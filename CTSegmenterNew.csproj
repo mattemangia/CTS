@@ -167,7 +167,7 @@
     <Compile Include="SAMForm.Designer.cs">
       <DependentUpon>SAMForm.cs</DependentUpon>
     </Compile>
-    <Compile Include="VideoPredictor.cs" />
+    <Compile Include="CTMemorySegmenter.cs" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="favicon.ico" />

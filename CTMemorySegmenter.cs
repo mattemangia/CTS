@@ -87,7 +87,13 @@ namespace CTSegmenter
             // var options = new SessionOptions();
             // options.AppendExecutionProvider_DML();
             // else, just CPU:
+
+           
             var options = new SessionOptions();
+            try { options.AppendExecutionProvider_DML(); }
+            catch { options.AppendExecutionProvider_CPU();
+                Logger.Log("[CTMemorySegmenter] DirectML not available. Falling back to CPU Execution Provider");
+            }
 
             _imageEncoderSession = new InferenceSession(imageEncoderPath, options);
             _promptEncoderSession = new InferenceSession(promptEncoderPath, options);
@@ -685,6 +691,85 @@ namespace CTSegmenter
             smallBmp.Dispose();
             return final;
         }
+
+        /// <summary>
+        /// Quickly process a single CT slice with SAM2:
+        ///   1) Resizes the image to 1024 x 1024 (or your `_imageSize`) 
+        ///   2) Encodes it via <see cref="_imageEncoderSession"/> 
+        ///   3) Encodes user prompts (points, boxes, brush, text) via <see cref="_promptEncoderSession"/> 
+        ///   4) Runs the <see cref="_maskDecoderSession"/> 
+        ///   5) Optionally runs <see cref="_mlpSession"/> for final post-processing 
+        ///   6) Resizes the mask back to the original resolution 
+        /// This method does NOT use memory/attention. 
+        /// </summary>
+        /// <param name="sliceImage">One CT slice (any size, typically 24-bit grayscale). </param>
+        /// <param name="userPoints">Optional 2D points (in original slice coords) for prompting. </param>
+        /// <param name="userBoxes">Optional bounding boxes (Rectangles) in original coords. </param>
+        /// <param name="userBrushMask">
+        ///   Optional brush overlay: a bool[,] that is true wherever the user brushed. 
+        ///   Dimensions = (width, height) of original slice. 
+        /// </param>
+        /// <param name="textPrompt">Optional text prompt if the model supports it. </param>
+        /// <returns>A segmented mask as a Bitmap, same resolution as sliceImage. </returns>
+        public Bitmap ProcessSingleSlice(
+            Bitmap sliceImage,
+            List<Point> userPoints = null,
+            List<Rectangle> userBoxes = null,
+            bool[,] userBrushMask = null,
+            string textPrompt = null
+        )
+        {
+            if (sliceImage == null)
+                throw new ArgumentNullException(nameof(sliceImage));
+
+            // 1) Run the image encoder. We produce e.g. "vision_features" & "vision_pos_enc".
+            //    Dimensions for SAM2 typically [1,3,1024,1024] if _imageSize=1024.
+            (Tensor<float> visionFeatures, Tensor<float> visionPosEnc) = RunImageEncoder(sliceImage);
+
+            // 2) Build user prompt embeddings if any:
+            //    Points, boxes => scaled to _imageSize
+            //    Brush => up/downsample to 1024x1024
+            //    Text => dummy or real embedding
+            //    We'll get (sparseEmb, denseEmb, densePosEnc).
+            (Tensor<float> sparseEmb, Tensor<float> denseEmb, Tensor<float> densePe) =
+                RunPromptEncoderIfNeeded(
+                    sliceImage.Width,
+                    sliceImage.Height,
+                    userPoints,
+                    userBoxes,
+                    userBrushMask,
+                    textPrompt
+                );
+
+            // 3) Run the mask decoder. We pass:
+            //      - "image_embeddings"  => visionFeatures
+            //      - "sparse_prompt_embeddings" => sparseEmb
+            //      - "dense_prompt_embeddings"  => denseEmb
+            //      - "image_pe" => densePe
+            //    Typically the output is named "low_res_masks".
+            //    We'll store it in "lowResMask".
+            Tensor<float> lowResMask = RunMaskDecoder(
+                visionFeatures,
+                (sparseEmb, denseEmb, densePe),
+                fallbackVisionFeatures: visionFeatures,
+                fallbackVisionPosEnc: visionPosEnc
+            );
+
+            // 4) Convert the low-resolution mask from shape [1,1,256,256] (or [1,1, H/4, W/4]) 
+            //    up to [1,1,_imageSize,_imageSize] => then to a Bitmap
+            //    Then finally up to original slice dimension.
+            //    If we also want an MLP step, we apply it now:
+            Bitmap lowResMaskBmp = TensorToBitmap(lowResMask, _imageSize, _imageSize);
+            Bitmap maskResizedToSlice = ResizeImage(lowResMaskBmp, sliceImage.Width, sliceImage.Height);
+            lowResMaskBmp.Dispose();
+
+            // 5) Optionally run MLP for final post-processing if the pipeline uses it
+            Bitmap final = RunMlpOnMask(maskResizedToSlice);
+            maskResizedToSlice.Dispose();
+
+            return final;
+        }
+
 
         /// <summary>
         /// Resizes a bitmap with high-quality interpolation.

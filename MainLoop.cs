@@ -83,7 +83,7 @@ namespace CTSegmenter
         private Bitmap xzCache, yzCache;
 
         // Orthoview bitmaps and states
-        public bool ShowMask { get; set; } = true;
+        public bool ShowMask { get; set; } = false;
         public bool EnableThresholdMask { get; set; } = true;
         // New property: when true, full material colors are rendered (the "Render Materials" mode)
         public bool RenderMaterials { get; set; } = false;
@@ -348,21 +348,15 @@ namespace CTSegmenter
                 });
 
                 CurrentPath = path;
-
-                // Stop any ongoing rendering.
                 renderTimer?.Stop();
 
                 // Dispose of any previously loaded volume and labels.
                 lock (datasetLock)
                 {
-                    if (volumeData != null)
-                    {
-                        volumeData.Dispose();
-                        volumeData = null;
-                    }
+                    volumeData?.Dispose();
+                    volumeData = null;
                     if (volumeLabels != null)
                     {
-                        // If using memory mapping, also release file locks.
                         volumeLabels.ReleaseFileLock();
                         volumeLabels.Dispose();
                         volumeLabels = null;
@@ -371,76 +365,67 @@ namespace CTSegmenter
                 GC.Collect();
                 GC.WaitForPendingFinalizers();
 
-                double? userPixelSize = await Task.Run(() => AskUserPixelSize());
-                if (!userPixelSize.HasValue || userPixelSize.Value <= 0)
+                bool folderMode = Directory.Exists(path);
+                // Ask for pixel size only if in folder mode.
+                if (folderMode)
                 {
-                    Logger.Log("[LoadDatasetAsync] Pixel size not provided or invalid.");
-                    return;
+                    double? userPixelSize = await Task.Run(() => AskUserPixelSize());
+                    if (!userPixelSize.HasValue || userPixelSize.Value <= 0)
+                    {
+                        Logger.Log("[LoadDatasetAsync] Pixel size not provided or invalid.");
+                        return;
+                    }
+                    pixelSize = userPixelSize.Value;
+                    Logger.Log($"[LoadDatasetAsync] Using pixel size from user input: {pixelSize}");
                 }
-                pixelSize = userPixelSize.Value;
-                Logger.Log($"[LoadDatasetAsync] Using adjusted pixel size: {pixelSize}");
-
-                // Folder mode
-                if (Directory.Exists(path))
+                // --- Folder Mode ---
+                if (folderMode)
                 {
                     Logger.Log("[LoadDatasetAsync] Detected folder mode.");
-                    // Always initialize Materials and create labels.chk.
                     lock (datasetLock)
                     {
                         InitializeMaterials();
                         SaveLabelsChk();
                     }
 
-                    string volBinPath = Path.Combine(path, "volume.bin");
-                    string labBinPath = Path.Combine(path, "labels.bin");
-                    string chkPath = Path.Combine(path, "volume.chk");
+                    string volumeBinPath = Path.Combine(path, "volume.bin");
+                    string labelsBinPath = Path.Combine(path, "labels.bin");
+                    string volumeChkPath = Path.Combine(path, "volume.chk");
 
-                    // If binning is requested...
+                    // --- BINNING Branch ---
                     if (SelectedBinningFactor > 1)
                     {
-                        // If binary files do not exist, generate them from folder images.
-                        if (!File.Exists(volBinPath) || !File.Exists(labBinPath) || !File.Exists(chkPath))
+                        if (!File.Exists(volumeBinPath) || !File.Exists(labelsBinPath) || !File.Exists(volumeChkPath))
                         {
-                            Logger.Log("[LoadDatasetAsync] Binary files not found. Generating volume.bin from folder images.");
+                            Logger.Log("[LoadDatasetAsync] Binary files missing. Generating volume.bin from folder images.");
                             lock (datasetLock)
                             {
                                 if (useMemoryMapping)
-                                {
                                     volumeData = ChunkedVolume.FromFolder(path, CHUNK_DIM, progressForm, true);
-                                }
                                 else
-                                {
                                     volumeData = ChunkedVolume.FromFolder(path, CHUNK_DIM, progressForm, false);
-                                }
                                 width = volumeData.Width;
                                 height = volumeData.Height;
                                 depth = volumeData.Depth;
                             }
-                            Logger.Log($"[LoadDatasetAsync] Generated volume data: {width}x{height}x{depth}");
+                            Logger.Log($"[LoadDatasetAsync] Loaded original volume: {width}x{height}x{depth}");
                             CreateVolumeChk(path, width, height, depth, CHUNK_DIM, pixelSize);
-                            // For labels, if labels.bin is missing, create a blank file.
-                            if (!File.Exists(labBinPath))
+                            if (!File.Exists(labelsBinPath))
                             {
-                                CreateBlankLabelsFile(labBinPath, width, height, depth, CHUNK_DIM);
+                                CreateBlankLabelsFile(labelsBinPath, width, height, depth, CHUNK_DIM);
                             }
-                            // Dispose the generated volume so that the file is no longer locked.
                             volumeData.Dispose();
                             volumeData = null;
                         }
 
-                        // Create a backup copy of the current volume.bin before binning.
                         string backupVolPath = Path.Combine(path, "temp_volume.bin");
                         Logger.Log($"[LoadDatasetAsync] Creating backup copy of volume.bin: {backupVolPath}");
-                        File.Copy(volBinPath, backupVolPath, true);
+                        File.Copy(volumeBinPath, backupVolPath, true);
 
-                        // Dispose any loaded data to release file locks.
                         lock (datasetLock)
                         {
-                            if (volumeData != null)
-                            {
-                                volumeData.Dispose();
-                                volumeData = null;
-                            }
+                            volumeData?.Dispose();
+                            volumeData = null;
                             if (volumeLabels != null)
                             {
                                 volumeLabels.ReleaseFileLock();
@@ -451,32 +436,26 @@ namespace CTSegmenter
                         GC.Collect();
                         GC.WaitForPendingFinalizers();
 
-                        Logger.Log($"[LoadDatasetAsync] Binning requested with factor {SelectedBinningFactor}. Processing binning using backup file.");
+                        Logger.Log($"[LoadDatasetAsync] Running binning process with factor {SelectedBinningFactor}...");
                         Progress<int> binProgress = new Progress<int>(p => progressForm.UpdateProgress(p));
-                        // Use the backup file (temp_volume.bin) in the binning process. The ProcessBinningAsync method will read
+                        await Binning.ProcessBinningAsync(path, SelectedBinningFactor, (float)pixelSize, useMemoryMapping);
+                        Logger.Log("[LoadDatasetAsync] Binning complete. Loading binned volume.");
 
-                        // the original binary files (volume.bin and labels.bin) in the folder; ensure the implementation of ProcessBinningAsync
-                        // is updated to use these files. In our approach, assume that ProcessBinningAsync will overwrite volume.bin and labels.bin.
-
-                        await Binning.ProcessBinningAsync(path, SelectedBinningFactor, (float)userPixelSize, useMemoryMapping);
-                        Logger.Log("[LoadDatasetAsync] Binning completed. Loading binned volume from volume.bin.");
-
-                        // Now load the newly binned volume.
                         if (useMemoryMapping)
-                            volumeData = LoadVolumeBin(volBinPath, true);
+                            volumeData = LoadVolumeBin(volumeBinPath, true);
                         else
-                            volumeData = LoadVolumeBin(volBinPath, false);
+                            volumeData = LoadVolumeBin(volumeBinPath, false);
                         width = volumeData.Width;
                         height = volumeData.Height;
                         depth = volumeData.Depth;
+                        Logger.Log($"[LoadDatasetAsync] Loaded binned volume: {width}x{height}x{depth}");
 
-                        // Load labels.
-                        if (File.Exists(labBinPath))
+                        if (File.Exists(labelsBinPath))
                         {
-                            Logger.Log($"[LoadDatasetAsync] Found labels file at: {labBinPath}");
+                            Logger.Log($"[LoadDatasetAsync] Found labels file at: {labelsBinPath}");
                             try
                             {
-                                volumeLabels = LoadLabelsBin(labBinPath, useMemoryMapping);
+                                volumeLabels = LoadLabelsBin(labelsBinPath, useMemoryMapping);
                             }
                             catch (Exception ex)
                             {
@@ -489,64 +468,124 @@ namespace CTSegmenter
                                 }
                                 GC.Collect();
                                 GC.WaitForPendingFinalizers();
-                                CreateBlankLabelsFile(labBinPath, width, height, depth, CHUNK_DIM);
-                                volumeLabels = LoadLabelsBin(labBinPath, useMemoryMapping);
-                                Logger.Log("[LoadDatasetAsync] Reloaded new labels.bin (memory mapped).");
+                                CreateBlankLabelsFile(labelsBinPath, width, height, depth, CHUNK_DIM);
+                                volumeLabels = LoadLabelsBin(labelsBinPath, useMemoryMapping);
+                                Logger.Log("[LoadDatasetAsync] Reloaded new labels.bin.");
                             }
                         }
                         else
                         {
-                            Logger.Log("[LoadDatasetAsync] labels.bin not found. Creating new blank labels file.");
-                            CreateBlankLabelsFile(labBinPath, width, height, depth, CHUNK_DIM);
-                            volumeLabels = LoadLabelsBin(labBinPath, useMemoryMapping);
+                            Logger.Log("[LoadDatasetAsync] labels.bin not found. Creating blank labels file.");
+                            CreateBlankLabelsFile(labelsBinPath, width, height, depth, CHUNK_DIM);
+                            volumeLabels = LoadLabelsBin(labelsBinPath, useMemoryMapping);
                         }
                     }
-                    else // If no binning is requested.
+                    // --- NO BINNING Branch ---
+                    else
                     {
-                        lock (datasetLock)
+                        Logger.Log("[LoadDatasetAsync] Binning factor = 1. Loading volume directly from folder images.");
+                        if (useMemoryMapping)
+                            volumeData = ChunkedVolume.FromFolder(path, CHUNK_DIM, progressForm, true);
+                        else
+                            volumeData = ChunkedVolume.FromFolder(path, CHUNK_DIM, progressForm, false);
+                        width = volumeData.Width;
+                        height = volumeData.Height;
+                        depth = volumeData.Depth;
+                        Logger.Log($"[LoadDatasetAsync] Loaded volume: {width}x{height}x{depth}");
+                        CreateVolumeChk(path, width, height, depth, CHUNK_DIM, pixelSize);
+
+                        if (File.Exists(Path.Combine(path, "labels.bin")))
                         {
+                            Logger.Log($"[LoadDatasetAsync] Found labels file at: {Path.Combine(path, "labels.bin")}");
+                            volumeLabels = LoadLabelsBin(Path.Combine(path, "labels.bin"), useMemoryMapping);
+                        }
+                        else
+                        {
+                            Logger.Log("[LoadDatasetAsync] labels.bin not found. Creating blank labels file.");
+                            CreateBlankLabelsFile(Path.Combine(path, "labels.bin"), width, height, depth, CHUNK_DIM);
+                            volumeLabels = LoadLabelsBin(Path.Combine(path, "labels.bin"), useMemoryMapping);
+                        }
+                    }
+                }
+                // --- File Mode ---
+                else if (File.Exists(path))
+                {
+                    string fileName = Path.GetFileName(path).ToLower();
+                    string baseFolder = Path.GetDirectoryName(path);
+                    // Case: Volume file (volume.bin) only.
+                    if (fileName.Contains("volume") && !fileName.Contains("labels"))
+                    {
+                        string volChk = Path.Combine(baseFolder, "volume.chk");
+                        if (File.Exists(volChk))
+                        {
+                            var header = ReadVolumeChk(baseFolder);
+                            int volWidth = header.volWidth;
+                            int volHeight = header.volHeight;
+                            int volDepth = header.volDepth;
+                            int chkChunkDim = header.chunkDim;
+                            double chkPixelSize = header.pixelSize;
+                            pixelSize = chkPixelSize;
+                            Logger.Log($"[LoadDatasetAsync] Loaded header from volume.chk: {volWidth}x{volHeight}x{volDepth}, chunkDim={chkChunkDim}, pixelSize={pixelSize}");
+                            // Use raw-loading since the volume.bin in file mode (when exported from folder mode) does not include a header.
                             if (useMemoryMapping)
-                            {
-                                Logger.Log("[LoadDatasetAsync] Loading volume with memory mapping from folder.");
-                                volumeData = ChunkedVolume.FromFolder(path, CHUNK_DIM, progressForm, true);
-                            }
+                                volumeData = LoadVolumeBinRaw(path, true, volWidth, volHeight, volDepth, chkChunkDim);
                             else
-                            {
-                                Logger.Log("[LoadDatasetAsync] Loading full volume into RAM from folder.");
-                                volumeData = ChunkedVolume.FromFolder(path, CHUNK_DIM, progressForm, false);
-                            }
+                                volumeData = LoadVolumeBinRaw(path, false, volWidth, volHeight, volDepth, chkChunkDim);
                             width = volumeData.Width;
                             height = volumeData.Height;
                             depth = volumeData.Depth;
-                        }
-                        Logger.Log($"[LoadDatasetAsync] Loaded volume data: {width}x{height}x{depth}");
-                        CreateVolumeChk(path, width, height, depth, CHUNK_DIM, pixelSize);
-
-                        //string labBinPath = Path.Combine(path, "labels.bin");
-                        if (File.Exists(labBinPath))
-                        {
-                            Logger.Log($"[LoadDatasetAsync] Found labels file at: {labBinPath}");
-                            volumeLabels = LoadLabelsBin(labBinPath, useMemoryMapping);
+                            string labelsPath = Path.Combine(baseFolder, "labels.bin");
+                            if (File.Exists(labelsPath))
+                            {
+                                volumeLabels = LoadLabelsBin(labelsPath, useMemoryMapping);
+                            }
+                            else
+                            {
+                                CreateBlankLabelsFile(labelsPath, width, height, depth, CHUNK_DIM);
+                                volumeLabels = LoadLabelsBin(labelsPath, useMemoryMapping);
+                            }
                         }
                         else
                         {
-                            Logger.Log("[LoadDatasetAsync] labels.bin not found. Creating new blank labels file.");
-                            CreateBlankLabelsFile(labBinPath, width, height, depth, CHUNK_DIM);
-                            volumeLabels = LoadLabelsBin(labBinPath, useMemoryMapping);
+                            Logger.Log("[LoadDatasetAsync] volume.chk not found. Assuming combined file mode.");
+                            LoadCombinedBinary(path);
                         }
                     }
-
-                    // Once the dataset is loaded, update UI settings (e.g., slice indices) and trigger rendering.
-                    if (volumeData != null && !this.IsDisposed && mainView != null && mainView.IsHandleCreated)
+                    // Case: Labels file only.
+                    else if (fileName.Contains("labels"))
                     {
-                        await mainView.SafeInvokeAsync(() =>
-                        {
-                            CurrentSlice = depth / 2;
-                            XzSliceY = height / 2;
-                            YzSliceX = width / 2;
-                            RenderViews();
-                        });
+                        string labChk = Path.Combine(baseFolder, "labels.chk");
+                        if (!File.Exists(labChk))
+                            throw new Exception("Labels header file (labels.chk) not found.");
+                        volumeLabels = LoadLabelsBin(path, useMemoryMapping);
+                        volumeData = null;
+                        width = volumeLabels.Width;
+                        height = volumeLabels.Height;
+                        depth = volumeLabels.Depth;
                     }
+                    // Otherwise, assume Combined File mode.
+                    else
+                    {
+                        Logger.Log("[LoadDatasetAsync] File mode: assuming combined file mode.");
+                        LoadCombinedBinary(path);
+                    }
+                }
+                else
+                {
+                    Logger.Log("[LoadDatasetAsync] Provided path is neither a folder nor an existing file.");
+                    return;
+                }
+
+                // Update UI and trigger initial render.
+                if ((volumeData != null || volumeLabels != null) && !this.IsDisposed && mainView != null && mainView.IsHandleCreated)
+                {
+                    await mainView.SafeInvokeAsync(() =>
+                    {
+                        CurrentSlice = (volumeData != null ? depth / 2 : 0);
+                        XzSliceY = (height > 0 ? height / 2 : 0);
+                        YzSliceX = (width > 0 ? width / 2 : 0);
+                        RenderViews();
+                    });
                 }
             }
             catch (AggregateException ae)
@@ -565,15 +604,6 @@ namespace CTSegmenter
                 await this.SafeInvokeAsync(() => progressForm?.Close());
             }
         }
-
-
-
-
-
-
-
-
-
 
 
 
@@ -753,6 +783,57 @@ namespace CTSegmenter
             }
             Logger.Log($"[CreateBlankLabelsFile] Created blank labels.bin at {path}");
         }
+
+        /// <summary>
+        /// Loads a combined volume+labels file (saved via SaveBinary) from the given path.
+        /// Assumes the file header was written in SaveBinary.
+        /// </summary>
+        private void LoadCombinedBinary(string path)
+        {
+            // This implementation loads everything into RAM.
+            using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read))
+            using (BinaryReader br = new BinaryReader(fs))
+            {
+                // Read volume header
+                width = br.ReadInt32();
+                height = br.ReadInt32();
+                depth = br.ReadInt32();
+                pixelSize = br.ReadDouble();
+
+                // Read materials
+                int materialCount = br.ReadInt32();
+                Materials = new List<Material>();
+                for (int i = 0; i < materialCount; i++)
+                {
+                    string name = br.ReadString();
+                    int argb = br.ReadInt32();
+                    byte min = br.ReadByte();
+                    byte max = br.ReadByte();
+                    bool isExterior = br.ReadBoolean();
+                    byte id = br.ReadByte();
+                    Materials.Add(new Material(name, Color.FromArgb(argb), min, max, id) { IsExterior = isExterior });
+                }
+
+                // Read a flag that indicates whether volume data (grayscale) is present.
+                bool hasGrayscale = br.ReadBoolean();
+                if (hasGrayscale)
+                {
+                    // Create the volume in RAM
+                    volumeData = new ChunkedVolume(width, height, depth, CHUNK_DIM);
+                    volumeData.ReadChunks(br);
+                }
+                else
+                {
+                    volumeData = null;
+                }
+
+                // Now load the labels.
+                // Create a new ChunkedLabelVolume (RAM mode) and read its chunks.
+                volumeLabels = new ChunkedLabelVolume(width, height, depth, CHUNK_DIM, false, null);
+                volumeLabels.ReadChunksHeaderAndData(br);
+            }
+        }
+
 
         private void ShowError(string title, string message)
         {
@@ -1209,9 +1290,10 @@ namespace CTSegmenter
         // Modified CreateBitmapFromData using RenderMaterials property.
         private Bitmap CreateBitmapFromData(byte[] slice, int sliceIndex)
         {
+            // Ensure there is at least the Exterior material.
             if (Materials == null || Materials.Count == 0)
             {
-                // Safety fallback: ensure there is at least the Exterior material.
+                Materials = new List<Material>();
                 Materials.Add(new Material("Exterior", Color.Transparent, 0, 0, 0) { IsExterior = true });
             }
             if (volumeData == null)
@@ -1228,54 +1310,57 @@ namespace CTSegmenter
                     // Get the base grayscale value.
                     byte gVal = volumeData?[x, y, sliceIndex] ?? 0;
                     Color baseColor = Color.FromArgb(gVal, gVal, gVal);
-                    byte segID = slice[y * width + x];
-                    Color c = baseColor;
+                    Color finalColor = baseColor;
 
-                    if (RenderMaterials)
+                    if (ShowMask)  // Only apply segmentation if the flag is true.
                     {
-                        // When RenderMaterials is enabled, display the material's full color for nonzero labels.
-                        Material mat = Materials.FirstOrDefault(m => m.ID == segID);
-                        if (segID != 0 && mat != null)
-                        {
-                            c = mat.Color;
-                        }
-                    }
-                    else
-                    {
-                        if (segID != 0)
+                        // Get the segmentation ID.
+                        byte segID = slice[y * width + x];
+
+                        if (RenderMaterials)
                         {
                             Material mat = Materials.FirstOrDefault(m => m.ID == segID);
-                            if (mat != null)
+                            if (segID != 0 && mat != null)
                             {
-                                c = mat.Color;
+                                finalColor = mat.Color;
                             }
                         }
-                        else if (thresholdActive && gVal >= PreviewMin && gVal <= PreviewMax)
+                        else
                         {
-                            Color sel = GetComplementaryColor(Materials[SelectedMaterialIndex].Color);
-                            c = BlendColors(c, sel, 0.5f);
+                            if (segID != 0)
+                            {
+                                Material mat = Materials.FirstOrDefault(m => m.ID == segID);
+                                if (mat != null)
+                                    finalColor = mat.Color;
+                            }
+                            else if (thresholdActive && gVal >= PreviewMin && gVal <= PreviewMax)
+                            {
+                                Color sel = GetComplementaryColor(Materials[SelectedMaterialIndex].Color);
+                                finalColor = BlendColors(baseColor, sel, 0.5f);
+                            }
+                        }
+
+                        // Overlay temporary brush selection if available.
+                        if (currentSelection != null)
+                        {
+                            byte sel = currentSelection[x, y];
+                            if (sel != 0)
+                            {
+                                Material selMat = Materials.FirstOrDefault(m => m.ID == sel);
+                                if (selMat != null)
+                                {
+                                    finalColor = BlendColors(finalColor, selMat.Color, 0.5f);
+                                }
+                            }
                         }
                     }
 
-                    // Overlay temporary brush selection if available.
-                    if (currentSelection != null)
-                    {
-                        byte sel = currentSelection[x, y];
-                        if (sel != 0)
-                        {
-                            Material selMat = Materials.FirstOrDefault(m => m.ID == sel);
-                            if (selMat != null)
-                            {
-                                c = BlendColors(c, selMat.Color, 0.5f);
-                            }
-                        }
-                    }
-
-                    bmp.SetPixel(x, y, c);
+                    bmp.SetPixel(x, y, finalColor);
                 }
             }
             return bmp;
         }
+
 
 
 
@@ -1611,28 +1696,44 @@ namespace CTSegmenter
             e.Graphics.DrawImage(currentBitmap, destRect);
             DrawScaleBar(e.Graphics, mainView.ClientRectangle, zoomLevel);
 
-            // Draw header text and slice info.
-            using (Font font = new Font("Arial", 12, FontStyle.Bold))
-            using (SolidBrush brush = new SolidBrush(Color.Yellow))
+            // Draw header text ("XY") at top left.
+            using (Font headerFont = new Font("Arial", 12, FontStyle.Bold))
+            using (SolidBrush headerBrush = new SolidBrush(Color.Yellow))
             {
-                e.Graphics.DrawString("XY", font, brush, new PointF(5, 5));
+                e.Graphics.DrawString("XY", headerFont, headerBrush, new PointF(5, 5));
             }
-            string sliceText = $"Slice: {CurrentSlice}";
-            using (Font font = new Font("Arial", 10))
-            using (SolidBrush brush = new SolidBrush(Color.White))
+
+            // Draw the pixel size at top right.
+            string pixelSizeText;
+            // Convert pixelSize (assumed in meters) to µm if <1e-3, else in mm.
+            if (pixelSize < 1e-3)
+                pixelSizeText = $"{pixelSize * 1e6:0.#} µm";
+            else
+                pixelSizeText = $"{pixelSize * 1e3:0.#} mm";
+
+            using (Font pixelFont = new Font("Arial", 10))
+            using (SolidBrush pixelBrush = new SolidBrush(Color.Yellow))
             {
-                SizeF textSize = e.Graphics.MeasureString(sliceText, font);
-                e.Graphics.DrawString(sliceText, font, brush,
+                SizeF textSize = e.Graphics.MeasureString(pixelSizeText, pixelFont);
+                e.Graphics.DrawString(pixelSizeText, pixelFont, pixelBrush, new PointF(mainView.ClientSize.Width - textSize.Width - 5, 5));
+            }
+
+            // Draw slice info at bottom right.
+            string sliceText = $"Slice: {CurrentSlice}";
+            using (Font sliceFont = new Font("Arial", 10))
+            using (SolidBrush sliceBrush = new SolidBrush(Color.White))
+            {
+                SizeF textSize = e.Graphics.MeasureString(sliceText, sliceFont);
+                e.Graphics.DrawString(sliceText, sliceFont, sliceBrush,
                     new PointF(mainView.ClientSize.Width - textSize.Width - 5, mainView.ClientSize.Height - textSize.Height - 5));
             }
 
             // Draw the brush/eraser overlay if active.
-            // Multiply the brush size (in image space) by zoomLevel to convert to screen space.
             if (showBrushOverlay && (currentTool == SegmentationTool.Brush || currentTool == SegmentationTool.Eraser))
             {
                 using (Pen pen = new Pen(Color.Red, 2))
                 {
-                    float effectiveDiameter = currentBrushSize * zoomLevel; // in screen pixels
+                    float effectiveDiameter = currentBrushSize * zoomLevel;
                     float effectiveRadius = effectiveDiameter / 2f;
                     e.Graphics.DrawEllipse(pen,
                         brushOverlayCenter.X - effectiveRadius,

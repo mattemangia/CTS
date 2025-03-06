@@ -87,6 +87,8 @@ namespace CTSegmenter
         private ToolStripMenuItem dbgConsole;
         private ToolStripMenuItem about;
         private bool thresholdMaskEnabled = true;
+        private bool isUpdatingHistogram = false;
+
 
         public ControlForm(MainForm form)
         {
@@ -180,7 +182,7 @@ namespace CTSegmenter
             showMaskMenuItem = new ToolStripMenuItem("Show Mask")
             {
                 CheckOnClick = true,
-                Checked = true
+                Checked = false
             };
             showMaskMenuItem.CheckedChanged += (s, e) =>
             {
@@ -845,46 +847,87 @@ namespace CTSegmenter
 
         private void UpdateHistogram(PictureBox histBox)
         {
-            if (mainForm.volumeData == null)
-            {
-                histBox.Image = null;
+            // Prevent reentrancy – if already updating, simply return.
+            if (isUpdatingHistogram)
                 return;
-            }
-            int w = mainForm.GetWidth();
-            int h = mainForm.GetHeight();
-            int slice = mainForm.CurrentSlice;
-            byte[] graySlice = new byte[w * h];
-            for (int y = 0; y < h; y++)
-                for (int x = 0; x < w; x++)
-                    graySlice[y * w + x] = mainForm.volumeData[x, y, slice];
-            int[] hist = new int[256];
-            foreach (byte b in graySlice)
-                hist[b]++;
-            int maxCount = hist.Max();
-            int histWidth = 256, histHeight = 100;
-            Bitmap bmp = new Bitmap(histWidth, histHeight);
-            using (Graphics g = Graphics.FromImage(bmp))
+            isUpdatingHistogram = true;
+
+            try
             {
-                g.Clear(Color.Black);
-                for (int i = 0; i < 256; i++)
+                if (mainForm.volumeData == null)
                 {
-                    float binHeight = (maxCount > 0) ? (hist[i] / (float)maxCount) * histHeight : 0;
-                    g.DrawLine(Pens.White, i, histHeight, i, histHeight - binHeight);
+                    histBox.Image = null;
+                    return;
                 }
-                int minThreshold = (int)numThresholdMin.Value;
-                int maxThreshold = (int)numThresholdMax.Value;
-                using (Pen pen = new Pen(Color.Red, 2))
+
+                int w = mainForm.GetWidth();
+                int h = mainForm.GetHeight();
+                int slice = mainForm.CurrentSlice;
+
+                // Optionally, you could add a check here for valid slice indices.
+                // For example, if your volume data's third dimension is depth, you might check that slice is less than that depth.
+
+                byte[] graySlice = new byte[w * h];
+                for (int y = 0; y < h; y++)
                 {
-                    g.DrawLine(pen, minThreshold, 0, minThreshold, histHeight);
+                    for (int x = 0; x < w; x++)
+                    {
+                        graySlice[y * w + x] = mainForm.volumeData[x, y, slice];
+                    }
                 }
-                using (Pen pen = new Pen(Color.Blue, 2))
+
+                int[] hist = new int[256];
+                foreach (byte b in graySlice)
+                    hist[b]++;
+
+                int maxCount = hist.Max();
+                int histWidth = 256, histHeight = 100;
+                Bitmap bmp = new Bitmap(histWidth, histHeight + 15);
+
+                using (Graphics g = Graphics.FromImage(bmp))
                 {
-                    g.DrawLine(pen, maxThreshold, 0, maxThreshold, histHeight);
+                    g.Clear(Color.Black);
+                    for (int i = 0; i < 256; i++)
+                    {
+                        float binHeight = (maxCount > 0) ? (hist[i] / (float)maxCount) * histHeight : 0;
+                        g.DrawLine(Pens.White, i, histHeight, i, histHeight - binHeight);
+                    }
+
+                    // Ensure threshold values are within [0, 255]
+                    int minThreshold = Math.Max(0, Math.Min(255, (int)numThresholdMin.Value));
+                    int maxThreshold = Math.Max(0, Math.Min(255, (int)numThresholdMax.Value));
+
+                    using (Pen pen = new Pen(Color.Red, 2))
+                    {
+                        g.DrawLine(pen, minThreshold, 0, minThreshold, histHeight);
+                    }
+                    using (Pen pen = new Pen(Color.Blue, 2))
+                    {
+                        g.DrawLine(pen, maxThreshold, 0, maxThreshold, histHeight);
+                    }
+
+                    // Draw the labels "0" and "255" at the bottom extremes.
+                    using (Font font = new Font("Arial", 8))
+                    using (Brush brush = Brushes.Gray)
+                    {
+                        g.DrawString("0", font, brush, new PointF(0, histHeight));
+                        SizeF size255 = g.MeasureString("255", font);
+                        g.DrawString("255", font, brush, histWidth - size255.Width, histHeight);
+                    }
                 }
+
+                histBox.Image?.Dispose();
+                histBox.Image = bmp;
             }
-            histBox.Image?.Dispose();
-            histBox.Image = bmp;
+            finally
+            {
+                isUpdatingHistogram = false;
+            }
         }
+
+
+
+
 
         public void RefreshMaterialList()
         {

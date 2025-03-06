@@ -143,6 +143,7 @@
     <Compile Include="ControlForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="CTFusion.cs" />
     <Compile Include="MainLoop.cs" />
     <Compile Include="MainLoop.Designer.cs">
       <DependentUpon>MainLoop.cs</DependentUpon>

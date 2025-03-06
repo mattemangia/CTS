@@ -299,7 +299,7 @@ namespace CTSegmenter
                 WrapContents = false,
                 Padding = new Padding(30),
             };
-            btnInterpolate = new Button { Text = "Interpolate", Width = 120 };
+            btnInterpolate = new Button { Text = "Interpolate", Width = 120, Enabled=false };
             btnInterpolate.Click += (s, e) => { /* To be implemented later */ };
 
 
@@ -549,6 +549,7 @@ namespace CTSegmenter
                 trkMax.Enabled = false;
                 numThresholdMin.Enabled = false;
                 numThresholdMax.Enabled = false;
+                btnInterpolate.Enabled = false;
             }
             else if (item == eraserMenuItem)
             {
@@ -558,6 +559,7 @@ namespace CTSegmenter
                 trkMax.Enabled = false;
                 numThresholdMin.Enabled = false;
                 numThresholdMax.Enabled = false;
+                btnInterpolate.Enabled = true;
             }
             else if (item == brushMenuItem)
             {
@@ -567,6 +569,7 @@ namespace CTSegmenter
                 trkMax.Enabled = false;
                 numThresholdMin.Enabled = false;
                 numThresholdMax.Enabled = false;
+                btnInterpolate.Enabled = true;
             }
             else if (item == thresholdingMenuItem)
             {
@@ -577,6 +580,7 @@ namespace CTSegmenter
                 trkMax.Enabled = true;
                 numThresholdMin.Enabled = true;
                 numThresholdMax.Enabled = true;
+                btnInterpolate.Enabled = false;
             }
             // Inform MainForm of the current tool.
             mainForm.SetSegmentationTool(currentTool);

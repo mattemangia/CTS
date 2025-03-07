@@ -137,6 +137,7 @@
     <None Include="Properties\Settings.settings" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Annotations.cs" />
     <Compile Include="Binning.cs" />
     <Compile Include="ChunkedLabelVolume.cs" />
     <Compile Include="ChunkedVolume.cs" />

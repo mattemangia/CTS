@@ -9,10 +9,11 @@ using System.IO.MemoryMappedFiles;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Drawing.Imaging;
 
 namespace CTSegmenter
 {
-    public enum SegmentationTool { Pan, Brush, Eraser, Thresholding }
+    public enum SegmentationTool { Pan, Brush, Eraser, Thresholding, Point }
     static class Program
     {
         [STAThread]
@@ -115,7 +116,8 @@ namespace CTSegmenter
                 renderTimer?.Start();
             }
         }
-
+        //SAM2 Annotations
+        public AnnotationManager AnnotationMgr { get; set; }
         // Demonstration: chunk dimension
         private const int CHUNK_DIM = 256;
 
@@ -140,10 +142,20 @@ namespace CTSegmenter
         public SegmentationTool currentTool = SegmentationTool.Pan;
         private int currentBrushSize = 50;
         private bool showBrushOverlay = false;
+        // New overlay centers for orthoviews:
+        private PointF xzOverlayCenter = new PointF(0, 0);
+        private PointF yzOverlayCenter = new PointF(0, 0);
 
         private Point brushOverlayCenter; // might choose to store the last mouse location
+        public bool[,,] interpolatedMask;
+        // Stores sparse brush annotations for slices the user has applied.
+        public Dictionary<int, byte[,]> sparseSelectionsZ = new Dictionary<int, byte[,]>(); // XY slices (Z-axis)
+        public Dictionary<int, byte[,]> sparseSelectionsY = new Dictionary<int, byte[,]>(); // XZ slices (Y-axis)
+        public Dictionary<int, byte[,]> sparseSelectionsX = new Dictionary<int, byte[,]>(); // YZ slices (X-axis)
+        public Dictionary<int, byte[,]> sparseSelections = new Dictionary<int, byte[,]>();
+        public enum Axis { X, Y, Z }
 
-    
+        public SAMForm SamFormInstance { get; set; }
 
         private byte nextMaterialID = 1; // 0 is reserved for Exterior.
         public byte[,] currentSelection;  // dimensions: [width, height] for current slice temporary selection
@@ -1055,19 +1067,16 @@ namespace CTSegmenter
                 }
             }
 
-            // Clear the temporary XY selection.
+            // Save to sparseSelectionsZ (XY slices)
+            byte[,] copy = new byte[width, height];
+            Array.Copy(currentSelection, copy, width * height);
+            sparseSelectionsZ[slice] = copy;
+
             currentSelection = new byte[width, height];
-
-            // Clear the XY slice cache so that the applied selection no longer appears.
-            lock (sliceCacheLock)
-            {
-                sliceCache.Clear();
-            }
-
-            // Update the main view and orthoviews.
             RenderViews();
             _ = RenderOrthoViewsAsync();
         }
+
 
 
         public void SubtractCurrentSelection()
@@ -1111,7 +1120,103 @@ namespace CTSegmenter
             thresholdUpdateTimer.Stop();
             thresholdUpdateTimer.Start();
         }
+        /// <summary>
+        /// Applies the entire interpolated selection (a 3D binary mask) to the label volume,
+        /// setting voxels to the provided materialID.
+        /// </summary>
+        /// <param name="materialID">The material label to apply.</param>
+        public void ApplyInterpolatedSelection(byte materialID)
+        {
+            if (interpolatedMask == null)
+            {
+                Logger.Log("[ApplyInterpolatedSelection] No interpolated mask available.");
+                return;
+            }
 
+            // If in thresholding mode, we update only the temporary preview (currentSelection)
+            // so that your threshold overlay (computed in RenderViews) continues to be used.
+            if (currentTool == SegmentationTool.Thresholding)
+            {
+                int currentZ = CurrentSlice;
+                for (int x = 0; x < width; x++)
+                {
+                    for (int y = 0; y < height; y++)
+                    {
+                        currentSelection[x, y] = interpolatedMask[x, y, currentZ] ? materialID : (byte)0;
+                    }
+                }
+                Logger.Log("[ApplyInterpolatedSelection] Updated preview in thresholding mode.");
+            }
+            else
+            {
+                // For non-thresholding modes, apply the interpolated mask to the entire label volume.
+                for (int z = 0; z < depth; z++)
+                {
+                    for (int y = 0; y < height; y++)
+                    {
+                        for (int x = 0; x < width; x++)
+                        {
+                            // Only update voxels where the mask is true.
+                            if (interpolatedMask[x, y, z])
+                            {
+                                volumeLabels[x, y, z] = materialID;
+                            }
+                        }
+                    }
+                }
+                // Update the temporary overlay for the current slice.
+                int currentZ = CurrentSlice;
+                for (int x = 0; x < width; x++)
+                {
+                    for (int y = 0; y < height; y++)
+                    {
+                        currentSelection[x, y] = interpolatedMask[x, y, currentZ] ? materialID : (byte)0;
+                    }
+                }
+                Logger.Log("[ApplyInterpolatedSelection] 3D interpolated mask applied to volumeLabels.");
+            }
+
+            // Clear cached slice data to force a full re-render.
+            lock (sliceCacheLock)
+            {
+                sliceCache.Clear();
+            }
+
+            RenderViews();
+            _ = RenderOrthoViewsAsync();
+        }
+        /// <summary>
+        /// Subtracts (removes) the selection for the given material by using the full 3D interpolated mask.
+        /// For every voxel in the volume, if the interpolated mask is true and the voxel currently
+        /// has the given material ID, then set the label to 0 (Exterior).
+        /// </summary>
+        /// <param name="materialID">The material label to subtract.</param>
+        public void SubtractInterpolatedSelection(byte materialID)
+        {
+            if (interpolatedMask == null)
+            {
+                Logger.Log("[SubtractInterpolatedSelection] No interpolated mask available.");
+                return;
+            }
+
+            // Subtract from ALL slices in the volume
+            for (int z = 0; z < depth; z++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        if (interpolatedMask[x, y, z] && volumeLabels[x, y, z] == materialID)
+                        {
+                            volumeLabels[x, y, z] = 0;
+                        }
+                    }
+                }
+            }
+            Logger.Log($"[SubtractInterpolatedSelection] Subtracted 3D interpolated mask.");
+            RenderViews();
+            _ = RenderOrthoViewsAsync();
+        }
         private void ApplyThresholdToVolume(int matIndex, byte newMin, byte newMax)
         {
             byte materialID = Materials[matIndex].ID;
@@ -1691,41 +1796,44 @@ namespace CTSegmenter
             if (currentBitmap == null)
                 return;
 
+            // Draw the current image slice (with pan and zoom)
             e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            RectangleF destRect = new RectangleF(panOffset.X, panOffset.Y, currentBitmap.Width * zoomLevel, currentBitmap.Height * zoomLevel);
+            RectangleF destRect = new RectangleF(panOffset.X, panOffset.Y,
+                                                  currentBitmap.Width * zoomLevel,
+                                                  currentBitmap.Height * zoomLevel);
             e.Graphics.DrawImage(currentBitmap, destRect);
+
+            // Draw a scale bar (your existing method)
             DrawScaleBar(e.Graphics, mainView.ClientRectangle, zoomLevel);
 
-            // Draw header text ("XY") at top left.
+            // Header text "XY" at top left.
             using (Font headerFont = new Font("Arial", 12, FontStyle.Bold))
             using (SolidBrush headerBrush = new SolidBrush(Color.Yellow))
             {
                 e.Graphics.DrawString("XY", headerFont, headerBrush, new PointF(5, 5));
             }
 
-            // Draw the pixel size at top right.
-            string pixelSizeText;
-            // Convert pixelSize (assumed in meters) to µm if <1e-3, else in mm.
-            if (pixelSize < 1e-3)
-                pixelSizeText = $"{pixelSize * 1e6:0.#} µm";
-            else
-                pixelSizeText = $"{pixelSize * 1e3:0.#} mm";
-
+            // Display the pixel size at top right.
+            string pixelSizeText = pixelSize < 1e-3
+                ? $"Pixel Size: {pixelSize * 1e6:0.#} µm"
+                : $"Pixel Size: {pixelSize * 1e3:0.#} mm";
             using (Font pixelFont = new Font("Arial", 10))
             using (SolidBrush pixelBrush = new SolidBrush(Color.Yellow))
             {
                 SizeF textSize = e.Graphics.MeasureString(pixelSizeText, pixelFont);
-                e.Graphics.DrawString(pixelSizeText, pixelFont, pixelBrush, new PointF(mainView.ClientSize.Width - textSize.Width - 5, 5));
+                e.Graphics.DrawString(pixelSizeText, pixelFont, pixelBrush,
+                                      new PointF(mainView.ClientSize.Width - textSize.Width - 5, 5));
             }
 
-            // Draw slice info at bottom right.
+            // Display the current slice number at bottom right.
             string sliceText = $"Slice: {CurrentSlice}";
             using (Font sliceFont = new Font("Arial", 10))
             using (SolidBrush sliceBrush = new SolidBrush(Color.White))
             {
                 SizeF textSize = e.Graphics.MeasureString(sliceText, sliceFont);
                 e.Graphics.DrawString(sliceText, sliceFont, sliceBrush,
-                    new PointF(mainView.ClientSize.Width - textSize.Width - 5, mainView.ClientSize.Height - textSize.Height - 5));
+                                      new PointF(mainView.ClientSize.Width - textSize.Width - 5,
+                                                 mainView.ClientSize.Height - textSize.Height - 5));
             }
 
             // Draw the brush/eraser overlay if active.
@@ -1736,10 +1844,24 @@ namespace CTSegmenter
                     float effectiveDiameter = currentBrushSize * zoomLevel;
                     float effectiveRadius = effectiveDiameter / 2f;
                     e.Graphics.DrawEllipse(pen,
-                        brushOverlayCenter.X - effectiveRadius,
-                        brushOverlayCenter.Y - effectiveRadius,
-                        effectiveDiameter,
-                        effectiveDiameter);
+                                           brushOverlayCenter.X - effectiveRadius,
+                                           brushOverlayCenter.Y - effectiveRadius,
+                                           effectiveDiameter,
+                                           effectiveDiameter);
+                }
+            }
+            foreach (var point in AnnotationMgr.GetPointsForSlice(CurrentSlice))
+            {
+                float x = point.X * globalZoom + panOffset.X;
+                float y = point.Y * globalZoom + panOffset.Y;
+
+                Color materialColor = Materials.FirstOrDefault(m => m.Name == point.Label)?.Color ?? Color.Red;
+                using (var pen = new Pen(materialColor, 2))
+                using (var brush = new SolidBrush(materialColor))
+                {
+                    e.Graphics.DrawLine(pen, x - 5, y, x + 5, y);
+                    e.Graphics.DrawLine(pen, x, y - 5, x, y + 5);
+                    e.Graphics.DrawString(point.ID.ToString(), Font, brush: Brushes.Yellow, x + 5, y + 5);
                 }
             }
         }
@@ -1754,7 +1876,7 @@ namespace CTSegmenter
             zoomLevel = globalZoom;
             mainView.Invalidate();
         }
-
+        private DateTime _lastPointCreationTime = DateTime.MinValue;
         private void MainView_MouseDown(object sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left)
@@ -1764,18 +1886,73 @@ namespace CTSegmenter
             }
             else if (e.Button == MouseButtons.Right)
             {
-                // Right click will paint or erase depending on current tool.
-                if (currentTool == SegmentationTool.Brush)
-                    PaintMaskAt(e.Location, currentBrushSize);
-                else if (currentTool == SegmentationTool.Eraser)
-                    EraseMaskAt(e.Location, currentBrushSize);
+                // Debounce: ignore clicks that occur too fast after the last point creation (e.g., within 200 ms)
+                if (currentTool == SegmentationTool.Point)
+                {
+                    DateTime now = DateTime.Now;
+                    if ((now - _lastPointCreationTime).TotalMilliseconds < 200)
+                        return;
+                    _lastPointCreationTime = now;
+                }
 
+                if (currentTool == SegmentationTool.Brush)
+                {
+                    PaintMaskAt(e.Location, currentBrushSize);
+                }
+                else if (currentTool == SegmentationTool.Eraser)
+                {
+                    EraseMaskAt(e.Location, currentBrushSize);
+                }
+                else if (currentTool == SegmentationTool.Point)
+                {
+                    // Calculate slice coordinates
+                    float sliceX = (e.X - panOffset.X) / globalZoom;
+                    float sliceY = (e.Y - panOffset.Y) / globalZoom;
+
+                    // Use the currently selected material (or a default)
+                    Material selectedMaterial = (SelectedMaterialIndex >= 0 && SelectedMaterialIndex < Materials.Count)
+                        ? Materials[SelectedMaterialIndex]
+                        : new Material("Default", Color.Red, 0, 0, 1);
+
+                    // Create a new annotation point for the current slice
+                    AnnotationPoint point = AnnotationMgr.AddPoint(sliceX, sliceY, CurrentSlice, selectedMaterial.Name);
+
+                    // Update the SAMForm grid via our dedicated updater.
+                    UpdateSAMFormWithPoint(point);
+
+                    RenderViews();
+                    _ = RenderOrthoViewsAsync();
+                }
                 mainView.Invalidate();
             }
         }
-
+        private void UpdateSAMFormWithPoint(AnnotationPoint point)
+        {
+            // If a SAMForm is open, update its DataGridView.
+            if (this.SamFormInstance != null && !this.SamFormInstance.IsDisposed)
+            {
+                DataGridView dgv = SamFormInstance.GetPointsDataGridView();
+                if (dgv != null)
+                {
+                    dgv.Rows.Add(point.ID, point.X, point.Y, point.Z, point.Type, point.Label);
+                }
+            }
+        }
+        private void InsertPointToSAMForm(AnnotationPoint point)
+        {
+            foreach (Form frm in Application.OpenForms)
+            {
+                if (frm is SAMForm samForm)
+                {
+                    DataGridView dgv = samForm.Controls.Find("dataGridPoints", true)[0] as DataGridView;
+                    dgv.Rows.Add(point.ID, point.X, point.Y, point.Z, point.Type, point.Label);
+                    break;
+                }
+            }
+        }
         private void PaintMaskAt(Point screenLocation, int brushSize)
         {
+            interpolatedMask = null;
             // Convert screen (client) coordinates to image coordinates.
             int imageX = (int)((screenLocation.X - panOffset.X) / zoomLevel);
             int imageY = (int)((screenLocation.Y - panOffset.Y) / zoomLevel);
@@ -1810,9 +1987,344 @@ namespace CTSegmenter
             RenderViews();
             _ = RenderOrthoViewsAsync();
         }
+        /// <summary>
+        /// Computes a full 3D interpolated mask from the sparse brush selections (for XY, XZ, and YZ views),
+        /// then applies a 3D smoothing filter and immediately updates the entire label volume.
+        /// </summary>
+        /// <param name="materialID">The material label to assign.</param>
+        public void InterpolateSelection(byte materialID)
+        {
+            // Create a new raw 3D mask covering the full volume.
+            interpolatedMask = new bool[width, height, depth];
+
+            // Interpolate along the three axes using the stored sparse selections.
+            // For the XY view (sparseSelectionsZ), keys are Z-slices.
+            bool[,,] maskZ = InterpolateAlongAxis(sparseSelectionsZ, width, height, depth, Axis.Z);
+            // For the XZ view (sparseSelectionsY), keys are Y-slices.
+            bool[,,] maskY = InterpolateAlongAxis(sparseSelectionsY, width, depth, height, Axis.Y);
+            // For the YZ view (sparseSelectionsX), keys are X-slices.
+            bool[,,] maskX = InterpolateAlongAxis(sparseSelectionsX, height, depth, width, Axis.X);
+
+            // Combine the three raw masks (logical OR) into the interpolatedMask.
+            for (int x = 0; x < width; x++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    for (int z = 0; z < depth; z++)
+                    {
+                        interpolatedMask[x, y, z] = maskZ[x, y, z] || maskY[x, y, z] || maskX[x, y, z];
+                    }
+                }
+            }
+
+            // Now smooth the raw interpolated mask.
+            bool[,,] smoothMask = SmoothMask(interpolatedMask, kernelSize: 3, threshold: 0.5);
+
+            // Immediately update the entire label volume using the smoothed mask.
+            for (int z = 0; z < depth; z++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        if (smoothMask[x, y, z])
+                        {
+                            volumeLabels[x, y, z] = materialID;
+                        }
+                    }
+                }
+            }
+
+            Logger.Log("[InterpolateSelection] 3D interpolated and smoothed mask applied across the entire volume.");
+            RenderViews();
+            _ = RenderOrthoViewsAsync();
+        }
+        /// <summary>
+        /// Fills entirely empty slices in the mask by copying from the nearest non-empty slice.
+        /// This helps ensure that a few missing slices (if any) do not break the overall continuity.
+        /// </summary>
+        /// <param name="mask">The raw 3D mask computed from interpolation.</param>
+        /// <returns>The 3D mask with empty slices filled.</returns>
+        private bool[,,] FillEmptySlices(bool[,,] mask)
+        {
+            int d = mask.GetLength(2);
+            // For each slice in the z-dimension:
+            for (int z = 0; z < d; z++)
+            {
+                if (IsSliceEmpty(mask, z))
+                {
+                    // Look for the nearest non-empty slice.
+                    int nearest = -1;
+                    for (int offset = 1; offset < d; offset++)
+                    {
+                        if (z - offset >= 0 && !IsSliceEmpty(mask, z - offset))
+                        {
+                            nearest = z - offset;
+                            break;
+                        }
+                        if (z + offset < d && !IsSliceEmpty(mask, z + offset))
+                        {
+                            nearest = z + offset;
+                            break;
+                        }
+                    }
+                    if (nearest != -1)
+                    {
+                        // Copy the entire slice from the nearest non-empty slice.
+                        for (int x = 0; x < mask.GetLength(0); x++)
+                        {
+                            for (int y = 0; y < mask.GetLength(1); y++)
+                            {
+                                mask[x, y, z] = mask[x, y, nearest];
+                            }
+                        }
+                    }
+                }
+            }
+            return mask;
+        }
+        /// <summary>
+        /// Determines whether a given slice (at index z) is completely empty (all false).
+        /// </summary>
+        private bool IsSliceEmpty(bool[,,] mask, int z)
+        {
+            int w = mask.GetLength(0), h = mask.GetLength(1);
+            for (int x = 0; x < w; x++)
+            {
+                for (int y = 0; y < h; y++)
+                {
+                    if (mask[x, y, z])
+                        return false;
+                }
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Interpolates along one axis using sparse brush selections.
+        /// For each in-plane coordinate, it gathers all slice indices where a brush stroke was recorded
+        /// and fills all slices between the minimum and maximum indices.
+        /// </summary>
+        /// <param name="sparseDict">
+        /// Dictionary whose keys are slice indices (for a given view) and values are the corresponding 2D brush masks.
+        /// </param>
+        /// <param name="dimA">
+        /// For Axis.Z: volume width; for Axis.Y: volume width; for Axis.X: volume height.
+        /// </param>
+        /// <param name="dimB">
+        /// For Axis.Z: volume height; for Axis.Y: volume depth; for Axis.X: volume depth.
+        /// </param>
+        /// <param name="fullDim">
+        /// For Axis.Z: volume depth; for Axis.Y: volume height; for Axis.X: volume width.
+        /// </param>
+        /// <param name="axis">The axis along which to interpolate.</param>
+        /// <returns>A 3D boolean mask of dimensions [width, height, depth].</returns>
+        private bool[,,] InterpolateAlongAxis(Dictionary<int, byte[,]> sparseDict, int dimA, int dimB, int fullDim, Axis axis)
+        {
+            bool[,,] mask = new bool[width, height, depth];
+
+            switch (axis)
+            {
+                case Axis.Z:
+                    // For each (x,y) coordinate in the XY plane.
+                    for (int x = 0; x < width; x++)
+                    {
+                        for (int y = 0; y < height; y++)
+                        {
+                            List<int> zIndices = new List<int>();
+                            foreach (var kvp in sparseDict)
+                            {
+                                int zKey = kvp.Key;
+                                byte[,] plane = kvp.Value; // Expected size: [width, height]
+                                if (x < plane.GetLength(0) && y < plane.GetLength(1) && plane[x, y] != 0)
+                                {
+                                    zIndices.Add(zKey);
+                                }
+                            }
+                            if (zIndices.Count > 0)
+                            {
+                                int minZ = zIndices.Min();
+                                int maxZ = zIndices.Max();
+                                minZ = Math.Max(0, minZ);
+                                maxZ = Math.Min(depth - 1, maxZ);
+                                for (int z = minZ; z <= maxZ; z++)
+                                {
+                                    mask[x, y, z] = true;
+                                }
+                            }
+                        }
+                    }
+                    break;
+                case Axis.Y:
+                    // For each (x,z) coordinate in the XZ plane.
+                    for (int x = 0; x < width; x++)
+                    {
+                        for (int z = 0; z < depth; z++)
+                        {
+                            List<int> yIndices = new List<int>();
+                            foreach (var kvp in sparseDict)
+                            {
+                                int yKey = kvp.Key;
+                                byte[,] plane = kvp.Value; // Expected size: [width, depth]
+                                if (x < plane.GetLength(0) && z < plane.GetLength(1) && plane[x, z] != 0)
+                                {
+                                    yIndices.Add(yKey);
+                                }
+                            }
+                            if (yIndices.Count > 0)
+                            {
+                                int minY = yIndices.Min();
+                                int maxY = yIndices.Max();
+                                minY = Math.Max(0, minY);
+                                maxY = Math.Min(height - 1, maxY);
+                                for (int y = minY; y <= maxY; y++)
+                                {
+                                    mask[x, y, z] = true;
+                                }
+                            }
+                        }
+                    }
+                    break;
+                case Axis.X:
+                    // For each (y,z) coordinate in the YZ plane.
+                    for (int y = 0; y < height; y++)
+                    {
+                        for (int z = 0; z < depth; z++)
+                        {
+                            List<int> xIndices = new List<int>();
+                            foreach (var kvp in sparseDict)
+                            {
+                                int xKey = kvp.Key;
+                                byte[,] plane = kvp.Value; // Expected size: [height, depth]
+                                if (y < plane.GetLength(0) && z < plane.GetLength(1) && plane[y, z] != 0)
+                                {
+                                    xIndices.Add(xKey);
+                                }
+                            }
+                            if (xIndices.Count > 0)
+                            {
+                                int minX = xIndices.Min();
+                                int maxX = xIndices.Max();
+                                minX = Math.Max(0, minX);
+                                maxX = Math.Min(width - 1, maxX);
+                                for (int x = minX; x <= maxX; x++)
+                                {
+                                    mask[x, y, z] = true;
+                                }
+                            }
+                        }
+                    }
+                    break;
+            }
+            return mask;
+        }
+
+        /// <summary>
+        /// Applies a simple 3D mean filter to the binary mask to smooth abrupt transitions.
+        /// The method averages over a cubic kernel of given size and then thresholds the result.
+        /// </summary>
+        /// <param name="mask">The original 3D binary mask.</param>
+        /// <param name="kernelSize">Size of the cubic kernel (should be an odd number; default is 3).</param>
+        /// <param name="threshold">Threshold (between 0 and 1) at which to binarize the result (default is 0.5).</param>
+        /// <returns>A smoothed 3D binary mask.</returns>
+        private bool[,,] SmoothMask(bool[,,] mask, int kernelSize = 3, double threshold = 0.5)
+        {
+            int w = mask.GetLength(0), h = mask.GetLength(1), d = mask.GetLength(2);
+            double[,,] accum = new double[w, h, d];
+            int offset = kernelSize / 2;
+
+            // For each voxel, average the values in its neighborhood.
+            for (int x = 0; x < w; x++)
+            {
+                for (int y = 0; y < h; y++)
+                {
+                    for (int z = 0; z < d; z++)
+                    {
+                        double sum = 0;
+                        int count = 0;
+                        for (int i = -offset; i <= offset; i++)
+                        {
+                            for (int j = -offset; j <= offset; j++)
+                            {
+                                for (int k = -offset; k <= offset; k++)
+                                {
+                                    int nx = x + i, ny = y + j, nz = z + k;
+                                    if (nx >= 0 && nx < w && ny >= 0 && ny < h && nz >= 0 && nz < d)
+                                    {
+                                        sum += mask[nx, ny, nz] ? 1.0 : 0.0;
+                                        count++;
+                                    }
+                                }
+                            }
+                        }
+                        accum[x, y, z] = sum / count;
+                    }
+                }
+            }
+
+            // Create the smoothed mask by thresholding the averaged values.
+            bool[,,] smoothMask = new bool[w, h, d];
+            for (int x = 0; x < w; x++)
+            {
+                for (int y = 0; y < h; y++)
+                {
+                    for (int z = 0; z < d; z++)
+                    {
+                        smoothMask[x, y, z] = accum[x, y, z] >= threshold;
+                    }
+                }
+            }
+            return smoothMask;
+        }
+
+        // Helper method to interpolate along a single axis
+        private void ProcessAxisInterpolation(Dictionary<int, byte[,]> sparseDict, Action<int, int, int> setMask)
+        {
+            foreach (var kvp in sparseDict)
+            {
+                int fixedAxisIndex = kvp.Key; // e.g., Z for XY slices
+                byte[,] slice = kvp.Value;
+
+                for (int a = 0; a < slice.GetLength(0); a++)
+                {
+                    for (int b = 0; b < slice.GetLength(1); b++)
+                    {
+                        if (slice[a, b] != 0)
+                        {
+                            // Determine voxel coordinates based on axis
+                            int x = -1, y = -1, z = -1;
+                            if (sparseDict == sparseSelectionsZ) // XY slice
+                            {
+                                x = a;
+                                y = b;
+                                z = fixedAxisIndex;
+                            }
+                            else if (sparseDict == sparseSelectionsY) // XZ slice
+                            {
+                                x = a;
+                                z = b;
+                                y = fixedAxisIndex;
+                            }
+                            else if (sparseDict == sparseSelectionsX) // YZ slice
+                            {
+                                y = a;
+                                z = b;
+                                x = fixedAxisIndex;
+                            }
+
+                            if (x >= 0 && y >= 0 && z >= 0)
+                            {
+                                setMask(x, y, z);
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         private void EraseMaskAt(Point screenLocation, int brushSize)
         {
+            interpolatedMask = null;
             int imageX = (int)((screenLocation.X - panOffset.X) / zoomLevel);
             int imageY = (int)((screenLocation.Y - panOffset.Y) / zoomLevel);
             int radius = brushSize / 2;
@@ -1839,6 +2351,17 @@ namespace CTSegmenter
         }
         private void MainView_MouseMove(object sender, MouseEventArgs e)
         {
+            // When hovering with no button pressed and brush (or eraser) is active,
+            // update the overlay center to follow the pointer.
+            if (e.Button == MouseButtons.None &&
+                (currentTool == SegmentationTool.Brush || currentTool == SegmentationTool.Eraser))
+            {
+                brushOverlayCenter = e.Location;
+                showBrushOverlay = true;
+                mainView.Invalidate();
+            }
+
+            // Panning with left mouse button.
             if (e.Button == MouseButtons.Left && mainView.Capture)
             {
                 int dx = e.Location.X - lastMousePosition.X;
@@ -1848,6 +2371,7 @@ namespace CTSegmenter
                 lastMousePosition = e.Location;
                 mainView.Invalidate();
             }
+            // Painting (or erasing) on right click.
             else if (e.Button == MouseButtons.Right)
             {
                 if (currentTool == SegmentationTool.Brush)
@@ -1989,27 +2513,43 @@ namespace CTSegmenter
             RectangleF destRect = new RectangleF(xzPan.X, xzPan.Y, xzProjection.Width * xzZoom, xzProjection.Height * xzZoom);
             e.Graphics.DrawImage(xzProjection, destRect);
             DrawScaleBar(e.Graphics, xzView.ClientRectangle, xzZoom);
+
+            // Draw header and slice text as before
             using (Font font = new Font("Arial", 12, FontStyle.Bold))
-            using (SolidBrush brush = new SolidBrush(Color.Red))
+            using (SolidBrush headerBrush = new SolidBrush(Color.Red))
             {
-                e.Graphics.DrawString("XZ", font, brush, new PointF(5, 5));
+                e.Graphics.DrawString("XZ", font, headerBrush, new PointF(5, 5));
             }
             string sliceText = $"Slice: {this.XzSliceY}";
             using (Font font = new Font("Arial", 10))
-            using (SolidBrush brush = new SolidBrush(Color.White))
+            using (SolidBrush textBrush = new SolidBrush(Color.White))
             {
                 SizeF textSize = e.Graphics.MeasureString(sliceText, font);
-                e.Graphics.DrawString(sliceText, font, brush, new PointF(xzView.ClientSize.Width - textSize.Width - 5, xzView.ClientSize.Height - textSize.Height - 5));
+                e.Graphics.DrawString(sliceText, font, textBrush,
+                    new PointF(xzView.ClientSize.Width - textSize.Width - 5, xzView.ClientSize.Height - textSize.Height - 5));
             }
-            // Draw the brush/eraser overlay at the center of the XZ view if active.
-            if (showBrushOverlay && (currentTool == SegmentationTool.Brush || currentTool == SegmentationTool.Eraser))
+
+            // ---- NEW: Draw annotation points on the XZ view ----
+            // Only show points whose Y coordinate is close to the fixed XZ slice (XzSliceY)
+            float tolerance = 5.0f;
+            foreach (var point in AnnotationMgr.Points)
             {
-                using (Pen pen = new Pen(Color.Red, 2))
+                if (Math.Abs(point.Y - XzSliceY) <= tolerance)
                 {
-                    float effectiveDiameter = currentBrushSize * xzZoom; // Scale the brush size by xzZoom.
-                    float effectiveRadius = effectiveDiameter / 2f;
-                    PointF center = new PointF(xzView.ClientSize.Width / 2f, xzView.ClientSize.Height / 2f);
-                    e.Graphics.DrawEllipse(pen, center.X - effectiveRadius, center.Y - effectiveRadius, effectiveDiameter, effectiveDiameter);
+                    // In XZ view: horizontal axis = X and vertical axis = Z.
+                    float drawX = point.X * xzZoom + xzPan.X;
+                    float drawZ = point.Z * xzZoom + xzPan.Y;
+                    Color pointColor = Materials.FirstOrDefault(m => m.Name == point.Label)?.Color ?? Color.Red;
+                    using (Pen pen = new Pen(pointColor, 2))
+                    {
+                        e.Graphics.DrawLine(pen, drawX - 5, drawZ, drawX + 5, drawZ);
+                        e.Graphics.DrawLine(pen, drawX, drawZ - 5, drawX, drawZ + 5);
+                    }
+                    using (Font font = new Font("Arial", 8))
+                    using (SolidBrush idBrush = new SolidBrush(Color.Yellow))
+                    {
+                        e.Graphics.DrawString(point.ID.ToString(), font, idBrush, drawX + 5, drawZ + 5);
+                    }
                 }
             }
         }
@@ -2026,11 +2566,32 @@ namespace CTSegmenter
             if (e.Button == MouseButtons.Right)
             {
                 if (currentTool == SegmentationTool.Brush)
+                {
                     PaintOrthoMaskAtXZ(e.Location, currentBrushSize);
+                }
                 else if (currentTool == SegmentationTool.Eraser)
+                {
                     EraseOrthoMaskAtXZ(e.Location, currentBrushSize);
-                // Immediately refresh the orthoview.
-                _ = RenderOrthoViewsAsync();
+                }
+                else if (currentTool == SegmentationTool.Point)
+                {
+                    // In XZ view: horizontal coordinate corresponds to X,
+                    // vertical coordinate corresponds to Z.
+                    int x = (int)((e.X - xzPan.X) / xzZoom);
+                    int z = (int)((e.Y - xzPan.Y) / xzZoom);
+                    // Use the fixed Y slice from XzSliceY.
+                    float sliceX = x;
+                    float sliceY = XzSliceY;
+                    int sliceZ = z;
+                    Material selectedMaterial = (SelectedMaterialIndex >= 0 && SelectedMaterialIndex < Materials.Count)
+                        ? Materials[SelectedMaterialIndex]
+                        : new Material("Default", Color.Red, 0, 0, 1);
+                    AnnotationPoint point = AnnotationMgr.AddPoint(sliceX, sliceY, sliceZ, selectedMaterial.Name);
+                    UpdateSAMFormWithPoint(point);
+                    // Optionally, re-render both main and orthoviews
+                    RenderViews();
+                    _ = RenderOrthoViewsAsync();
+                }
             }
             else if (e.Button == MouseButtons.Left)
             {
@@ -2040,7 +2601,15 @@ namespace CTSegmenter
 
         private void XzView_MouseMove(object sender, MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Right)
+            // When hovering (no button pressed) with Brush or Eraser active, update the overlay center.
+            if (e.Button == MouseButtons.None &&
+                (currentTool == SegmentationTool.Brush || currentTool == SegmentationTool.Eraser))
+            {
+                xzOverlayCenter = e.Location;
+                showBrushOverlay = true;
+                xzView.Invalidate();
+            }
+            else if (e.Button == MouseButtons.Right)
             {
                 if (currentTool == SegmentationTool.Brush)
                     PaintOrthoMaskAtXZ(e.Location, currentBrushSize);
@@ -2124,30 +2693,46 @@ namespace CTSegmenter
             RectangleF destRect = new RectangleF(yzPan.X, yzPan.Y, yzProjection.Width * yzZoom, yzProjection.Height * yzZoom);
             e.Graphics.DrawImage(yzProjection, destRect);
             DrawScaleBar(e.Graphics, yzView.ClientRectangle, yzZoom);
+
             using (Font font = new Font("Arial", 12, FontStyle.Bold))
-            using (SolidBrush brush = new SolidBrush(Color.Green))
+            using (SolidBrush headerBrush = new SolidBrush(Color.Green))
             {
-                e.Graphics.DrawString("YZ", font, brush, new PointF(5, 5));
+                e.Graphics.DrawString("YZ", font, headerBrush, new PointF(5, 5));
             }
             string sliceText = $"Slice: {this.YzSliceX}";
             using (Font font = new Font("Arial", 10))
-            using (SolidBrush brush = new SolidBrush(Color.White))
+            using (SolidBrush textBrush = new SolidBrush(Color.White))
             {
                 SizeF textSize = e.Graphics.MeasureString(sliceText, font);
-                e.Graphics.DrawString(sliceText, font, brush, new PointF(yzView.ClientSize.Width - textSize.Width - 5, yzView.ClientSize.Height - textSize.Height - 5));
+                e.Graphics.DrawString(sliceText, font, textBrush,
+                    new PointF(yzView.ClientSize.Width - textSize.Width - 5, yzView.ClientSize.Height - textSize.Height - 5));
             }
-            // Draw the brush/eraser overlay at the center of the YZ view if active.
-            if (showBrushOverlay && (currentTool == SegmentationTool.Brush || currentTool == SegmentationTool.Eraser))
+
+            // ---- NEW: Draw annotation points on the YZ view ----
+            // In YZ view the fixed coordinate is X = YzSliceX; so display points whose X is near YzSliceX.
+            float tolerance = 5.0f;
+            foreach (var point in AnnotationMgr.Points)
             {
-                using (Pen pen = new Pen(Color.Red, 2))
+                if (Math.Abs(point.X - YzSliceX) <= tolerance)
                 {
-                    float effectiveDiameter = currentBrushSize * yzZoom;
-                    float effectiveRadius = effectiveDiameter / 2f;
-                    PointF center = new PointF(yzView.ClientSize.Width / 2f, yzView.ClientSize.Height / 2f);
-                    e.Graphics.DrawEllipse(pen, center.X - effectiveRadius, center.Y - effectiveRadius, effectiveDiameter, effectiveDiameter);
+                    // In YZ view: horizontal axis = Z, vertical axis = Y.
+                    float drawZ = point.Z * yzZoom + yzPan.X;
+                    float drawY = point.Y * yzZoom + yzPan.Y;
+                    Color pointColor = Materials.FirstOrDefault(m => m.Name == point.Label)?.Color ?? Color.Red;
+                    using (Pen pen = new Pen(pointColor, 2))
+                    {
+                        e.Graphics.DrawLine(pen, drawZ - 5, drawY, drawZ + 5, drawY);
+                        e.Graphics.DrawLine(pen, drawZ, drawY - 5, drawZ, drawY + 5);
+                    }
+                    using (Font font = new Font("Arial", 8))
+                    using (SolidBrush idBrush = new SolidBrush(Color.Yellow))
+                    {
+                        e.Graphics.DrawString(point.ID.ToString(), font, idBrush, drawZ + 5, drawY + 5);
+                    }
                 }
             }
         }
+
 
         private void YzView_MouseWheel(object sender, MouseEventArgs e)
         {
@@ -2160,10 +2745,31 @@ namespace CTSegmenter
             if (e.Button == MouseButtons.Right)
             {
                 if (currentTool == SegmentationTool.Brush)
+                {
                     PaintOrthoMaskAtYZ(e.Location, currentBrushSize);
+                }
                 else if (currentTool == SegmentationTool.Eraser)
+                {
                     EraseOrthoMaskAtYZ(e.Location, currentBrushSize);
-                _ = RenderOrthoViewsAsync();
+                }
+                else if (currentTool == SegmentationTool.Point)
+                {
+                    // In YZ view: horizontal axis corresponds to Z,
+                    // vertical axis corresponds to Y.
+                    int z = (int)((e.X - yzPan.X) / yzZoom);
+                    int y = (int)((e.Y - yzPan.Y) / yzZoom);
+                    // Use the fixed X coordinate from YzSliceX.
+                    float sliceX = YzSliceX;
+                    float sliceY = y;
+                    int sliceZ = z;
+                    Material selectedMaterial = (SelectedMaterialIndex >= 0 && SelectedMaterialIndex < Materials.Count)
+                        ? Materials[SelectedMaterialIndex]
+                        : new Material("Default", Color.Red, 0, 0, 1);
+                    AnnotationPoint point = AnnotationMgr.AddPoint(sliceX, sliceY, sliceZ, selectedMaterial.Name);
+                    UpdateSAMFormWithPoint(point);
+                    RenderViews();
+                    _ = RenderOrthoViewsAsync();
+                }
             }
             else if (e.Button == MouseButtons.Left)
             {
@@ -2171,9 +2777,18 @@ namespace CTSegmenter
             }
         }
 
+
         private void YzView_MouseMove(object sender, MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Right)
+            // When hovering (no button pressed) with Brush or Eraser active, update the overlay center.
+            if (e.Button == MouseButtons.None &&
+                (currentTool == SegmentationTool.Brush || currentTool == SegmentationTool.Eraser))
+            {
+                yzOverlayCenter = e.Location;
+                showBrushOverlay = true;
+                yzView.Invalidate();
+            }
+            else if (e.Button == MouseButtons.Right)
             {
                 if (currentTool == SegmentationTool.Brush)
                     PaintOrthoMaskAtYZ(e.Location, currentBrushSize);
@@ -2259,7 +2874,12 @@ namespace CTSegmenter
                             volumeLabels[x, XzSliceY, z] = sel;
                     }
                 }
-                // Clear the temporary selection.
+
+                // Store in sparseSelectionsY
+                byte[,] copy = new byte[width, depth];
+                Array.Copy(currentSelectionXZ, copy, width * depth);
+                sparseSelectionsY[XzSliceY] = copy;
+
                 currentSelectionXZ = null;
             }
 
@@ -2275,8 +2895,15 @@ namespace CTSegmenter
                             volumeLabels[YzSliceX, y, z] = sel;
                     }
                 }
+
+                // Store in sparseSelectionsX
+                byte[,] copy = new byte[depth, height];
+                Array.Copy(currentSelectionYZ, copy, depth * height);
+                sparseSelectionsX[YzSliceX] = copy;
+
                 currentSelectionYZ = null;
             }
+
             RenderViews();
             _ = RenderOrthoViewsAsync();
         }
@@ -2314,6 +2941,74 @@ namespace CTSegmenter
             RenderViews();
             _ = RenderOrthoViewsAsync();
         }
+
+        public void SaveScreenshot()
+        {
+            // Compute composite dimensions.
+            // mainView is at top-left, yzView at top-right, and xzView at bottom-left.
+            int compWidth = mainView.Width + yzView.Width;
+            int compHeight = mainView.Height + xzView.Height;
+
+            using (Bitmap composite = new Bitmap(compWidth, compHeight))
+            {
+                using (Graphics g = Graphics.FromImage(composite))
+                {
+                    // Fill the background.
+                    g.Clear(Color.Black);
+
+                    // Draw the main view (XY view) at top-left.
+                    using (Bitmap bmpMain = new Bitmap(mainView.Width, mainView.Height))
+                    {
+                        mainView.DrawToBitmap(bmpMain, new Rectangle(0, 0, mainView.Width, mainView.Height));
+                        g.DrawImage(bmpMain, 0, 0);
+                    }
+
+                    // Draw the YZ view in the top-right cell.
+                    using (Bitmap bmpYZ = new Bitmap(yzView.Width, yzView.Height))
+                    {
+                        yzView.DrawToBitmap(bmpYZ, new Rectangle(0, 0, yzView.Width, yzView.Height));
+                        g.DrawImage(bmpYZ, mainView.Width, 0);
+                    }
+
+                    // Draw the XZ view in the bottom-left cell.
+                    using (Bitmap bmpXZ = new Bitmap(xzView.Width, xzView.Height))
+                    {
+                        xzView.DrawToBitmap(bmpXZ, new Rectangle(0, 0, xzView.Width, xzView.Height));
+                        g.DrawImage(bmpXZ, 0, mainView.Height);
+                    }
+
+                    // Draw separating dark grey lines.
+                    using (Pen linePen = new Pen(Color.DarkGray, 3))
+                    {
+                        // Vertical line between mainView and yzView.
+                        g.DrawLine(linePen, mainView.Width, 0, mainView.Width, compHeight);
+                        // Horizontal line between mainView and xzView.
+                        g.DrawLine(linePen, 0, mainView.Height, compWidth, mainView.Height);
+                    }
+                }
+
+                // Open a SaveFileDialog to let the user choose file type and location.
+                using (SaveFileDialog sfd = new SaveFileDialog())
+                {
+                    sfd.Filter = "JPEG Image|*.jpg|TIFF Image|*.tif|PNG Image|*.png";
+                    sfd.Title = "Save Screenshot";
+                    if (sfd.ShowDialog() == DialogResult.OK)
+                    {
+                        // Determine the chosen image format.
+                        ImageFormat format = ImageFormat.Png;
+                        string ext = Path.GetExtension(sfd.FileName).ToLower();
+                        if (ext == ".jpg" || ext == ".jpeg")
+                            format = ImageFormat.Jpeg;
+                        else if (ext == ".tif" || ext == ".tiff")
+                            format = ImageFormat.Tiff;
+
+                        composite.Save(sfd.FileName, format);
+                        Logger.Log($"[SaveScreenshot] Screenshot saved to {sfd.FileName}");
+                    }
+                }
+            }
+        }
+
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {

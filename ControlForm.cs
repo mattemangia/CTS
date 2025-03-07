@@ -89,6 +89,9 @@ namespace CTSegmenter
         private bool thresholdMaskEnabled = true;
         private bool isUpdatingHistogram = false;
 
+        //Annotations for SAM2
+        AnnotationManager sharedAnnotationManager = new AnnotationManager();
+        
 
         public ControlForm(MainForm form)
         {
@@ -98,6 +101,7 @@ namespace CTSegmenter
                 this.Close();
                 Application.Exit();
             };
+            mainForm.AnnotationMgr = sharedAnnotationManager;
             InitializeComponent();
         }
 
@@ -135,7 +139,7 @@ namespace CTSegmenter
             saveBinMenuItem.Click += (s, e) => OnSaveClicked();
             exportImagesMenuItem = new ToolStripMenuItem("Export Images");
             exportImagesMenuItem.Click += (s, e) => mainForm.ExportImages();
-            closeDatasetMenuItem = new ToolStripMenuItem("Close Dataset");
+            closeDatasetMenuItem = new ToolStripMenuItem("Close B/W Dataset");
             closeDatasetMenuItem.Click += (s, e) => OnCloseDataset();
             exitMenuItem = new ToolStripMenuItem("Exit");
             exitMenuItem.Click += (s, e) =>
@@ -168,7 +172,8 @@ namespace CTSegmenter
             segmentAnythingMenuItem.Click += (s, e) =>
             {
                 Logger.Log("[ControlForm] Opening Segment Anything - ONNX Processor");
-                SAMForm samForm = new SAMForm();
+                SAMForm samForm = new SAMForm(mainForm, sharedAnnotationManager, mainForm.Materials);
+                mainForm.SetSegmentationTool(SegmentationTool.Point);
                 samForm.Show();
             };
             editMenu.DropDownItems.AddRange(new ToolStripItem[]
@@ -300,7 +305,37 @@ namespace CTSegmenter
                 Padding = new Padding(30),
             };
             btnInterpolate = new Button { Text = "Interpolate", Width = 120, Enabled=false };
-            btnInterpolate.Click += (s, e) => { /* To be implemented later */ };
+            btnInterpolate.Click += (s, e) =>
+            {
+                // Make sure a valid non-Exterior material is selected.
+                int idx = lstMaterials.SelectedIndex;
+                if (idx < 0 || idx >= mainForm.Materials.Count)
+                {
+                    MessageBox.Show("No material selected for interpolation.");
+                    return;
+                }
+                Material mat = mainForm.Materials[idx];
+                if (mat.IsExterior)
+                {
+                    MessageBox.Show("Cannot interpolate for the Exterior material.");
+                    return;
+                }
+
+                // Disable the button while processing.
+                btnInterpolate.Enabled = false;
+                // Run the interpolation on a background thread.
+                Task.Run(() =>
+                {
+                    mainForm.InterpolateSelection(mat.ID);
+                }).ContinueWith(t =>
+                {
+                    // Re-enable the button on the UI thread once complete.
+                    this.Invoke(new Action(() =>
+                    {
+                        btnInterpolate.Enabled = true;
+                    }));
+                });
+            };
 
 
             chkLoadFull = new CheckBox
@@ -364,11 +399,95 @@ namespace CTSegmenter
 
             FlowLayoutPanel thresholdButtonsPanel = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, WrapContents = false };
             btnAddSelection = new Button { Text = "+", Width = 50, Height = 25 };
-            btnAddSelection.Click += (s, e) => AddThresholdedSelection();
+
+            btnAddSelection = new Button { Text = "+", Width = 50, Height = 25 };
+            btnAddSelection.Click += (s, e) =>
+            {
+                int idx = lstMaterials.SelectedIndex;
+                if (idx <= 0 || idx >= mainForm.Materials.Count)
+                {
+                    MessageBox.Show("Select a valid material (not the Exterior).");
+                    return;
+                }
+                Material mat = mainForm.Materials[idx];
+
+                // If the current tool is Brush, then apply the 2D (current slice) selection.
+                if (mainForm.currentTool == SegmentationTool.Brush)
+                {
+                    mainForm.ApplyCurrentSelection();
+                    mainForm.ApplyOrthoSelections(); // Also apply selections from orthoviews if needed.
+                }
+                // Otherwise, if an interpolated (full volume) mask is available, apply that.
+                else if (mainForm.interpolatedMask != null)
+                {
+                    mainForm.ApplyInterpolatedSelection(mat.ID);
+                }
+                // Otherwise, fallback to the threshold-based selection.
+                else
+                {
+                    mainForm.AddThresholdSelection(mat.Min, mat.Max, (byte)mat.ID);
+                }
+                mainForm.SaveLabelsChk();
+            };
             btnSubSelection = new Button { Text = "-", Width = 50, Height = 25 };
-            btnSubSelection.Click += (s, e) => SubThresholdedSelection();
+            btnSubSelection.Click += (s, e) =>
+            {
+                int idx = lstMaterials.SelectedIndex;
+                if (idx <= 0 || idx >= mainForm.Materials.Count)
+                {
+                    MessageBox.Show("Select a valid material (not the Exterior).");
+                    return;
+                }
+                Material mat = mainForm.Materials[idx];
+
+                if (mainForm.currentTool == SegmentationTool.Brush)
+                {
+                    mainForm.SubtractCurrentSelection();
+                    mainForm.SubtractOrthoSelections();
+                }
+                else if (mainForm.interpolatedMask != null)
+                {
+                    mainForm.SubtractInterpolatedSelection(mat.ID);
+                }
+                else
+                {
+                    // Fallback: use your brush-based subtraction routines.
+                    mainForm.SubtractCurrentSelection();
+                    mainForm.SubtractOrthoSelections();
+                }
+                mainForm.SaveLabelsChk();
+            };
+            Button btnClearSelection = new Button { Text = "Clear", Width = 50, Height = 25 };
+            btnClearSelection.Click += (s, e) =>
+            {
+                // Clear the 2D temporary selection.
+                mainForm.currentSelection = new byte[mainForm.GetWidth(), mainForm.GetHeight()];
+                // Optionally, clear the 3D interpolated mask too.
+                mainForm.interpolatedMask = null;
+
+                Logger.Log("[ClearSelection] Cleared current selection.");
+                // Refresh views so that the cleared selection is no longer shown.
+                mainForm.RenderViews();
+                _ = mainForm.RenderOrthoViewsAsync();
+            };
+            Button btnApply = new Button { Text = "Apply", Width = 50, Height = 25 };
+            btnApply.Click += (s, e) =>
+            {
+                // For brush tool, commit the current (2D) selection and the orthoview (XZ/YZ) selections.
+                if (mainForm.currentTool == SegmentationTool.Brush)
+                {
+                    mainForm.ApplyCurrentSelection();
+                    mainForm.ApplyOrthoSelections();
+                }
+                // You could later extend this for other tools if needed.
+                // Refresh the views so the changes are visible.
+                mainForm.RenderViews();
+                _ = mainForm.RenderOrthoViewsAsync();
+            };
             thresholdButtonsPanel.Controls.Add(btnAddSelection);
             thresholdButtonsPanel.Controls.Add(btnSubSelection);
+            thresholdButtonsPanel.Controls.Add(btnClearSelection);
+            thresholdButtonsPanel.Controls.Add(btnApply);
             leftPanel.Controls.Add(thresholdButtonsPanel);
             toolSizeLabel = new Label { Text = "Tool Size: 50px", AutoSize = true };
             leftPanel.Controls.Add(toolSizeLabel);
@@ -391,8 +510,22 @@ namespace CTSegmenter
             btnSegmentAnything = new Button { Text = "Segment Anything", Width = 120 };
             btnSegmentAnything.Click += (s, e) =>
             {
+                mainForm.SetSegmentationTool(SegmentationTool.Point);
                 Logger.Log("[ControlForm] Opening Segment Anything - ONNX Processor");
-                SAMForm samForm = new SAMForm();
+                SAMForm samForm = new SAMForm(mainForm, sharedAnnotationManager,mainForm.Materials);
+                mainForm.SamFormInstance = samForm;
+                panMenuItem.Enabled = false;
+                eraserMenuItem.Enabled = false;
+                brushMenuItem.Enabled = false;
+                thresholdingMenuItem.Enabled = false;
+                // When SAM closes, re-enable the buttons.
+                samForm.FormClosed += (sender, args) =>
+                {
+                    panMenuItem.Enabled = true;
+                    eraserMenuItem.Enabled = true;
+                    brushMenuItem.Enabled = true;
+                    thresholdingMenuItem.Enabled = true;
+                };
                 samForm.Show();
             };
             leftPanel.Controls.Add(btnSegmentAnything);
@@ -478,6 +611,17 @@ namespace CTSegmenter
             rightPanel.Controls.Add(numYz);
             histogramPictureBox = new PictureBox { Width = 260, Height = 100, BorderStyle = BorderStyle.FixedSingle, Visible = false };
             rightPanel.Controls.Add(histogramPictureBox);
+
+            Button btnScreenshot = new Button
+            {
+                Text = "Take Screenshot",
+                Width = 120,
+                Margin = new Padding(0, 10, 0, 0)
+            };
+            btnScreenshot.Click += (s, e) => mainForm.SaveScreenshot();
+            rightPanel.Controls.Add(btnScreenshot);
+
+
             table.Controls.Add(rightPanel, 1, 0);
             RefreshMaterialList();
             trkMin.Scroll += (s, e) =>
@@ -520,6 +664,8 @@ namespace CTSegmenter
             // Additional logic for clearing overlays on tool switch.
             if (item == brushMenuItem || item == eraserMenuItem || item == panMenuItem)
             {
+                //enableThresholdMaskMenuItem.Checked = true;
+                
                 // When switching to brush, eraser, or pan, clear any threshold overlay.
                 mainForm.PreviewMin = 0;
                 mainForm.PreviewMax = 0;
@@ -851,15 +997,15 @@ namespace CTSegmenter
 
         private void UpdateHistogram(PictureBox histBox)
         {
-            // Prevent reentrancy – if already updating, simply return.
             if (isUpdatingHistogram)
                 return;
             isUpdatingHistogram = true;
 
             try
             {
-                if (mainForm.volumeData == null)
+                if (mainForm.volumeData == null || histBox.ClientSize.Width <= 0 || histBox.ClientSize.Height <= 0)
                 {
+                    histBox.Image?.Dispose();
                     histBox.Image = null;
                     return;
                 }
@@ -868,17 +1014,17 @@ namespace CTSegmenter
                 int h = mainForm.GetHeight();
                 int slice = mainForm.CurrentSlice;
 
-                // Optionally, you could add a check here for valid slice indices.
-                // For example, if your volume data's third dimension is depth, you might check that slice is less than that depth.
+                if (w <= 0 || h <= 0)
+                {
+                    histBox.Image?.Dispose();
+                    histBox.Image = null;
+                    return;
+                }
 
                 byte[] graySlice = new byte[w * h];
                 for (int y = 0; y < h; y++)
-                {
                     for (int x = 0; x < w; x++)
-                    {
                         graySlice[y * w + x] = mainForm.volumeData[x, y, slice];
-                    }
-                }
 
                 int[] hist = new int[256];
                 foreach (byte b in graySlice)
@@ -886,48 +1032,54 @@ namespace CTSegmenter
 
                 int maxCount = hist.Max();
                 int histWidth = 256, histHeight = 100;
-                Bitmap bmp = new Bitmap(histWidth, histHeight + 15);
 
-                using (Graphics g = Graphics.FromImage(bmp))
+                using (Bitmap bmp = new Bitmap(histWidth, histHeight + 15))
                 {
-                    g.Clear(Color.Black);
-                    for (int i = 0; i < 256; i++)
+                    using (Graphics g = Graphics.FromImage(bmp))
                     {
-                        float binHeight = (maxCount > 0) ? (hist[i] / (float)maxCount) * histHeight : 0;
-                        g.DrawLine(Pens.White, i, histHeight, i, histHeight - binHeight);
+                        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+                        g.Clear(Color.Black);
+
+                        for (int i = 0; i < 256; i++)
+                        {
+                            float binHeight = (maxCount > 0) ? (hist[i] / (float)maxCount) * histHeight : 0;
+                            g.DrawLine(Pens.White, i, histHeight, i, histHeight - binHeight);
+                        }
+
+                        int minThreshold = (numThresholdMin != null) ? Math.Max(0, Math.Min(255, (int)numThresholdMin.Value)) : 0;
+                        int maxThreshold = (numThresholdMax != null) ? Math.Max(0, Math.Min(255, (int)numThresholdMax.Value)) : 255;
+
+                        using (Pen redPen = new Pen(Color.Red, 2))
+                        using (Pen bluePen = new Pen(Color.Blue, 2))
+                        {
+                            g.DrawLine(redPen, minThreshold, 0, minThreshold, histHeight);
+                            g.DrawLine(bluePen, maxThreshold, 0, maxThreshold, histHeight);
+                        }
+
+                        // Define fixed rectangles for drawing text labels.
+                        // The left rectangle is at (0, histHeight) with width 50 and height 15.
+                        // The right rectangle is at (histWidth - 50, histHeight) with width 50 and height 15.
+                        RectangleF rectLeft = new RectangleF(0, histHeight, 50, 15);
+                        RectangleF rectRight = new RectangleF(histWidth - 50, histHeight, 50, 15);
+
+                       
                     }
 
-                    // Ensure threshold values are within [0, 255]
-                    int minThreshold = Math.Max(0, Math.Min(255, (int)numThresholdMin.Value));
-                    int maxThreshold = Math.Max(0, Math.Min(255, (int)numThresholdMax.Value));
-
-                    using (Pen pen = new Pen(Color.Red, 2))
-                    {
-                        g.DrawLine(pen, minThreshold, 0, minThreshold, histHeight);
-                    }
-                    using (Pen pen = new Pen(Color.Blue, 2))
-                    {
-                        g.DrawLine(pen, maxThreshold, 0, maxThreshold, histHeight);
-                    }
-
-                    // Draw the labels "0" and "255" at the bottom extremes.
-                    using (Font font = new Font("Arial", 8))
-                    using (Brush brush = Brushes.Gray)
-                    {
-                        g.DrawString("0", font, brush, new PointF(0, histHeight));
-                        SizeF size255 = g.MeasureString("255", font);
-                        g.DrawString("255", font, brush, histWidth - size255.Width, histHeight);
-                    }
+                    histBox.Image?.Dispose();
+                    histBox.Image = (Bitmap)bmp.Clone();
                 }
-
-                histBox.Image?.Dispose();
-                histBox.Image = bmp;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[UpdateHistogram] Exception: " + ex.Message);
             }
             finally
             {
                 isUpdatingHistogram = false;
             }
         }
+
+
 
 
 

@@ -160,8 +160,10 @@ namespace CTSegmenter
         private byte nextMaterialID = 1; // 0 is reserved for Exterior.
         public byte[,] currentSelection;  // dimensions: [width, height] for current slice temporary selection
                                           // For orthoview temporary selections.
-        private byte[,] currentSelectionXZ; // dimensions: [width, depth] for XZ view (fixed Y = XzSliceY)
-        private byte[,] currentSelectionYZ; // dimensions: [depth, height] for YZ view (fixed X = YzSliceX)
+        public byte[,] currentSelectionXZ; // dimensions: [width, depth] for XZ view (fixed Y = XzSliceY)
+        public byte[,] currentSelectionYZ; // dimensions: [depth, height] for YZ view (fixed X = YzSliceX)
+
+        public bool RealTimeProcessing { get; set; } = false;
 
 
         #endregion
@@ -1886,7 +1888,7 @@ namespace CTSegmenter
             }
             else if (e.Button == MouseButtons.Right)
             {
-                // Debounce: ignore clicks that occur too fast after the last point creation (e.g., within 200 ms)
+                // For point tool, debounce as before.
                 if (currentTool == SegmentationTool.Point)
                 {
                     DateTime now = DateTime.Now;
@@ -1905,25 +1907,198 @@ namespace CTSegmenter
                 }
                 else if (currentTool == SegmentationTool.Point)
                 {
-                    // Calculate slice coordinates
                     float sliceX = (e.X - panOffset.X) / globalZoom;
                     float sliceY = (e.Y - panOffset.Y) / globalZoom;
-
-                    // Use the currently selected material (or a default)
                     Material selectedMaterial = (SelectedMaterialIndex >= 0 && SelectedMaterialIndex < Materials.Count)
                         ? Materials[SelectedMaterialIndex]
                         : new Material("Default", Color.Red, 0, 0, 1);
-
-                    // Create a new annotation point for the current slice
                     AnnotationPoint point = AnnotationMgr.AddPoint(sliceX, sliceY, CurrentSlice, selectedMaterial.Name);
-
-                    // Update the SAMForm grid via our dedicated updater.
                     UpdateSAMFormWithPoint(point);
-
-                    RenderViews();
-                    _ = RenderOrthoViewsAsync();
                 }
                 mainView.Invalidate();
+
+                // If real-time processing is enabled, update segmentation preview immediately.
+                if (RealTimeProcessing)
+                    ProcessSegmentationPreview();
+            }
+        }
+        public Bitmap GenerateXYBitmap(int sliceIndex, int width, int height)
+        {
+            Bitmap bmp = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    byte val = volumeData[x, y, sliceIndex];
+                    bmp.SetPixel(x, y, Color.FromArgb(val, val, val));
+                }
+            }
+            return bmp;
+        }
+
+        public Bitmap GenerateXZBitmap(int fixedY, int width, int depth)
+        {
+            Bitmap bmp = new Bitmap(width, depth, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            for (int z = 0; z < depth; z++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    byte val = volumeData[x, fixedY, z];
+                    bmp.SetPixel(x, z, Color.FromArgb(val, val, val));
+                }
+            }
+            return bmp;
+        }
+
+        public Bitmap GenerateYZBitmap(int fixedX, int height, int depth)
+        {
+            Bitmap bmp = new Bitmap(depth, height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            for (int y = 0; y < height; y++)
+            {
+                for (int z = 0; z < depth; z++)
+                {
+                    byte val = volumeData[fixedX, y, z];
+                    bmp.SetPixel(z, y, Color.FromArgb(val, val, val));
+                }
+            }
+            return bmp;
+        }
+        /// <summary>
+        /// If real-time processing is enabled in the settings, this method processes the current slice 
+        /// and the orthogonal views (XZ and YZ) to produce segmentation previews based on the current annotation points.
+        /// </summary>
+        public void ProcessSegmentationPreview()
+        {
+            try
+            {
+                // Retrieve current settings from SAMForm (or use a stored copy).
+                SAMSettingsParams settings = SamFormInstance.CurrentSettings;
+                string modelFolder = settings.ModelFolderPath;
+                int imageSize = settings.ImageInputSize;
+                string imageEncoderPath = Path.Combine(modelFolder, "image_encoder_hiera_t.onnx");
+                string promptEncoderPath = Path.Combine(modelFolder, "prompt_encoder_hiera_t.onnx");
+                string maskDecoderPath = Path.Combine(modelFolder, "mask_decoder_hiera_t.onnx");
+                string memoryAttentionPath = Path.Combine(modelFolder, "memory_attention_hiera_t.onnx");
+                string memoryEncoderPath = Path.Combine(modelFolder, "memory_encoder_hiera_t.onnx");
+                string mlpPath = Path.Combine(modelFolder, "mlp_hiera_t.onnx");
+
+                // Fixed parameters for preview.
+                int threshold = 128;
+                int tolerance = 5;
+                int width = GetWidth();
+                int height = GetHeight();
+                int depth = GetDepth();
+
+                using (var segmenter = new CTMemorySegmenter(
+                    imageEncoderPath,
+                    promptEncoderPath,
+                    maskDecoderPath,
+                    memoryEncoderPath,
+                    memoryAttentionPath,
+                    mlpPath,
+                    imageSize))
+                {
+                    // --- Process XY view (current slice) ---
+                    int currentSlice = CurrentSlice;
+                    var pointsXY = AnnotationMgr.GetPointsForSlice(currentSlice).ToList();
+                    if (pointsXY.Any())
+                    {
+                        using (Bitmap baseXY = GenerateXYBitmap(currentSlice, width, height))
+                        {
+                            byte[,] maskXY = new byte[width, height];
+                            foreach (var group in pointsXY.GroupBy(p => p.Label))
+                            {
+                                List<Point> promptPoints = group.Select(p => new Point((int)p.X, (int)p.Y)).ToList();
+                                using (Bitmap maskResult = segmenter.ProcessSingleSlice(baseXY, promptPoints, null, null, null))
+                                {
+                                    for (int yPix = 0; yPix < height; yPix++)
+                                    {
+                                        for (int xPix = 0; xPix < width; xPix++)
+                                        {
+                                            Color c = maskResult.GetPixel(xPix, yPix);
+                                            if (c.R > threshold)
+                                            {
+                                                var mat = Materials.FirstOrDefault(m => m.Name == group.Key);
+                                                if (mat != null)
+                                                    maskXY[xPix, yPix] = mat.ID;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            currentSelection = maskXY;
+                        }
+                    }
+
+                    // --- Process XZ view ---
+                    var pointsXZ = AnnotationMgr.Points.Where(p => Math.Abs(p.Y - XzSliceY) <= tolerance).ToList();
+                    if (pointsXZ.Any())
+                    {
+                        using (Bitmap baseXZ = GenerateXZBitmap(XzSliceY, width, depth))
+                        {
+                            byte[,] maskXZ = new byte[width, depth];
+                            foreach (var group in pointsXZ.GroupBy(p => p.Label))
+                            {
+                                List<Point> promptPoints = group.Select(p => new Point((int)p.X, (int)p.Z)).ToList();
+                                using (Bitmap maskResult = segmenter.ProcessSingleSlice(baseXZ, promptPoints, null, null, null))
+                                {
+                                    for (int zPix = 0; zPix < depth; zPix++)
+                                    {
+                                        for (int xPix = 0; xPix < width; xPix++)
+                                        {
+                                            Color c = maskResult.GetPixel(xPix, zPix);
+                                            if (c.R > threshold)
+                                            {
+                                                var mat = Materials.FirstOrDefault(m => m.Name == group.Key);
+                                                if (mat != null)
+                                                    maskXZ[xPix, zPix] = mat.ID;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            currentSelectionXZ = maskXZ;
+                        }
+                    }
+
+                    // --- Process YZ view ---
+                    var pointsYZ = AnnotationMgr.Points.Where(p => Math.Abs(p.X - YzSliceX) <= tolerance).ToList();
+                    if (pointsYZ.Any())
+                    {
+                        using (Bitmap baseYZ = GenerateYZBitmap(YzSliceX, height, depth))
+                        {
+                            byte[,] maskYZ = new byte[depth, height];
+                            foreach (var group in pointsYZ.GroupBy(p => p.Label))
+                            {
+                                List<Point> promptPoints = group.Select(p => new Point((int)p.Z, (int)p.Y)).ToList();
+                                using (Bitmap maskResult = segmenter.ProcessSingleSlice(baseYZ, promptPoints, null, null, null))
+                                {
+                                    for (int yPix = 0; yPix < height; yPix++)
+                                    {
+                                        for (int zPix = 0; zPix < depth; zPix++)
+                                        {
+                                            Color c = maskResult.GetPixel(zPix, yPix);
+                                            if (c.R > threshold)
+                                            {
+                                                var mat = Materials.FirstOrDefault(m => m.Name == group.Key);
+                                                if (mat != null)
+                                                    maskYZ[zPix, yPix] = mat.ID;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            currentSelectionYZ = maskYZ;
+                        }
+                    }
+                }
+                // Refresh the views.
+                RenderViews();
+                _ = RenderOrthoViewsAsync();
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[MainForm.ProcessSegmentationPreview] Exception: " + ex.Message);
             }
         }
         private void UpdateSAMFormWithPoint(AnnotationPoint point)
@@ -2351,8 +2526,7 @@ namespace CTSegmenter
         }
         private void MainView_MouseMove(object sender, MouseEventArgs e)
         {
-            // When hovering with no button pressed and brush (or eraser) is active,
-            // update the overlay center to follow the pointer.
+            // Update brush overlay for Brush/Eraser tools.
             if (e.Button == MouseButtons.None &&
                 (currentTool == SegmentationTool.Brush || currentTool == SegmentationTool.Eraser))
             {
@@ -2360,8 +2534,7 @@ namespace CTSegmenter
                 showBrushOverlay = true;
                 mainView.Invalidate();
             }
-
-            // Panning with left mouse button.
+            // Panning
             if (e.Button == MouseButtons.Left && mainView.Capture)
             {
                 int dx = e.Location.X - lastMousePosition.X;
@@ -2371,13 +2544,16 @@ namespace CTSegmenter
                 lastMousePosition = e.Location;
                 mainView.Invalidate();
             }
-            // Painting (or erasing) on right click.
+            // If painting (brush/eraser) with right-click, update and preview.
             else if (e.Button == MouseButtons.Right)
             {
                 if (currentTool == SegmentationTool.Brush)
                     PaintMaskAt(e.Location, currentBrushSize);
                 else if (currentTool == SegmentationTool.Eraser)
                     EraseMaskAt(e.Location, currentBrushSize);
+                mainView.Invalidate();
+                if (RealTimeProcessing)
+                    ProcessSegmentationPreview();
             }
         }
         private void MainView_MouseUp(object sender, MouseEventArgs e)
@@ -2566,32 +2742,22 @@ namespace CTSegmenter
             if (e.Button == MouseButtons.Right)
             {
                 if (currentTool == SegmentationTool.Brush)
-                {
                     PaintOrthoMaskAtXZ(e.Location, currentBrushSize);
-                }
                 else if (currentTool == SegmentationTool.Eraser)
-                {
                     EraseOrthoMaskAtXZ(e.Location, currentBrushSize);
-                }
                 else if (currentTool == SegmentationTool.Point)
                 {
-                    // In XZ view: horizontal coordinate corresponds to X,
-                    // vertical coordinate corresponds to Z.
                     int x = (int)((e.X - xzPan.X) / xzZoom);
                     int z = (int)((e.Y - xzPan.Y) / xzZoom);
-                    // Use the fixed Y slice from XzSliceY.
-                    float sliceX = x;
-                    float sliceY = XzSliceY;
-                    int sliceZ = z;
                     Material selectedMaterial = (SelectedMaterialIndex >= 0 && SelectedMaterialIndex < Materials.Count)
                         ? Materials[SelectedMaterialIndex]
                         : new Material("Default", Color.Red, 0, 0, 1);
-                    AnnotationPoint point = AnnotationMgr.AddPoint(sliceX, sliceY, sliceZ, selectedMaterial.Name);
+                    AnnotationPoint point = AnnotationMgr.AddPoint(x, XzSliceY, z, selectedMaterial.Name);
                     UpdateSAMFormWithPoint(point);
-                    // Optionally, re-render both main and orthoviews
-                    RenderViews();
-                    _ = RenderOrthoViewsAsync();
                 }
+                xzView.Invalidate();
+                if (RealTimeProcessing)
+                    ProcessSegmentationPreview();
             }
             else if (e.Button == MouseButtons.Left)
             {
@@ -2601,7 +2767,6 @@ namespace CTSegmenter
 
         private void XzView_MouseMove(object sender, MouseEventArgs e)
         {
-            // When hovering (no button pressed) with Brush or Eraser active, update the overlay center.
             if (e.Button == MouseButtons.None &&
                 (currentTool == SegmentationTool.Brush || currentTool == SegmentationTool.Eraser))
             {
@@ -2615,7 +2780,9 @@ namespace CTSegmenter
                     PaintOrthoMaskAtXZ(e.Location, currentBrushSize);
                 else if (currentTool == SegmentationTool.Eraser)
                     EraseOrthoMaskAtXZ(e.Location, currentBrushSize);
-                _ = RenderOrthoViewsAsync();
+                xzView.Invalidate();
+                if (RealTimeProcessing)
+                    ProcessSegmentationPreview();
             }
             else if (e.Button == MouseButtons.Left)
             {
@@ -2745,31 +2912,22 @@ namespace CTSegmenter
             if (e.Button == MouseButtons.Right)
             {
                 if (currentTool == SegmentationTool.Brush)
-                {
                     PaintOrthoMaskAtYZ(e.Location, currentBrushSize);
-                }
                 else if (currentTool == SegmentationTool.Eraser)
-                {
                     EraseOrthoMaskAtYZ(e.Location, currentBrushSize);
-                }
                 else if (currentTool == SegmentationTool.Point)
                 {
-                    // In YZ view: horizontal axis corresponds to Z,
-                    // vertical axis corresponds to Y.
                     int z = (int)((e.X - yzPan.X) / yzZoom);
                     int y = (int)((e.Y - yzPan.Y) / yzZoom);
-                    // Use the fixed X coordinate from YzSliceX.
-                    float sliceX = YzSliceX;
-                    float sliceY = y;
-                    int sliceZ = z;
                     Material selectedMaterial = (SelectedMaterialIndex >= 0 && SelectedMaterialIndex < Materials.Count)
                         ? Materials[SelectedMaterialIndex]
                         : new Material("Default", Color.Red, 0, 0, 1);
-                    AnnotationPoint point = AnnotationMgr.AddPoint(sliceX, sliceY, sliceZ, selectedMaterial.Name);
+                    AnnotationPoint point = AnnotationMgr.AddPoint(YzSliceX, y, z, selectedMaterial.Name);
                     UpdateSAMFormWithPoint(point);
-                    RenderViews();
-                    _ = RenderOrthoViewsAsync();
                 }
+                yzView.Invalidate();
+                if (RealTimeProcessing)
+                    ProcessSegmentationPreview();
             }
             else if (e.Button == MouseButtons.Left)
             {
@@ -2780,7 +2938,6 @@ namespace CTSegmenter
 
         private void YzView_MouseMove(object sender, MouseEventArgs e)
         {
-            // When hovering (no button pressed) with Brush or Eraser active, update the overlay center.
             if (e.Button == MouseButtons.None &&
                 (currentTool == SegmentationTool.Brush || currentTool == SegmentationTool.Eraser))
             {
@@ -2794,7 +2951,9 @@ namespace CTSegmenter
                     PaintOrthoMaskAtYZ(e.Location, currentBrushSize);
                 else if (currentTool == SegmentationTool.Eraser)
                     EraseOrthoMaskAtYZ(e.Location, currentBrushSize);
-                _ = RenderOrthoViewsAsync();
+                yzView.Invalidate();
+                if (RealTimeProcessing)
+                    ProcessSegmentationPreview();
             }
             else if (e.Button == MouseButtons.Left)
             {

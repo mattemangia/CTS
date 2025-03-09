@@ -71,46 +71,96 @@ namespace CTSegmenter
         /// <param name="imageInputSize">SAM2 typically uses 1024</param>
         /// <param name="canUseTextPrompts">Set true if can pass text to the prompt model</param>
         public CTMemorySegmenter(
-            string imageEncoderPath,
-            string promptEncoderPath,
-            string maskDecoderPath,
-            string memoryEncoderPath,
-            string memoryAttentionPath,
-            string mlpPath,
-            int imageInputSize = 1024,
-            bool canUseTextPrompts = false)
+    string imageEncoderPath,
+    string promptEncoderPath,
+    string maskDecoderPath,
+    string memoryEncoderPath,
+    string memoryAttentionPath,
+    string mlpPath,
+    int imageInputSize = 1024,
+    bool canUseTextPrompts = false)
         {
+            Logger.Log("[CTMemorySegmenter] Constructor start");
             _imageSize = imageInputSize;
             _canUseTextPrompts = canUseTextPrompts;
+            _sliceMem = new Dictionary<int, SliceMemory>();
 
-            // If GPU is wanted, might do:
-            // var options = new SessionOptions();
-            // options.AppendExecutionProvider_DML();
-            // else, just CPU:
-
-           
-            var options = new SessionOptions();
-            try { options.AppendExecutionProvider_DML(); }
-            catch { options.AppendExecutionProvider_CPU();
-                Logger.Log("[CTMemorySegmenter] DirectML not available. Falling back to CPU Execution Provider");
+            // First try to set up options with DML.
+            SessionOptions options = new SessionOptions();
+            bool useDml = true;
+            try
+            {
+                options.AppendExecutionProvider_DML();
+                Logger.Log("[CTMemorySegmenter] Using DirectML Execution Provider");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[CTMemorySegmenter] DML not available, falling back to CPU: " + ex.Message);
+                useDml = false;
+                options = new SessionOptions();
+                options.AppendExecutionProvider_CPU();
             }
 
-            _imageEncoderSession = new InferenceSession(imageEncoderPath, options);
-            _promptEncoderSession = new InferenceSession(promptEncoderPath, options);
-            _maskDecoderSession = new InferenceSession(maskDecoderPath, options);
-            _memoryEncoderSession = new InferenceSession(memoryEncoderPath, options);
-            _memoryAttentionSession = new InferenceSession(memoryAttentionPath, options);
-            _mlpSession = new InferenceSession(mlpPath, options);
+            try
+            {
+                _imageEncoderSession = new InferenceSession(imageEncoderPath, options);
+                Logger.Log($"[CTMemorySegmenter] Loaded image encoder from {imageEncoderPath}");
+                _promptEncoderSession = new InferenceSession(promptEncoderPath, options);
+                Logger.Log($"[CTMemorySegmenter] Loaded prompt encoder from {promptEncoderPath}");
+                _maskDecoderSession = new InferenceSession(maskDecoderPath, options);
+                Logger.Log($"[CTMemorySegmenter] Loaded mask decoder from {maskDecoderPath}");
+                _memoryEncoderSession = new InferenceSession(memoryEncoderPath, options);
+                Logger.Log($"[CTMemorySegmenter] Loaded memory encoder from {memoryEncoderPath}");
+                _memoryAttentionSession = new InferenceSession(memoryAttentionPath, options);
+                Logger.Log($"[CTMemorySegmenter] Loaded memory attention from {memoryAttentionPath}");
+                _mlpSession = new InferenceSession(mlpPath, options);
+                Logger.Log($"[CTMemorySegmenter] Loaded MLP from {mlpPath}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[CTMemorySegmenter] Exception during initialization with DirectML: " + ex.Message);
+                // Fallback: try to reinitialize with CPU only if not already using CPU.
+                if (useDml)
+                {
+                    Logger.Log("[CTMemorySegmenter] Falling back to CPU Execution Provider for all sessions.");
+                    try
+                    {
+                        SessionOptions cpuOptions = new SessionOptions();
+                        cpuOptions.AppendExecutionProvider_CPU();
 
-            _sliceMem = new Dictionary<int, SliceMemory>();
+                        _imageEncoderSession = new InferenceSession(imageEncoderPath, cpuOptions);
+                        Logger.Log($"[CTMemorySegmenter] (CPU) Loaded image encoder from {imageEncoderPath}");
+                        _promptEncoderSession = new InferenceSession(promptEncoderPath, cpuOptions);
+                        Logger.Log($"[CTMemorySegmenter] (CPU) Loaded prompt encoder from {promptEncoderPath}");
+                        _maskDecoderSession = new InferenceSession(maskDecoderPath, cpuOptions);
+                        Logger.Log($"[CTMemorySegmenter] (CPU) Loaded mask decoder from {maskDecoderPath}");
+                        _memoryEncoderSession = new InferenceSession(memoryEncoderPath, cpuOptions);
+                        Logger.Log($"[CTMemorySegmenter] (CPU) Loaded memory encoder from {memoryEncoderPath}");
+                        _memoryAttentionSession = new InferenceSession(memoryAttentionPath, cpuOptions);
+                        Logger.Log($"[CTMemorySegmenter] (CPU) Loaded memory attention from {memoryAttentionPath}");
+                        _mlpSession = new InferenceSession(mlpPath, cpuOptions);
+                        Logger.Log($"[CTMemorySegmenter] (CPU) Loaded MLP from {mlpPath}");
+                    }
+                    catch (Exception cpuEx)
+                    {
+                        Logger.Log("[CTMemorySegmenter] Exception during CPU fallback initialization: " + cpuEx.Message);
+                        throw;
+                    }
+                }
+                else
+                {
+                    throw;
+                }
+            }
+            Logger.Log("[CTMemorySegmenter] Constructor end");
         }
-
         /// <summary>
         /// Resets any stored memory or results across slices.
         /// </summary>
         public void ResetState()
         {
             // Clear the dictionary that held memory embeddings and final masks.
+            Logger.Log("[CTMemorySegmenter.ResetState] Resetting state");
             foreach (var kvp in _sliceMem)
             {
                 // If needed, dispose bitmaps
@@ -121,6 +171,7 @@ namespace CTSegmenter
                 }
             }
             _sliceMem.Clear();
+            Logger.Log("[CTMemorySegmenter.ResetState] State cleared");
         }
 
         // -------------------------------------------------------------------
@@ -143,6 +194,7 @@ namespace CTSegmenter
             bool[,] userBrushMask = null,
             string textPrompt = null)
         {
+            Logger.Log($"[PropagateSegmentationInVolume] Start processing {slices.Length} slices with middle index {middleSliceIndex}");
             if (slices == null || slices.Length == 0)
                 throw new ArgumentException("No slices provided.");
             if (middleSliceIndex < 0 || middleSliceIndex >= slices.Length)
@@ -151,7 +203,7 @@ namespace CTSegmenter
             // 1) Segment the middle slice with the user prompts
             int numSlices = slices.Length;
             Bitmap[] results = new Bitmap[numSlices];
-
+            Logger.Log("[PropagateSegmentationInVolume] Processing middle slice");
             var middleMask = ProcessSliceWithMemory(
                 sliceIndex: middleSliceIndex,
                 sliceImage: slices[middleSliceIndex],
@@ -163,7 +215,7 @@ namespace CTSegmenter
                 nextSliceIndex: null    // no memory from next
             );
             results[middleSliceIndex] = middleMask;
-
+            Logger.Log("[PropagateSegmentationInVolume] Propagating backward");
             // 2) go backward from [middleSliceIndex-1 .. 0]
             for (int i = middleSliceIndex - 1; i >= 0; i--)
             {
@@ -179,7 +231,7 @@ namespace CTSegmenter
                 );
                 results[i] = mask;
             }
-
+            Logger.Log("[PropagateSegmentationInVolume] Propagating forward");
             // 3) go forward from [middleSliceIndex+1 .. last]
             for (int i = middleSliceIndex + 1; i < numSlices; i++)
             {
@@ -195,7 +247,7 @@ namespace CTSegmenter
                 );
                 results[i] = mask;
             }
-
+            Logger.Log("[PropagateSegmentationInVolume] Processing complete");
             return results;
         }
 
@@ -218,10 +270,12 @@ namespace CTSegmenter
             int? prevSliceIndex,
             int? nextSliceIndex)
         {
+            Logger.Log($"[ProcessSliceWithMemory] Start processing slice {sliceIndex}");
             // 1) image encoder
             //    Convert sliceImage => float => run session
             //    Suppose the outputs are "vision_features" and "vision_pos_enc"
             var (visionFeatures, visionPosEnc) = RunImageEncoder(sliceImage);
+            Logger.Log($"[ProcessSliceWithMemory] Image encoder completed for slice {sliceIndex}");
 
             // 2) prompt encoder if the user provided new points, boxes, etc.
             //    If we have no new prompts, we can feed empty or skip it.
@@ -234,6 +288,7 @@ namespace CTSegmenter
                 brushMask,
                 textPrompt
             );
+            Logger.Log($"[ProcessSliceWithMemory] Prompt encoder completed for slice {sliceIndex}");
 
             // 3) memory attention
             //    If we have memory from a previous slice or next slice,
@@ -252,6 +307,7 @@ namespace CTSegmenter
                     prevMemoryFeatures: prevMem.MemoryFeatures,
                     prevMemoryPosEnc: prevMem.MemoryPosEnc
                 );
+                Logger.Log($"[ProcessSliceWithMemory] Memory attention applied for slice {sliceIndex} using previous slice {prevSliceIndex}");
             }
             // else if we have memory from next slice (rare in forward pass?), do similarly
             // We'll skip that. Can combine both if wanted.
@@ -269,7 +325,7 @@ namespace CTSegmenter
                 fallbackVisionFeatures: visionFeatures,
                 fallbackVisionPosEnc: visionPosEnc
             );
-
+            Logger.Log($"[ProcessSliceWithMemory] Mask decoder completed for slice {sliceIndex}");
             // 5) re-encode the new mask => memory
             //    so that future slices can see it
             var (maskMemFeatures, maskMemPosEnc) = RunMemoryEncoder(
@@ -289,7 +345,7 @@ namespace CTSegmenter
                 MemoryPosEnc = maskMemPosEnc,
                 Mask = null // we'll fill it after MLP below
             };
-
+            Logger.Log($"[ProcessSliceWithMemory] Memory updated for slice {sliceIndex}");
             // 6) upsample that mask to the original slice resolution,
             //    then optionally run MLP for final post-processing.
             Bitmap lowResMaskBmp = TensorToBitmap(lowResMask, _imageSize, _imageSize);
@@ -300,7 +356,7 @@ namespace CTSegmenter
             finalMask.Dispose();
             // store final in dictionary
             _sliceMem[sliceIndex].Mask = postProcessedMask;
-
+            Logger.Log($"[ProcessSliceWithMemory] Finished processing slice {sliceIndex}");
             return postProcessedMask;
         }
 
@@ -309,21 +365,35 @@ namespace CTSegmenter
         // -------------------------------------------------------------------
         private (Tensor<float> visionFeatures, Tensor<float> visionPosEnc) RunImageEncoder(Bitmap sliceImage)
         {
-            // Convert to float array [1,3,H,W]
+            Logger.Log("[RunImageEncoder] Converting image and running image encoder.");
             float[] floatData = ImageToFloatArray(sliceImage);
             var imageTensor = new DenseTensor<float>(floatData, new int[] { 1, 3, _imageSize, _imageSize });
             var inputs = new List<NamedOnnxValue>
-            {
-                NamedOnnxValue.CreateFromTensor("input_image", imageTensor)
-            };
+    {
+        NamedOnnxValue.CreateFromTensor("input_image", imageTensor)
+    };
 
-            Tensor<float> features;
-            Tensor<float> posEnc;
+            Tensor<float> features = null;
+            Tensor<float> posEnc = null;
             using (var outputs = _imageEncoderSession.Run(inputs))
             {
-                features = outputs.First(x => x.Name == "vision_features").AsTensor<float>();
-                posEnc = outputs.First(x => x.Name == "vision_pos_enc").AsTensor<float>();
+                var featureOutput = outputs.FirstOrDefault(x => x.Name == "vision_features");
+                if (featureOutput == null)
+                {
+                    Logger.Log("[RunImageEncoder] ERROR: 'vision_features' output not found.");
+                    throw new Exception("'vision_features' output not found in image encoder outputs.");
+                }
+                features = featureOutput.AsTensor<float>();
+
+                var posEncOutput = outputs.FirstOrDefault(x => x.Name == "vision_pos_enc_0");
+                if (posEncOutput == null)
+                {
+                    Logger.Log("[RunImageEncoder] ERROR: 'vision_pos_enc' output not found.");
+                    throw new Exception("'vision_pos_enc' output not found in image encoder outputs.");
+                }
+                posEnc = posEncOutput.AsTensor<float>();
             }
+            Logger.Log("[RunImageEncoder] Completed.");
             return (features, posEnc);
         }
 
@@ -336,6 +406,7 @@ namespace CTSegmenter
             bool[,] brushMask,
             string textPrompt)
         {
+            Logger.Log("[RunPromptEncoderIfNeeded] Checking for prompts");
             bool hasPrompts = ((userPoints != null && userPoints.Count > 0)
                              || (userBoxes != null && userBoxes.Count > 0)
                              || (brushMask != null)
@@ -343,6 +414,7 @@ namespace CTSegmenter
 
             if (!hasPrompts)
             {
+                Logger.Log("[RunPromptEncoderIfNeeded] No prompts provided; returning empty embeddings");
                 // return empty or dummy embeddings
                 // shape depends on model
                 // For demonstration, we create shape [1,256], [1,256,64,64], etc.
@@ -381,6 +453,7 @@ namespace CTSegmenter
                 denseEmb = outputs.First(x => x.Name == "dense_embeddings").AsTensor<float>();
                 densePe = outputs.First(x => x.Name == "dense_pe").AsTensor<float>();
             }
+            Logger.Log("[RunPromptEncoderIfNeeded] Completed");
             return (sparseEmb, denseEmb, densePe);
         }
 
@@ -390,6 +463,7 @@ namespace CTSegmenter
             Tensor<float> prevMemoryFeatures,
             Tensor<float> prevMemoryPosEnc)
         {
+            Logger.Log("[RunMemoryAttention] Running memory attention");
             // shape depends on ONNX
             // We'll assume something like:
             //   inputs: "current_feats", "current_pos", "prev_feats", "prev_pos"
@@ -408,6 +482,7 @@ namespace CTSegmenter
                 combinedFeats = results.First(x => x.Name == "combined_feats").AsTensor<float>();
                 combinedPos = results.First(x => x.Name == "combined_pos").AsTensor<float>();
             }
+            Logger.Log("[RunMemoryAttention] Completed");
             return (combinedFeats, combinedPos);
         }
 
@@ -417,6 +492,7 @@ namespace CTSegmenter
             Tensor<float> fallbackVisionFeatures,
             Tensor<float> fallbackVisionPosEnc)
         {
+            Logger.Log("[RunMaskDecoder] Running mask decoder");
             // build inputs
             var inputs = new List<NamedOnnxValue>
             {
@@ -435,6 +511,7 @@ namespace CTSegmenter
             {
                 lowResMask = outputs.First(x => x.Name == "low_res_masks").AsTensor<float>();
             }
+            Logger.Log("[RunMaskDecoder] Completed");
             return lowResMask;
         }
 
@@ -442,6 +519,7 @@ namespace CTSegmenter
             Bitmap sliceImage,
             Tensor<float> lowResMask)
         {
+            Logger.Log("[RunMemoryEncoder] Running memory encoder");
             // The memory encoder typically wants a [1,1,H,W] mask, etc.
             var inputs = new List<NamedOnnxValue>
             {
@@ -455,6 +533,7 @@ namespace CTSegmenter
                 memFeats = outputs.First(x => x.Name == "maskmem_features").AsTensor<float>();
                 memPosEnc = outputs.First(x => x.Name == "maskmem_pos_enc").AsTensor<float>();
             }
+            Logger.Log("[RunMemoryEncoder] Completed");
             return (memFeats, memPosEnc);
         }
 
@@ -464,6 +543,7 @@ namespace CTSegmenter
         /// </summary>
         private Bitmap RunMlpOnMask(Bitmap maskBmp)
         {
+            Logger.Log("[RunMlpOnMask] Running MLP post-processing");
             if (maskBmp == null) return null;
 
             int w = maskBmp.Width;
@@ -510,6 +590,7 @@ namespace CTSegmenter
                 int yy = i / w;
                 final.SetPixel(xx, yy, Color.FromArgb(c, c, c));
             }
+            Logger.Log("[RunMlpOnMask] Completed");
             return final;
         }
 
@@ -712,25 +793,27 @@ namespace CTSegmenter
         /// <param name="textPrompt">Optional text prompt if the model supports it. </param>
         /// <returns>A segmented mask as a Bitmap, same resolution as sliceImage. </returns>
         public Bitmap ProcessSingleSlice(
-            Bitmap sliceImage,
-            List<Point> userPoints = null,
-            List<Rectangle> userBoxes = null,
-            bool[,] userBrushMask = null,
-            string textPrompt = null
-        )
+    Bitmap sliceImage,
+    List<Point> userPoints = null,
+    List<Rectangle> userBoxes = null,
+    bool[,] userBrushMask = null,
+    string textPrompt = null
+)
         {
+            Logger.Log("[ProcessSingleSlice] Start processing a single slice.");
             if (sliceImage == null)
+            {
+                Logger.Log("[ProcessSingleSlice] Error: sliceImage is null.");
                 throw new ArgumentNullException(nameof(sliceImage));
+            }
 
-            // 1) Run the image encoder. We produce e.g. "vision_features" & "vision_pos_enc".
-            //    Dimensions for SAM2 typically [1,3,1024,1024] if _imageSize=1024.
+            // 1) Run the image encoder.
+            Logger.Log("[ProcessSingleSlice] Running image encoder.");
             (Tensor<float> visionFeatures, Tensor<float> visionPosEnc) = RunImageEncoder(sliceImage);
+            Logger.Log("[ProcessSingleSlice] Image encoder completed.");
 
-            // 2) Build user prompt embeddings if any:
-            //    Points, boxes => scaled to _imageSize
-            //    Brush => up/downsample to 1024x1024
-            //    Text => dummy or real embedding
-            //    We'll get (sparseEmb, denseEmb, densePosEnc).
+            // 2) Build user prompt embeddings if any.
+            Logger.Log("[ProcessSingleSlice] Running prompt encoder.");
             (Tensor<float> sparseEmb, Tensor<float> denseEmb, Tensor<float> densePe) =
                 RunPromptEncoderIfNeeded(
                     sliceImage.Width,
@@ -740,35 +823,34 @@ namespace CTSegmenter
                     userBrushMask,
                     textPrompt
                 );
+            Logger.Log("[ProcessSingleSlice] Prompt encoder completed.");
 
-            // 3) Run the mask decoder. We pass:
-            //      - "image_embeddings"  => visionFeatures
-            //      - "sparse_prompt_embeddings" => sparseEmb
-            //      - "dense_prompt_embeddings"  => denseEmb
-            //      - "image_pe" => densePe
-            //    Typically the output is named "low_res_masks".
-            //    We'll store it in "lowResMask".
+            // 3) Run the mask decoder.
+            Logger.Log("[ProcessSingleSlice] Running mask decoder.");
             Tensor<float> lowResMask = RunMaskDecoder(
                 visionFeatures,
                 (sparseEmb, denseEmb, densePe),
                 fallbackVisionFeatures: visionFeatures,
                 fallbackVisionPosEnc: visionPosEnc
             );
+            Logger.Log("[ProcessSingleSlice] Mask decoder completed.");
 
-            // 4) Convert the low-resolution mask from shape [1,1,256,256] (or [1,1, H/4, W/4]) 
-            //    up to [1,1,_imageSize,_imageSize] => then to a Bitmap
-            //    Then finally up to original slice dimension.
-            //    If we also want an MLP step, we apply it now:
+            // 4) Convert low-resolution mask to a Bitmap.
+            Logger.Log("[ProcessSingleSlice] Converting low resolution mask to Bitmap.");
             Bitmap lowResMaskBmp = TensorToBitmap(lowResMask, _imageSize, _imageSize);
             Bitmap maskResizedToSlice = ResizeImage(lowResMaskBmp, sliceImage.Width, sliceImage.Height);
             lowResMaskBmp.Dispose();
+            Logger.Log("[ProcessSingleSlice] Resized mask to original slice dimensions.");
 
-            // 5) Optionally run MLP for final post-processing if the pipeline uses it
+            // 5) Optionally run MLP for final post-processing.
+            Logger.Log("[ProcessSingleSlice] Running MLP post-processing on mask.");
             Bitmap final = RunMlpOnMask(maskResizedToSlice);
             maskResizedToSlice.Dispose();
+            Logger.Log("[ProcessSingleSlice] MLP post-processing completed. Returning final mask.");
 
             return final;
         }
+
 
 
         /// <summary>
@@ -802,7 +884,9 @@ namespace CTSegmenter
         // Disposal
         // -------------------------------------------------------------------
         public void Dispose()
+
         {
+            Logger.Log("[CTMemorySegmenter.Dispose] Disposing sessions and resetting state");
             if (_imageEncoderSession != null) _imageEncoderSession.Dispose();
             if (_promptEncoderSession != null) _promptEncoderSession.Dispose();
             if (_maskDecoderSession != null) _maskDecoderSession.Dispose();
@@ -811,6 +895,7 @@ namespace CTSegmenter
             if (_mlpSession != null) _mlpSession.Dispose();
 
             ResetState();
+            Logger.Log("[CTMemorySegmenter.Dispose] Disposal complete");
         }
     }
 }

@@ -10,6 +10,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Drawing.Imaging;
+using static CTSegmenter.SAMForm;
 
 namespace CTSegmenter
 {
@@ -154,7 +155,7 @@ namespace CTSegmenter
         public Dictionary<int, byte[,]> sparseSelectionsX = new Dictionary<int, byte[,]>(); // YZ slices (X-axis)
         public Dictionary<int, byte[,]> sparseSelections = new Dictionary<int, byte[,]>();
         public enum Axis { X, Y, Z }
-
+        
         public SAMForm SamFormInstance { get; set; }
 
         private byte nextMaterialID = 1; // 0 is reserved for Exterior.
@@ -175,7 +176,7 @@ namespace CTSegmenter
             InitializeTimers();
             InitializeMaterials();
             mainView.Paint += MainView_Paint;
-            mainView.MouseDown += MainView_MouseDown;
+            //mainView.MouseDown += MainView_MouseDown;
             mainView.MouseMove += MainView_MouseMove;
             mainView.MouseWheel += MainView_MouseWheel;
 
@@ -258,6 +259,18 @@ namespace CTSegmenter
             yzView.MouseMove += YzView_MouseMove;
 
             this.Controls.Add(mainLayout);
+        }
+        // Cached segmenter instance for live preview
+        private CTMemorySegmenter _liveSegmenter = null;
+
+        // Clears the cached segmenter (for example, when live preview is turned off or settings change)
+        public void ClearLiveSegmenter()
+        {
+            if (_liveSegmenter != null)
+            {
+                _liveSegmenter.Dispose();
+                _liveSegmenter = null;
+            }
         }
 
         public void SetSegmentationTool(SegmentationTool tool)
@@ -946,8 +959,7 @@ namespace CTSegmenter
                 {
                     Parallel.For(0, depth, z =>
                     {
-                        byte[] sliceData = GetSliceData(z);
-                        using (Bitmap bmp = CreateBitmapFromData(sliceData, z))
+                        using (Bitmap bmp = CreateBitmapFromData(z))
                         {
                             bmp.Save(Path.Combine(dialog.SelectedPath, $"{z:00000}.bmp"));
                         }
@@ -1361,7 +1373,7 @@ namespace CTSegmenter
                 return;
             byte[] sliceData = GetSliceData(currentSlice);
             currentBitmap?.Dispose();
-            currentBitmap = CreateBitmapFromData(sliceData, currentSlice);
+            currentBitmap = CreateBitmapFromData(currentSlice);
             ClampPanOffset();
             mainView.Invalidate();
         }
@@ -1395,81 +1407,58 @@ namespace CTSegmenter
 
 
         // Modified CreateBitmapFromData using RenderMaterials property.
-        private Bitmap CreateBitmapFromData(byte[] slice, int sliceIndex)
+        private Bitmap CreateBitmapFromData(int sliceIndex)
         {
-            // Ensure there is at least the Exterior material.
-            if (Materials == null || Materials.Count == 0)
-            {
-                Materials = new List<Material>();
-                Materials.Add(new Material("Exterior", Color.Transparent, 0, 0, 0) { IsExterior = true });
-            }
-            if (volumeData == null)
-                return new Bitmap(width, height);
-
-            Bitmap bmp = new Bitmap(width, height);
+            Bitmap bmp = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+            // Determine if thresholding is active.
             bool thresholdActive = (Materials.Count > 1) && EnableThresholdMask &&
                                    (SelectedMaterialIndex >= 0) && (PreviewMax > PreviewMin);
-
             for (int y = 0; y < height; y++)
             {
                 for (int x = 0; x < width; x++)
                 {
-                    // Get the base grayscale value.
-                    byte gVal = volumeData?[x, y, sliceIndex] ?? 0;
+                    // Use volumeData if available; otherwise use a neutral gray (128).
+                    byte gVal = (volumeData != null) ? volumeData[x, y, sliceIndex] : (byte)128;
                     Color baseColor = Color.FromArgb(gVal, gVal, gVal);
                     Color finalColor = baseColor;
 
-                    if (ShowMask)  // Only apply segmentation if the flag is true.
+                    // Get the segmentation label directly from volumeLabels.
+                    byte segID = (volumeLabels != null) ? volumeLabels[x, y, sliceIndex] : (byte)0;
+                    if (segID != 0)
                     {
-                        // Get the segmentation ID.
-                        byte segID = slice[y * width + x];
-
-                        if (RenderMaterials)
+                        Material mat = Materials.FirstOrDefault(m => m.ID == segID);
+                        if (mat != null)
                         {
-                            Material mat = Materials.FirstOrDefault(m => m.ID == segID);
-                            if (segID != 0 && mat != null)
-                            {
-                                finalColor = mat.Color;
-                            }
+                            // If RenderMaterials is true, use full material color;
+                            // if ShowMask is true, blend 50% with the base color.
+                            finalColor = RenderMaterials ? mat.Color : (ShowMask ? BlendColors(baseColor, mat.Color, 0.5f) : mat.Color);
                         }
-                        else
-                        {
-                            if (segID != 0)
-                            {
-                                Material mat = Materials.FirstOrDefault(m => m.ID == segID);
-                                if (mat != null)
-                                    finalColor = mat.Color;
-                            }
-                            else if (thresholdActive && gVal >= PreviewMin && gVal <= PreviewMax)
-                            {
-                                Color sel = GetComplementaryColor(Materials[SelectedMaterialIndex].Color);
-                                finalColor = BlendColors(baseColor, sel, 0.5f);
-                            }
-                        }
+                    }
+                    // Optionally apply a threshold overlay if no label is present.
+                    else if (ShowMask && thresholdActive && gVal >= PreviewMin && gVal <= PreviewMax)
+                    {
+                        Color sel = GetComplementaryColor(Materials[SelectedMaterialIndex].Color);
+                        finalColor = BlendColors(baseColor, sel, 0.5f);
+                    }
 
-                        // Overlay temporary brush selection if available.
-                        if (currentSelection != null)
+                    // Overlay any temporary brush/eraser selection.
+                    if (currentSelection != null)
+                    {
+                        byte sel = currentSelection[x, y];
+                        if (sel != 0)
                         {
-                            byte sel = currentSelection[x, y];
-                            if (sel != 0)
+                            Material selMat = Materials.FirstOrDefault(m => m.ID == sel);
+                            if (selMat != null)
                             {
-                                Material selMat = Materials.FirstOrDefault(m => m.ID == sel);
-                                if (selMat != null)
-                                {
-                                    finalColor = BlendColors(finalColor, selMat.Color, 0.5f);
-                                }
+                                finalColor = BlendColors(finalColor, selMat.Color, 0.5f);
                             }
                         }
                     }
-
                     bmp.SetPixel(x, y, finalColor);
                 }
             }
             return bmp;
         }
-
-
-
 
 
 
@@ -1483,7 +1472,7 @@ namespace CTSegmenter
 
         public async Task RenderOrthoViewsAsync(bool forceUpdate = false)
         {
-            if (!showProjections || isRenderingOrtho || volumeData == null || volumeLabels == null)
+            if (!showProjections || isRenderingOrtho || volumeLabels == null)
                 return;
 
             isRenderingOrtho = true;
@@ -1510,10 +1499,10 @@ namespace CTSegmenter
                         {
                             for (int x = 0; x < volWidth; x++)
                             {
-                                byte gray = volumeData[x, xzRow, z];
+                                // If volumeData is null, default to black.
+                                byte gray = (volumeData != null) ? volumeData[x, xzRow, z] : (byte)0;
                                 Color pixel = Color.FromArgb(gray, gray, gray);
                                 byte lbl = volumeLabels[x, xzRow, z];
-
                                 if (RenderMaterials)
                                 {
                                     Material mat = Materials.FirstOrDefault(m => m.ID == lbl);
@@ -1534,7 +1523,6 @@ namespace CTSegmenter
                                         pixel = BlendColors(pixel, sel, 0.5f);
                                     }
                                 }
-                                // Overlay temporary selection for XZ view.
                                 if (currentSelectionXZ != null)
                                 {
                                     byte sel = currentSelectionXZ[x, z];
@@ -1571,10 +1559,10 @@ namespace CTSegmenter
                         {
                             for (int z = 0; z < volDepth; z++)
                             {
-                                byte gray = volumeData[yzCol, y, z];
+                                // Use a null-check for volumeData.
+                                byte gray = (volumeData != null) ? volumeData[yzCol, y, z] : (byte)0;
                                 Color pixel = Color.FromArgb(gray, gray, gray);
                                 byte lbl = volumeLabels[yzCol, y, z];
-
                                 if (RenderMaterials)
                                 {
                                     Material mat = Materials.FirstOrDefault(m => m.ID == lbl);
@@ -1595,7 +1583,6 @@ namespace CTSegmenter
                                         pixel = BlendColors(pixel, sel, 0.5f);
                                     }
                                 }
-                                // Overlay temporary selection for YZ view.
                                 if (currentSelectionYZ != null)
                                 {
                                     byte sel = currentSelectionYZ[z, y];
@@ -1639,6 +1626,7 @@ namespace CTSegmenter
                 isRenderingOrtho = false;
             }
         }
+
 
 
 
@@ -1922,47 +1910,183 @@ namespace CTSegmenter
                     ProcessSegmentationPreview();
             }
         }
-        public Bitmap GenerateXYBitmap(int sliceIndex, int width, int height)
+        public Bitmap GenerateXYBitmap(int sliceIndex)
         {
-            Bitmap bmp = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            Bitmap bmp = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+            // Determine if thresholding is active (only used when no label is present)
+            bool thresholdActive = (Materials.Count > 1) && EnableThresholdMask &&
+                                   (SelectedMaterialIndex >= 0) && (PreviewMax > PreviewMin);
             for (int y = 0; y < height; y++)
             {
                 for (int x = 0; x < width; x++)
                 {
-                    byte val = volumeData[x, y, sliceIndex];
-                    bmp.SetPixel(x, y, Color.FromArgb(val, val, val));
+                    // Use volumeData if available; otherwise use a neutral gray (128)
+                    byte gVal = (volumeData != null) ? volumeData[x, y, sliceIndex] : (byte)128;
+                    Color baseColor = Color.FromArgb(gVal, gVal, gVal);
+                    Color finalColor = baseColor;
+
+                    // Always try to overlay the segmentation label from volumeLabels.
+                    byte segID = (volumeLabels != null) ? volumeLabels[x, y, sliceIndex] : (byte)0;
+                    if (segID != 0)
+                    {
+                        Material mat = Materials.FirstOrDefault(m => m.ID == segID);
+                        if (mat != null)
+                        {
+                            // If RenderMaterials is true or if neither flag is active, use full material color.
+                            // If ShowMask is active and RenderMaterials is false, blend 50% with baseColor.
+                            if (RenderMaterials || (!ShowMask && !RenderMaterials))
+                            {
+                                finalColor = mat.Color;
+                            }
+                            else if (ShowMask)
+                            {
+                                finalColor = BlendColors(baseColor, mat.Color, 0.5f);
+                            }
+                        }
+                    }
+                    // Optionally apply threshold overlay when no label is present.
+                    else if (ShowMask && thresholdActive && gVal >= PreviewMin && gVal <= PreviewMax)
+                    {
+                        Color sel = GetComplementaryColor(Materials[SelectedMaterialIndex].Color);
+                        finalColor = BlendColors(baseColor, sel, 0.5f);
+                    }
+
+                    // Overlay any temporary brush selection.
+                    if (currentSelection != null)
+                    {
+                        byte sel = currentSelection[x, y];
+                        if (sel != 0)
+                        {
+                            Material selMat = Materials.FirstOrDefault(m => m.ID == sel);
+                            if (selMat != null)
+                            {
+                                finalColor = BlendColors(finalColor, selMat.Color, 0.5f);
+                            }
+                        }
+                    }
+
+                    bmp.SetPixel(x, y, finalColor);
                 }
             }
             return bmp;
         }
 
+
+
+
         public Bitmap GenerateXZBitmap(int fixedY, int width, int depth)
         {
-            Bitmap bmp = new Bitmap(width, depth, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            Bitmap bmp = new Bitmap(width, depth, PixelFormat.Format24bppRgb);
+            bool thresholdActive = (Materials.Count > 1) && EnableThresholdMask &&
+                                   (SelectedMaterialIndex >= 0) && (PreviewMax > PreviewMin);
             for (int z = 0; z < depth; z++)
             {
                 for (int x = 0; x < width; x++)
                 {
-                    byte val = volumeData[x, fixedY, z];
-                    bmp.SetPixel(x, z, Color.FromArgb(val, val, val));
+                    byte gVal = (volumeData != null) ? volumeData[x, fixedY, z] : (byte)128;
+                    Color baseColor = Color.FromArgb(gVal, gVal, gVal);
+                    Color finalColor = baseColor;
+                    byte segID = (volumeLabels != null) ? volumeLabels[x, fixedY, z] : (byte)0;
+
+                    if (RenderMaterials)
+                    {
+                        if (segID != 0)
+                        {
+                            Material mat = Materials.FirstOrDefault(m => m.ID == segID);
+                            if (mat != null)
+                                finalColor = mat.Color;
+                        }
+                    }
+                    else if (ShowMask)
+                    {
+                        if (segID != 0)
+                        {
+                            Material mat = Materials.FirstOrDefault(m => m.ID == segID);
+                            if (mat != null)
+                                finalColor = mat.Color;
+                        }
+                        else if (thresholdActive && gVal >= PreviewMin && gVal <= PreviewMax)
+                        {
+                            Color sel = GetComplementaryColor(Materials[SelectedMaterialIndex].Color);
+                            finalColor = BlendColors(baseColor, sel, 0.5f);
+                        }
+                    }
+
+                    // Overlay temporary selection from the XZ view.
+                    if (currentSelectionXZ != null)
+                    {
+                        byte sel = currentSelectionXZ[x, z];
+                        if (sel != 0)
+                        {
+                            Material selMat = Materials.FirstOrDefault(m => m.ID == sel);
+                            if (selMat != null)
+                                finalColor = BlendColors(finalColor, selMat.Color, 0.5f);
+                        }
+                    }
+
+                    bmp.SetPixel(x, z, finalColor);
                 }
             }
             return bmp;
         }
 
+
         public Bitmap GenerateYZBitmap(int fixedX, int height, int depth)
         {
-            Bitmap bmp = new Bitmap(depth, height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            Bitmap bmp = new Bitmap(depth, height, PixelFormat.Format24bppRgb);
+            bool thresholdActive = (Materials.Count > 1) && EnableThresholdMask &&
+                                   (SelectedMaterialIndex >= 0) && (PreviewMax > PreviewMin);
             for (int y = 0; y < height; y++)
             {
                 for (int z = 0; z < depth; z++)
                 {
-                    byte val = volumeData[fixedX, y, z];
-                    bmp.SetPixel(z, y, Color.FromArgb(val, val, val));
+                    byte gVal = (volumeData != null) ? volumeData[fixedX, y, z] : (byte)128;
+                    Color baseColor = Color.FromArgb(gVal, gVal, gVal);
+                    Color finalColor = baseColor;
+                    byte segID = (volumeLabels != null) ? volumeLabels[fixedX, y, z] : (byte)0;
+
+                    if (RenderMaterials)
+                    {
+                        if (segID != 0)
+                        {
+                            Material mat = Materials.FirstOrDefault(m => m.ID == segID);
+                            if (mat != null)
+                                finalColor = mat.Color;
+                        }
+                    }
+                    else if (ShowMask)
+                    {
+                        if (segID != 0)
+                        {
+                            Material mat = Materials.FirstOrDefault(m => m.ID == segID);
+                            if (mat != null)
+                                finalColor = mat.Color;
+                        }
+                        else if (thresholdActive && gVal >= PreviewMin && gVal <= PreviewMax)
+                        {
+                            Color sel = GetComplementaryColor(Materials[SelectedMaterialIndex].Color);
+                            finalColor = BlendColors(baseColor, sel, 0.5f);
+                        }
+                    }
+
+                    // Overlay temporary selection from the YZ view.
+                    if (currentSelectionYZ != null)
+                    {
+                        byte sel = currentSelectionYZ[z, y];
+                        if (sel != 0)
+                        {
+                            Material selMat = Materials.FirstOrDefault(m => m.ID == sel);
+                            if (selMat != null)
+                                finalColor = BlendColors(finalColor, selMat.Color, 0.5f);
+                        }
+                    }
+
+                    bmp.SetPixel(z, y, finalColor);
                 }
             }
             return bmp;
         }
+
         /// <summary>
         /// If real-time processing is enabled in the settings, this method processes the current slice 
         /// and the orthogonal views (XZ and YZ) to produce segmentation previews based on the current annotation points.
@@ -1971,7 +2095,7 @@ namespace CTSegmenter
         {
             try
             {
-                // Retrieve current settings from SAMForm (or use a stored copy).
+                // Retrieve current settings from SAMForm.
                 SAMSettingsParams settings = SamFormInstance.CurrentSettings;
                 string modelFolder = settings.ModelFolderPath;
                 int imageSize = settings.ImageInputSize;
@@ -1982,31 +2106,55 @@ namespace CTSegmenter
                 string memoryEncoderPath = Path.Combine(modelFolder, "memory_encoder_hiera_t.onnx");
                 string mlpPath = Path.Combine(modelFolder, "mlp_hiera_t.onnx");
 
-                // Fixed parameters for preview.
-                int threshold = 128;
-                int tolerance = 5;
+                CTMemorySegmenter segmenter = null;
+                if (this.RealTimeProcessing)
+                {
+                    // Use a cached instance if available.
+                    if (_liveSegmenter == null)
+                    {
+                        _liveSegmenter = new CTMemorySegmenter(
+                            imageEncoderPath,
+                            promptEncoderPath,
+                            maskDecoderPath,
+                            memoryEncoderPath,
+                            memoryAttentionPath,
+                            mlpPath,
+                            imageSize);
+                    }
+                    segmenter = _liveSegmenter;
+                }
+                else
+                {
+                    // Otherwise create a temporary instance.
+                    segmenter = new CTMemorySegmenter(
+                        imageEncoderPath,
+                        promptEncoderPath,
+                        maskDecoderPath,
+                        memoryEncoderPath,
+                        memoryAttentionPath,
+                        mlpPath,
+                        imageSize);
+                }
+
                 int width = GetWidth();
                 int height = GetHeight();
                 int depth = GetDepth();
 
-                using (var segmenter = new CTMemorySegmenter(
-                    imageEncoderPath,
-                    promptEncoderPath,
-                    maskDecoderPath,
-                    memoryEncoderPath,
-                    memoryAttentionPath,
-                    mlpPath,
-                    imageSize))
+                // Retrieve the selected segmentation direction from SAMForm.
+                var dir = SamFormInstance.SelectedDirection;
+
+                // Process based on selected direction:
+                if (dir == SegmentationDirection.XY)
                 {
-                    // --- Process XY view (current slice) ---
-                    int currentSlice = CurrentSlice;
-                    var pointsXY = AnnotationMgr.GetPointsForSlice(currentSlice).ToList();
-                    if (pointsXY.Any())
+                    // Process only the XY view (current slice)
+                    int currentSlice = this.CurrentSlice;
+                    List<AnnotationPoint> annPointsXY = AnnotationMgr.GetPointsForSlice(currentSlice).ToList();
+                    if (annPointsXY.Any())
                     {
-                        using (Bitmap baseXY = GenerateXYBitmap(currentSlice, width, height))
+                        using (Bitmap baseXY = GenerateXYBitmap(currentSlice))
                         {
                             byte[,] maskXY = new byte[width, height];
-                            foreach (var group in pointsXY.GroupBy(p => p.Label))
+                            foreach (var group in annPointsXY.GroupBy(p => p.Label))
                             {
                                 List<Point> promptPoints = group.Select(p => new Point((int)p.X, (int)p.Y)).ToList();
                                 using (Bitmap maskResult = segmenter.ProcessSingleSlice(baseXY, promptPoints, null, null, null))
@@ -2016,7 +2164,7 @@ namespace CTSegmenter
                                         for (int xPix = 0; xPix < width; xPix++)
                                         {
                                             Color c = maskResult.GetPixel(xPix, yPix);
-                                            if (c.R > threshold)
+                                            if (c.R > 128)
                                             {
                                                 var mat = Materials.FirstOrDefault(m => m.Name == group.Key);
                                                 if (mat != null)
@@ -2029,15 +2177,17 @@ namespace CTSegmenter
                             currentSelection = maskXY;
                         }
                     }
-
-                    // --- Process XZ view ---
-                    var pointsXZ = AnnotationMgr.Points.Where(p => Math.Abs(p.Y - XzSliceY) <= tolerance).ToList();
-                    if (pointsXZ.Any())
+                }
+                else if (dir == SegmentationDirection.XZ)
+                {
+                    // Process only the XZ projection (using XzSliceY as fixed row)
+                    List<AnnotationPoint> annPointsXZ = AnnotationMgr.GetPointsForSlice(this.XzSliceY).ToList();
+                    if (annPointsXZ.Any())
                     {
-                        using (Bitmap baseXZ = GenerateXZBitmap(XzSliceY, width, depth))
+                        using (Bitmap baseXZ = GenerateXZBitmap(this.XzSliceY, width, depth))
                         {
                             byte[,] maskXZ = new byte[width, depth];
-                            foreach (var group in pointsXZ.GroupBy(p => p.Label))
+                            foreach (var group in annPointsXZ.GroupBy(p => p.Label))
                             {
                                 List<Point> promptPoints = group.Select(p => new Point((int)p.X, (int)p.Z)).ToList();
                                 using (Bitmap maskResult = segmenter.ProcessSingleSlice(baseXZ, promptPoints, null, null, null))
@@ -2047,7 +2197,7 @@ namespace CTSegmenter
                                         for (int xPix = 0; xPix < width; xPix++)
                                         {
                                             Color c = maskResult.GetPixel(xPix, zPix);
-                                            if (c.R > threshold)
+                                            if (c.R > 128)
                                             {
                                                 var mat = Materials.FirstOrDefault(m => m.Name == group.Key);
                                                 if (mat != null)
@@ -2060,15 +2210,17 @@ namespace CTSegmenter
                             currentSelectionXZ = maskXZ;
                         }
                     }
-
-                    // --- Process YZ view ---
-                    var pointsYZ = AnnotationMgr.Points.Where(p => Math.Abs(p.X - YzSliceX) <= tolerance).ToList();
-                    if (pointsYZ.Any())
+                }
+                else if (dir == SegmentationDirection.YZ)
+                {
+                    // Process only the YZ projection (using YzSliceX as fixed column)
+                    List<AnnotationPoint> annPointsYZ = AnnotationMgr.GetPointsForSlice(this.YzSliceX).ToList();
+                    if (annPointsYZ.Any())
                     {
-                        using (Bitmap baseYZ = GenerateYZBitmap(YzSliceX, height, depth))
+                        using (Bitmap baseYZ = GenerateYZBitmap(this.YzSliceX, height, depth))
                         {
                             byte[,] maskYZ = new byte[depth, height];
-                            foreach (var group in pointsYZ.GroupBy(p => p.Label))
+                            foreach (var group in annPointsYZ.GroupBy(p => p.Label))
                             {
                                 List<Point> promptPoints = group.Select(p => new Point((int)p.Z, (int)p.Y)).ToList();
                                 using (Bitmap maskResult = segmenter.ProcessSingleSlice(baseYZ, promptPoints, null, null, null))
@@ -2078,7 +2230,7 @@ namespace CTSegmenter
                                         for (int zPix = 0; zPix < depth; zPix++)
                                         {
                                             Color c = maskResult.GetPixel(zPix, yPix);
-                                            if (c.R > threshold)
+                                            if (c.R > 128)
                                             {
                                                 var mat = Materials.FirstOrDefault(m => m.Name == group.Key);
                                                 if (mat != null)
@@ -2092,15 +2244,26 @@ namespace CTSegmenter
                         }
                     }
                 }
+
                 // Refresh the views.
                 RenderViews();
                 _ = RenderOrthoViewsAsync();
+
+                // If not using live preview, dispose the temporary segmenter.
+                if (!this.RealTimeProcessing)
+                {
+                    segmenter.Dispose();
+                }
             }
             catch (Exception ex)
             {
-                Logger.Log("[MainForm.ProcessSegmentationPreview] Exception: " + ex.Message);
+                Logger.Log("[ProcessSegmentationPreview] Exception: " + ex.Message);
             }
         }
+
+
+
+
         private void UpdateSAMFormWithPoint(AnnotationPoint point)
         {
             // If a SAMForm is open, update its DataGridView.

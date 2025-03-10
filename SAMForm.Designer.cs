@@ -39,6 +39,9 @@
             this.pasteToolStripButton = new System.Windows.Forms.ToolStripButton();
             this.toolStripSeparator1 = new System.Windows.Forms.ToolStripSeparator();
             this.toolStripButton1 = new System.Windows.Forms.ToolStripButton();
+            this.toolStripButton2 = new System.Windows.Forms.ToolStripButton();
+            this.toolStripButton3 = new System.Windows.Forms.ToolStripButton();
+            this.btnApply = new System.Windows.Forms.ToolStripButton();
             this.toolStripSeparator2 = new System.Windows.Forms.ToolStripSeparator();
             this.helpToolStripButton = new System.Windows.Forms.ToolStripButton();
             this.dataGridPoints = new System.Windows.Forms.DataGridView();
@@ -48,9 +51,10 @@
             this.Z = new System.Windows.Forms.DataGridViewTextBoxColumn();
             this.Type = new System.Windows.Forms.DataGridViewTextBoxColumn();
             this.Label = new System.Windows.Forms.DataGridViewComboBoxColumn();
-            this.toolStripButton2 = new System.Windows.Forms.ToolStripButton();
-            this.toolStripButton3 = new System.Windows.Forms.ToolStripButton();
-            this.btnApply = new System.Windows.Forms.ToolStripButton();
+            this.XYButton = new System.Windows.Forms.ToolStripButton();
+            this.XZButton = new System.Windows.Forms.ToolStripButton();
+            this.YZButton = new System.Windows.Forms.ToolStripButton();
+            this.toolStripSeparator3 = new System.Windows.Forms.ToolStripSeparator();
             this.toolStrip1.SuspendLayout();
             ((System.ComponentModel.ISupportInitialize)(this.dataGridPoints)).BeginInit();
             this.SuspendLayout();
@@ -73,6 +77,10 @@
             this.toolStripButton3,
             this.btnApply,
             this.toolStripSeparator2,
+            this.XYButton,
+            this.XZButton,
+            this.YZButton,
+            this.toolStripSeparator3,
             this.helpToolStripButton});
             this.toolStrip1.Location = new System.Drawing.Point(0, 0);
             this.toolStrip1.Name = "toolStrip1";
@@ -155,6 +163,35 @@
             this.toolStripButton1.Text = "Preview Image";
             this.toolStripButton1.Click += new System.EventHandler(this.toolStripButton1_Click);
             // 
+            // toolStripButton2
+            // 
+            this.toolStripButton2.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
+            this.toolStripButton2.Image = ((System.Drawing.Image)(resources.GetObject("toolStripButton2.Image")));
+            this.toolStripButton2.ImageTransparentColor = System.Drawing.Color.Magenta;
+            this.toolStripButton2.Name = "toolStripButton2";
+            this.toolStripButton2.Size = new System.Drawing.Size(29, 29);
+            this.toolStripButton2.Text = "Process Dataset";
+            // 
+            // toolStripButton3
+            // 
+            this.toolStripButton3.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
+            this.toolStripButton3.Image = ((System.Drawing.Image)(resources.GetObject("toolStripButton3.Image")));
+            this.toolStripButton3.ImageTransparentColor = System.Drawing.Color.Magenta;
+            this.toolStripButton3.Name = "toolStripButton3";
+            this.toolStripButton3.Size = new System.Drawing.Size(29, 29);
+            this.toolStripButton3.Text = "Settings";
+            this.toolStripButton3.Click += new System.EventHandler(this.toolStripButton3_Click);
+            // 
+            // btnApply
+            // 
+            this.btnApply.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
+            this.btnApply.Image = ((System.Drawing.Image)(resources.GetObject("btnApply.Image")));
+            this.btnApply.ImageTransparentColor = System.Drawing.Color.Magenta;
+            this.btnApply.Name = "btnApply";
+            this.btnApply.Size = new System.Drawing.Size(29, 29);
+            this.btnApply.Text = "Apply";
+            this.btnApply.Click += new System.EventHandler(this.btnApply_Click);
+            // 
             // toolStripSeparator2
             // 
             this.toolStripSeparator2.Name = "toolStripSeparator2";
@@ -229,34 +266,43 @@
             this.Label.Name = "Label";
             this.Label.Width = 125;
             // 
-            // toolStripButton2
+            // XYButton
             // 
-            this.toolStripButton2.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
-            this.toolStripButton2.Image = ((System.Drawing.Image)(resources.GetObject("toolStripButton2.Image")));
-            this.toolStripButton2.ImageTransparentColor = System.Drawing.Color.Magenta;
-            this.toolStripButton2.Name = "toolStripButton2";
-            this.toolStripButton2.Size = new System.Drawing.Size(29, 29);
-            this.toolStripButton2.Text = "Process Dataset";
+            this.XYButton.Checked = true;
+            this.XYButton.CheckState = System.Windows.Forms.CheckState.Checked;
+            this.XYButton.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
+            this.XYButton.Image = ((System.Drawing.Image)(resources.GetObject("XYButton.Image")));
+            this.XYButton.ImageTransparentColor = System.Drawing.Color.Magenta;
+            this.XYButton.Name = "XYButton";
+            this.XYButton.Size = new System.Drawing.Size(29, 29);
+            this.XYButton.Text = "toolStripButton4";
+            this.XYButton.ToolTipText = "Process XY";
+            this.XYButton.Click += new System.EventHandler(this.XYButton_Click);
             // 
-            // toolStripButton3
+            // XZButton
             // 
-            this.toolStripButton3.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
-            this.toolStripButton3.Image = ((System.Drawing.Image)(resources.GetObject("toolStripButton3.Image")));
-            this.toolStripButton3.ImageTransparentColor = System.Drawing.Color.Magenta;
-            this.toolStripButton3.Name = "toolStripButton3";
-            this.toolStripButton3.Size = new System.Drawing.Size(29, 29);
-            this.toolStripButton3.Text = "Settings";
-            this.toolStripButton3.Click += new System.EventHandler(this.toolStripButton3_Click);
+            this.XZButton.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
+            this.XZButton.Image = ((System.Drawing.Image)(resources.GetObject("XZButton.Image")));
+            this.XZButton.ImageTransparentColor = System.Drawing.Color.Magenta;
+            this.XZButton.Name = "XZButton";
+            this.XZButton.Size = new System.Drawing.Size(29, 29);
+            this.XZButton.Text = "Process XZ";
+            this.XZButton.Click += new System.EventHandler(this.XZButton_Click);
             // 
-            // btnApply
+            // YZButton
             // 
-            this.btnApply.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
-            this.btnApply.Image = ((System.Drawing.Image)(resources.GetObject("btnApply.Image")));
-            this.btnApply.ImageTransparentColor = System.Drawing.Color.Magenta;
-            this.btnApply.Name = "btnApply";
-            this.btnApply.Size = new System.Drawing.Size(29, 29);
-            this.btnApply.Text = "Apply";
-            this.btnApply.Click += new System.EventHandler(this.btnApply_Click);
+            this.YZButton.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
+            this.YZButton.Image = ((System.Drawing.Image)(resources.GetObject("YZButton.Image")));
+            this.YZButton.ImageTransparentColor = System.Drawing.Color.Magenta;
+            this.YZButton.Name = "YZButton";
+            this.YZButton.Size = new System.Drawing.Size(29, 29);
+            this.YZButton.Text = "Process YZ";
+            this.YZButton.Click += new System.EventHandler(this.YZButton_Click);
+            // 
+            // toolStripSeparator3
+            // 
+            this.toolStripSeparator3.Name = "toolStripSeparator3";
+            this.toolStripSeparator3.Size = new System.Drawing.Size(6, 32);
             // 
             // SAMForm
             // 
@@ -300,5 +346,9 @@
         private System.Windows.Forms.ToolStripButton toolStripButton2;
         private System.Windows.Forms.ToolStripButton toolStripButton3;
         private System.Windows.Forms.ToolStripButton btnApply;
+        private System.Windows.Forms.ToolStripButton XYButton;
+        private System.Windows.Forms.ToolStripButton XZButton;
+        private System.Windows.Forms.ToolStripButton YZButton;
+        private System.Windows.Forms.ToolStripSeparator toolStripSeparator3;
     }
 }

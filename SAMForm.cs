@@ -32,12 +32,13 @@ namespace CTSegmenter
                 // Set the main form’s tool back to Pan
                 if (mainForm != null)
                 {
+                    
                     mainForm.SetSegmentationTool(SegmentationTool.Pan);
                     mainForm.RenderViews(); // refresh to clear point overlays
                     _ = mainForm.RenderOrthoViewsAsync();
                 }
                 e.Cancel = true;
-                this.Hide();
+                this.Dispose();
             }
             else
             {
@@ -81,6 +82,12 @@ namespace CTSegmenter
             {
                 labelColumn.Items.Add(material.Name);
             }
+            // After initializing dataGridPoints (e.g., in the constructor or InitializeComponent)
+            this.dataGridPoints.CurrentCellDirtyStateChanged += (s, e) =>
+            {
+                if (dataGridPoints.IsCurrentCellDirty)
+                    dataGridPoints.CommitEdit(DataGridViewDataErrorContexts.Commit);
+            };
             Logger.Log("[SAM] Constructor end");
         }
         public void UpdateSettings(SAMSettingsParams settings)
@@ -95,6 +102,8 @@ namespace CTSegmenter
                 // Optionally, refresh or reinitialize any components that depend on these settings.
             }
         }
+
+
         public DataGridView GetPointsDataGridView()
         {
             return this.dataGridPoints;
@@ -108,16 +117,22 @@ namespace CTSegmenter
         {
             if (e.RowIndex < 0)
                 return;
+
+            // Check if the changed column is "Label"
             if (dataGridPoints.Columns[e.ColumnIndex].Name == "Label")
             {
+                // Get the point ID from the first column (or however your grid is organized)
                 int pointID = Convert.ToInt32(dataGridPoints.Rows[e.RowIndex].Cells[0].Value);
+                // Retrieve the new label from the cell's value
                 string newLabel = dataGridPoints.Rows[e.RowIndex].Cells["Label"].Value?.ToString();
                 if (!string.IsNullOrEmpty(newLabel))
                 {
+                    // Find the corresponding annotation point (assuming AnnotationPoint has a Label property)
                     var point = annotationManager.Points.FirstOrDefault(p => p.ID == pointID);
                     if (point != null)
                     {
                         point.Label = newLabel;
+                        // Update the main form's rendering so the new label appears in the slices.
                         mainForm.RenderViews();
                         _ = mainForm.RenderOrthoViewsAsync();
                     }
@@ -183,10 +198,8 @@ namespace CTSegmenter
         {
             try
             {
-                // --- 1. Create a CTMemorySegmenter instance using current settings ---
                 string modelFolder = CurrentSettings.ModelFolderPath;
                 int imageSize = CurrentSettings.ImageInputSize;
-                // Derive model paths from the settings (see SAMSettings.cs)
                 string imageEncoderPath = Path.Combine(modelFolder, "image_encoder_hiera_t.onnx");
                 string promptEncoderPath = Path.Combine(modelFolder, "prompt_encoder_hiera_t.onnx");
                 string maskDecoderPath = Path.Combine(modelFolder, "mask_decoder_hiera_t.onnx");
@@ -195,151 +208,127 @@ namespace CTSegmenter
                 string mlpPath = Path.Combine(modelFolder, "mlp_hiera_t.onnx");
 
                 using (var segmenter = new CTMemorySegmenter(
-                    imageEncoderPath,
-                    promptEncoderPath,
-                    maskDecoderPath,
-                    memoryEncoderPath,
-                    memoryAttentionPath,
-                    mlpPath,
-                    imageSize))
+       imageEncoderPath,
+       promptEncoderPath,
+       maskDecoderPath,
+       memoryEncoderPath,
+       memoryAttentionPath,
+       mlpPath,
+       imageSize,
+       false,
+       CurrentSettings.EnableMlp))
                 {
-                    // Parameters for segmentation preview
-                    int threshold = 128; // pixel intensity threshold to decide segmentation
-                    int tolerance = 5;   // tolerance (in pixels) for matching fixed coordinate in orthoviews
-
-                    // Get volume dimensions from MainForm (assumed accessible)
                     int width = mainForm.GetWidth();
                     int height = mainForm.GetHeight();
-                    // Assume MainForm has a GetDepth() method (or use a stored depth property)
                     int depth = mainForm.GetDepth();
 
-                    // --- Process XY view (current slice) ---
-                    // Visible points in XY view have their Z exactly equal to the current slice.
-                    var pointsXY = annotationManager.Points.Where(p => p.Z == mainForm.CurrentSlice).ToList();
-                    if (pointsXY.Any())
+                    // Process XY view if selected.
+                    if ((SelectedDirection & SegmentationDirection.XY) != 0)
                     {
-                        // Generate base XY image from the volume (grayscale)
-                        using (Bitmap baseXY = GenerateXYBitmap(mainForm.CurrentSlice, width, height))
+                        using (Bitmap baseXY = GenerateXYBitmap(mainForm.CurrentSlice, width, height)) 
                         {
-                            // Create an empty temporary mask (same dimensions as XY view)
-                            byte[,] maskXY = new byte[width, height];
-
-                            // Group points by material label
-                            foreach (var group in pointsXY.GroupBy(p => p.Label))
+                            List<Point> promptPointsXY = annotationManager.GetPointsForSlice(mainForm.CurrentSlice)
+                                .Select(p => new Point((int)p.X, (int)p.Y)).ToList();
+                            Bitmap maskXY = segmenter.ProcessXYSlice(mainForm.CurrentSlice, baseXY, promptPointsXY, null, null);
+                            if (maskXY != null)
                             {
-                                // Convert each annotation point to an integer prompt (using its X and Y)
-                                List<Point> promptPoints = group.Select(p => new Point((int)p.X, (int)p.Y)).ToList();
-                                // Process the slice with the given prompt; no boxes, brush mask or text prompt provided here.
-                                using (Bitmap maskResult = segmenter.ProcessSingleSlice(baseXY, promptPoints, null, null, null))
+                                byte[,] maskXYArray = new byte[width, height];
+                                for (int y = 0; y < height; y++)
                                 {
-                                    // For each pixel, if the mask indicates segmentation, set the material id.
-                                    for (int yPix = 0; yPix < height; yPix++)
+                                    for (int x = 0; x < width; x++)
                                     {
-                                        for (int xPix = 0; xPix < width; xPix++)
+                                        Color c = maskXY.GetPixel(x, y);
+                                        if (c.R > 128)
                                         {
-                                            Color c = maskResult.GetPixel(xPix, yPix);
-                                            if (c.R > threshold)
-                                            {
-                                                var mat = mainForm.Materials.FirstOrDefault(m => m.Name == group.Key);
-                                                if (mat != null)
-                                                {
-                                                    maskXY[xPix, yPix] = mat.ID;
-                                                }
-                                            }
+                                            maskXYArray[x, y] = mainForm.Materials.FirstOrDefault(m => m.Name ==
+                                                (promptPointsXY.Count > 0 ? promptPointsXY[0].ToString() : "Default"))?.ID ?? 1;
                                         }
                                     }
                                 }
+                                mainForm.currentSelection = maskXYArray;
+                                maskXY.Dispose();
                             }
-                            // Pass the preview mask to the MainForm for the XY view.
-                            mainForm.currentSelection = maskXY;
                         }
                     }
 
-                    // --- Process XZ view ---
-                    // Visible points in XZ view: those with Y coordinate close to mainForm.XzSliceY.
-                    var pointsXZ = annotationManager.Points.Where(p => Math.Abs(p.Y - mainForm.XzSliceY) <= tolerance).ToList();
-                    if (pointsXZ.Any())
+                    // Process XZ view if selected.
+                    if ((SelectedDirection & SegmentationDirection.XZ) != 0)
                     {
                         using (Bitmap baseXZ = GenerateXZBitmap(mainForm.XzSliceY, width, depth))
                         {
-                            byte[,] maskXZ = new byte[width, depth]; // dimensions: [width, depth]
-                            foreach (var group in pointsXZ.GroupBy(p => p.Label))
+                            List<Point> promptPointsXZ = annotationManager.GetPointsForSlice(mainForm.XzSliceY)
+                                .Select(p => new Point((int)p.X, (int)p.Z)).ToList();
+                            Bitmap maskXZ = segmenter.ProcessXZSlice(mainForm.XzSliceY, baseXZ, promptPointsXZ, null, null);
+                            if (maskXZ != null)
                             {
-                                // For XZ view, use (X, Z) coordinates.
-                                List<Point> promptPoints = group.Select(p => new Point((int)p.X, (int)p.Z)).ToList();
-                                using (Bitmap maskResult = segmenter.ProcessSingleSlice(baseXZ, promptPoints, null, null, null))
+                                byte[,] maskXZArray = new byte[width, depth];
+                                for (int z = 0; z < depth; z++)
                                 {
-                                    for (int zPix = 0; zPix < depth; zPix++)
+                                    for (int x = 0; x < width; x++)
                                     {
-                                        for (int xPix = 0; xPix < width; xPix++)
+                                        Color c = maskXZ.GetPixel(x, z);
+                                        if (c.R > 128)
                                         {
-                                            Color c = maskResult.GetPixel(xPix, zPix);
-                                            if (c.R > threshold)
-                                            {
-                                                var mat = mainForm.Materials.FirstOrDefault(m => m.Name == group.Key);
-                                                if (mat != null)
-                                                {
-                                                    maskXZ[xPix, zPix] = mat.ID;
-                                                }
-                                            }
+                                            maskXZArray[x, z] = mainForm.Materials.FirstOrDefault(m => m.Name ==
+                                                (promptPointsXZ.Count > 0 ? promptPointsXZ[0].ToString() : "Default"))?.ID ?? 1;
                                         }
                                     }
                                 }
+                                mainForm.currentSelectionXZ = maskXZArray;
+                                maskXZ.Dispose();
                             }
-                            mainForm.currentSelectionXZ = maskXZ;
                         }
                     }
 
-                    // --- Process YZ view ---
-                    // Visible points in YZ view: those with X coordinate close to mainForm.YzSliceX.
-                    var pointsYZ = annotationManager.Points.Where(p => Math.Abs(p.X - mainForm.YzSliceX) <= tolerance).ToList();
-                    if (pointsYZ.Any())
+                    // Process YZ view if selected.
+                    if ((SelectedDirection & SegmentationDirection.YZ) != 0)
                     {
                         using (Bitmap baseYZ = GenerateYZBitmap(mainForm.YzSliceX, height, depth))
                         {
-                            // Note: For YZ view, the bitmap dimensions are [depth, height]
-                            byte[,] maskYZ = new byte[depth, height];
-                            foreach (var group in pointsYZ.GroupBy(p => p.Label))
+                            List<Point> promptPointsYZ = annotationManager.GetPointsForSlice(mainForm.YzSliceX)
+                                .Select(p => new Point((int)p.Z, (int)p.Y)).ToList();
+                            Bitmap maskYZ = segmenter.ProcessYZSlice(mainForm.YzSliceX, baseYZ, promptPointsYZ, null, null);
+                            if (maskYZ != null)
                             {
-                                // For YZ view, use (Z, Y) coordinates.
-                                List<Point> promptPoints = group.Select(p => new Point((int)p.Z, (int)p.Y)).ToList();
-                                using (Bitmap maskResult = segmenter.ProcessSingleSlice(baseYZ, promptPoints, null, null, null))
+                                byte[,] maskYZArray = new byte[depth, height];
+                                for (int y = 0; y < height; y++)
                                 {
-                                    for (int yPix = 0; yPix < height; yPix++)
+                                    for (int z = 0; z < depth; z++)
                                     {
-                                        for (int zPix = 0; zPix < depth; zPix++)
+                                        Color c = maskYZ.GetPixel(z, y);
+                                        if (c.R > 128)
                                         {
-                                            // In baseYZ, x coordinate corresponds to zPix.
-                                            Color c = maskResult.GetPixel(zPix, yPix);
-                                            if (c.R > threshold)
-                                            {
-                                                var mat = mainForm.Materials.FirstOrDefault(m => m.Name == group.Key);
-                                                if (mat != null)
-                                                {
-                                                    maskYZ[zPix, yPix] = mat.ID;
-                                                }
-                                            }
+                                            maskYZArray[z, y] = mainForm.Materials.FirstOrDefault(m => m.Name ==
+                                                (promptPointsYZ.Count > 0 ? promptPointsYZ[0].ToString() : "Default"))?.ID ?? 1;
                                         }
                                     }
                                 }
+                                mainForm.currentSelectionYZ = maskYZArray;
+                                maskYZ.Dispose();
                             }
-                            mainForm.currentSelectionYZ = maskYZ;
                         }
                     }
 
-                    // --- Update MainForm views ---
                     mainForm.RenderViews();
                     _ = mainForm.RenderOrthoViewsAsync();
                 }
             }
             catch (Exception ex)
             {
-                // Log and optionally display an error.
                 Logger.Log("[SAMForm.toolStripButton1_Click] Exception: " + ex.Message);
                 MessageBox.Show("An error occurred while processing segmentation: " + ex.Message);
             }
         }
-
+        public void SetRealTimeProcessing(bool enable)
+        {
+            // mainForm is already stored in SAMForm (set during construction).
+            mainForm.RealTimeProcessing = enable;
+            // If live preview is disabled, clear any cached segmenter.
+            if (!enable)
+            {
+                mainForm.ClearLiveSegmenter();
+            }
+        }
         // --- Helper methods to generate base bitmaps for each view ---
         // Generates a grayscale XY slice image from MainForm.volumeData.
         Bitmap GenerateXYBitmap(int sliceIndex, int width, int height)
@@ -371,6 +360,8 @@ namespace CTSegmenter
             }
             return bmp;
         }
+
+        
 
         // Generates a grayscale YZ projection (at fixed X) from MainForm.volumeData.
         Bitmap GenerateYZBitmap(int fixedX, int height, int depth)
@@ -421,6 +412,75 @@ namespace CTSegmenter
                     // so any changed settings are automatically applied.
                 }
             }
+        }
+        [Flags]
+        public enum SegmentationDirection
+        {
+            None = 0,
+            XY = 1,
+            XZ = 2,
+            YZ = 4
+        }
+
+        // Expose the selected direction as a property.
+        public SegmentationDirection SelectedDirection { get; set; } = SegmentationDirection.XY;
+
+        private void XYButton_Click(object sender, EventArgs e)
+        {
+            // Assuming XYButton is a CheckBox or ToggleButton
+            CheckBox btn = sender as CheckBox;
+            if (btn == null)
+                return;
+
+            if (btn.Checked)
+            {
+                // Add XY flag
+                SelectedDirection |= SegmentationDirection.XY;
+            }
+            else
+            {
+                // Remove XY flag
+                SelectedDirection &= ~SegmentationDirection.XY;
+            }
+            // Ensure at least one axis is always selected (default to XY if none)
+            if (SelectedDirection == SegmentationDirection.None)
+                SelectedDirection = SegmentationDirection.XY;
+        }
+
+        private void XZButton_Click(object sender, EventArgs e)
+        {
+            CheckBox btn = sender as CheckBox;
+            if (btn == null)
+                return;
+
+            if (btn.Checked)
+            {
+                SelectedDirection |= SegmentationDirection.XZ;
+            }
+            else
+            {
+                SelectedDirection &= ~SegmentationDirection.XZ;
+            }
+            if (SelectedDirection == SegmentationDirection.None)
+                SelectedDirection = SegmentationDirection.XZ;  // defaulting to XZ if none selected
+        }
+
+        private void YZButton_Click(object sender, EventArgs e)
+        {
+            CheckBox btn = sender as CheckBox;
+            if (btn == null)
+                return;
+
+            if (btn.Checked)
+            {
+                SelectedDirection |= SegmentationDirection.YZ;
+            }
+            else
+            {
+                SelectedDirection &= ~SegmentationDirection.YZ;
+            }
+            if (SelectedDirection == SegmentationDirection.None)
+                SelectedDirection = SegmentationDirection.YZ;  // defaulting to YZ if none selected
         }
     }
 }

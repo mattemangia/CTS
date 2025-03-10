@@ -11,25 +11,13 @@ using Microsoft.ML.OnnxRuntime.Tensors;
 namespace CTSegmenter
 {
     /// <summary>
-    /// Demonstrates CT slice segmentation via a SAM2-like pipeline with
-    /// multi-frame memory & attention. Possibilities:
-    ///  - Provide user prompts for a middle slice (points, boxes, brush, text).
-    ///  - Automatically propagate segmentation backward & forward in the volume.
-    ///  - Use an MLP for final post-processing.
-    ///
-    /// Key methods:
-    ///  - PropagateSegmentationInVolume(...)
-    ///  - ResetState()
-    ///  - ProcessSliceWithMemory(...)
-    ///  
-    /// This version stores memory as Tensor<float> (rather than DenseTensor<float>) 
-    /// to avoid implicit conversion errors.
+    /// CTMemorySegmenter processes CT slices for segmentation. It implements separate pipelines
+    /// for XY, XZ and YZ views and uses real prompt encoding. Memory propagation is supported,
+    /// and MLP post-processing is disabled by default.
     /// </summary>
     public class CTMemorySegmenter : IDisposable
     {
-        // -------------------------------------------------------------------
-        // ONNX runtime sessions for different model parts
-        // -------------------------------------------------------------------
+        // ONNX sessions
         private InferenceSession _imageEncoderSession;
         private InferenceSession _promptEncoderSession;
         private InferenceSession _maskDecoderSession;
@@ -37,55 +25,40 @@ namespace CTSegmenter
         private InferenceSession _memoryAttentionSession;
         private InferenceSession _mlpSession;
 
-        // -------------------------------------------------------------------
-        // Basic config
-        // -------------------------------------------------------------------
-        private int _imageSize;            // e.g. 1024 for SAM2
-        private bool _canUseTextPrompts;   // if model handles text
+        // Configuration
+        private int _imageSize; // e.g., 1024
+        private bool _canUseTextPrompts;
+        private bool _enableMlp; // MLP post-processing enabled if true
 
-        // -------------------------------------------------------------------
-        // Internal memory store per slice
-        // We store:
-        //   - memory embeddings (maskMemFeatures) after each slice
-        //   - memory positional enc (maskMemPosEnc) if needed
-        //   - final mask from each slice
-        // For a single object. Can expand to multiple objects as needed.
-        // -------------------------------------------------------------------
-        private class SliceMemory
-        {
-            public Tensor<float> MemoryFeatures; // previously encoded mask embeddings
-            public Tensor<float> MemoryPosEnc;   // positional enc, if needed
-            public Bitmap Mask;                  // final segmentation result for that slice
-        }
+        // Memory storage for propagation
         private Dictionary<int, SliceMemory> _sliceMem;
 
-        /// <summary>
-        /// Constructor: Provide each model’s ONNX path, plus optional config.
-        /// </summary>
-        /// <param name="imageEncoderPath">ONNX for image encoder</param>
-        /// <param name="promptEncoderPath">ONNX for prompt encoder</param>
-        /// <param name="maskDecoderPath">ONNX for mask decoder</param>
-        /// <param name="memoryEncoderPath">ONNX for memory encoder</param>
-        /// <param name="memoryAttentionPath">ONNX for memory attention step</param>
-        /// <param name="mlpPath">ONNX for MLP post-processing</param>
-        /// <param name="imageInputSize">SAM2 typically uses 1024</param>
-        /// <param name="canUseTextPrompts">Set true if can pass text to the prompt model</param>
+        private const int MLP_SIZE = 16; // MLP expects tensor of shape [*,256]
+
+        private class SliceMemory
+        {
+            public Tensor<float> MemoryFeatures;
+            public Tensor<float> MemoryPosEnc;
+            public Bitmap Mask;
+        }
+
         public CTMemorySegmenter(
-    string imageEncoderPath,
-    string promptEncoderPath,
-    string maskDecoderPath,
-    string memoryEncoderPath,
-    string memoryAttentionPath,
-    string mlpPath,
-    int imageInputSize = 1024,
-    bool canUseTextPrompts = false)
+            string imageEncoderPath,
+            string promptEncoderPath,
+            string maskDecoderPath,
+            string memoryEncoderPath,
+            string memoryAttentionPath,
+            string mlpPath,
+            int imageInputSize = 1024,
+            bool canUseTextPrompts = false,
+            bool enableMlp = false)
         {
             Logger.Log("[CTMemorySegmenter] Constructor start");
             _imageSize = imageInputSize;
             _canUseTextPrompts = canUseTextPrompts;
+            _enableMlp = enableMlp;
             _sliceMem = new Dictionary<int, SliceMemory>();
 
-            // First try to set up options with DML.
             SessionOptions options = new SessionOptions();
             bool useDml = true;
             try
@@ -100,52 +73,31 @@ namespace CTSegmenter
                 options = new SessionOptions();
                 options.AppendExecutionProvider_CPU();
             }
-
             try
             {
                 _imageEncoderSession = new InferenceSession(imageEncoderPath, options);
-                Logger.Log($"[CTMemorySegmenter] Loaded image encoder from {imageEncoderPath}");
                 _promptEncoderSession = new InferenceSession(promptEncoderPath, options);
-                Logger.Log($"[CTMemorySegmenter] Loaded prompt encoder from {promptEncoderPath}");
                 _maskDecoderSession = new InferenceSession(maskDecoderPath, options);
-                Logger.Log($"[CTMemorySegmenter] Loaded mask decoder from {maskDecoderPath}");
                 _memoryEncoderSession = new InferenceSession(memoryEncoderPath, options);
-                Logger.Log($"[CTMemorySegmenter] Loaded memory encoder from {memoryEncoderPath}");
                 _memoryAttentionSession = new InferenceSession(memoryAttentionPath, options);
-                Logger.Log($"[CTMemorySegmenter] Loaded memory attention from {memoryAttentionPath}");
                 _mlpSession = new InferenceSession(mlpPath, options);
-                Logger.Log($"[CTMemorySegmenter] Loaded MLP from {mlpPath}");
+                Logger.Log("[CTMemorySegmenter] All sessions loaded successfully.");
             }
             catch (Exception ex)
             {
-                Logger.Log("[CTMemorySegmenter] Exception during initialization with DirectML: " + ex.Message);
-                // Fallback: try to reinitialize with CPU only if not already using CPU.
+                Logger.Log("[CTMemorySegmenter] Exception during initialization: " + ex.Message);
                 if (useDml)
                 {
-                    Logger.Log("[CTMemorySegmenter] Falling back to CPU Execution Provider for all sessions.");
-                    try
-                    {
-                        SessionOptions cpuOptions = new SessionOptions();
-                        cpuOptions.AppendExecutionProvider_CPU();
-
-                        _imageEncoderSession = new InferenceSession(imageEncoderPath, cpuOptions);
-                        Logger.Log($"[CTMemorySegmenter] (CPU) Loaded image encoder from {imageEncoderPath}");
-                        _promptEncoderSession = new InferenceSession(promptEncoderPath, cpuOptions);
-                        Logger.Log($"[CTMemorySegmenter] (CPU) Loaded prompt encoder from {promptEncoderPath}");
-                        _maskDecoderSession = new InferenceSession(maskDecoderPath, cpuOptions);
-                        Logger.Log($"[CTMemorySegmenter] (CPU) Loaded mask decoder from {maskDecoderPath}");
-                        _memoryEncoderSession = new InferenceSession(memoryEncoderPath, cpuOptions);
-                        Logger.Log($"[CTMemorySegmenter] (CPU) Loaded memory encoder from {memoryEncoderPath}");
-                        _memoryAttentionSession = new InferenceSession(memoryAttentionPath, cpuOptions);
-                        Logger.Log($"[CTMemorySegmenter] (CPU) Loaded memory attention from {memoryAttentionPath}");
-                        _mlpSession = new InferenceSession(mlpPath, cpuOptions);
-                        Logger.Log($"[CTMemorySegmenter] (CPU) Loaded MLP from {mlpPath}");
-                    }
-                    catch (Exception cpuEx)
-                    {
-                        Logger.Log("[CTMemorySegmenter] Exception during CPU fallback initialization: " + cpuEx.Message);
-                        throw;
-                    }
+                    Logger.Log("[CTMemorySegmenter] Falling back to CPU Execution Provider.");
+                    SessionOptions cpuOptions = new SessionOptions();
+                    cpuOptions.AppendExecutionProvider_CPU();
+                    _imageEncoderSession = new InferenceSession(imageEncoderPath, cpuOptions);
+                    _promptEncoderSession = new InferenceSession(promptEncoderPath, cpuOptions);
+                    _maskDecoderSession = new InferenceSession(maskDecoderPath, cpuOptions);
+                    _memoryEncoderSession = new InferenceSession(memoryEncoderPath, cpuOptions);
+                    _memoryAttentionSession = new InferenceSession(memoryAttentionPath, cpuOptions);
+                    _mlpSession = new InferenceSession(mlpPath, cpuOptions);
+                    Logger.Log("[CTMemorySegmenter] CPU fallback successful.");
                 }
                 else
                 {
@@ -153,593 +105,519 @@ namespace CTSegmenter
                 }
             }
             Logger.Log("[CTMemorySegmenter] Constructor end");
+            LogAllModelMetadata();
         }
-        /// <summary>
-        /// Resets any stored memory or results across slices.
-        /// </summary>
+        public void LogAllModelMetadata()
+        {
+            LogSessionMetadata("ImageEncoder", _imageEncoderSession);
+            LogSessionMetadata("PromptEncoder", _promptEncoderSession);
+            LogSessionMetadata("MaskDecoder", _maskDecoderSession);
+            LogSessionMetadata("MemoryEncoder", _memoryEncoderSession);
+            LogSessionMetadata("MemoryAttention", _memoryAttentionSession);
+            LogSessionMetadata("MLP", _mlpSession);
+        }
+        private void LogSessionMetadata(string sessionName, InferenceSession session)
+        {
+            Logger.Log($"==== Metadata for {sessionName} Session ====");
+            Logger.Log("Inputs:");
+            foreach (var input in session.InputMetadata)
+            {
+                Logger.Log($"   Name: {input.Key}, Type: {input.Value.ElementType}, Dimensions: {string.Join("x", input.Value.Dimensions.ToArray())}");
+            }
+            Logger.Log("Outputs:");
+            foreach (var output in session.OutputMetadata)
+            {
+                Logger.Log($"   Name: {output.Key}, Type: {output.Value.ElementType}, Dimensions: {string.Join("x", output.Value.Dimensions.ToArray())}");
+            }
+            Logger.Log("===============================================");
+        }
+        public void Dispose()
+        {
+            _imageEncoderSession?.Dispose();
+            _promptEncoderSession?.Dispose();
+            _maskDecoderSession?.Dispose();
+            _memoryEncoderSession?.Dispose();
+            _memoryAttentionSession?.Dispose();
+            _mlpSession?.Dispose();
+        }
+
         public void ResetState()
         {
-            // Clear the dictionary that held memory embeddings and final masks.
             Logger.Log("[CTMemorySegmenter.ResetState] Resetting state");
             foreach (var kvp in _sliceMem)
             {
-                // If needed, dispose bitmaps
-                if (kvp.Value.Mask != null)
-                {
-                    kvp.Value.Mask.Dispose();
-                    kvp.Value.Mask = null;
-                }
+                kvp.Value.Mask?.Dispose();
             }
             _sliceMem.Clear();
             Logger.Log("[CTMemorySegmenter.ResetState] State cleared");
         }
 
-        // -------------------------------------------------------------------
-        // MAIN method: Propagate segmentation across a volume
-        //    1) user picks a middle slice, provides prompts
-        //    2) we do that slice first
-        //    3) propagate backward, then forward
-        // -------------------------------------------------------------------
-        /// <summary>
-        /// The user provides a set of CT slices (Bitmaps). They pick
-        /// one slice index with user prompts. We do that slice, then
-        /// propagate backward and forward in index order, storing
-        /// final masks for each slice. We return them as an array.
-        /// </summary>
-        public Bitmap[] PropagateSegmentationInVolume(
-            Bitmap[] slices,
-            int middleSliceIndex,
-            List<Point> userPoints = null,
-            List<Rectangle> userBoxes = null,
-            bool[,] userBrushMask = null,
-            string textPrompt = null)
-        {
-            Logger.Log($"[PropagateSegmentationInVolume] Start processing {slices.Length} slices with middle index {middleSliceIndex}");
-            if (slices == null || slices.Length == 0)
-                throw new ArgumentException("No slices provided.");
-            if (middleSliceIndex < 0 || middleSliceIndex >= slices.Length)
-                throw new ArgumentOutOfRangeException(nameof(middleSliceIndex));
+        // --- Public methods for different projections (they now accept a slice index) ---
 
-            // 1) Segment the middle slice with the user prompts
-            int numSlices = slices.Length;
-            Bitmap[] results = new Bitmap[numSlices];
-            Logger.Log("[PropagateSegmentationInVolume] Processing middle slice");
-            var middleMask = ProcessSliceWithMemory(
-                sliceIndex: middleSliceIndex,
-                sliceImage: slices[middleSliceIndex],
-                userPoints: userPoints,
-                userBoxes: userBoxes,
-                brushMask: userBrushMask,
-                textPrompt: textPrompt,
-                prevSliceIndex: null,   // no memory from previous
-                nextSliceIndex: null    // no memory from next
-            );
-            results[middleSliceIndex] = middleMask;
-            Logger.Log("[PropagateSegmentationInVolume] Propagating backward");
-            // 2) go backward from [middleSliceIndex-1 .. 0]
-            for (int i = middleSliceIndex - 1; i >= 0; i--)
-            {
-                Bitmap mask = ProcessSliceWithMemory(
-                    sliceIndex: i,
-                    sliceImage: slices[i],
-                    userPoints: null,         // no new user points for these
-                    userBoxes: null,
-                    brushMask: null,
-                    textPrompt: null,
-                    prevSliceIndex: i + 1,      // memory from slice i+1
-                    nextSliceIndex: null
-                );
-                results[i] = mask;
-            }
-            Logger.Log("[PropagateSegmentationInVolume] Propagating forward");
-            // 3) go forward from [middleSliceIndex+1 .. last]
-            for (int i = middleSliceIndex + 1; i < numSlices; i++)
-            {
-                Bitmap mask = ProcessSliceWithMemory(
-                    sliceIndex: i,
-                    sliceImage: slices[i],
-                    userPoints: null,
-                    userBoxes: null,
-                    brushMask: null,
-                    textPrompt: null,
-                    prevSliceIndex: i - 1,  // memory from slice i-1
-                    nextSliceIndex: null
-                );
-                results[i] = mask;
-            }
-            Logger.Log("[PropagateSegmentationInVolume] Processing complete");
-            return results;
+        public Bitmap ProcessXYSlice(int sliceIndex, Bitmap sliceImage, List<Point> promptPoints, List<Rectangle> promptBoxes, bool[,] brushMask, string textPrompt = null)
+        {
+            return ProcessSliceWithMemory(sliceIndex, sliceImage, promptPoints, promptBoxes, brushMask, textPrompt, null, null);
         }
 
-        // -------------------------------------------------------------------
-        // Core function: process a single slice using multi-frame memory
-        //    1) run image encoder
-        //    2) run prompt encoder (if we have new user prompts)
-        //    3) run memory attention (if we have memory from prev or next)
-        //    4) run mask decoder => get new mask
-        //    5) re-encode that mask to update memory
-        //    6) run optional MLP post-processing
-        // -------------------------------------------------------------------
-        private Bitmap ProcessSliceWithMemory(
-            int sliceIndex,
-            Bitmap sliceImage,
-            List<Point> userPoints,
-            List<Rectangle> userBoxes,
-            bool[,] brushMask,
-            string textPrompt,
-            int? prevSliceIndex,
-            int? nextSliceIndex)
+        public Bitmap ProcessXZSlice(int sliceIndex, Bitmap sliceImage, List<Point> promptPoints, List<Rectangle> promptBoxes, bool[,] brushMask, string textPrompt = null)
         {
-            Logger.Log($"[ProcessSliceWithMemory] Start processing slice {sliceIndex}");
-            // 1) image encoder
-            //    Convert sliceImage => float => run session
-            //    Suppose the outputs are "vision_features" and "vision_pos_enc"
-            var (visionFeatures, visionPosEnc) = RunImageEncoder(sliceImage);
+            // For XZ view, sliceIndex indicates the fixed Y (row) value.
+            return ProcessSliceWithMemory(sliceIndex, sliceImage, promptPoints, promptBoxes, brushMask, textPrompt, null, null);
+        }
+
+        public Bitmap ProcessYZSlice(int sliceIndex, Bitmap sliceImage, List<Point> promptPoints, List<Rectangle> promptBoxes, bool[,] brushMask, string textPrompt = null)
+        {
+            // For YZ view, sliceIndex indicates the fixed X (column) value.
+            return ProcessSliceWithMemory(sliceIndex, sliceImage, promptPoints, promptBoxes, brushMask, textPrompt, null, null);
+        }
+
+        // Also provide legacy method:
+        public Bitmap ProcessSingleSlice(Bitmap sliceImage, List<Point> promptPoints, List<Rectangle> promptBoxes, bool[,] brushMask, string textPrompt = null)
+        {
+            return ProcessXYSlice(0, sliceImage, promptPoints, promptBoxes, brushMask, textPrompt);
+        }
+
+        // MAIN PIPELINE
+        private Bitmap ProcessSliceWithMemory(
+    int sliceIndex,
+    Bitmap sliceImage,
+    List<Point> userPoints,
+    List<Rectangle> userBoxes,
+    bool[,] brushMask,
+    string textPrompt,
+    int? prevSliceIndex,
+    int? nextSliceIndex)
+        {
+            Logger.Log($"[ProcessSliceWithMemory] Start processing slice {sliceIndex} with original dimensions {sliceImage.Width}x{sliceImage.Height}");
+
+            // 1. Resize the input to the model resolution.
+            Bitmap resizedImage = ResizeImage(sliceImage, _imageSize, _imageSize);
+            var (visionFeatures, visionPosEnc) = RunImageEncoder(resizedImage);
             Logger.Log($"[ProcessSliceWithMemory] Image encoder completed for slice {sliceIndex}");
 
-            // 2) prompt encoder if the user provided new points, boxes, etc.
-            //    If we have no new prompts, we can feed empty or skip it.
-            //    We'll produce "sparse_embeddings", "dense_embeddings", "dense_pe"
-            var promptEmbeds = RunPromptEncoderIfNeeded(
-                sliceImage.Width,
-                sliceImage.Height,
-                userPoints,
-                userBoxes,
-                brushMask,
-                textPrompt
-            );
-            Logger.Log($"[ProcessSliceWithMemory] Prompt encoder completed for slice {sliceIndex}");
+            // 2. Run prompt encoder.
+            var promptEmbeds = RunPromptEncoderIfNeeded(sliceImage.Width, sliceImage.Height, userPoints, userBoxes, brushMask, textPrompt);
+            Logger.Log("[ProcessSliceWithMemory] Prompt encoder completed.");
 
-            // 3) memory attention
-            //    If we have memory from a previous slice or next slice,
-            //    feed it into the memory attention model (with the new image).
-            //    For demonstration, we only check previous slice memory. 
+            // 3. Memory attention (if previous slice exists)
             Tensor<float> combinedMemoryFeatures = null;
             Tensor<float> combinedMemoryPosEnc = null;
-            // If we have memory from prev slice
             if (prevSliceIndex.HasValue && _sliceMem.ContainsKey(prevSliceIndex.Value))
             {
                 var prevMem = _sliceMem[prevSliceIndex.Value];
-                // run memory attention here:
-                (combinedMemoryFeatures, combinedMemoryPosEnc) = RunMemoryAttention(
-                    currentVisionFeatures: visionFeatures,
-                    currentVisionPosEnc: visionPosEnc,
-                    prevMemoryFeatures: prevMem.MemoryFeatures,
-                    prevMemoryPosEnc: prevMem.MemoryPosEnc
-                );
-                Logger.Log($"[ProcessSliceWithMemory] Memory attention applied for slice {sliceIndex} using previous slice {prevSliceIndex}");
+                var currFeatFlat = FlattenForAttention(visionFeatures);
+                var currPosFlat = FlattenForAttention(visionPosEnc);
+                var memFeatFlat = FlattenForAttention(prevMem.MemoryFeatures);
+                var memPosFlat = FlattenForAttention(prevMem.MemoryPosEnc);
+                long numObjPtrTokens = 1;
+                (combinedMemoryFeatures, combinedMemoryPosEnc) = RunMemoryAttention(currFeatFlat, currPosFlat, memFeatFlat, memPosFlat, numObjPtrTokens);
+                combinedMemoryFeatures = ReshapeFromAttention(combinedMemoryFeatures, 1, 256, 64, 64);
+                Logger.Log($"[ProcessSliceWithMemory] Memory attention applied using previous slice {prevSliceIndex}");
             }
-            // else if we have memory from next slice (rare in forward pass?), do similarly
-            // We'll skip that. Can combine both if wanted.
 
-            // If no memory from anywhere, we can just treat combinedMemoryFeatures = null => no memory.
+            // 4. Run mask decoder.
+            Tensor<float> lowResMask = RunMaskDecoder(combinedMemoryFeatures ?? visionFeatures, promptEmbeds, visionFeatures, visionPosEnc);
+            Logger.Log($"[ProcessSliceWithMemory] Mask decoder completed for slice {sliceIndex}. Output shape: {string.Join("x", lowResMask.Dimensions.ToArray())}");
 
-            // 4) run mask decoder => we pass
-            //      - image embeddings   (visionFeatures or combinedMemoryFeatures, depending on design)
-            //      - prompt embeddings (from promptEmbeds)
-            //      - pos enc
-            //    Then we get a low-res mask
-            var lowResMask = RunMaskDecoder(
-                (combinedMemoryFeatures ?? visionFeatures),
-                promptEmbeds,
-                fallbackVisionFeatures: visionFeatures,
-                fallbackVisionPosEnc: visionPosEnc
-            );
-            Logger.Log($"[ProcessSliceWithMemory] Mask decoder completed for slice {sliceIndex}");
-            // 5) re-encode the new mask => memory
-            //    so that future slices can see it
-            var (maskMemFeatures, maskMemPosEnc) = RunMemoryEncoder(
-                sliceImage,
-                lowResMask
-            );
-
-            // store in dictionary
-            if (_sliceMem.ContainsKey(sliceIndex) && _sliceMem[sliceIndex].Mask != null)
+            // 5. If the mask tensor has more than one channel, extract channel 1.
+            if (lowResMask.Dimensions[1] > 1)
             {
-                // dispose the old mask if any
-                _sliceMem[sliceIndex].Mask.Dispose();
+                lowResMask = ExtractChannel(lowResMask, 1);
+                Logger.Log($"[ProcessSliceWithMemory] Extracted channel 1. New shape: {string.Join("x", lowResMask.Dimensions.ToArray())}");
             }
-            _sliceMem[sliceIndex] = new SliceMemory
-            {
-                MemoryFeatures = maskMemFeatures,
-                MemoryPosEnc = maskMemPosEnc,
-                Mask = null // we'll fill it after MLP below
-            };
-            Logger.Log($"[ProcessSliceWithMemory] Memory updated for slice {sliceIndex}");
-            // 6) upsample that mask to the original slice resolution,
-            //    then optionally run MLP for final post-processing.
-            Bitmap lowResMaskBmp = TensorToBitmap(lowResMask, _imageSize, _imageSize);
+
+            // 6. Convert tensor to a low-res bitmap.
+            // NOTE: lowResMask is now of shape [1,1,256,256]; use these dimensions.
+            Bitmap lowResMaskBmp = TensorToBitmap(lowResMask, 256, 256);
+            Logger.Log($"[ProcessSliceWithMemory] Low-res mask bitmap dimensions: {lowResMaskBmp.Width}x{lowResMaskBmp.Height}");
+
+            // 7. Resize the mask back to the original slice resolution.
             Bitmap finalMask = ResizeImage(lowResMaskBmp, sliceImage.Width, sliceImage.Height);
+            Logger.Log($"[ProcessSliceWithMemory] Final mask dimensions: {finalMask.Width}x{finalMask.Height}");
             lowResMaskBmp.Dispose();
 
-            Bitmap postProcessedMask = RunMlpOnMask(finalMask);
-            finalMask.Dispose();
-            // store final in dictionary
-            _sliceMem[sliceIndex].Mask = postProcessedMask;
+            // 8. Optionally apply MLP post-processing.
+            Bitmap postProcessedMask = _enableMlp ? RunMlpOnMask(finalMask) : finalMask;
+            Logger.Log(_enableMlp ? "[ProcessSliceWithMemory] MLP post-processing applied." : "[ProcessSliceWithMemory] MLP post-processing skipped.");
+
+            // 9. Update memory.
+            if (_sliceMem.ContainsKey(sliceIndex))
+                _sliceMem[sliceIndex].Mask?.Dispose();
+            _sliceMem[sliceIndex] = new SliceMemory { MemoryFeatures = combinedMemoryFeatures ?? visionFeatures, MemoryPosEnc = combinedMemoryPosEnc ?? visionPosEnc, Mask = postProcessedMask };
             Logger.Log($"[ProcessSliceWithMemory] Finished processing slice {sliceIndex}");
             return postProcessedMask;
         }
 
-        // -------------------------------------------------------------------
-        // Steps
-        // -------------------------------------------------------------------
-        private (Tensor<float> visionFeatures, Tensor<float> visionPosEnc) RunImageEncoder(Bitmap sliceImage)
+
+
+        // --- Helper methods for each stage ---
+        private (Tensor<float> visionFeatures, Tensor<float> visionPosEnc) RunImageEncoder(Bitmap image)
         {
-            Logger.Log("[RunImageEncoder] Converting image and running image encoder.");
-            float[] floatData = ImageToFloatArray(sliceImage);
+            Logger.Log("[RunImageEncoder] Running image encoder.");
+            float[] floatData = ImageToFloatArray(image);
             var imageTensor = new DenseTensor<float>(floatData, new int[] { 1, 3, _imageSize, _imageSize });
             var inputs = new List<NamedOnnxValue>
-    {
-        NamedOnnxValue.CreateFromTensor("input_image", imageTensor)
-    };
-
-            Tensor<float> features = null;
-            Tensor<float> posEnc = null;
+            {
+                NamedOnnxValue.CreateFromTensor("input_image", imageTensor)
+            };
+            Tensor<float> features, posEnc;
             using (var outputs = _imageEncoderSession.Run(inputs))
             {
-                var featureOutput = outputs.FirstOrDefault(x => x.Name == "vision_features");
-                if (featureOutput == null)
-                {
-                    Logger.Log("[RunImageEncoder] ERROR: 'vision_features' output not found.");
-                    throw new Exception("'vision_features' output not found in image encoder outputs.");
-                }
-                features = featureOutput.AsTensor<float>();
-
-                var posEncOutput = outputs.FirstOrDefault(x => x.Name == "vision_pos_enc_0");
-                if (posEncOutput == null)
-                {
-                    Logger.Log("[RunImageEncoder] ERROR: 'vision_pos_enc' output not found.");
-                    throw new Exception("'vision_pos_enc' output not found in image encoder outputs.");
-                }
-                posEnc = posEncOutput.AsTensor<float>();
+                features = outputs.First(x => x.Name == "vision_features").AsTensor<float>();
+                // Use vision_pos_enc_2 (1x256x64x64) for spatial alignment
+                posEnc = outputs.First(x => x.Name == "vision_pos_enc_2").AsTensor<float>();
             }
             Logger.Log("[RunImageEncoder] Completed.");
             return (features, posEnc);
         }
 
-        private (Tensor<float> Sparse, Tensor<float> Dense, Tensor<float> DensePe)
-        RunPromptEncoderIfNeeded(
-            int originalWidth,
-            int originalHeight,
-            List<Point> userPoints,
-            List<Rectangle> userBoxes,
-            bool[,] brushMask,
-            string textPrompt)
-        {
-            Logger.Log("[RunPromptEncoderIfNeeded] Checking for prompts");
-            bool hasPrompts = ((userPoints != null && userPoints.Count > 0)
-                             || (userBoxes != null && userBoxes.Count > 0)
-                             || (brushMask != null)
-                             || (!string.IsNullOrEmpty(textPrompt) && _canUseTextPrompts));
 
+
+        // RunPromptEncoderIfNeeded: returns prompt tensors with real encoding.
+        private (Tensor<float> Sparse, Tensor<float> Dense, Tensor<float> DensePe) RunPromptEncoderIfNeeded(
+            int originalWidth, int originalHeight,
+            List<Point> userPoints, List<Rectangle> userBoxes,
+            bool[,] brushMask, string textPrompt)
+        {
+            bool hasPrompts = (userPoints != null && userPoints.Count > 0) ||
+                              (userBoxes != null && userBoxes.Count > 0) ||
+                              (brushMask != null) ||
+                              (!string.IsNullOrEmpty(textPrompt) && _canUseTextPrompts);
             if (!hasPrompts)
             {
-                Logger.Log("[RunPromptEncoderIfNeeded] No prompts provided; returning empty embeddings");
-                // return empty or dummy embeddings
-                // shape depends on model
-                // For demonstration, we create shape [1,256], [1,256,64,64], etc.
-                var sparseEmpty = new DenseTensor<float>(new int[] { 1, 256 });
-                var denseEmpty = new DenseTensor<float>(new int[] { 1, 256, 64, 64 });
-                return (sparseEmpty, denseEmpty, densePe: new DenseTensor<float>(new int[] { 1, 256, 64, 64 }));
+                Logger.Log("[RunPromptEncoderIfNeeded] No prompts provided; using dummy tensors.");
+                float[] dummySparse = new float[1 * 1 * 256];
+                var sparse = new DenseTensor<float>(dummySparse, new int[] { 1, 1, 256 });
+                float[] dummyDense = new float[1 * 256 * 64 * 64];
+                var dense = new DenseTensor<float>(dummyDense, new int[] { 1, 256, 64, 64 });
+                float[] dummyDensePe = new float[1 * 256 * 64 * 64];
+                var densePe = new DenseTensor<float>(dummyDensePe, new int[] { 1, 256, 64, 64 });
+                return (sparse, dense, densePe);
             }
-
-            // Build coords, labels, brush mask, text embedding, etc.
-            var promptTensors = CreatePromptTensors(
-                userPoints, userBoxes, brushMask,
-                textPrompt,
-                originalWidth, originalHeight
-            );
-
-            var inputs = new List<NamedOnnxValue>
-            {
-                NamedOnnxValue.CreateFromTensor("coords", promptTensors.Coords),
-                NamedOnnxValue.CreateFromTensor("labels", promptTensors.Labels),
-                NamedOnnxValue.CreateFromTensor("masks", promptTensors.MaskPrompt),
-                NamedOnnxValue.CreateFromTensor("masks_enable", promptTensors.MaskEnable)
-            };
-            if (_canUseTextPrompts && !string.IsNullOrEmpty(textPrompt))
-            {
-                float[] txtEmb = EncodeTextToFloatArray(textPrompt);
-                var txtTensor = new DenseTensor<float>(txtEmb, new int[] { 1, txtEmb.Length });
-                inputs.Add(NamedOnnxValue.CreateFromTensor("text_embed", txtTensor));
-            }
-
-            Tensor<float> sparseEmb;
-            Tensor<float> denseEmb;
-            Tensor<float> densePe;
-            using (var outputs = _promptEncoderSession.Run(inputs))
-            {
-                sparseEmb = outputs.First(x => x.Name == "sparse_embeddings").AsTensor<float>();
-                denseEmb = outputs.First(x => x.Name == "dense_embeddings").AsTensor<float>();
-                densePe = outputs.First(x => x.Name == "dense_pe").AsTensor<float>();
-            }
-            Logger.Log("[RunPromptEncoderIfNeeded] Completed");
-            return (sparseEmb, denseEmb, densePe);
+            return CreatePromptTensors(userPoints, userBoxes, brushMask, textPrompt, originalWidth, originalHeight);
         }
 
-        private (Tensor<float>, Tensor<float>) RunMemoryAttention(
-            Tensor<float> currentVisionFeatures,
-            Tensor<float> currentVisionPosEnc,
-            Tensor<float> prevMemoryFeatures,
-            Tensor<float> prevMemoryPosEnc)
+        // Real prompt encoder: outputs sparse: [1,1,256], dense: [1,256,64,64], dense_pe: [1,256,64,64].
+        private (Tensor<float> Sparse, Tensor<float> Dense, Tensor<float> DensePe) CreatePromptTensors(
+            List<Point> points, List<Rectangle> boxes,
+            bool[,] brushMask, string textPrompt,
+            int originalWidth, int originalHeight)
         {
-            Logger.Log("[RunMemoryAttention] Running memory attention");
-            // shape depends on ONNX
-            // We'll assume something like:
-            //   inputs: "current_feats", "current_pos", "prev_feats", "prev_pos"
-            //   outputs: "combined_feats", "combined_pos"
-            var inputs = new List<NamedOnnxValue>
+            Logger.Log("[CreatePromptTensors] Starting real prompt tensor creation.");
+            List<float> promptValues = new List<float>();
+            if (points != null && points.Count > 0)
             {
-                NamedOnnxValue.CreateFromTensor("current_feats", currentVisionFeatures),
-                NamedOnnxValue.CreateFromTensor("current_pos",   currentVisionPosEnc),
-                NamedOnnxValue.CreateFromTensor("prev_feats",    prevMemoryFeatures),
-                NamedOnnxValue.CreateFromTensor("prev_pos",      prevMemoryPosEnc)
-            };
-            Tensor<float> combinedFeats;
-            Tensor<float> combinedPos;
-            using (var results = _memoryAttentionSession.Run(inputs))
-            {
-                combinedFeats = results.First(x => x.Name == "combined_feats").AsTensor<float>();
-                combinedPos = results.First(x => x.Name == "combined_pos").AsTensor<float>();
+                foreach (var p in points)
+                {
+                    float normX = (float)p.X / originalWidth * _imageSize;
+                    float normY = (float)p.Y / originalHeight * _imageSize;
+                    promptValues.Add(normX);
+                    promptValues.Add(normY);
+                }
+                Logger.Log($"[CreatePromptTensors] Processed {points.Count} point(s).");
             }
-            Logger.Log("[RunMemoryAttention] Completed");
-            return (combinedFeats, combinedPos);
+            if (boxes != null && boxes.Count > 0)
+            {
+                foreach (var r in boxes)
+                {
+                    float left = (float)r.Left / originalWidth * _imageSize;
+                    float top = (float)r.Top / originalHeight * _imageSize;
+                    float right = (float)r.Right / originalWidth * _imageSize;
+                    float bottom = (float)r.Bottom / originalHeight * _imageSize;
+                    promptValues.Add(left);
+                    promptValues.Add(top);
+                    promptValues.Add(right);
+                    promptValues.Add(bottom);
+                }
+                Logger.Log($"[CreatePromptTensors] Processed {boxes.Count} box(es).");
+            }
+            if (promptValues.Count == 0)
+            {
+                promptValues.Add(0f);
+                promptValues.Add(0f);
+                Logger.Log("[CreatePromptTensors] No prompts provided; added default coordinate.");
+            }
+            // The sparse tensor must have shape [1,1,256]
+            float[] sparseArray = new float[1 * 1 * 256];
+            for (int i = 0; i < 256; i++)
+            {
+                sparseArray[i] = (i < promptValues.Count) ? promptValues[i] : 0f;
+            }
+            var sparseTensor = new DenseTensor<float>(sparseArray, new int[] { 1, 1, 256 });
+            Logger.Log("[CreatePromptTensors] Created sparse tensor of shape [1,1,256].");
+
+            // Dense prompt embedding: use zeros with shape [1,256,64,64]
+            int denseElements = 1 * 256 * 64 * 64;
+            float[] denseArray = new float[denseElements];
+            var denseTensor = new DenseTensor<float>(denseArray, new int[] { 1, 256, 64, 64 });
+            Logger.Log("[CreatePromptTensors] Created dense prompt tensor of shape [1,256,64,64].");
+
+            // Dense positional encoding: create a simple sinusoidal encoding over 64x64 grid for 256 channels.
+            float[] densePeArray = new float[denseElements];
+            int channels = 256, height = 64, width = 64;
+            for (int c = 0; c < channels; c++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        double value = (c % 2 == 0)
+                            ? Math.Sin((double)x / width * Math.PI * 2)
+                            : Math.Cos((double)y / height * Math.PI * 2);
+                        int index = c * (height * width) + y * width + x;
+                        densePeArray[index] = (float)value;
+                    }
+                }
+            }
+            var densePeTensor = new DenseTensor<float>(densePeArray, new int[] { 1, 256, 64, 64 });
+            Logger.Log("[CreatePromptTensors] Created dense positional encoding tensor of shape [1,256,64,64].");
+
+            Logger.Log("[CreatePromptTensors] Real prompt tensors created successfully.");
+            return (sparseTensor, denseTensor, densePeTensor);
         }
 
+        // RunMemoryEncoder: now accepts two inputs: "pix_feat" and "masks"
+        private (Tensor<float> memoryFeats, Tensor<float> memoryPosEnc) RunMemoryEncoder(Tensor<float> pixFeat, Tensor<float> maskTensor)
+        {
+            Logger.Log("[RunMemoryEncoder] Running memory encoder.");
+            var inputs = new List<NamedOnnxValue>
+            {
+                NamedOnnxValue.CreateFromTensor("pix_feat", pixFeat),
+                NamedOnnxValue.CreateFromTensor("masks", maskTensor)
+            };
+            Tensor<float> memFeats, memPosEnc;
+            using (var outputs = _memoryEncoderSession.Run(inputs))
+            {
+                memFeats = outputs.First(x => x.Name == "vision_features").AsTensor<float>();
+                memPosEnc = outputs.First(x => x.Name == "vision_pos_enc").AsTensor<float>();
+            }
+            Logger.Log("[RunMemoryEncoder] Completed.");
+            return (memFeats, memPosEnc);
+        }
+        // Convert a Bitmap mask (grayscale) to a tensor of shape [1,1,_imageSize,_imageSize]
+        private Tensor<float> ImageToMaskTensor(Bitmap mask)
+        {
+            int w = mask.Width, h = mask.Height;
+            float[] data = new float[w * h];
+            for (int y = 0; y < h; y++)
+            {
+                for (int x = 0; x < w; x++)
+                {
+                    Color c = mask.GetPixel(x, y);
+                    data[y * w + x] = c.R / 255f;
+                }
+            }
+            return new DenseTensor<float>(data, new int[] { 1, 1, w, h });
+        }
+
+        // RunMemoryAttention: flatten inputs to expected shapes then call model.
+        // Expected:
+        //   curr: 4096x1x256 (from vision_features of shape 1x256x64x64)
+        //   curr_pos: 4096x1x256 (from vision_pos_enc of shape 1x256x64x64)
+        //   memory: ?x1x64 (from memory encoder output of shape 1x64x64x64 flattened)
+        //   memory_pos: ?x1x64 (from memory encoder output of shape 1x64x64x64 flattened)
+        //   num_obj_ptr_tokens: scalar (Int64)
+        private (Tensor<float> flattenedPixFeat, Tensor<float> flattenedMemPosEnc) RunMemoryAttention(
+            Tensor<float> currFeatFlat, Tensor<float> currPosFlat,
+            Tensor<float> memFeatFlat, Tensor<float> memPosFlat,
+            long numObjPtrTokens)
+        {
+            Logger.Log("[RunMemoryAttention] Running memory attention.");
+            var inputs = new List<NamedOnnxValue>
+            {
+                NamedOnnxValue.CreateFromTensor("curr", currFeatFlat),
+                NamedOnnxValue.CreateFromTensor("memory", memFeatFlat),
+                NamedOnnxValue.CreateFromTensor("curr_pos", currPosFlat),
+                NamedOnnxValue.CreateFromTensor("memory_pos", memPosFlat),
+                NamedOnnxValue.CreateFromTensor("num_obj_ptr_tokens", new DenseTensor<long>(new long[] { numObjPtrTokens }, new int[] { 1 }))
+            };
+            Tensor<float> outTensor;
+            using (var outputs = _memoryAttentionSession.Run(inputs))
+            {
+                outTensor = outputs.First(x => x.Name == "pix_feat").AsTensor<float>();
+            }
+            Logger.Log("[RunMemoryAttention] Completed.");
+            return (outTensor, null); // Only pix_feat output is used.
+        }
+
+        // Helper: Flatten tensor of shape [1,C,H,W] into shape [H*W, 1, C]
+        private Tensor<float> FlattenForAttention(Tensor<float> input)
+        {
+            int batch = input.Dimensions[0];
+            int channels = input.Dimensions[1];
+            int height = input.Dimensions[2];
+            int width = input.Dimensions[3];
+            int flatSize = height * width;
+            float[] inputData = input.ToArray();
+            float[] flatData = new float[flatSize * 1 * channels];
+            for (int h = 0; h < height; h++)
+            {
+                for (int w = 0; w < width; w++)
+                {
+                    int flatIndex = h * width + w;
+                    for (int c = 0; c < channels; c++)
+                    {
+                        int origIndex = ((0 * channels + c) * height + h) * width + w;
+                        flatData[flatIndex * channels + c] = inputData[origIndex];
+                    }
+                }
+            }
+            return new DenseTensor<float>(flatData, new int[] { flatSize, 1, channels });
+        }
+
+        // Helper: Reshape flattened attention output back to [1, C, H, W]
+        private Tensor<float> ReshapeFromAttention(Tensor<float> flat, int batch, int channels, int height, int width)
+        {
+            float[] flatData = flat.ToArray();
+            float[] outData = new float[batch * channels * height * width];
+            for (int i = 0; i < height * width; i++)
+            {
+                for (int c = 0; c < channels; c++)
+                {
+                    outData[c * height * width + i] = flatData[i * channels + c];
+                }
+            }
+            return new DenseTensor<float>(outData, new int[] { batch, channels, height, width });
+        }
+
+        // RunMaskDecoder: prepare inputs and run the mask decoder.
         private Tensor<float> RunMaskDecoder(
             Tensor<float> imageOrMemoryFeats,
             (Tensor<float> Sparse, Tensor<float> Dense, Tensor<float> DensePe) promptEmbeds,
             Tensor<float> fallbackVisionFeatures,
             Tensor<float> fallbackVisionPosEnc)
         {
-            Logger.Log("[RunMaskDecoder] Running mask decoder");
-            // build inputs
+            Logger.Log("[RunMaskDecoder] Running mask decoder.");
+            // high_res_features1: upsample vision_pos_enc_2 to 256x256 and reduce channels from 256 to 32.
+            Tensor<float> upPosEnc = UpsampleSpatial(fallbackVisionPosEnc, 4); // 64 -> 256
+            Tensor<float> highResFeatures1 = ReduceChannels(upPosEnc, 8); // 256/8 = 32; shape [1,32,256,256]
+            // high_res_features2: upsample fallbackVisionFeatures 1x256x64x64 by factor 2, then reduce channels by factor 4 -> 1x64x128x128.
+            Tensor<float> upFeatures = UpsampleSpatial(fallbackVisionFeatures, 2);
+            Tensor<float> highResFeatures2 = ReduceChannels(upFeatures, 4);
             var inputs = new List<NamedOnnxValue>
             {
                 NamedOnnxValue.CreateFromTensor("image_embeddings", imageOrMemoryFeats),
                 NamedOnnxValue.CreateFromTensor("sparse_prompt_embeddings", promptEmbeds.Sparse),
-                NamedOnnxValue.CreateFromTensor("dense_prompt_embeddings",  promptEmbeds.Dense),
-                NamedOnnxValue.CreateFromTensor("image_pe",                 promptEmbeds.DensePe),
-                // Some SAM2 models also want "high_res_features1" & "high_res_features2"
-                NamedOnnxValue.CreateFromTensor("high_res_features1", fallbackVisionFeatures),
-                NamedOnnxValue.CreateFromTensor("high_res_features2", fallbackVisionFeatures)
-                // or we might pass fallbackVisionPosEnc if needed...
+                NamedOnnxValue.CreateFromTensor("dense_prompt_embeddings", promptEmbeds.Dense),
+                NamedOnnxValue.CreateFromTensor("image_pe", promptEmbeds.DensePe),
+                NamedOnnxValue.CreateFromTensor("high_res_features1", highResFeatures1),
+                NamedOnnxValue.CreateFromTensor("high_res_features2", highResFeatures2)
             };
-
-            Tensor<float> lowResMask;
+            Tensor<float> outputTensor;
             using (var outputs = _maskDecoderSession.Run(inputs))
             {
-                lowResMask = outputs.First(x => x.Name == "low_res_masks").AsTensor<float>();
+                outputTensor = outputs.First(x => x.Name == "masks").AsTensor<float>();
             }
-            Logger.Log("[RunMaskDecoder] Completed");
-            return lowResMask;
+            Logger.Log($"[RunMaskDecoder] Completed. Output shape: {string.Join("x", outputTensor.Dimensions.ToArray())}");
+            return outputTensor;
         }
 
-        private (Tensor<float> memoryFeats, Tensor<float> memoryPosEnc) RunMemoryEncoder(
-            Bitmap sliceImage,
-            Tensor<float> lowResMask)
-        {
-            Logger.Log("[RunMemoryEncoder] Running memory encoder");
-            // The memory encoder typically wants a [1,1,H,W] mask, etc.
-            var inputs = new List<NamedOnnxValue>
-            {
-                NamedOnnxValue.CreateFromTensor("input_mask", lowResMask)
-            };
-
-            Tensor<float> memFeats;
-            Tensor<float> memPosEnc;
-            using (var outputs = _memoryEncoderSession.Run(inputs))
-            {
-                memFeats = outputs.First(x => x.Name == "maskmem_features").AsTensor<float>();
-                memPosEnc = outputs.First(x => x.Name == "maskmem_pos_enc").AsTensor<float>();
-            }
-            Logger.Log("[RunMemoryEncoder] Completed");
-            return (memFeats, memPosEnc);
-        }
-
-        /// <summary>
-        /// Runs an MLP for final post-processing of the mask. If no MLP,
-        /// Could skip this step or return the original mask.
-        /// </summary>
         private Bitmap RunMlpOnMask(Bitmap maskBmp)
         {
-            Logger.Log("[RunMlpOnMask] Running MLP post-processing");
-            if (maskBmp == null) return null;
-
-            int w = maskBmp.Width;
-            int h = maskBmp.Height;
-            float[] maskData = new float[w * h];
-
-            // read mask => float
-            BitmapData data = maskBmp.LockBits(new Rectangle(0, 0, w, h),
-                ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-            unsafe
+            if (maskBmp == null)
+                return null;
+            int w = maskBmp.Width, h = maskBmp.Height;
+            float[] dsArray = new float[MLP_SIZE * MLP_SIZE];
+            BitmapData data = maskBmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            try
             {
-                byte* ptr = (byte*)data.Scan0;
                 int stride = data.Stride;
-                for (int y = 0; y < h; y++)
+                unsafe
                 {
-                    byte* row = ptr + (y * stride);
-                    for (int x = 0; x < w; x++)
+                    byte* scan0 = (byte*)data.Scan0;
+                    float blockW = (float)w / MLP_SIZE;
+                    float blockH = (float)h / MLP_SIZE;
+                    for (int oy = 0; oy < MLP_SIZE; oy++)
                     {
-                        byte b = row[x * 3];
-                        maskData[y * w + x] = b / 255f;
+                        for (int ox = 0; ox < MLP_SIZE; ox++)
+                        {
+                            int startX = (int)(ox * blockW);
+                            int startY = (int)(oy * blockH);
+                            int endX = (int)Math.Min((ox + 1) * blockW, w);
+                            int endY = (int)Math.Min((oy + 1) * blockH, h);
+                            double sum = 0;
+                            int count = 0;
+                            for (int yy = startY; yy < endY; yy++)
+                            {
+                                byte* rowPtr = scan0 + yy * stride;
+                                for (int xx = startX; xx < endX; xx++)
+                                {
+                                    byte r = rowPtr[xx * 3 + 2];
+                                    byte g = rowPtr[xx * 3 + 1];
+                                    byte b = rowPtr[xx * 3];
+                                    double lum = 0.299 * r + 0.587 * g + 0.114 * b;
+                                    sum += lum;
+                                    count++;
+                                }
+                            }
+                            double avg = (count > 0) ? sum / count : 0.0;
+                            float norm = (float)(avg / 255.0);
+                            dsArray[oy * MLP_SIZE + ox] = norm;
+                        }
                     }
                 }
             }
-            maskBmp.UnlockBits(data);
-
-            var inputTensor = new DenseTensor<float>(maskData, new int[] { 1, w * h });
+            finally
+            {
+                maskBmp.UnlockBits(data);
+            }
+            var inputTensor = new DenseTensor<float>(dsArray, new int[] { 1, MLP_SIZE * MLP_SIZE });
+            string inputName = _mlpSession.InputMetadata.Keys.FirstOrDefault() ?? "x";
+            Logger.Log($"[RunMlpOnMask] Using input '{inputName}' for MLP.");
             var mlpInputs = new List<NamedOnnxValue>
             {
-                NamedOnnxValue.CreateFromTensor("input_mask", inputTensor)
+                NamedOnnxValue.CreateFromTensor(inputName, inputTensor)
             };
             Tensor<float> mlpOutput;
             using (var results = _mlpSession.Run(mlpInputs))
             {
                 mlpOutput = results.First().AsTensor<float>();
             }
-            // mlpOutput shape [1, w*h], clamp & convert back to image
             float[] outArr = mlpOutput.ToArray();
-            Bitmap final = new Bitmap(w, h);
+            if (outArr.Length != MLP_SIZE * MLP_SIZE)
+            {
+                Logger.Log($"[RunMlpOnMask] Unexpected output size: {outArr.Length}");
+                return maskBmp;
+            }
+            Bitmap mlp16 = new Bitmap(MLP_SIZE, MLP_SIZE, PixelFormat.Format24bppRgb);
             for (int i = 0; i < outArr.Length; i++)
             {
                 float val = Math.Max(0f, Math.Min(outArr[i], 1f));
                 int c = (int)(val * 255);
-                int xx = i % w;
-                int yy = i / w;
-                final.SetPixel(xx, yy, Color.FromArgb(c, c, c));
+                int xx = i % MLP_SIZE;
+                int yy = i / MLP_SIZE;
+                mlp16.SetPixel(xx, yy, Color.FromArgb(c, c, c));
             }
-            Logger.Log("[RunMlpOnMask] Completed");
+            Bitmap final = new Bitmap(w, h);
+            using (Graphics g = Graphics.FromImage(final))
+            {
+                g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                g.DrawImage(mlp16, 0, 0, w, h);
+            }
+            mlp16.Dispose();
+            Logger.Log("[RunMlpOnMask] MLP post-processing completed.");
             return final;
         }
 
-        // -------------------------------------------------------------------
-        // Helper data structures & conversions
-        // -------------------------------------------------------------------
-        private struct PromptTensors
-        {
-            public Tensor<float> Coords;
-            public Tensor<int> Labels;
-            public Tensor<float> MaskPrompt;
-            public Tensor<int> MaskEnable;
-        }
-
-        private PromptTensors CreatePromptTensors(
-            List<Point> points,
-            List<Rectangle> boxes,
-            bool[,] brushMask,
-            string textPrompt,
-            int originalWidth,
-            int originalHeight)
-        {
-            // Collect coords & labels
-            var allCoords = new List<float>();
-            var allLabels = new List<int>();
-
-            // 1) Points => label=1
-            if (points != null)
-            {
-                foreach (var p in points)
-                {
-                    float normX = (float)p.X / (float)originalWidth * _imageSize;
-                    float normY = (float)p.Y / (float)originalHeight * _imageSize;
-                    allCoords.Add(normX);
-                    allCoords.Add(normY);
-                    allLabels.Add(1);
-                }
-            }
-            // 2) Boxes => typically we do 2 coords for the corners => labels 2,3
-            if (boxes != null)
-            {
-                foreach (var r in boxes)
-                {
-                    float left = r.Left / (float)originalWidth * _imageSize;
-                    float top = r.Top / (float)originalHeight * _imageSize;
-                    float right = r.Right / (float)originalWidth * _imageSize;
-                    float bottom = r.Bottom / (float)originalHeight * _imageSize;
-
-                    // corner1 => label=2
-                    allCoords.Add(left);
-                    allCoords.Add(top);
-                    allLabels.Add(2);
-                    // corner2 => label=3
-                    allCoords.Add(right);
-                    allCoords.Add(bottom);
-                    allLabels.Add(3);
-                }
-            }
-
-            // If no coords => add dummy
-            if (allCoords.Count == 0)
-            {
-                allCoords.Add(0f);
-                allCoords.Add(0f);
-                allLabels.Add(-1);
-            }
-            int pointCount = allCoords.Count / 2;
-            var coordsTensor = new DenseTensor<float>(allCoords.ToArray(), new int[] { 1, pointCount, 2 });
-            var labelsTensor = new DenseTensor<int>(allLabels.ToArray(), new int[] { 1, pointCount });
-
-            // 3) Brush mask => shape [1,1,_imageSize,_imageSize]
-            float[] maskData = new float[_imageSize * _imageSize];
-            if (brushMask != null)
-            {
-                int srcW = brushMask.GetLength(0);
-                int srcH = brushMask.GetLength(1);
-                for (int yy = 0; yy < _imageSize; yy++)
-                {
-                    int srcY = (int)((float)yy / (float)_imageSize * srcH);
-                    for (int xx = 0; xx < _imageSize; xx++)
-                    {
-                        int srcX = (int)((float)xx / (float)_imageSize * srcW);
-                        if (brushMask[srcX, srcY]) maskData[yy * _imageSize + xx] = 1f;
-                    }
-                }
-            }
-            var maskPromptTensor = new DenseTensor<float>(maskData, new int[] { 1, 1, _imageSize, _imageSize });
-            int maskEnableVal = (brushMask != null) ? 1 : 0;
-            var maskEnableTensor = new DenseTensor<int>(new int[] { maskEnableVal }, new int[] { 1 });
-
-            var prompts = new PromptTensors
-            {
-                Coords = coordsTensor,
-                Labels = labelsTensor,
-                MaskPrompt = maskPromptTensor,
-                MaskEnable = maskEnableTensor
-            };
-            return prompts;
-        }
-
-        /// <summary>
-        /// Convert text to a dummy embedding, shape=256. Replace with real text model if needed.
-        /// </summary>
-        private float[] EncodeTextToFloatArray(string text)
-        {
-            int dim = 256;
-            float[] arr = new float[dim];
-            // trivial pattern
-            for (int i = 0; i < dim; i++)
-            {
-                arr[i] = (float)((i % 7) / 7.0);
-            }
-            return arr;
-        }
-
-        /// <summary>
-        /// Convert a CT slice (24-bit grayscale, or color) to float array [1,3,H,W], normalized.
-        /// We first resize the input to _imageSize x _imageSize inside here, so that
-        /// the shape matches SAM2’s expected input dimension.
-        /// </summary>
         private float[] ImageToFloatArray(Bitmap original)
         {
-            // 1) resize
             Bitmap resized = ResizeImage(original, _imageSize, _imageSize);
-            int w = resized.Width;
-            int h = resized.Height;
-
-            float[] result = new float[1 * 3 * w * h];
-            BitmapData data = resized.LockBits(new Rectangle(0, 0, w, h),
-                ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-
+            int w = resized.Width, h = resized.Height;
+            float[] result = new float[3 * w * h];
+            BitmapData data = resized.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
             unsafe
             {
                 byte* ptr = (byte*)data.Scan0;
                 int stride = data.Stride;
                 for (int y = 0; y < h; y++)
                 {
-                    byte* row = ptr + (y * stride);
+                    byte* row = ptr + y * stride;
                     for (int x = 0; x < w; x++)
                     {
-                        byte b = row[x * 3];
-                        byte g = row[x * 3 + 1];
-                        byte r = row[x * 3 + 2];
-                        int idxR = 0 * (w * h) + y * w + x;
-                        int idxG = 1 * (w * h) + y * w + x;
-                        int idxB = 2 * (w * h) + y * w + x;
-                        result[idxR] = r / 255f;
-                        result[idxG] = g / 255f;
-                        result[idxB] = b / 255f;
+                        int idx = y * w + x;
+                        result[idx] = row[x * 3 + 2] / 255f;
+                        result[w * h + idx] = row[x * 3 + 1] / 255f;
+                        result[2 * w * h + idx] = row[x * 3] / 255f;
                     }
                 }
             }
@@ -748,154 +626,129 @@ namespace CTSegmenter
             return result;
         }
 
-        /// <summary>
-        /// Convert a mask tensor (shape [1,1,h,w]) to a grayscale bitmap of desired size.
-        /// </summary>
-        private Bitmap TensorToBitmap(Tensor<float> tensor, int targetW, int targetH)
+        private Bitmap ResizeImage(Bitmap image, int width, int height)
         {
-            int h = tensor.Dimensions[2];
-            int w = tensor.Dimensions[3];
-            // build a small bmp
-            Bitmap smallBmp = new Bitmap(w, h);
-            for (int yy = 0; yy < h; yy++)
+            Bitmap dest = new Bitmap(width, height);
+            using (Graphics g = Graphics.FromImage(dest))
             {
-                for (int xx = 0; xx < w; xx++)
-                {
-                    float val = tensor[0, 0, yy, xx];
-                    val = Math.Max(0f, Math.Min(1f, val));
-                    int c = (int)(val * 255);
-                    smallBmp.SetPixel(xx, yy, Color.FromArgb(c, c, c));
-                }
-            }
-            // scale up
-            Bitmap final = ResizeImage(smallBmp, targetW, targetH);
-            smallBmp.Dispose();
-            return final;
-        }
-
-        /// <summary>
-        /// Quickly process a single CT slice with SAM2:
-        ///   1) Resizes the image to 1024 x 1024 (or your `_imageSize`) 
-        ///   2) Encodes it via <see cref="_imageEncoderSession"/> 
-        ///   3) Encodes user prompts (points, boxes, brush, text) via <see cref="_promptEncoderSession"/> 
-        ///   4) Runs the <see cref="_maskDecoderSession"/> 
-        ///   5) Optionally runs <see cref="_mlpSession"/> for final post-processing 
-        ///   6) Resizes the mask back to the original resolution 
-        /// This method does NOT use memory/attention. 
-        /// </summary>
-        /// <param name="sliceImage">One CT slice (any size, typically 24-bit grayscale). </param>
-        /// <param name="userPoints">Optional 2D points (in original slice coords) for prompting. </param>
-        /// <param name="userBoxes">Optional bounding boxes (Rectangles) in original coords. </param>
-        /// <param name="userBrushMask">
-        ///   Optional brush overlay: a bool[,] that is true wherever the user brushed. 
-        ///   Dimensions = (width, height) of original slice. 
-        /// </param>
-        /// <param name="textPrompt">Optional text prompt if the model supports it. </param>
-        /// <returns>A segmented mask as a Bitmap, same resolution as sliceImage. </returns>
-        public Bitmap ProcessSingleSlice(
-    Bitmap sliceImage,
-    List<Point> userPoints = null,
-    List<Rectangle> userBoxes = null,
-    bool[,] userBrushMask = null,
-    string textPrompt = null
-)
-        {
-            Logger.Log("[ProcessSingleSlice] Start processing a single slice.");
-            if (sliceImage == null)
-            {
-                Logger.Log("[ProcessSingleSlice] Error: sliceImage is null.");
-                throw new ArgumentNullException(nameof(sliceImage));
-            }
-
-            // 1) Run the image encoder.
-            Logger.Log("[ProcessSingleSlice] Running image encoder.");
-            (Tensor<float> visionFeatures, Tensor<float> visionPosEnc) = RunImageEncoder(sliceImage);
-            Logger.Log("[ProcessSingleSlice] Image encoder completed.");
-
-            // 2) Build user prompt embeddings if any.
-            Logger.Log("[ProcessSingleSlice] Running prompt encoder.");
-            (Tensor<float> sparseEmb, Tensor<float> denseEmb, Tensor<float> densePe) =
-                RunPromptEncoderIfNeeded(
-                    sliceImage.Width,
-                    sliceImage.Height,
-                    userPoints,
-                    userBoxes,
-                    userBrushMask,
-                    textPrompt
-                );
-            Logger.Log("[ProcessSingleSlice] Prompt encoder completed.");
-
-            // 3) Run the mask decoder.
-            Logger.Log("[ProcessSingleSlice] Running mask decoder.");
-            Tensor<float> lowResMask = RunMaskDecoder(
-                visionFeatures,
-                (sparseEmb, denseEmb, densePe),
-                fallbackVisionFeatures: visionFeatures,
-                fallbackVisionPosEnc: visionPosEnc
-            );
-            Logger.Log("[ProcessSingleSlice] Mask decoder completed.");
-
-            // 4) Convert low-resolution mask to a Bitmap.
-            Logger.Log("[ProcessSingleSlice] Converting low resolution mask to Bitmap.");
-            Bitmap lowResMaskBmp = TensorToBitmap(lowResMask, _imageSize, _imageSize);
-            Bitmap maskResizedToSlice = ResizeImage(lowResMaskBmp, sliceImage.Width, sliceImage.Height);
-            lowResMaskBmp.Dispose();
-            Logger.Log("[ProcessSingleSlice] Resized mask to original slice dimensions.");
-
-            // 5) Optionally run MLP for final post-processing.
-            Logger.Log("[ProcessSingleSlice] Running MLP post-processing on mask.");
-            Bitmap final = RunMlpOnMask(maskResizedToSlice);
-            maskResizedToSlice.Dispose();
-            Logger.Log("[ProcessSingleSlice] MLP post-processing completed. Returning final mask.");
-
-            return final;
-        }
-
-
-
-        /// <summary>
-        /// Resizes a bitmap with high-quality interpolation.
-        /// </summary>
-        private Bitmap ResizeImage(Bitmap src, int newW, int newH)
-        {
-            Bitmap dst = new Bitmap(newW, newH);
-            dst.SetResolution(src.HorizontalResolution, src.VerticalResolution);
-            using (Graphics g = Graphics.FromImage(dst))
-            {
-                g.CompositingMode = CompositingMode.SourceCopy;
-                g.CompositingQuality = CompositingQuality.HighQuality;
                 g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                g.SmoothingMode = SmoothingMode.HighQuality;
-                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                using (var attr = new ImageAttributes())
+                g.DrawImage(image, 0, 0, width, height);
+            }
+            return dest;
+        }
+
+        private Bitmap TensorToBitmap(Tensor<float> tensor, int width, int height)
+        {
+            // Verify that tensor has shape [1,1,H,W]
+            if (tensor.Dimensions[0] != 1 || tensor.Dimensions[1] != 1)
+            {
+                throw new Exception("TensorToBitmap expects tensor shape [1,1,H,W].");
+            }
+            float[] data = tensor.ToArray();
+            Bitmap bmp = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
                 {
-                    attr.SetWrapMode(WrapMode.TileFlipXY);
-                    g.DrawImage(src,
-                        new Rectangle(0, 0, newW, newH),
-                        0, 0, src.Width, src.Height,
-                        GraphicsUnit.Pixel,
-                        attr);
+                    float val = data[y * width + x];
+                    int gray = (int)(Math.Max(0, Math.Min(val, 1)) * 255);
+                    bmp.SetPixel(x, y, Color.FromArgb(gray, gray, gray));
                 }
             }
-            return dst;
+            return bmp;
         }
 
-        // -------------------------------------------------------------------
-        // Disposal
-        // -------------------------------------------------------------------
-        public void Dispose()
-
+        private Tensor<float> ReduceChannels(Tensor<float> input, int factor)
         {
-            Logger.Log("[CTMemorySegmenter.Dispose] Disposing sessions and resetting state");
-            if (_imageEncoderSession != null) _imageEncoderSession.Dispose();
-            if (_promptEncoderSession != null) _promptEncoderSession.Dispose();
-            if (_maskDecoderSession != null) _maskDecoderSession.Dispose();
-            if (_memoryEncoderSession != null) _memoryEncoderSession.Dispose();
-            if (_memoryAttentionSession != null) _memoryAttentionSession.Dispose();
-            if (_mlpSession != null) _mlpSession.Dispose();
-
-            ResetState();
-            Logger.Log("[CTMemorySegmenter.Dispose] Disposal complete");
+            int batch = input.Dimensions[0];
+            int channels = input.Dimensions[1];
+            int height = input.Dimensions[2];
+            int width = input.Dimensions[3];
+            if (channels % factor != 0)
+                throw new ArgumentException("Channel dimension must be divisible by factor.");
+            int targetChannels = channels / factor;
+            float[] inputArray = input.ToArray();
+            float[] outputArray = new float[batch * targetChannels * height * width];
+            for (int b = 0; b < batch; b++)
+            {
+                for (int tc = 0; tc < targetChannels; tc++)
+                {
+                    for (int h = 0; h < height; h++)
+                    {
+                        for (int w = 0; w < width; w++)
+                        {
+                            float sum = 0;
+                            for (int i = 0; i < factor; i++)
+                            {
+                                int c = tc * factor + i;
+                                int inputIndex = (((b * channels + c) * height) + h) * width + w;
+                                sum += inputArray[inputIndex];
+                            }
+                            int outputIndex = (((b * targetChannels + tc) * height) + h) * width + w;
+                            outputArray[outputIndex] = sum / factor;
+                        }
+                    }
+                }
+            }
+            return new DenseTensor<float>(outputArray, new int[] { batch, targetChannels, height, width });
         }
+
+        private Tensor<float> UpsampleSpatial(Tensor<float> input, int factor)
+        {
+            int batch = input.Dimensions[0];
+            int channels = input.Dimensions[1];
+            int height = input.Dimensions[2];
+            int width = input.Dimensions[3];
+            int targetHeight = height * factor;
+            int targetWidth = width * factor;
+            float[] inputArray = input.ToArray();
+            float[] outputArray = new float[batch * channels * targetHeight * targetWidth];
+            for (int b = 0; b < batch; b++)
+            {
+                for (int c = 0; c < channels; c++)
+                {
+                    for (int h = 0; h < targetHeight; h++)
+                    {
+                        int origH = h / factor;
+                        for (int w = 0; w < targetWidth; w++)
+                        {
+                            int origW = w / factor;
+                            int inIndex = (((b * channels + c) * height) + origH) * width + origW;
+                            int outIndex = (((b * channels + c) * targetHeight) + h) * targetWidth + w;
+                            outputArray[outIndex] = inputArray[inIndex];
+                        }
+                    }
+                }
+            }
+            return new DenseTensor<float>(outputArray, new int[] { batch, channels, targetHeight, targetWidth });
+        }
+
+
+
+        // Add this helper method somewhere in your CTMemorySegmenter class:
+        private Tensor<float> ExtractChannel(Tensor<float> tensor, int channelIndex)
+        {
+            // Assume tensor shape is [1, C, H, W]
+            int batch = tensor.Dimensions[0];
+            int channels = tensor.Dimensions[1];
+            int height = tensor.Dimensions[2];
+            int width = tensor.Dimensions[3];
+            float[] input = tensor.ToArray();
+            float[] output = new float[batch * 1 * height * width];
+            for (int b = 0; b < batch; b++)
+            {
+                for (int h = 0; h < height; h++)
+                {
+                    for (int w = 0; w < width; w++)
+                    {
+                        int inputIndex = ((b * channels + channelIndex) * height + h) * width + w;
+                        int outputIndex = ((b * 1 + 0) * height + h) * width + w;
+                        output[outputIndex] = input[inputIndex];
+                    }
+                }
+            }
+            return new DenseTensor<float>(output, new int[] { batch, 1, height, width });
+        }
+
     }
 }

@@ -519,7 +519,7 @@ namespace CTSegmenter
                 brushMenuItem.Enabled = false;
                 thresholdingMenuItem.Enabled = false;
                 // When SAM closes, re-enable the buttons.
-                samForm.FormClosed += (sender, args) =>
+                samForm.Disposed += (sender, args) =>
                 {
                     panMenuItem.Enabled = true;
                     eraserMenuItem.Enabled = true;

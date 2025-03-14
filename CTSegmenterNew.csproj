@@ -134,7 +134,10 @@
     <None Include=".vs\CTSegmenter.csproj.dtbcache.json" />
     <None Include="App.config" />
     <None Include="packages.config" />
-    <None Include="Properties\Settings.settings" />
+    <None Include="Properties\Settings.settings">
+      <Generator>SettingsSingleFileGenerator</Generator>
+      <LastGenOutput>Settings1.Designer.cs</LastGenOutput>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Annotations.cs" />
@@ -145,6 +148,11 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="CTFusion.cs" />
+    <Content Include="MainLoop - Copy.txt" />
+    <Compile Include="LRUCache.cs" />
+    <Compile Include="MainLoop - Copy.Designer.cs">
+      <DependentUpon>MainLoop - Copy.txt</DependentUpon>
+    </Compile>
     <Compile Include="MainLoop.cs" />
     <Compile Include="MainLoop.Designer.cs">
       <DependentUpon>MainLoop.cs</DependentUpon>
@@ -167,6 +175,11 @@
       <DependentUpon>Resources.resx</DependentUpon>
     </Compile>
     <Compile Include="Properties\Settings.Designer.cs" />
+    <Compile Include="Properties\Settings1.Designer.cs">
+      <AutoGen>True</AutoGen>
+      <DesignTimeSharedInput>True</DesignTimeSharedInput>
+      <DependentUpon>Settings.settings</DependentUpon>
+    </Compile>
     <Compile Include="SafeInvokeAsync.cs" />
     <Compile Include="SAMForm.cs">
       <SubType>Form</SubType>
@@ -176,11 +189,15 @@
     </Compile>
     <Compile Include="CTMemorySegmenter.cs" />
     <Compile Include="SAMSettings.cs" />
+    <Compile Include="VolumeExtensions.cs" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="favicon.ico" />
   </ItemGroup>
   <ItemGroup>
+    <EmbeddedResource Include="MainLoop - Copy.resx">
+      <DependentUpon>MainLoop - Copy.txt</DependentUpon>
+    </EmbeddedResource>
     <EmbeddedResource Include="MainLoop.resx">
       <DependentUpon>MainLoop.cs</DependentUpon>
     </EmbeddedResource>

@@ -361,3 +361,6 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+/MainLoop - Copy.Designer.cs
+/MainLoop - Copy.resx
+/MainLoop - Copy.txt

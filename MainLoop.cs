@@ -11,6 +11,8 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Drawing.Imaging;
 using static CTSegmenter.SAMForm;
+using System.Threading;
+using System.Runtime.InteropServices;
 
 namespace CTSegmenter
 {
@@ -62,7 +64,7 @@ namespace CTSegmenter
 
 
         // Rendering fields
-        private Timer renderTimer;
+        private System.Windows.Forms.Timer renderTimer;
 
         // Main view zoom/pan
         public float globalZoom = 1.0f;
@@ -126,7 +128,7 @@ namespace CTSegmenter
         private Dictionary<int, byte[]> sliceCache = new Dictionary<int, byte[]>();
         private const int MAX_CACHE_SIZE = 5;
         private readonly object sliceCacheLock = new object(); // Protects sliceCache
-
+        private Bitmap _backingStore;
         public int SelectedMaterialIndex { get; set; } = -1;
         public byte PreviewMin { get; set; }
         public byte PreviewMax { get; set; }
@@ -165,6 +167,8 @@ namespace CTSegmenter
         public byte[,] currentSelectionYZ; // dimensions: [depth, height] for YZ view (fixed X = YzSliceX)
 
         public bool RealTimeProcessing { get; set; } = false;
+        private DateTime _lastRenderRequest = DateTime.MinValue;
+        private const int RENDER_THROTTLE_MS = 200;
 
 
         #endregion
@@ -217,6 +221,15 @@ namespace CTSegmenter
             mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30F));
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 70F));
             mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 30F));
+            mainView = new PictureBox
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.Black,
+                SizeMode = PictureBoxSizeMode.Zoom
+            };
+            SetStyle(ControlStyles.OptimizedDoubleBuffer |
+                     ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.UserPaint, true);
 
             // Main view – using Paint event.
             mainView = new PictureBox
@@ -262,7 +275,10 @@ namespace CTSegmenter
         }
         // Cached segmenter instance for live preview
         private CTMemorySegmenter _liveSegmenter = null;
-
+        // Add to class fields
+        private readonly ReaderWriterLockSlim _bitmapLock = new ReaderWriterLockSlim();
+        private Bitmap _scaledBitmap;
+        private float _lastZoom = -1;
         // Clears the cached segmenter (for example, when live preview is turned off or settings change)
         public void ClearLiveSegmenter()
         {
@@ -270,6 +286,25 @@ namespace CTSegmenter
             {
                 _liveSegmenter.Dispose();
                 _liveSegmenter = null;
+            }
+        }
+        private void UpdateBackingStore()
+        {
+            if (currentBitmap == null) return;
+
+            _backingStore?.Dispose();
+            _backingStore = new Bitmap(
+                (int)(currentBitmap.Width * zoomLevel),
+                (int)(currentBitmap.Height * zoomLevel),
+                PixelFormat.Format24bppRgb);
+
+            using (var g = Graphics.FromImage(_backingStore))
+            {
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.DrawImage(currentBitmap,
+                    new Rectangle(0, 0, _backingStore.Width, _backingStore.Height),
+                    new Rectangle(0, 0, currentBitmap.Width, currentBitmap.Height),
+                    GraphicsUnit.Pixel);
             }
         }
 
@@ -290,7 +325,7 @@ namespace CTSegmenter
             mainView.Invalidate();
 
             // Create a timer that hides the overlay after 1000ms.
-            Timer overlayTimer = new Timer { Interval = 1000 };
+            System.Windows.Forms.Timer overlayTimer = new System.Windows.Forms.Timer { Interval = 1000 };
             overlayTimer.Tick += (s, e) =>
             {
                 showBrushOverlay = false;
@@ -316,8 +351,11 @@ namespace CTSegmenter
         }
         private void InitializeTimers()
         {
-            renderTimer = new Timer { Interval = 100 };
-            renderTimer.Tick += (s, e) => RenderViews();
+            renderTimer = new System.Windows.Forms.Timer { Interval = RENDER_THROTTLE_MS };
+            renderTimer.Tick += (s, e) => {
+                renderTimer.Stop();
+                RenderViews();
+            };
         }
 
         // When loading a dataset from a folder, we want to reset Materials to only Exterior and one empty Material1.
@@ -1124,7 +1162,7 @@ namespace CTSegmenter
             pendingMax = newMax;
             if (thresholdUpdateTimer == null)
             {
-                thresholdUpdateTimer = new Timer { Interval = 50 };
+                thresholdUpdateTimer = new System.Windows.Forms.Timer { Interval = 50 };
                 thresholdUpdateTimer.Tick += (s, e) =>
                 {
                     thresholdUpdateTimer.Stop();
@@ -1369,13 +1407,19 @@ namespace CTSegmenter
 
         public void RenderViews()
         {
+            if ((DateTime.Now - _lastRenderRequest).TotalMilliseconds < RENDER_THROTTLE_MS) return;
+            _lastRenderRequest = DateTime.Now;
             if (width <= 0 || height <= 0)
                 return;
             byte[] sliceData = GetSliceData(currentSlice);
             currentBitmap?.Dispose();
             currentBitmap = CreateBitmapFromData(currentSlice);
             ClampPanOffset();
+            UpdateScaledBitmap(currentBitmap);
             mainView.Invalidate();
+            
+            renderTimer.Interval = RENDER_THROTTLE_MS;
+            
         }
 
         private byte[] GetSliceData(int slice)
@@ -1407,56 +1451,71 @@ namespace CTSegmenter
 
 
         // Modified CreateBitmapFromData using RenderMaterials property.
+        // Modified CreateBitmapFromData with LockBits and parallelization
         private Bitmap CreateBitmapFromData(int sliceIndex)
         {
-            Bitmap bmp = new Bitmap(width, height, PixelFormat.Format24bppRgb);
-            // Determine if thresholding is active.
-            bool thresholdActive = (Materials.Count > 1) && EnableThresholdMask &&
-                                   (SelectedMaterialIndex >= 0) && (PreviewMax > PreviewMin);
-            for (int y = 0; y < height; y++)
+            var bmp = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+            var rect = new Rectangle(0, 0, width, height);
+
+            var bmpData = bmp.LockBits(rect, ImageLockMode.WriteOnly, bmp.PixelFormat);
+            int bytesPerPixel = 3; // 24bpp
+            bool thresholdActive = Materials.Count > 1 && EnableThresholdMask &&
+                                  SelectedMaterialIndex >= 0 && PreviewMax > PreviewMin;
+            Material selectedMat = SelectedMaterialIndex >= 0 ? Materials[SelectedMaterialIndex] : null;
+
+            unsafe
             {
-                for (int x = 0; x < width; x++)
+                byte* ptr = (byte*)bmpData.Scan0;
+
+                Parallel.For(0, height, y =>
                 {
-                    // Use volumeData if available; otherwise use a neutral gray (128).
-                    byte gVal = (volumeData != null) ? volumeData[x, y, sliceIndex] : (byte)128;
-                    Color baseColor = Color.FromArgb(gVal, gVal, gVal);
-                    Color finalColor = baseColor;
+                    byte* row = ptr + (y * bmpData.Stride);
+                    for (int x = 0; x < width; x++)
+                    {
+                        // Original pixel logic starts
+                        byte gVal = volumeData?[x, y, sliceIndex] ?? 128;
+                        Color finalColor = Color.FromArgb(gVal, gVal, gVal);
 
-                    // Get the segmentation label directly from volumeLabels.
-                    byte segID = (volumeLabels != null) ? volumeLabels[x, y, sliceIndex] : (byte)0;
-                    if (segID != 0)
-                    {
-                        Material mat = Materials.FirstOrDefault(m => m.ID == segID);
-                        if (mat != null)
+                        byte segID = volumeLabels?[x, y, sliceIndex] ?? 0;
+                        if (segID != 0)
                         {
-                            // If RenderMaterials is true, use full material color;
-                            // if ShowMask is true, blend 50% with the base color.
-                            finalColor = RenderMaterials ? mat.Color : (ShowMask ? BlendColors(baseColor, mat.Color, 0.5f) : mat.Color);
-                        }
-                    }
-                    // Optionally apply a threshold overlay if no label is present.
-                    else if (ShowMask && thresholdActive && gVal >= PreviewMin && gVal <= PreviewMax)
-                    {
-                        Color sel = GetComplementaryColor(Materials[SelectedMaterialIndex].Color);
-                        finalColor = BlendColors(baseColor, sel, 0.5f);
-                    }
-
-                    // Overlay any temporary brush/eraser selection.
-                    if (currentSelection != null)
-                    {
-                        byte sel = currentSelection[x, y];
-                        if (sel != 0)
-                        {
-                            Material selMat = Materials.FirstOrDefault(m => m.ID == sel);
-                            if (selMat != null)
+                            Material mat = Materials.FirstOrDefault(m => m.ID == segID);
+                            if (mat != null)
                             {
-                                finalColor = BlendColors(finalColor, selMat.Color, 0.5f);
+                                if (RenderMaterials)
+                                    finalColor = mat.Color;
+                                else if (ShowMask)
+                                    finalColor = BlendColors(finalColor, mat.Color, 0.5f);
                             }
                         }
+                        else if (ShowMask && thresholdActive && gVal >= PreviewMin && gVal <= PreviewMax)
+                        {
+                            Color sel = GetComplementaryColor(selectedMat.Color);
+                            finalColor = BlendColors(finalColor, sel, 0.5f);
+                        }
+
+                        if (currentSelection != null)
+                        {
+                            byte sel = currentSelection[x, y];
+                            if (sel != 0)
+                            {
+                                Material selMat = Materials.FirstOrDefault(m => m.ID == sel);
+                                if (selMat != null)
+                                    finalColor = BlendColors(finalColor, selMat.Color, 0.5f);
+                            }
+                        }
+                        // Original pixel logic ends
+
+                        // Write to bitmap memory
+                        int offset = x * bytesPerPixel;
+                        row[offset] = finalColor.B;     // Blue
+                        row[offset + 1] = finalColor.G; // Green
+                        row[offset + 2] = finalColor.R; // Red
                     }
-                    bmp.SetPixel(x, y, finalColor);
-                }
+                });
             }
+
+            bmp.UnlockBits(bmpData);
             return bmp;
         }
 
@@ -1474,6 +1533,8 @@ namespace CTSegmenter
         {
             if (!showProjections || isRenderingOrtho || volumeLabels == null)
                 return;
+            if ((DateTime.Now - lastOrthoRenderTime).TotalMilliseconds < 1000 && !forceUpdate) return;
+            lastOrthoRenderTime = DateTime.Now;
 
             isRenderingOrtho = true;
             try
@@ -1517,7 +1578,7 @@ namespace CTSegmenter
                                         if (mat != null)
                                             pixel = mat.Color;
                                     }
-                                    else if (thresholdActive && gray >= PreviewMin && gray <= PreviewMax)
+                                    else if (ShowMask && thresholdActive && gray >= PreviewMin && gray <= PreviewMax)
                                     {
                                         Color sel = GetComplementaryColor(Materials[SelectedMaterialIndex].Color);
                                         pixel = BlendColors(pixel, sel, 0.5f);
@@ -1577,7 +1638,7 @@ namespace CTSegmenter
                                         if (mat != null)
                                             pixel = mat.Color;
                                     }
-                                    else if (thresholdActive && gray >= PreviewMin && gray <= PreviewMax)
+                                    else if (ShowMask && thresholdActive && gray >= PreviewMin && gray <= PreviewMax)
                                     {
                                         Color sel = GetComplementaryColor(Materials[SelectedMaterialIndex].Color);
                                         pixel = BlendColors(pixel, sel, 0.5f);
@@ -1780,66 +1841,57 @@ namespace CTSegmenter
                 }
             }
         }
+        // Helper method to format pixel size
+        private string FormatPixelSize(double meters)
+        {
+            if (meters >= 1e-3) // 1mm or larger
+                return $"{(meters * 1000):0.###} mm";
 
+            if (meters >= 1e-6) // 1µm or larger
+                return $"{(meters * 1e6):0.###} μm";
+
+            return $"{(meters * 1e9):0} nm";
+        }
         private void MainView_Paint(object sender, PaintEventArgs e)
         {
-            if (currentBitmap == null)
-                return;
-
-            // Draw the current image slice (with pan and zoom)
-            e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            RectangleF destRect = new RectangleF(panOffset.X, panOffset.Y,
-                                                  currentBitmap.Width * zoomLevel,
-                                                  currentBitmap.Height * zoomLevel);
-            e.Graphics.DrawImage(currentBitmap, destRect);
-
-            // Draw a scale bar (your existing method)
-            DrawScaleBar(e.Graphics, mainView.ClientRectangle, zoomLevel);
-
-            // Header text "XY" at top left.
-            using (Font headerFont = new Font("Arial", 12, FontStyle.Bold))
-            using (SolidBrush headerBrush = new SolidBrush(Color.Yellow))
+            if (_scaledBitmap == null || width == 0 || height == 0) return;
+            _bitmapLock.EnterReadLock();
+            try
             {
-                e.Graphics.DrawString("XY", headerFont, headerBrush, new PointF(5, 5));
-            }
+                if (_scaledBitmap == null) return;
 
-            // Display the pixel size at top right.
-            string pixelSizeText = pixelSize < 1e-3
-                ? $"Pixel Size: {pixelSize * 1e6:0.#} µm"
-                : $"Pixel Size: {pixelSize * 1e3:0.#} mm";
-            using (Font pixelFont = new Font("Arial", 10))
-            using (SolidBrush pixelBrush = new SolidBrush(Color.Yellow))
-            {
-                SizeF textSize = e.Graphics.MeasureString(pixelSizeText, pixelFont);
-                e.Graphics.DrawString(pixelSizeText, pixelFont, pixelBrush,
-                                      new PointF(mainView.ClientSize.Width - textSize.Width - 5, 5));
-            }
-
-            // Display the current slice number at bottom right.
-            string sliceText = $"Slice: {CurrentSlice}";
-            using (Font sliceFont = new Font("Arial", 10))
-            using (SolidBrush sliceBrush = new SolidBrush(Color.White))
-            {
-                SizeF textSize = e.Graphics.MeasureString(sliceText, sliceFont);
-                e.Graphics.DrawString(sliceText, sliceFont, sliceBrush,
-                                      new PointF(mainView.ClientSize.Width - textSize.Width - 5,
-                                                 mainView.ClientSize.Height - textSize.Height - 5));
-            }
-
-            // Draw the brush/eraser overlay if active.
-            if (showBrushOverlay && (currentTool == SegmentationTool.Brush || currentTool == SegmentationTool.Eraser))
-            {
-                using (Pen pen = new Pen(Color.Red, 2))
+                // Draw pre-rendered scaled bitmap
+                e.Graphics.DrawImage(_scaledBitmap, panOffset);
+                using(Font font = new Font("Arial", 12, FontStyle.Bold))
+        using (SolidBrush headerBrush = new SolidBrush(Color.Yellow))  // Yellow color for XY label
                 {
-                    float effectiveDiameter = currentBrushSize * zoomLevel;
-                    float effectiveRadius = effectiveDiameter / 2f;
-                    e.Graphics.DrawEllipse(pen,
-                                           brushOverlayCenter.X - effectiveRadius,
-                                           brushOverlayCenter.Y - effectiveRadius,
-                                           effectiveDiameter,
-                                           effectiveDiameter);
+                    e.Graphics.DrawString("XY", font, headerBrush, new PointF(5, 5));
                 }
+                //Write pixel size
+                string sizeText = $"Pixel size: {FormatPixelSize(pixelSize)}";
+                using (SolidBrush textBrush = new SolidBrush(Color.White))
+                using (Font font = new Font("Arial", 10))
+                {
+                    SizeF textSize = e.Graphics.MeasureString(sizeText, font);
+                    PointF position = new PointF(
+                        mainView.ClientSize.Width - textSize.Width - 10,
+                        5
+                    );
+                    e.Graphics.DrawString(sizeText, font, textBrush, position);
+                }
+
+                // Draw overlays
+                DrawScaleBar(e.Graphics, mainView.ClientRectangle, globalZoom);
+                DrawAnnotations(e.Graphics);
+                DrawBrushOverlay(e.Graphics);
             }
+            finally
+            {
+                _bitmapLock.ExitReadLock();
+            }
+        }
+        private void DrawAnnotations(Graphics g)
+        {
             foreach (var point in AnnotationMgr.GetPointsForSlice(CurrentSlice))
             {
                 float x = point.X * globalZoom + panOffset.X;
@@ -1849,23 +1901,176 @@ namespace CTSegmenter
                 using (var pen = new Pen(materialColor, 2))
                 using (var brush = new SolidBrush(materialColor))
                 {
-                    e.Graphics.DrawLine(pen, x - 5, y, x + 5, y);
-                    e.Graphics.DrawLine(pen, x, y - 5, x, y + 5);
-                    e.Graphics.DrawString(point.ID.ToString(), Font, brush: Brushes.Yellow, x + 5, y + 5);
+                    g.DrawLine(pen, x - 5, y, x + 5, y);
+                    g.DrawLine(pen, x, y - 5, x, y + 5);
+                    g.DrawString(point.ID.ToString(), Font, Brushes.Yellow, x + 5, y + 5);
                 }
             }
         }
+        private void DrawBrushOverlay(Graphics g)
+        {
+            if (!showBrushOverlay || currentTool == SegmentationTool.Pan) return;
 
+            float radius = currentBrushSize * globalZoom / 2;
+            using (var pen = new Pen(Color.Red, 2))
+            {
+                g.DrawEllipse(pen,
+                    brushOverlayCenter.X - radius,
+                    brushOverlayCenter.Y - radius,
+                    radius * 2,
+                    radius * 2);
+            }
+        }
+        public unsafe delegate void PixelProcessorDelegate(byte* row, int x, int y, int bytesPerPixel);
+        private readonly LRUCache<int, byte[]> _sliceCache = new LRUCache<int, byte[]>(5);
+        private const int BYTES_PER_PIXEL = 3; // For 24bpp RGB
+        private Bitmap CreateBitmapFromCache(byte[] pixelData)
+        {
+            Bitmap bmp = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+            Rectangle rect = new Rectangle(0, 0, width, height);
 
+            BitmapData bmpData = bmp.LockBits(rect, ImageLockMode.WriteOnly, bmp.PixelFormat);
+            try
+            {
+                Marshal.Copy(pixelData, 0, bmpData.Scan0, pixelData.Length);
+            }
+            finally
+            {
+                bmp.UnlockBits(bmpData);
+            }
+            return bmp;
+        }
+        private unsafe Bitmap RenderOrthoView(PixelProcessorDelegate pixelProcessor, int width, int height)
+        {
+            var bmp = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+            var rect = new Rectangle(0, 0, width, height);
+
+            var bmpData = bmp.LockBits(rect, ImageLockMode.WriteOnly, bmp.PixelFormat);
+            int bytesPerPixel = 3;
+
+            byte* ptr = (byte*)bmpData.Scan0;
+            int stride = bmpData.Stride;
+
+            Parallel.For(0, height, y =>
+            {
+                byte* row = ptr + (y * stride);
+                for (int x = 0; x < width; x++)
+                {
+                    pixelProcessor(row, x, y, bytesPerPixel);
+                }
+            });
+
+            bmp.UnlockBits(bmpData);
+            return bmp;
+        }
+        private void UpdateScaledBitmap(Bitmap source)
+        {
+            _bitmapLock.EnterWriteLock();
+            try
+            {
+                if (_scaledBitmap != null &&
+                    Math.Abs(globalZoom - _lastZoom) < 0.01f &&
+                    _scaledBitmap.Size == mainView.ClientSize)
+                {
+                    return;
+                }
+
+                _scaledBitmap?.Dispose();
+                _scaledBitmap = CreateScaledBitmap(source, globalZoom);
+                _lastZoom = globalZoom;
+
+                mainView.Invalidate();
+            }
+            finally
+            {
+                _bitmapLock.ExitWriteLock();
+            }
+        }
+
+        private async Task RenderViewsAsync(bool forceRedraw = false)
+        {
+            try
+            {
+                if (width == 0 || height == 0) return;
+
+                // Check cache first
+                byte[] sliceData;
+                if (!forceRedraw && sliceCache.TryGetValue(CurrentSlice, out sliceData))
+                {
+                    using (var temp = CreateBitmapFromCache(sliceData))
+                    {
+                        UpdateScaledBitmap(temp);
+                    }
+                    return;
+                }
+
+                // Generate new bitmap
+                var newBitmap = await Task.Run(() => CreateBitmapFromData(CurrentSlice));
+
+                // Update cache
+                UpdateSliceCache(CurrentSlice, newBitmap);
+
+                // Update display
+                UpdateScaledBitmap(newBitmap);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[RenderViewsAsync] Error: {ex}");
+            }
+        }
+
+        private void UpdateSliceCache(int sliceIndex, Bitmap bitmap)
+        {
+            Rectangle rect = new Rectangle(0, 0, bitmap.Width, bitmap.Height);
+            BitmapData bmpData = bitmap.LockBits(rect, ImageLockMode.ReadOnly, bitmap.PixelFormat);
+            try
+            {
+                byte[] pixelData = new byte[bmpData.Stride * bmpData.Height];
+                Marshal.Copy(bmpData.Scan0, pixelData, 0, pixelData.Length);
+                _sliceCache.Add(sliceIndex, pixelData);
+            }
+            finally
+            {
+                bitmap.UnlockBits(bmpData);
+            }
+        }
+        private Bitmap CreateScaledBitmap(Bitmap source, float zoom)
+        {
+            var scaledWidth = (int)(source.Width * zoom);
+            var scaledHeight = (int)(source.Height * zoom);
+
+            var scaled = new Bitmap(scaledWidth, scaledHeight, PixelFormat.Format24bppRgb);
+
+            using (var g = Graphics.FromImage(scaled))
+            {
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.DrawImage(source, 0, 0, scaledWidth, scaledHeight);
+            }
+
+            return scaled;
+        }
 
         private void MainView_MouseWheel(object sender, MouseEventArgs e)
         {
-            // Mouse wheel always zooms.
+            // Determine zoom factor from the mouse wheel.
             float factor = (e.Delta > 0) ? 1.1f : 0.9f;
             globalZoom = Math.Max(0.1f, Math.Min(5f, globalZoom * factor));
             zoomLevel = globalZoom;
+
+            // Update the scaled bitmap using the current bitmap.
+            if (currentBitmap != null)
+            {
+                UpdateScaledBitmap(currentBitmap);
+            }
+
+            // Invalidate the main view to trigger a redraw.
             mainView.Invalidate();
+
+            // Restart the render timer for a full update.
+            renderTimer.Stop();
+            renderTimer.Start();
         }
+
         private DateTime _lastPointCreationTime = DateTime.MinValue;
         private void MainView_MouseDown(object sender, MouseEventArgs e)
         {
@@ -1873,6 +2078,9 @@ namespace CTSegmenter
             {
                 lastMousePosition = e.Location;
                 mainView.Capture = true;
+                // Restart timer on panning initiation
+                renderTimer.Stop();
+                renderTimer.Start();
             }
             else if (e.Button == MouseButtons.Right)
             {
@@ -1904,12 +2112,16 @@ namespace CTSegmenter
                     UpdateSAMFormWithPoint(point);
                 }
                 mainView.Invalidate();
+                // Restart timer to schedule render update
+                renderTimer.Stop();
+                renderTimer.Start();
 
-                // If real-time processing is enabled, update segmentation preview immediately.
+                // Immediately update segmentation preview if enabled.
                 if (RealTimeProcessing)
                     ProcessSegmentationPreview();
             }
         }
+
         public Bitmap GenerateXYBitmap(int sliceIndex)
         {
             Bitmap bmp = new Bitmap(width, height, PixelFormat.Format24bppRgb);
@@ -2005,7 +2217,7 @@ namespace CTSegmenter
                             if (mat != null)
                                 finalColor = mat.Color;
                         }
-                        else if (thresholdActive && gVal >= PreviewMin && gVal <= PreviewMax)
+                        else if (ShowMask && thresholdActive && gVal >= PreviewMin && gVal <= PreviewMax)
                         {
                             Color sel = GetComplementaryColor(Materials[SelectedMaterialIndex].Color);
                             finalColor = BlendColors(baseColor, sel, 0.5f);
@@ -2062,7 +2274,7 @@ namespace CTSegmenter
                             if (mat != null)
                                 finalColor = mat.Color;
                         }
-                        else if (thresholdActive && gVal >= PreviewMin && gVal <= PreviewMax)
+                        else if (ShowMask && thresholdActive && gVal >= PreviewMin && gVal <= PreviewMax)
                         {
                             Color sel = GetComplementaryColor(Materials[SelectedMaterialIndex].Color);
                             finalColor = BlendColors(baseColor, sel, 0.5f);
@@ -2696,8 +2908,10 @@ namespace CTSegmenter
                 brushOverlayCenter = e.Location;
                 showBrushOverlay = true;
                 mainView.Invalidate();
+                renderTimer.Stop();
+                renderTimer.Start();
             }
-            // Panning
+            // Panning with left mouse button.
             if (e.Button == MouseButtons.Left && mainView.Capture)
             {
                 int dx = e.Location.X - lastMousePosition.X;
@@ -2706,8 +2920,10 @@ namespace CTSegmenter
                 ClampPanOffset();
                 lastMousePosition = e.Location;
                 mainView.Invalidate();
+                renderTimer.Stop();
+                renderTimer.Start();
             }
-            // If painting (brush/eraser) with right-click, update and preview.
+            // Painting (brush/eraser) with right mouse button.
             else if (e.Button == MouseButtons.Right)
             {
                 if (currentTool == SegmentationTool.Brush)
@@ -2715,10 +2931,13 @@ namespace CTSegmenter
                 else if (currentTool == SegmentationTool.Eraser)
                     EraseMaskAt(e.Location, currentBrushSize);
                 mainView.Invalidate();
+                renderTimer.Stop();
+                renderTimer.Start();
                 if (RealTimeProcessing)
                     ProcessSegmentationPreview();
             }
         }
+
         private void MainView_MouseUp(object sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left)
@@ -2896,10 +3115,18 @@ namespace CTSegmenter
 
         private void XzView_MouseWheel(object sender, MouseEventArgs e)
         {
+            // Determine zoom factor for the XZ view.
             float factor = (e.Delta > 0) ? 1.1f : 0.9f;
             xzZoom = Math.Max(0.1f, Math.Min(5f, xzZoom * factor));
+
+            // Invalidate the XZ view to update the projection.
             xzView.Invalidate();
+
+            // Restart the render timer to schedule a full update.
+            renderTimer.Stop();
+            renderTimer.Start();
         }
+
         private void XzView_MouseDown(object sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Right)
@@ -2919,14 +3146,21 @@ namespace CTSegmenter
                     UpdateSAMFormWithPoint(point);
                 }
                 xzView.Invalidate();
+                // Restart timer on action in XZ view
+                renderTimer.Stop();
+                renderTimer.Start();
                 if (RealTimeProcessing)
                     ProcessSegmentationPreview();
             }
             else if (e.Button == MouseButtons.Left)
             {
                 lastMousePosition = e.Location;
+                // Optionally, restart timer for panning initiation.
+                renderTimer.Stop();
+                renderTimer.Start();
             }
         }
+
 
         private void XzView_MouseMove(object sender, MouseEventArgs e)
         {
@@ -2936,6 +3170,8 @@ namespace CTSegmenter
                 xzOverlayCenter = e.Location;
                 showBrushOverlay = true;
                 xzView.Invalidate();
+                renderTimer.Stop();
+                renderTimer.Start();
             }
             else if (e.Button == MouseButtons.Right)
             {
@@ -2944,6 +3180,8 @@ namespace CTSegmenter
                 else if (currentTool == SegmentationTool.Eraser)
                     EraseOrthoMaskAtXZ(e.Location, currentBrushSize);
                 xzView.Invalidate();
+                renderTimer.Stop();
+                renderTimer.Start();
                 if (RealTimeProcessing)
                     ProcessSegmentationPreview();
             }
@@ -2954,8 +3192,11 @@ namespace CTSegmenter
                 xzPan = new PointF(xzPan.X + dx, xzPan.Y + dy);
                 lastMousePosition = e.Location;
                 xzView.Invalidate();
+                renderTimer.Stop();
+                renderTimer.Start();
             }
         }
+
 
         private void PaintOrthoMaskAtXZ(Point screenLocation, int brushSize)
         {
@@ -3066,10 +3307,18 @@ namespace CTSegmenter
 
         private void YzView_MouseWheel(object sender, MouseEventArgs e)
         {
+            // Determine zoom factor for the YZ view.
             float factor = (e.Delta > 0) ? 1.1f : 0.9f;
             yzZoom = Math.Max(0.1f, Math.Min(5f, yzZoom * factor));
+
+            // Invalidate the YZ view to update the projection.
             yzView.Invalidate();
+
+            // Restart the render timer to schedule a full update.
+            renderTimer.Stop();
+            renderTimer.Start();
         }
+
         private void YzView_MouseDown(object sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Right)
@@ -3089,14 +3338,21 @@ namespace CTSegmenter
                     UpdateSAMFormWithPoint(point);
                 }
                 yzView.Invalidate();
+                // Restart timer on action in YZ view.
+                renderTimer.Stop();
+                renderTimer.Start();
                 if (RealTimeProcessing)
                     ProcessSegmentationPreview();
             }
             else if (e.Button == MouseButtons.Left)
             {
                 lastMousePosition = e.Location;
+                // Optionally, restart timer for panning initiation.
+                renderTimer.Stop();
+                renderTimer.Start();
             }
         }
+
 
 
         private void YzView_MouseMove(object sender, MouseEventArgs e)
@@ -3107,6 +3363,8 @@ namespace CTSegmenter
                 yzOverlayCenter = e.Location;
                 showBrushOverlay = true;
                 yzView.Invalidate();
+                renderTimer.Stop();
+                renderTimer.Start();
             }
             else if (e.Button == MouseButtons.Right)
             {
@@ -3115,6 +3373,8 @@ namespace CTSegmenter
                 else if (currentTool == SegmentationTool.Eraser)
                     EraseOrthoMaskAtYZ(e.Location, currentBrushSize);
                 yzView.Invalidate();
+                renderTimer.Stop();
+                renderTimer.Start();
                 if (RealTimeProcessing)
                     ProcessSegmentationPreview();
             }
@@ -3125,8 +3385,11 @@ namespace CTSegmenter
                 yzPan = new PointF(yzPan.X + dx, yzPan.Y + dy);
                 lastMousePosition = e.Location;
                 yzView.Invalidate();
+                renderTimer.Stop();
+                renderTimer.Start();
             }
         }
+
 
         private void PaintOrthoMaskAtYZ(Point screenLocation, int brushSize)
         {

@@ -81,7 +81,7 @@ namespace CTSegmenter
         private ToolStripMenuItem showMaskMenuItem;
         private ToolStripMenuItem enableThresholdMaskMenuItem; // This now is "Render Materials"
         private ToolStripMenuItem showHistogramMenuItem;
-        private ToolStripMenuItem showOrthoviewsMenuItem;
+        //private ToolStripMenuItem showOrthoviewsMenuItem;
         private ToolStripMenuItem resetZoomMenuItem;
         private ToolStripMenuItem helpMenu;
         private ToolStripMenuItem dbgConsole;
@@ -223,7 +223,7 @@ namespace CTSegmenter
                     UpdateHistogram(histogramPictureBox);
             };
 
-            showOrthoviewsMenuItem = new ToolStripMenuItem("Show Orthoviews")
+            /*showOrthoviewsMenuItem = new ToolStripMenuItem("Show Orthoviews")
             {
                 CheckOnClick = true,
                 Checked = false
@@ -234,14 +234,14 @@ namespace CTSegmenter
                 if (showOrthoviewsMenuItem.Checked)
                     await mainForm.RenderOrthoViewsAsync();
             };
-
+*/
             resetZoomMenuItem = new ToolStripMenuItem("Reset Zoom");
             resetZoomMenuItem.Click += (s, e) => mainForm.ResetView();
 
             viewMenu.DropDownItems.AddRange(new ToolStripItem[]
             {
                 showMaskMenuItem, enableThresholdMaskMenuItem, showHistogramMenuItem,
-                showOrthoviewsMenuItem, resetZoomMenuItem
+                //showOrthoviewsMenuItem, resetZoomMenuItem
             });
             menuStrip.Items.Add(viewMenu);
 
@@ -388,18 +388,31 @@ namespace CTSegmenter
             trkMin = new TrackBar { Width = 150, Minimum = 0, Maximum = 255, TickFrequency = 32, Value = 1, Location = new Point(0, 0) };
             thresholdPanel.Controls.Add(trkMin);
             numThresholdMin = new NumericUpDown { Width = 80, Minimum = 0, Maximum = 255, Value = trkMin.Value, Location = new Point(155, 0) };
-            numThresholdMin.ValueChanged += (s, e) => { trkMin.Value = (int)numThresholdMin.Value; UpdateSelectedMaterialRange(); };
+            numThresholdMin.ValueChanged += (s, e) => { trkMin.Value = (int)numThresholdMin.Value; UpdateSelectedMaterialRange(); mainForm.OnThresholdRangeChanged((byte)trkMin.Value, (byte)trkMax.Value); mainForm.RenderViews(); _ = mainForm.RenderOrthoViewsAsync(); };
             thresholdPanel.Controls.Add(numThresholdMin);
             trkMax = new TrackBar { Width = 150, Minimum = 0, Maximum = 255, TickFrequency = 32, Value = 255, Location = new Point(0, 40) };
             thresholdPanel.Controls.Add(trkMax);
             numThresholdMax = new NumericUpDown { Width = 80, Minimum = 0, Maximum = 255, Value = trkMax.Value, Location = new Point(155, 40) };
-            numThresholdMax.ValueChanged += (s, e) => { trkMax.Value = (int)numThresholdMax.Value; UpdateSelectedMaterialRange(); };
+            numThresholdMax.ValueChanged += (s, e) => { trkMax.Value = (int)numThresholdMax.Value; UpdateSelectedMaterialRange(); mainForm.OnThresholdRangeChanged((byte)trkMin.Value, (byte)trkMax.Value); mainForm.RenderViews(); _ = mainForm.RenderOrthoViewsAsync(); };
             thresholdPanel.Controls.Add(numThresholdMax);
             leftPanel.Controls.Add(thresholdPanel);
 
             FlowLayoutPanel thresholdButtonsPanel = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, WrapContents = false };
             btnAddSelection = new Button { Text = "+", Width = 50, Height = 25 };
-
+            trkMin.Scroll += (s, e) =>
+            {
+                numThresholdMin.Value = trkMin.Value;
+                UpdateSelectedMaterialRange();
+                mainForm.RenderViews(); // Immediate refresh
+                _ = mainForm.RenderOrthoViewsAsync();
+            };
+            trkMax.Scroll += (s, e) =>
+            {
+                numThresholdMax.Value = trkMax.Value;
+                UpdateSelectedMaterialRange();
+                mainForm.RenderViews(); // Immediate refresh
+                _ = mainForm.RenderOrthoViewsAsync();
+            };
             btnAddSelection = new Button { Text = "+", Width = 50, Height = 25 };
             btnAddSelection.Click += (s, e) =>
             {
@@ -548,6 +561,7 @@ namespace CTSegmenter
                 pendingXySliceValue = sliceSlider.Value;
                 lblSlice.Text = $"XY Slice: {pendingXySliceValue} / {sliceSlider.Maximum}";
                 numSlice.Value = pendingXySliceValue;
+                
                 if (xySliceUpdateTimer == null)
                 {
                     xySliceUpdateTimer = new Timer { Interval = 50 };
@@ -557,6 +571,7 @@ namespace CTSegmenter
                         mainForm.CurrentSlice = pendingXySliceValue;
                     };
                 }
+
                 else xySliceUpdateTimer.Stop();
                 xySliceUpdateTimer.Start();
             };
@@ -567,6 +582,8 @@ namespace CTSegmenter
                 sliceSlider.Value = (int)numSlice.Value;
                 mainForm.CurrentSlice = sliceSlider.Value;
                 lblSlice.Text = $"XY Slice: {sliceSlider.Value} / {sliceSlider.Maximum}";
+                
+                
             };
             rightPanel.Controls.Add(numSlice);
             lblXz = new Label { Text = "XZ Projection Row: 0 / 0", AutoSize = true };
@@ -577,6 +594,7 @@ namespace CTSegmenter
                 mainForm.XzSliceY = sliderXZ.Value;
                 lblXz.Text = $"XZ Projection Row: {sliderXZ.Value} / {sliderXZ.Maximum}";
                 numXz.Value = sliderXZ.Value;
+               
                 _ = mainForm.RenderOrthoViewsAsync();
             };
             rightPanel.Controls.Add(sliderXZ);
@@ -586,6 +604,7 @@ namespace CTSegmenter
                 sliderXZ.Value = (int)numXz.Value;
                 mainForm.XzSliceY = sliderXZ.Value;
                 lblXz.Text = $"XZ Projection Row: {sliderXZ.Value} / {sliderXZ.Maximum}";
+                
                 _ = mainForm.RenderOrthoViewsAsync();
             };
             rightPanel.Controls.Add(numXz);
@@ -597,6 +616,7 @@ namespace CTSegmenter
                 mainForm.YzSliceX = sliderYZ.Value;
                 lblYz.Text = $"YZ Projection Col: {sliderYZ.Value} / {sliderYZ.Maximum}";
                 numYz.Value = sliderYZ.Value;
+                
                 _ = mainForm.RenderOrthoViewsAsync();
             };
             rightPanel.Controls.Add(sliderYZ);
@@ -605,6 +625,7 @@ namespace CTSegmenter
             {
                 sliderYZ.Value = (int)numYz.Value;
                 mainForm.YzSliceX = sliderYZ.Value;
+                
                 lblYz.Text = $"YZ Projection Col: {sliderYZ.Value} / {sliderYZ.Maximum}";
                 _ = mainForm.RenderOrthoViewsAsync();
             };
@@ -678,12 +699,16 @@ namespace CTSegmenter
             }
             else if (item == thresholdingMenuItem)
             {
-                // When switching to thresholding, clear any existing brush selection.
-                mainForm.currentSelection = new byte[mainForm.GetWidth(), mainForm.GetHeight()];
-                // Enable the threshold overlay.
-                mainForm.EnableThresholdMask = true;
-                mainForm.RenderViews();
-                _ = mainForm.RenderOrthoViewsAsync();
+                currentTool = SegmentationTool.Thresholding;
+                toolSizeSlider.Enabled = false;
+                trkMin.Enabled = true;
+                trkMax.Enabled = true;
+                numThresholdMin.Enabled = true;
+                numThresholdMax.Enabled = true;
+                btnInterpolate.Enabled = false;
+                // Ensure ShowMask is enabled
+                showMaskMenuItem.Checked = true;
+                mainForm.ShowMask = true;
             }
 
             // Set the tool and enable/disable UI controls accordingly.

@@ -272,10 +272,11 @@ namespace CTSegmenter
 
             // 9. **New**: Apply threshold, hole-filling, morphological closing, etc.
             Bitmap cleanedUpMask = PostProcessMask(
-                postProcessedMask,
-                threshold: 0.5f,   // Tweak this threshold if needed
-                fillHoles: true,   // Fill holes by default
-                doMorphologicalClose: true // Simple morphological closing
+            postProcessedMask,
+            sliceIndex,
+            threshold: 0.5f,
+            fillHoles: true,
+            doMorphologicalClose: true
             );
 
             if (_enableMlp)
@@ -358,117 +359,170 @@ namespace CTSegmenter
 
         // Real prompt encoder: outputs sparse: [1,1,256], dense: [1,256,64,64], dense_pe: [1,256,64,64].
         private (Tensor<float> Sparse, Tensor<float> Dense, Tensor<float> DensePe) CreatePromptTensors(
-            List<Point> points,
-            List<Rectangle> boxes,
-            bool[,] brushMask,
-            string textPrompt,
-            int originalWidth,
-            int originalHeight)
+    List<Point> points,
+    List<Rectangle> boxes,
+    bool[,] brushMask,
+    string textPrompt,
+    int originalWidth,
+    int originalHeight)
         {
-            Logger.Log("[CreatePromptTensors] Starting real prompt tensor creation.");
-            List<float> promptValues = new List<float>();
+            // 1. Initialize tensors
+            var sparseTensor = new DenseTensor<float>(new float[256], new[] { 1, 1, 256 });
+            var denseTensor = new DenseTensor<float>(new[] { 1, 256, 64, 64 });
+            var densePeTensor = new DenseTensor<float>(new[] { 1, 256, 64, 64 });
 
-            // Points
-            if (points != null && points.Count > 0)
+            // 2. Process geometry prompts
+            List<float> coordBuffer = new List<float>();
+
+            // Convert points to normalized coordinates
+            if (points != null)
             {
-                foreach (var p in points)
+                foreach (Point p in points)
                 {
-                    float normX = (float)p.X / originalWidth * _imageSize;
-                    float normY = (float)p.Y / originalHeight * _imageSize;
-                    promptValues.Add(normX);
-                    promptValues.Add(normY);
+                    float nx = (float)p.X / originalWidth * _imageSize;
+                    float ny = (float)p.Y / originalHeight * _imageSize;
+                    coordBuffer.AddRange(new[] { nx, ny });
                 }
-                Logger.Log($"[CreatePromptTensors] Processed {points.Count} point(s).");
             }
 
-            // Boxes
-            if (boxes != null && boxes.Count > 0)
+            // Convert boxes to normalized coordinates
+            if (boxes != null)
             {
-                foreach (var r in boxes)
+                foreach (Rectangle box in boxes)
                 {
-                    float left = (float)r.Left / originalWidth * _imageSize;
-                    float top = (float)r.Top / originalHeight * _imageSize;
-                    float right = (float)r.Right / originalWidth * _imageSize;
-                    float bottom = (float)r.Bottom / originalHeight * _imageSize;
-                    promptValues.Add(left);
-                    promptValues.Add(top);
-                    promptValues.Add(right);
-                    promptValues.Add(bottom);
+                    float left = (float)box.Left / originalWidth * _imageSize;
+                    float top = (float)box.Top / originalHeight * _imageSize;
+                    float right = (float)box.Right / originalWidth * _imageSize;
+                    float bottom = (float)box.Bottom / originalHeight * _imageSize;
+                    coordBuffer.AddRange(new[] { left, top, right, bottom });
                 }
-                Logger.Log($"[CreatePromptTensors] Processed {boxes.Count} box(es).");
             }
 
-            // If no geometry prompts were found, add a dummy coordinate
-            if (promptValues.Count == 0)
-            {
-                promptValues.Add(0f);
-                promptValues.Add(0f);
-                Logger.Log("[CreatePromptTensors] No geometry prompts provided; added default coordinate.");
-            }
-
-            // The sparse tensor must have shape [1,1,256]
-            float[] sparseArray = new float[1 * 1 * 256];
+            // Pad or truncate to 256 elements
+            int numCoords = Math.Min(coordBuffer.Count, 256);
             for (int i = 0; i < 256; i++)
             {
-                sparseArray[i] = (i < promptValues.Count) ? promptValues[i] : 0f;
+                sparseTensor[0, 0, i] = i < numCoords ? coordBuffer[i] : 0f;
             }
-            var sparseTensor = new DenseTensor<float>(sparseArray, new int[] { 1, 1, 256 });
-            Logger.Log("[CreatePromptTensors] Created sparse tensor of shape [1,1,256].");
 
-            // Dense prompt embedding: use zeros with shape [1,256,64,64]
-            int denseElements = 1 * 256 * 64 * 64;
-            float[] denseArray = new float[denseElements];
-            var denseTensor = new DenseTensor<float>(denseArray, new int[] { 1, 256, 64, 64 });
-            Logger.Log("[CreatePromptTensors] Created dense prompt tensor of shape [1,256,64,64].");
-
-            // Dense positional encoding: simple sinusoidal encoding
-            float[] densePeArray = new float[denseElements];
-            int channels = 256, height = 64, width = 64;
-            for (int c = 0; c < channels; c++)
+            // 3. Process brush mask
+            if (brushMask != null)
             {
-                for (int y = 0; y < height; y++)
+                // Convert boolean mask to bitmap
+                Bitmap maskBmp = new Bitmap(originalWidth, originalHeight);
+                using (Graphics g = Graphics.FromImage(maskBmp))
                 {
-                    for (int x = 0; x < width; x++)
+                    g.Clear(Color.Black);
+                    for (int y = 0; y < originalHeight; y++)
                     {
-                        double value = (c % 2 == 0)
-                            ? Math.Sin((double)x / width * Math.PI * 2)
-                            : Math.Cos((double)y / height * Math.PI * 2);
-                        int index = c * (height * width) + y * width + x;
-                        densePeArray[index] = (float)value;
+                        for (int x = 0; x < originalWidth; x++)
+                        {
+                            if (brushMask[x, y])
+                                maskBmp.SetPixel(x, y, Color.White);
+                        }
+                    }
+                }
+
+                // Resize to 64x64 and convert to tensor - fixed using statement
+                Bitmap smallMask = null;
+                try
+                {
+                    smallMask = ResizeImage(maskBmp, 64, 64);
+                    BitmapData maskData = smallMask.LockBits(new Rectangle(0, 0, 64, 64),
+                        ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+
+                    float[] denseArray = new float[64 * 64];
+                    unsafe
+                    {
+                        byte* ptr = (byte*)maskData.Scan0;
+                        for (int i = 0; i < 64 * 64; i++)
+                        {
+                            denseArray[i] = ptr[i * 3] > 128 ? 1f : 0f; // Use red channel
+                        }
+                    }
+                    smallMask.UnlockBits(maskData);
+
+                    // Manual copy to dense tensor (alternative to BlockCopy)
+                    for (int i = 0; i < denseArray.Length; i++)
+                    {
+                        denseTensor[0, 0, i / 64, i % 64] = denseArray[i];
+                    }
+                }
+                finally
+                {
+                    smallMask?.Dispose();
+                }
+            }
+
+            // 4. Generate positional encoding
+            for (int y = 0; y < 64; y++)
+            {
+                for (int x = 0; x < 64; x++)
+                {
+                    float angleX = (float)(x / 64f * 2 * Math.PI);
+                    float angleY = (float)(y / 64f * 2 * Math.PI);
+
+                    for (int c = 0; c < 256; c++)
+                    {
+                        float freq = (float)Math.Pow(10000f, (c % 2 == 0 ? -c : -(c - 1)) / 256f);
+                        float val = c % 2 == 0 ?
+                            (float)Math.Sin(angleX * freq) :
+                            (float)Math.Cos(angleY * freq);
+
+                        densePeTensor[0, c, y, x] = val;
                     }
                 }
             }
-            var densePeTensor = new DenseTensor<float>(densePeArray, new int[] { 1, 256, 64, 64 });
-            Logger.Log("[CreatePromptTensors] Created dense positional encoding tensor of shape [1,256,64,64].");
 
-            Logger.Log("[CreatePromptTensors] Real prompt tensors created successfully.");
             return (sparseTensor, denseTensor, densePeTensor);
         }
 
         // RunMemoryAttention: flatten inputs to expected shapes, then call model.
         private (Tensor<float> flattenedPixFeat, Tensor<float> flattenedMemPosEnc) RunMemoryAttention(
-            Tensor<float> currFeatFlat,
-            Tensor<float> currPosFlat,
-            Tensor<float> memFeatFlat,
-            Tensor<float> memPosFlat,
-            long numObjPtrTokens)
+    Tensor<float> currFeatFlat,
+    Tensor<float> currPosFlat,
+    Tensor<float> memFeatFlat,
+    Tensor<float> memPosFlat,
+    long numObjPtrTokens)
         {
-            Logger.Log("[RunMemoryAttention] Running memory attention.");
-            var inputs = new List<NamedOnnxValue>
+            // 1. Create attention mask
+            int seqLength = currFeatFlat.Dimensions[0];
+            var attentionMask = new DenseTensor<float>(new[] { 1, seqLength, seqLength });
+            for (int i = 0; i < seqLength; i++)
             {
-                NamedOnnxValue.CreateFromTensor("curr", currFeatFlat),
-                NamedOnnxValue.CreateFromTensor("memory", memFeatFlat),
-                NamedOnnxValue.CreateFromTensor("curr_pos", currPosFlat),
-                NamedOnnxValue.CreateFromTensor("memory_pos", memPosFlat),
-                NamedOnnxValue.CreateFromTensor("num_obj_ptr_tokens", new DenseTensor<long>(new long[] { numObjPtrTokens }, new int[] { 1 }))
-            };
-            Tensor<float> outTensor;
-            using (var outputs = _memoryAttentionSession.Run(inputs))
-            {
-                outTensor = outputs.First(x => x.Name == "pix_feat").AsTensor<float>();
+                for (int j = 0; j < seqLength; j++)
+                {
+                    attentionMask[0, i, j] = (i >= j) ? 1f : 0f; // Causal mask
+                }
             }
-            Logger.Log("[RunMemoryAttention] Completed.");
-            return (outTensor, null); // Only "pix_feat" output is used.
+
+            // 2. Prepare inputs
+            var inputs = new List<NamedOnnxValue>
+    {
+        NamedOnnxValue.CreateFromTensor("query", currFeatFlat),
+        NamedOnnxValue.CreateFromTensor("key", memFeatFlat),
+        NamedOnnxValue.CreateFromTensor("value", memFeatFlat),
+        NamedOnnxValue.CreateFromTensor("pos_query", currPosFlat),
+        NamedOnnxValue.CreateFromTensor("pos_key", memPosFlat),
+        NamedOnnxValue.CreateFromTensor("attention_mask", attentionMask),
+        NamedOnnxValue.CreateFromTensor("num_objects",
+            new DenseTensor<long>(new[] { numObjPtrTokens }, new[] { 1 }))
+    };
+            Tensor<float> attnOutput;
+            Tensor<float> posOutput;
+
+            // 3. Run attention
+            using (var outputs = _memoryAttentionSession.Run(inputs))
+            {// 4. Extract and reshape outputs
+                attnOutput = outputs.First().AsTensor<float>();
+                posOutput = outputs.Skip(1).First().AsTensor<float>();
+
+            }
+
+                
+
+
+                return (attnOutput, posOutput);
         }
 
         private Tensor<float> FlattenForAttention(Tensor<float> input)
@@ -514,35 +568,44 @@ namespace CTSegmenter
         }
 
         private Tensor<float> RunMaskDecoder(
-            Tensor<float> imageOrMemoryFeats,
-            (Tensor<float> Sparse, Tensor<float> Dense, Tensor<float> DensePe) promptEmbeds,
-            Tensor<float> fallbackVisionFeatures,
-            Tensor<float> fallbackVisionPosEnc)
+    Tensor<float> imageOrMemoryFeats,
+    (Tensor<float> Sparse, Tensor<float> Dense, Tensor<float> DensePe) promptEmbeds,
+    Tensor<float> fallbackVisionFeatures,
+    Tensor<float> fallbackVisionPosEnc)
         {
-            Logger.Log("[RunMaskDecoder] Running mask decoder.");
-
-            // For demonstration, we create high_res_features from fallbackVisionFeatures & fallbackVisionPosEnc
-            Tensor<float> upPosEnc = UpsampleSpatial(fallbackVisionPosEnc, 4); // 64->256
-            Tensor<float> highResFeatures1 = ReduceChannels(upPosEnc, 8);      // 256 channels down to 32
+            // 1. Prepare high-res features
             Tensor<float> upFeatures = UpsampleSpatial(fallbackVisionFeatures, 2);
-            Tensor<float> highResFeatures2 = ReduceChannels(upFeatures, 4);    // 256 channels down to 64
+            Tensor<float> hrFeatures = ReduceChannels(upFeatures, 4);
 
+            Tensor<float> upPosEnc = UpsampleSpatial(fallbackVisionPosEnc, 4);
+            Tensor<float> hrPosEnc = ReduceChannels(upPosEnc, 8);
+
+            // 2. Prepare inputs
             var inputs = new List<NamedOnnxValue>
-            {
-                NamedOnnxValue.CreateFromTensor("image_embeddings", imageOrMemoryFeats),
-                NamedOnnxValue.CreateFromTensor("sparse_prompt_embeddings", promptEmbeds.Sparse),
-                NamedOnnxValue.CreateFromTensor("dense_prompt_embeddings", promptEmbeds.Dense),
-                NamedOnnxValue.CreateFromTensor("image_pe", promptEmbeds.DensePe),
-                NamedOnnxValue.CreateFromTensor("high_res_features1", highResFeatures1),
-                NamedOnnxValue.CreateFromTensor("high_res_features2", highResFeatures2)
-            };
-            Tensor<float> outputTensor;
+    {
+        NamedOnnxValue.CreateFromTensor("image_embeddings", imageOrMemoryFeats),
+        NamedOnnxValue.CreateFromTensor("sparse_embeddings", promptEmbeds.Sparse),
+        NamedOnnxValue.CreateFromTensor("dense_embeddings", promptEmbeds.Dense),
+        NamedOnnxValue.CreateFromTensor("image_pe", promptEmbeds.DensePe),
+        NamedOnnxValue.CreateFromTensor("hr_features1", hrFeatures),
+        NamedOnnxValue.CreateFromTensor("hr_features2", hrPosEnc)
+    };
+
+            // 3. Run decoder - fixed using statement
+            Tensor<float> maskLogits;
             using (var outputs = _maskDecoderSession.Run(inputs))
             {
-                outputTensor = outputs.First(x => x.Name == "masks").AsTensor<float>();
+                maskLogits = outputs.First().AsTensor<float>();
             }
-            Logger.Log($"[RunMaskDecoder] Completed. Output shape: {string.Join("x", outputTensor.Dimensions.ToArray())}");
-            return outputTensor;
+
+            // 4. Apply sigmoid activation
+            float[] maskData = maskLogits.ToArray();
+            for (int i = 0; i < maskData.Length; i++)
+            {
+                maskData[i] = 1.0f / (1.0f + (float)Math.Exp(-maskData[i]));
+            }
+
+            return new DenseTensor<float>(maskData, maskLogits.Dimensions);
         }
 
         private Bitmap RunMlpOnMask(Bitmap maskBmp)
@@ -648,34 +711,58 @@ namespace CTSegmenter
 
         private float[] ImageToFloatArray(Bitmap original)
         {
-            // Force a resize to _imageSize x _imageSize
-            Bitmap resized = ResizeImage(original, _imageSize, _imageSize);
-            int w = resized.Width;
-            int h = resized.Height;
-            float[] result = new float[3 * w * h];
+            const int TARGET_SIZE = 1024;
+            Bitmap resized = new Bitmap(TARGET_SIZE, TARGET_SIZE);
+            using (Graphics g = Graphics.FromImage(resized))
+            {
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.DrawImage(original, 0, 0, TARGET_SIZE, TARGET_SIZE);
+            }
 
-            BitmapData data = resized.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            float[] result = new float[1 * TARGET_SIZE * TARGET_SIZE]; // Single channel
+
+            // CT-specific parameters for rock samples
+            const float HU_MIN = -1000f;  // Air
+            const float HU_MAX = 3071f;    // Dense mineral
+            const float ROCK_WINDOW_CENTER = 500f;
+            const float ROCK_WINDOW_WIDTH = 2000f;
+
+            BitmapData data = resized.LockBits(new Rectangle(0, 0, TARGET_SIZE, TARGET_SIZE),
+                ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+
             unsafe
             {
                 byte* ptr = (byte*)data.Scan0;
                 int stride = data.Stride;
-                for (int y = 0; y < h; y++)
+
+                for (int y = 0; y < TARGET_SIZE; y++)
                 {
                     byte* row = ptr + y * stride;
-                    for (int x = 0; x < w; x++)
+                    for (int x = 0; x < TARGET_SIZE; x++)
                     {
-                        int idx = y * w + x;
-                        result[idx] = row[x * 3 + 2] / 255f;           // R
-                        result[w * h + idx] = row[x * 3 + 1] / 255f;   // G
-                        result[2 * w * h + idx] = row[x * 3] / 255f;   // B
+                        // Decode 16-bit CT value from ARGB channels
+                        short ctValue = (short)((row[x * 4 + 3] << 8) | row[x * 4 + 2]);
+
+                        // Apply rock-focused windowing
+                        float windowMin = ROCK_WINDOW_CENTER - ROCK_WINDOW_WIDTH / 2;
+                        float windowMax = ROCK_WINDOW_CENTER + ROCK_WINDOW_WIDTH / 2;
+                        float clamped = Clamp(ctValue, windowMin, windowMax);
+
+                        // Normalize to [0,1] range
+                        float normalized = (clamped - HU_MIN) / (HU_MAX - HU_MIN);
+                        result[y * TARGET_SIZE + x] = Clamp(normalized, 0f, 1f);
                     }
                 }
             }
+
             resized.UnlockBits(data);
             resized.Dispose();
             return result;
         }
-
+        private static float Clamp(float value, float min, float max)
+        {
+            return Math.Max(min, Math.Min(value, max));
+        }
         private Bitmap ResizeImage(Bitmap image, int width, int height)
         {
             Bitmap dest = new Bitmap(width, height);
@@ -809,35 +896,68 @@ namespace CTSegmenter
         // ---------------------------------------------------------------------
         // POST-PROCESSING: Threshold + Hole Filling + (optional) Morph Closing
         // ---------------------------------------------------------------------
-        private Bitmap PostProcessMask(
-            Bitmap mask,
-            float threshold = 0.5f,
-            bool fillHoles = true,
-            bool doMorphologicalClose = true
-        )
+        private Bitmap PostProcessMask(Bitmap mask, int sliceIndex,
+    float threshold = float.NaN, bool fillHoles = true, bool doMorphologicalClose = true)
         {
-            if (mask == null) return null;
+            // 1. Calculate adaptive threshold
+            if (float.IsNaN(threshold))
+            {
+                float[] histogram = new float[256];
+                BitmapData data = mask.LockBits(new Rectangle(0, 0, mask.Width, mask.Height),
+                    ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
 
-            // 1) Threshold the grayscale mask into binary
+                unsafe
+                {
+                    byte* ptr = (byte*)data.Scan0;
+                    for (int i = 0; i < mask.Width * mask.Height; i++)
+                    {
+                        histogram[ptr[i * 3]]++;
+                    }
+                }
+                mask.UnlockBits(data);
+
+                float sum = histogram.Sum();
+                float sumB = 0, wB = 0, maxVar = 0;
+                threshold = 0f;
+
+                for (int t = 0; t < 256; t++)
+                {
+                    wB += histogram[t] / sum;
+                    float wF = 1 - wB;
+                    if (wB == 0 || wF == 0) continue;
+
+                    sumB += t * (histogram[t] / sum);
+                    float mB = sumB / wB;
+                    float mF = (sum - sumB) / wF;
+                    float var = wB * wF * (mB - mF) * (mB - mF);
+
+                    if (var > maxVar)
+                    {
+                        maxVar = var;
+                        threshold = t / 255f;
+                    }
+                }
+            }
+
+            // 2. Apply threshold
             Bitmap bin = ThresholdMask(mask, threshold);
 
-            // 2) Fill holes if requested
+            // 3. 3D hole filling
             if (fillHoles)
             {
-                Bitmap filled = FillHoles(bin);
-                bin.Dispose();
-                bin = filled;
+                Bitmap adjacentMask = null;
+                if (_sliceMem.TryGetValue(sliceIndex - 1, out var prevMem))
+                    adjacentMask = prevMem.Mask;
+
+                bin = FillHoles3D(bin, adjacentMask);
             }
 
-            // 3) Optional morphological closing (helps smooth edges and fill narrow gaps)
+            // 4. Geological morphology
             if (doMorphologicalClose)
             {
-                Bitmap closed = MorphologicalClose(bin);
-                bin.Dispose();
-                bin = closed;
+                bin = MorphologicalClose3x3(bin, iterations: 2);
             }
 
-            // Return the final cleaned mask
             return bin;
         }
 
@@ -860,7 +980,99 @@ namespace CTSegmenter
             }
             return dest;
         }
+        private Bitmap FillHoles3D(Bitmap current, Bitmap previous)
+        {
+            Bitmap result = new Bitmap(current.Width, current.Height);
 
+            for (int y = 0; y < current.Height; y++)
+            {
+                for (int x = 0; x < current.Width; x++)
+                {
+                    bool currentVal = current.GetPixel(x, y).R > 128;
+                    bool prevVal = (previous?.GetPixel(x, y).R ?? 0) > 128;
+
+                    if (!currentVal && prevVal)
+                    {
+                        // Fill hole if present in previous slice
+                        result.SetPixel(x, y, Color.White);
+                    }
+                    else
+                    {
+                        result.SetPixel(x, y, current.GetPixel(x, y));
+                    }
+                }
+            }
+
+            return result;
+        }
+        private Bitmap MorphologicalClose3x3(Bitmap input, int iterations)
+        {
+            Bitmap result = (Bitmap)input.Clone();
+            for (int i = 0; i < iterations; i++)
+            {
+                result = Dilate3x3(result);
+                result = Erode3x3(result);
+            }
+            return result;
+        }
+        private Bitmap Dilate3x3(Bitmap input)
+        {
+            Bitmap output = new Bitmap(input.Width, input.Height);
+            for (int y = 0; y < input.Height; y++)
+            {
+                for (int x = 0; x < input.Width; x++)
+                {
+                    bool max = false;
+                    for (int dy = -1; dy <= 1; dy++)
+                    {
+                        for (int dx = -1; dx <= 1; dx++)
+                        {
+                            int nx = Clamp(x + dx, 0, input.Width - 1);
+                            int ny = Clamp(y + dy, 0, input.Height - 1);
+                            if (input.GetPixel(nx, ny).R > 128)
+                            {
+                                max = true;
+                                break;
+                            }
+                        }
+                        if (max) break;
+                    }
+                    output.SetPixel(x, y, max ? Color.White : Color.Black);
+                }
+            }
+            return output;
+        }
+        private Bitmap Erode3x3(Bitmap input)
+        {
+            Bitmap output = new Bitmap(input.Width, input.Height);
+            for (int y = 0; y < input.Height; y++)
+            {
+                for (int x = 0; x < input.Width; x++)
+                {
+                    bool min = true;
+                    for (int dy = -1; dy <= 1; dy++)
+                    {
+                        for (int dx = -1; dx <= 1; dx++)
+                        {
+                            int nx = Clamp(x + dx, 0, input.Width - 1);
+                            int ny =Clamp(y + dy, 0, input.Height - 1);
+                            if (input.GetPixel(nx, ny).R <= 128)
+                            {
+                                min = false;
+                                break;
+                            }
+                        }
+                        if (!min) break;
+                    }
+                    output.SetPixel(x, y, min ? Color.White : Color.Black);
+                }
+            }
+            return output;
+        }
+        private static int Clamp(int value, int min, int max)
+        {
+            return Math.Max(min, Math.Min(value, max));
+        }
         private Bitmap FillHoles(Bitmap binMask)
         {
             // Flood-fill from edges to find "background" => everything else that is 0 inside is a hole.

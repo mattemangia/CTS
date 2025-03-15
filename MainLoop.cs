@@ -9,7 +9,6 @@ using System.IO.MemoryMappedFiles;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using System.Drawing.Imaging;
 using static CTSegmenter.SAMForm;
 using System.Threading;
 using System.Runtime.InteropServices;

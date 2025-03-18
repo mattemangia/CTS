@@ -2,6 +2,7 @@
 using System.IO;
 using System.Threading;
 using System.Windows.Forms;
+using Microsoft.Extensions.Logging;
 
 namespace CTSegmenter
 {
@@ -44,6 +45,47 @@ namespace CTSegmenter
             }
         }
 
+        public static void Log(string message, int severity)
+        {
+            // Map severity to your log levels
+            LogLevel level = LogLevel.Information;
+
+            switch (severity)
+            {
+                case 0: level = LogLevel.Information; break;
+                case 1: level = LogLevel.Warning; break;
+                case 2: level = LogLevel.Error; break;
+                default: level = LogLevel.Debug; break;
+            }
+
+            Log(message, level);
+        }
+        public static void Log(string message, LogLevel level)
+        {
+            try
+            {
+                string logMessage = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} - {message}{Environment.NewLine}";
+
+                // File logging
+                lock (LockObj)
+                {
+                    File.AppendAllText(LogFilePath, logMessage);
+                }
+
+                // UI logging, if available
+                if (LogWindowInstance != null && LogWindowInstance.IsHandleCreated)
+                {
+                    LogWindowInstance.BeginInvoke(new Action(() =>
+                    {
+                        LogWindowInstance.AppendLog(logMessage);
+                    }));
+                }
+            }
+            catch (Exception ex)
+            {
+                // Swallow logging errors.
+            }
+        }
         public static void Log(string message)
         {
             try

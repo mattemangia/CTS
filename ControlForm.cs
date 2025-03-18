@@ -155,7 +155,20 @@ namespace CTSegmenter
                 exportImagesMenuItem, closeDatasetMenuItem, exitMenuItem
             });
             menuStrip.Items.Add(fileMenu);
+            ToolStripMenuItem view3DMenuItem = new ToolStripMenuItem("3D Volume View");
+            view3DMenuItem.Click += (s, e) =>
+            {
+                if (mainForm.volumeData == null && mainForm.volumeLabels == null)
+                {
+                    MessageBox.Show("No volume data loaded. Please load a dataset first.",
+                                   "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
 
+                // Create and show the 3D viewer form
+                CTViewer3DForm viewer3DForm = new CTViewer3DForm(mainForm);
+                viewer3DForm.Show();
+            };
             editMenu = new ToolStripMenuItem("Edit");
             addMaterialMenuItem = new ToolStripMenuItem("Add Material");
             addMaterialMenuItem.Click += (s, e) => OnAddMaterial();
@@ -240,10 +253,10 @@ namespace CTSegmenter
             resetZoomMenuItem.Click += (s, e) => mainForm.ResetView();
 
             viewMenu.DropDownItems.AddRange(new ToolStripItem[]
-            {
-                showMaskMenuItem, enableThresholdMaskMenuItem, showHistogramMenuItem,
-                //showOrthoviewsMenuItem, resetZoomMenuItem
-            });
+{
+    showMaskMenuItem, enableThresholdMaskMenuItem, showHistogramMenuItem,
+    view3DMenuItem, resetZoomMenuItem
+});
             //ToolStripSeparator toolsSeparator = new ToolStripSeparator();
             //toolsMenu.DropDownItems.Add(toolsSeparator);
             menuStrip.Items.Add(viewMenu);

@@ -154,9 +154,6 @@
       <DependentUpon>MainLoop - Copy.txt</DependentUpon>
     </Compile>
     <Compile Include="MainLoop.cs" />
-    <Compile Include="MainLoop.Designer.cs">
-      <DependentUpon>MainLoop.cs</DependentUpon>
-    </Compile>
     <Compile Include="Logger.cs" />
     <Compile Include="LogWindow.cs">
       <SubType>Form</SubType>
@@ -189,6 +186,7 @@
     </Compile>
     <Compile Include="CTMemorySegmenter.cs" />
     <Compile Include="SAMSettings.cs" />
+    <Compile Include="SegmentationPropagator.cs" />
     <Compile Include="VolumeExtensions.cs" />
   </ItemGroup>
   <ItemGroup>

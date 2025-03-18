@@ -810,5 +810,76 @@ namespace CTSegmenter
         {
             return thresholdingTrackbar.Value;
         }
+
+        private void toolStripButton2_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                Logger.Log("[SAMForm] Starting 3D segmentation propagation");
+
+                // Check if any direction is selected
+                if (SelectedDirection == SegmentationDirection.None)
+                {
+                    MessageBox.Show("Please select at least one direction (XY, XZ, or YZ) for propagation.",
+                                   "No Direction Selected", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                // Call the static propagator class to perform the segmentation
+                byte[,,] result = SegmentationPropagator.Propagate(
+                    mainForm,
+                    CurrentSettings,
+                    thresholdingTrackbar.Value,
+                    SelectedDirection);
+
+                if (result != null)
+                {
+                    // Copy results to ChunkedLabelVolume instead of direct assignment
+                    CopyResultsToVolumeLabels(result);
+
+                    // Update display after propagation
+                    mainForm.ClearSliceCache();
+                    mainForm.RenderViews();
+                    _ = mainForm.RenderOrthoViewsAsync();
+
+                    Logger.Log("[SAMForm] 3D propagation completed successfully");
+                    MessageBox.Show("3D propagation completed successfully", "Propagation", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                else
+                {
+                    MessageBox.Show("No segmentation could be propagated. Please ensure at least one slice is segmented.",
+                                   "Propagation Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SAMForm] Error during 3D propagation: " + ex.Message);
+                Logger.Log("[SAMForm] Stack trace: " + ex.StackTrace);
+                MessageBox.Show($"Error during 3D propagation: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+        // Helper method to copy results from a byte[,,] array to the ChunkedLabelVolume structure
+        private void CopyResultsToVolumeLabels(byte[,,] results)
+        {
+            int width = mainForm.GetWidth();
+            int height = mainForm.GetHeight();
+            int depth = mainForm.GetDepth();
+
+            Logger.Log("[SAMForm] Copying propagation results to ChunkedLabelVolume...");
+
+            // Copy the results to the ChunkedLabelVolume structure
+            for (int z = 0; z < depth; z++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        mainForm.volumeLabels[x, y, z] = results[x, y, z];
+                    }
+                }
+            }
+
+            Logger.Log("[SAMForm] Results successfully transferred to volume labels");
+        }
     }
 }

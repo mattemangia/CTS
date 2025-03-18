@@ -41,7 +41,8 @@ namespace CTSegmenter
         private NumericUpDown numThresholdMin, numThresholdMax;
         private Button btnAddSelection;
         private Button btnSubSelection;
-        private Button btnSegmentAnything;
+        //private Button btnSegmentAnything;
+        private SAMForm currentSamForm = null; // Track the currently open SAM form
         private Button btnRefresh;
         private Label lblSlice;
         private TrackBar sliceSlider;
@@ -243,6 +244,8 @@ namespace CTSegmenter
                 showMaskMenuItem, enableThresholdMaskMenuItem, showHistogramMenuItem,
                 //showOrthoviewsMenuItem, resetZoomMenuItem
             });
+            //ToolStripSeparator toolsSeparator = new ToolStripSeparator();
+            //toolsMenu.DropDownItems.Add(toolsSeparator);
             menuStrip.Items.Add(viewMenu);
 
             helpMenu = new ToolStripMenuItem("Help");
@@ -254,6 +257,8 @@ namespace CTSegmenter
             eraserMenuItem = new ToolStripMenuItem("Eraser") { CheckOnClick = true };
             brushMenuItem = new ToolStripMenuItem("Brush") { CheckOnClick = true };
             thresholdingMenuItem = new ToolStripMenuItem("Thresholding") { CheckOnClick = true };
+            // Create and add the Segment Anything menu item
+            
             // Attach a common click handler.
             panMenuItem.Click += ToolsMenuItem_Click;
             eraserMenuItem.Click += ToolsMenuItem_Click;
@@ -263,6 +268,47 @@ namespace CTSegmenter
             {
                 panMenuItem, eraserMenuItem, brushMenuItem, thresholdingMenuItem
             });
+            ToolStripSeparator toolsSeparator = new ToolStripSeparator();
+            toolsMenu.DropDownItems.Add(toolsSeparator);
+            ToolStripMenuItem segmentAnythingToolMenuItem = new ToolStripMenuItem("Segment Anything");
+            segmentAnythingToolMenuItem.Click += (s, e) =>
+            {
+                // Check if a SAM window is already open
+                if (currentSamForm != null && !currentSamForm.IsDisposed)
+                {
+                    // If it exists, just activate the existing window
+                    currentSamForm.Activate();
+                    return;
+                }
+
+                // Otherwise, create a new SAM form
+                mainForm.SetSegmentationTool(SegmentationTool.Point);
+                Logger.Log("[ControlForm] Opening Segment Anything - ONNX Processor");
+
+                // Create new form and store reference
+                SAMForm samForm = new SAMForm(mainForm, sharedAnnotationManager, mainForm.Materials);
+                mainForm.SamFormInstance = samForm;
+                currentSamForm = samForm;
+
+                // Disable tool menu items
+                panMenuItem.Enabled = false;
+                eraserMenuItem.Enabled = false;
+                brushMenuItem.Enabled = false;
+                thresholdingMenuItem.Enabled = false;
+
+                // When SAM closes, re-enable buttons and clear the reference
+                samForm.Disposed += (sender, args) =>
+                {
+                    panMenuItem.Enabled = true;
+                    eraserMenuItem.Enabled = true;
+                    brushMenuItem.Enabled = true;
+                    thresholdingMenuItem.Enabled = true;
+                    currentSamForm = null; // Clear reference when form is disposed
+                };
+
+                samForm.Show();
+            };
+            toolsMenu.DropDownItems.Add(segmentAnythingToolMenuItem);
             dbgConsole.Click += (s, e) =>
             {
                 if (Logger.LogWindowInstance == null || Logger.LogWindowInstance.IsDisposed)
@@ -520,7 +566,7 @@ namespace CTSegmenter
             btnRefresh.Click += (s, e) => mainForm.RenderViews();
             leftPanel.Controls.Add(btnRefresh);
 
-            btnSegmentAnything = new Button { Text = "Segment Anything", Width = 120 };
+           /* btnSegmentAnything = new Button { Text = "Segment Anything", Width = 120 };
             btnSegmentAnything.Click += (s, e) =>
             {
                 mainForm.SetSegmentationTool(SegmentationTool.Point);
@@ -541,7 +587,7 @@ namespace CTSegmenter
                 };
                 samForm.Show();
             };
-            leftPanel.Controls.Add(btnSegmentAnything);
+            leftPanel.Controls.Add(btnSegmentAnything);*/
             leftPanel.Controls.Add(btnInterpolate);
             table.Controls.Add(leftPanel, 0, 0);
 

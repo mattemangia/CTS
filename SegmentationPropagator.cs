@@ -258,9 +258,16 @@ namespace CTSegmenter
 
         // Propagate material segmentation in XY direction forward (increasing z)
         private static void PropagateXYForward(CTMemorySegmenter segmenter, MainForm mainForm,
-                                             int width, int height, int depth,
-                                             int startZ, Material material, byte[,,] volumeLabels, int threshold)
+                                     int width, int height, int depth,
+                                     int startZ, Material material, byte[,,] volumeLabels, int threshold)
         {
+            // Safety check - don't try to propagate from the last slice
+            if (startZ >= depth - 1)
+            {
+                Logger.Log($"[SegmentationPropagator] Cannot propagate forward from Z={startZ} (last slice)");
+                return;
+            }
+
             Logger.Log($"[SegmentationPropagator] Propagating material '{material.Name}' forward from Z={startZ}");
 
             // Keep track of the previous slice's points for consistency
@@ -268,12 +275,6 @@ namespace CTSegmenter
 
             for (int z = startZ + 1; z < depth; z++)
             {
-                // Safety check - don't try to propagate from the last slice
-                if (startZ >= depth - 1)
-                {
-                    Logger.Log($"[SegmentationPropagator] Cannot propagate forward from Z={startZ} (last slice)");
-                    return;
-                }
                 Logger.Log($"[SegmentationPropagator] Processing forward slice Z={z}");
 
                 // Generate base image for current slice
@@ -285,7 +286,7 @@ namespace CTSegmenter
                     if (prevPoints == null)
                     {
                         // First slice after start - sample points from the segmented slice
-                        points = SamplePointsFromVolume(width, height, z - 1, volumeLabels, material.ID);
+                        points = SamplePointsFromVolume(mainForm, width, height, z - 1, volumeLabels, material.ID);
                     }
                     else
                     {
@@ -295,7 +296,7 @@ namespace CTSegmenter
                             X = p.X,
                             Y = p.Y,
                             Z = z,
-                            Label = p.Label
+                            Label = p.Label  // Preserve the original material label
                         }).ToList();
                     }
 
@@ -305,8 +306,11 @@ namespace CTSegmenter
                         break;
                     }
 
+                    // Convert material-labeled points to the SAM-expected format (Foreground/Exterior)
+                    List<AnnotationPoint> samPoints = BuildMixedPrompts(points, material.Name);
+
                     // Process the slice using SAM2
-                    using (Bitmap mask = segmenter.ProcessXYSlice(z, baseImage, points, null, null))
+                    using (Bitmap mask = segmenter.ProcessXYSlice(z, baseImage, samPoints, null, null))
                     {
                         // Apply the mask to the volume
                         int pixelsSegmented = ApplyMaskToVolume(mask, width, height, z, material.ID, volumeLabels, threshold);
@@ -319,8 +323,8 @@ namespace CTSegmenter
                             break;
                         }
 
-                        // Update points for next iteration based on this slice's segmentation
-                        prevPoints = SamplePointsFromNewSegmentation(mask, z, material.ID, threshold);
+                        // Update points for next iteration
+                        prevPoints = SamplePointsFromNewSegmentation(mainForm, mask, z, material.ID, threshold);
                     }
                 }
             }
@@ -328,14 +332,16 @@ namespace CTSegmenter
 
         // Propagate material segmentation in XY direction backward (decreasing z)
         private static void PropagateXYBackward(CTMemorySegmenter segmenter, MainForm mainForm,
-                                              int width, int height, int depth,
-                                              int startZ, Material material, byte[,,] volumeLabels, int threshold)
+                                      int width, int height, int depth,
+                                      int startZ, Material material, byte[,,] volumeLabels, int threshold)
         {
+            // Safety check - don't try to propagate from the first slice
             if (startZ <= 0)
             {
                 Logger.Log($"[SegmentationPropagator] Cannot propagate backward from Z={startZ} (first slice)");
                 return;
             }
+
             Logger.Log($"[SegmentationPropagator] Propagating material '{material.Name}' backward from Z={startZ}");
 
             // Keep track of the previous slice's points for consistency
@@ -354,7 +360,7 @@ namespace CTSegmenter
                     if (prevPoints == null)
                     {
                         // First slice before start - sample points from the segmented slice
-                        points = SamplePointsFromVolume(width, height, z + 1, volumeLabels, material.ID);
+                        points = SamplePointsFromVolume(mainForm, width, height, z + 1, volumeLabels, material.ID);
                     }
                     else
                     {
@@ -374,8 +380,11 @@ namespace CTSegmenter
                         break;
                     }
 
+                    // Convert material points to SAM-expected format
+                    List<AnnotationPoint> samPoints = BuildMixedPrompts(points, material.Name);
+
                     // Process the slice using SAM2
-                    using (Bitmap mask = segmenter.ProcessXYSlice(z, baseImage, points, null, null))
+                    using (Bitmap mask = segmenter.ProcessXYSlice(z, baseImage, samPoints, null, null))
                     {
                         // Apply the mask to the volume
                         int pixelsSegmented = ApplyMaskToVolume(mask, width, height, z, material.ID, volumeLabels, threshold);
@@ -389,7 +398,7 @@ namespace CTSegmenter
                         }
 
                         // Update points for next iteration based on this slice's segmentation
-                        prevPoints = SamplePointsFromNewSegmentation(mask, z, material.ID, threshold);
+                        prevPoints = SamplePointsFromNewSegmentation(mainForm, mask, z, material.ID, threshold);
                     }
                 }
             }
@@ -400,7 +409,7 @@ namespace CTSegmenter
         #region XZ Direction Propagation
 
         private static byte[,,] PropagateXZDirection(CTMemorySegmenter segmenter, MainForm mainForm,
-                                             int width, int height, int depth, int threshold)
+                                           int width, int height, int depth, int threshold)
         {
             // Find a segmented slice in XZ direction
             int startY = FindSegmentedXZSlice(mainForm, width, height, depth);
@@ -437,7 +446,7 @@ namespace CTSegmenter
 
             Logger.Log($"[SegmentationPropagator] Found {materials.Count} materials in XZ slice: {string.Join(", ", materials.Select(m => m.Name))}");
 
-            // For each material, propagate forward and/or backward as needed
+            // For each material, propagate forward and backward
             foreach (var material in materials)
             {
                 Logger.Log($"[SegmentationPropagator] Propagating material '{material.Name}' (ID: {material.ID})");
@@ -520,8 +529,8 @@ namespace CTSegmenter
         }
 
         private static void PropagateXZForward(CTMemorySegmenter segmenter, MainForm mainForm,
-                                             int width, int height, int depth,
-                                             int startY, Material material, byte[,,] volumeLabels, int threshold)
+                                     int width, int height, int depth,
+                                     int startY, Material material, byte[,,] volumeLabels, int threshold)
         {
             // Safety check - don't try to propagate from the last slice
             if (startY >= height - 1)
@@ -529,6 +538,7 @@ namespace CTSegmenter
                 Logger.Log($"[SegmentationPropagator] Cannot propagate forward from Y={startY} (last slice)");
                 return;
             }
+
             Logger.Log($"[SegmentationPropagator] Propagating material '{material.Name}' forward from Y={startY}");
 
             // Keep track of the previous slice's points for consistency
@@ -547,7 +557,7 @@ namespace CTSegmenter
                     if (prevPoints == null)
                     {
                         // First slice after start - sample points from the XZ slice
-                        points = SamplePointsFromXZSlice(width, depth, y - 1, volumeLabels, material.ID);
+                        points = SamplePointsFromXZSlice(mainForm, width, depth, y - 1, volumeLabels, material.ID);
                     }
                     else
                     {
@@ -567,8 +577,11 @@ namespace CTSegmenter
                         break;
                     }
 
+                    // Convert material points to SAM-expected format
+                    List<AnnotationPoint> samPoints = BuildMixedPrompts(points, material.Name);
+
                     // Process the slice using SAM2
-                    using (Bitmap mask = segmenter.ProcessXZSlice(y, baseImage, points, null, null))
+                    using (Bitmap mask = segmenter.ProcessXZSlice(y, baseImage, samPoints, null, null))
                     {
                         // Apply the mask to the volume
                         int pixelsSegmented = ApplyMaskToXZVolume(mask, width, depth, y, material.ID, volumeLabels, threshold);
@@ -582,15 +595,15 @@ namespace CTSegmenter
                         }
 
                         // Update points for next iteration based on this slice's segmentation
-                        prevPoints = SamplePointsFromXZSegmentation(mask, y, material.ID, threshold);
+                        prevPoints = SamplePointsFromXZSegmentation(mainForm, mask, y, material.ID, threshold);
                     }
                 }
             }
         }
 
         private static void PropagateXZBackward(CTMemorySegmenter segmenter, MainForm mainForm,
-                                              int width, int height, int depth,
-                                              int startY, Material material, byte[,,] volumeLabels, int threshold)
+                                      int width, int height, int depth,
+                                      int startY, Material material, byte[,,] volumeLabels, int threshold)
         {
             // Safety check - don't try to propagate from the first slice
             if (startY <= 0)
@@ -598,6 +611,7 @@ namespace CTSegmenter
                 Logger.Log($"[SegmentationPropagator] Cannot propagate backward from Y={startY} (first slice)");
                 return;
             }
+
             Logger.Log($"[SegmentationPropagator] Propagating material '{material.Name}' backward from Y={startY}");
 
             // Keep track of the previous slice's points for consistency
@@ -616,7 +630,7 @@ namespace CTSegmenter
                     if (prevPoints == null)
                     {
                         // First slice before start - sample points from the XZ slice
-                        points = SamplePointsFromXZSlice(width, depth, y + 1, volumeLabels, material.ID);
+                        points = SamplePointsFromXZSlice(mainForm, width, depth, y + 1, volumeLabels, material.ID);
                     }
                     else
                     {
@@ -636,8 +650,11 @@ namespace CTSegmenter
                         break;
                     }
 
+                    // Convert material points to SAM-expected format
+                    List<AnnotationPoint> samPoints = BuildMixedPrompts(points, material.Name);
+
                     // Process the slice using SAM2
-                    using (Bitmap mask = segmenter.ProcessXZSlice(y, baseImage, points, null, null))
+                    using (Bitmap mask = segmenter.ProcessXZSlice(y, baseImage, samPoints, null, null))
                     {
                         // Apply the mask to the volume
                         int pixelsSegmented = ApplyMaskToXZVolume(mask, width, depth, y, material.ID, volumeLabels, threshold);
@@ -651,19 +668,32 @@ namespace CTSegmenter
                         }
 
                         // Update points for next iteration based on this slice's segmentation
-                        prevPoints = SamplePointsFromXZSegmentation(mask, y, material.ID, threshold);
+                        prevPoints = SamplePointsFromXZSegmentation(mainForm, mask, y, material.ID, threshold);
                     }
                 }
             }
         }
 
         // Sample points from a volume slice in XZ plane
-        private static List<AnnotationPoint> SamplePointsFromXZSlice(int width, int depth, int sliceY,
-                                                                   byte[,,] volumeLabels, byte materialId)
+        private static List<AnnotationPoint> SamplePointsFromXZSlice(
+    MainForm mainForm,
+    int width, int depth, int sliceY,
+    byte[,,] volumeLabels, byte materialId)
         {
             List<AnnotationPoint> points = new List<AnnotationPoint>();
             List<Point> foregroundPoints = new List<Point>();
             List<Point> backgroundPoints = new List<Point>();
+
+            // Find the target material name from its ID
+            Material targetMaterial = mainForm.Materials.FirstOrDefault(m => m.ID == materialId);
+            if (targetMaterial == null)
+            {
+                Logger.Log($"[SamplePointsFromXZSlice] Error: Material with ID {materialId} not found");
+                return points;
+            }
+
+            string targetMaterialName = targetMaterial.Name;
+            Logger.Log($"[SamplePointsFromXZSlice] Sampling for material '{targetMaterialName}' (ID: {materialId})");
 
             // Sample points from the XZ slice
             for (int z = 0; z < depth; z += 10)  // Sample every 10 pixels
@@ -694,7 +724,7 @@ namespace CTSegmenter
                         X = p.X,     // X stays X
                         Y = sliceY,  // Y is fixed for this XZ slice
                         Z = p.Y,     // In our Point, Y holds the Z value
-                        Label = "Foreground"
+                        Label = targetMaterialName
                     });
                 }
             }
@@ -703,12 +733,17 @@ namespace CTSegmenter
             {
                 foreach (var p in backgroundPoints.OrderBy(x => random.Next()).Take(Math.Min(maxPointsPerClass, backgroundPoints.Count)))
                 {
+                    // Look up the material name for this background point
+                    byte backgroundId = volumeLabels[p.X, sliceY, p.Y];
+                    Material backgroundMaterial = mainForm.Materials.FirstOrDefault(m => m.ID == backgroundId);
+                    string backgroundName = backgroundMaterial?.Name ?? "Exterior";
+
                     points.Add(new AnnotationPoint
                     {
                         X = p.X,
                         Y = sliceY,
                         Z = p.Y,     // In our Point, Y holds the Z value
-                        Label = "Exterior"
+                        Label = backgroundName
                     });
                 }
             }
@@ -716,12 +751,25 @@ namespace CTSegmenter
             return points;
         }
 
+
         // Sample points from a newly segmented XZ mask
-        private static List<AnnotationPoint> SamplePointsFromXZSegmentation(Bitmap mask, int sliceY, byte materialId, int threshold)
+        private static List<AnnotationPoint> SamplePointsFromXZSegmentation(
+    MainForm mainForm,
+    Bitmap mask, int sliceY, byte materialId, int threshold)
         {
             List<AnnotationPoint> points = new List<AnnotationPoint>();
             List<Point> foregroundPoints = new List<Point>();
             List<Point> backgroundPoints = new List<Point>();
+
+            // Find the target material name from its ID
+            Material targetMaterial = mainForm.Materials.FirstOrDefault(m => m.ID == materialId);
+            if (targetMaterial == null)
+            {
+                Logger.Log($"[SamplePointsFromXZSegmentation] Error: Material with ID {materialId} not found");
+                return points;
+            }
+
+            string targetMaterialName = targetMaterial.Name;
 
             // Sample from the mask
             for (int z = 0; z < mask.Height; z += 10)
@@ -752,7 +800,7 @@ namespace CTSegmenter
                         X = p.X,
                         Y = sliceY,
                         Z = p.Y,     // In our Point, Y holds the Z value
-                        Label = "Foreground"
+                        Label = targetMaterialName
                     });
                 }
             }
@@ -773,7 +821,6 @@ namespace CTSegmenter
 
             return points;
         }
-
         // Apply an XZ mask to the volume
         private static int ApplyMaskToXZVolume(Bitmap mask, int width, int depth, int sliceY,
                                             byte materialId, byte[,,] volumeLabels, int threshold)
@@ -803,7 +850,7 @@ namespace CTSegmenter
         #region YZ Direction Propagation
 
         private static byte[,,] PropagateYZDirection(CTMemorySegmenter segmenter, MainForm mainForm,
-                                              int width, int height, int depth, int threshold)
+                                           int width, int height, int depth, int threshold)
         {
             // Find a segmented slice in YZ direction
             int startX = FindSegmentedYZSlice(mainForm, width, height, depth);
@@ -840,7 +887,7 @@ namespace CTSegmenter
 
             Logger.Log($"[SegmentationPropagator] Found {materials.Count} materials in YZ slice: {string.Join(", ", materials.Select(m => m.Name))}");
 
-            // For each material, propagate forward and/or backward as needed
+            // For each material, propagate forward and backward
             foreach (var material in materials)
             {
                 Logger.Log($"[SegmentationPropagator] Propagating material '{material.Name}' (ID: {material.ID})");
@@ -922,8 +969,8 @@ namespace CTSegmenter
         }
 
         private static void PropagateYZForward(CTMemorySegmenter segmenter, MainForm mainForm,
-                                             int width, int height, int depth,
-                                             int startX, Material material, byte[,,] volumeLabels, int threshold)
+                                     int width, int height, int depth,
+                                     int startX, Material material, byte[,,] volumeLabels, int threshold)
         {
             // Safety check - don't try to propagate from the last slice
             if (startX >= width - 1)
@@ -931,6 +978,7 @@ namespace CTSegmenter
                 Logger.Log($"[SegmentationPropagator] Cannot propagate forward from X={startX} (last slice)");
                 return;
             }
+
             Logger.Log($"[SegmentationPropagator] Propagating material '{material.Name}' forward from X={startX}");
 
             // Keep track of the previous slice's points for consistency
@@ -949,7 +997,7 @@ namespace CTSegmenter
                     if (prevPoints == null)
                     {
                         // First slice after start - sample points from the YZ slice
-                        points = SamplePointsFromYZSlice(height, depth, x - 1, volumeLabels, material.ID);
+                        points = SamplePointsFromYZSlice(mainForm, height, depth, x - 1, volumeLabels, material.ID);
                     }
                     else
                     {
@@ -969,8 +1017,11 @@ namespace CTSegmenter
                         break;
                     }
 
+                    // Convert material points to SAM-expected format
+                    List<AnnotationPoint> samPoints = BuildMixedPrompts(points, material.Name);
+
                     // Process the slice using SAM2
-                    using (Bitmap mask = segmenter.ProcessYZSlice(x, baseImage, points, null, null))
+                    using (Bitmap mask = segmenter.ProcessYZSlice(x, baseImage, samPoints, null, null))
                     {
                         // Apply the mask to the volume
                         int pixelsSegmented = ApplyMaskToYZVolume(mask, height, depth, x, material.ID, volumeLabels, threshold);
@@ -984,15 +1035,15 @@ namespace CTSegmenter
                         }
 
                         // Update points for next iteration based on this slice's segmentation
-                        prevPoints = SamplePointsFromYZSegmentation(mask, x, material.ID, threshold);
+                        prevPoints = SamplePointsFromYZSegmentation(mainForm, mask, x, material.ID, threshold);
                     }
                 }
             }
         }
 
         private static void PropagateYZBackward(CTMemorySegmenter segmenter, MainForm mainForm,
-                                              int width, int height, int depth,
-                                              int startX, Material material, byte[,,] volumeLabels, int threshold)
+                                       int width, int height, int depth,
+                                       int startX, Material material, byte[,,] volumeLabels, int threshold)
         {
             // Safety check - don't try to propagate from the first slice
             if (startX <= 0)
@@ -1000,6 +1051,7 @@ namespace CTSegmenter
                 Logger.Log($"[SegmentationPropagator] Cannot propagate backward from X={startX} (first slice)");
                 return;
             }
+
             Logger.Log($"[SegmentationPropagator] Propagating material '{material.Name}' backward from X={startX}");
 
             // Keep track of the previous slice's points for consistency
@@ -1018,7 +1070,7 @@ namespace CTSegmenter
                     if (prevPoints == null)
                     {
                         // First slice before start - sample points from the YZ slice
-                        points = SamplePointsFromYZSlice(height, depth, x + 1, volumeLabels, material.ID);
+                        points = SamplePointsFromYZSlice(mainForm, height, depth, x + 1, volumeLabels, material.ID);
                     }
                     else
                     {
@@ -1038,8 +1090,11 @@ namespace CTSegmenter
                         break;
                     }
 
+                    // Convert material points to SAM-expected format
+                    List<AnnotationPoint> samPoints = BuildMixedPrompts(points, material.Name);
+
                     // Process the slice using SAM2
-                    using (Bitmap mask = segmenter.ProcessYZSlice(x, baseImage, points, null, null))
+                    using (Bitmap mask = segmenter.ProcessYZSlice(x, baseImage, samPoints, null, null))
                     {
                         // Apply the mask to the volume
                         int pixelsSegmented = ApplyMaskToYZVolume(mask, height, depth, x, material.ID, volumeLabels, threshold);
@@ -1053,19 +1108,32 @@ namespace CTSegmenter
                         }
 
                         // Update points for next iteration based on this slice's segmentation
-                        prevPoints = SamplePointsFromYZSegmentation(mask, x, material.ID, threshold);
+                        prevPoints = SamplePointsFromYZSegmentation(mainForm, mask, x, material.ID, threshold);
                     }
                 }
             }
         }
 
         // Sample points from a volume slice in YZ plane
-        private static List<AnnotationPoint> SamplePointsFromYZSlice(int height, int depth, int sliceX,
-                                                                   byte[,,] volumeLabels, byte materialId)
+        private static List<AnnotationPoint> SamplePointsFromYZSlice(
+    MainForm mainForm,
+    int height, int depth, int sliceX,
+    byte[,,] volumeLabels, byte materialId)
         {
             List<AnnotationPoint> points = new List<AnnotationPoint>();
             List<Point> foregroundPoints = new List<Point>();
             List<Point> backgroundPoints = new List<Point>();
+
+            // Find the target material name from its ID
+            Material targetMaterial = mainForm.Materials.FirstOrDefault(m => m.ID == materialId);
+            if (targetMaterial == null)
+            {
+                Logger.Log($"[SamplePointsFromYZSlice] Error: Material with ID {materialId} not found");
+                return points;
+            }
+
+            string targetMaterialName = targetMaterial.Name;
+            Logger.Log($"[SamplePointsFromYZSlice] Sampling for material '{targetMaterialName}' (ID: {materialId})");
 
             // Sample points from the YZ slice
             for (int z = 0; z < depth; z += 10)  // Sample every 10 pixels
@@ -1096,7 +1164,7 @@ namespace CTSegmenter
                         X = sliceX,
                         Y = p.Y,     // Y stays Y
                         Z = p.X,     // In our Point, X holds the Z value for YZ bitmap
-                        Label = "Foreground"
+                        Label = targetMaterialName
                     });
                 }
             }
@@ -1105,12 +1173,17 @@ namespace CTSegmenter
             {
                 foreach (var p in backgroundPoints.OrderBy(x => random.Next()).Take(Math.Min(maxPointsPerClass, backgroundPoints.Count)))
                 {
+                    // Look up the material name for this background point
+                    byte backgroundId = volumeLabels[sliceX, p.Y, p.X];
+                    Material backgroundMaterial = mainForm.Materials.FirstOrDefault(m => m.ID == backgroundId);
+                    string backgroundName = backgroundMaterial?.Name ?? "Exterior";
+
                     points.Add(new AnnotationPoint
                     {
                         X = sliceX,
                         Y = p.Y,
                         Z = p.X,     // In our Point, X holds the Z value for YZ bitmap
-                        Label = "Exterior"
+                        Label = backgroundName
                     });
                 }
             }
@@ -1119,11 +1192,23 @@ namespace CTSegmenter
         }
 
         // Sample points from a newly segmented YZ mask
-        private static List<AnnotationPoint> SamplePointsFromYZSegmentation(Bitmap mask, int sliceX, byte materialId, int threshold)
+        private static List<AnnotationPoint> SamplePointsFromYZSegmentation(
+    MainForm mainForm,
+    Bitmap mask, int sliceX, byte materialId, int threshold)
         {
             List<AnnotationPoint> points = new List<AnnotationPoint>();
             List<Point> foregroundPoints = new List<Point>();
             List<Point> backgroundPoints = new List<Point>();
+
+            // Find the target material name from its ID
+            Material targetMaterial = mainForm.Materials.FirstOrDefault(m => m.ID == materialId);
+            if (targetMaterial == null)
+            {
+                Logger.Log($"[SamplePointsFromYZSegmentation] Error: Material with ID {materialId} not found");
+                return points;
+            }
+
+            string targetMaterialName = targetMaterial.Name;
 
             // Sample from the mask
             for (int y = 0; y < mask.Height; y += 10)
@@ -1154,7 +1239,7 @@ namespace CTSegmenter
                         X = sliceX,
                         Y = p.Y,
                         Z = p.X,     // In our Point, X holds the Z value for YZ bitmap
-                        Label = "Foreground"
+                        Label = targetMaterialName
                     });
                 }
             }
@@ -1206,12 +1291,25 @@ namespace CTSegmenter
         #region Common Helper Methods
 
         // Sample annotation points from the volume for a specific material
-        private static List<AnnotationPoint> SamplePointsFromVolume(int width, int height, int sliceIndex,
-                                                                 byte[,,] volumeLabels, byte materialId)
+        private static List<AnnotationPoint> SamplePointsFromVolume(
+    MainForm mainForm,
+    int width, int height, int sliceIndex,
+    byte[,,] volumeLabels, byte materialId)
         {
             List<AnnotationPoint> points = new List<AnnotationPoint>();
             List<Point> foregroundPoints = new List<Point>();
             List<Point> backgroundPoints = new List<Point>();
+
+            // Find the target material name from its ID
+            Material targetMaterial = mainForm.Materials.FirstOrDefault(m => m.ID == materialId);
+            if (targetMaterial == null)
+            {
+                Logger.Log($"[SamplePointsFromVolume] Error: Material with ID {materialId} not found");
+                return points;
+            }
+
+            string targetMaterialName = targetMaterial.Name;
+            Logger.Log($"[SamplePointsFromVolume] Sampling for material '{targetMaterialName}' (ID: {materialId})");
 
             // Sample points from the volume
             for (int y = 0; y < height; y += 10)  // Sample every 10 pixels
@@ -1242,21 +1340,27 @@ namespace CTSegmenter
                         X = p.X,
                         Y = p.Y,
                         Z = sliceIndex,
-                        Label = "Foreground"
+                        Label = targetMaterialName  // Use the actual material name
                     });
                 }
             }
 
             if (backgroundPoints.Count > 0)
             {
+                // For background points, try to find actual material names
                 foreach (var p in backgroundPoints.OrderBy(x => random.Next()).Take(Math.Min(maxPointsPerClass, backgroundPoints.Count)))
                 {
+                    // Look up the material name for this background point
+                    byte backgroundId = volumeLabels[p.X, p.Y, sliceIndex];
+                    Material backgroundMaterial = mainForm.Materials.FirstOrDefault(m => m.ID == backgroundId);
+                    string backgroundName = backgroundMaterial?.Name ?? "Exterior";
+
                     points.Add(new AnnotationPoint
                     {
                         X = p.X,
                         Y = p.Y,
                         Z = sliceIndex,
-                        Label = "Exterior"
+                        Label = backgroundName  // Use the actual background material name
                     });
                 }
             }
@@ -1265,11 +1369,23 @@ namespace CTSegmenter
         }
 
         // Sample points from a newly segmented mask for next iteration
-        private static List<AnnotationPoint> SamplePointsFromNewSegmentation(Bitmap mask, int sliceIndex, byte materialId, int threshold)
+        private static List<AnnotationPoint> SamplePointsFromNewSegmentation(
+     MainForm mainForm,
+     Bitmap mask, int sliceIndex, byte materialId, int threshold)
         {
             List<AnnotationPoint> points = new List<AnnotationPoint>();
             List<Point> foregroundPoints = new List<Point>();
             List<Point> backgroundPoints = new List<Point>();
+
+            // Find the target material name from its ID
+            Material targetMaterial = mainForm.Materials.FirstOrDefault(m => m.ID == materialId);
+            if (targetMaterial == null)
+            {
+                Logger.Log($"[SamplePointsFromNewSegmentation] Error: Material with ID {materialId} not found");
+                return points;
+            }
+
+            string targetMaterialName = targetMaterial.Name;
 
             // Sample from the mask
             for (int y = 0; y < mask.Height; y += 10)
@@ -1300,7 +1416,7 @@ namespace CTSegmenter
                         X = p.X,
                         Y = p.Y,
                         Z = sliceIndex,
-                        Label = "Foreground"
+                        Label = targetMaterialName  // Use the material name
                     });
                 }
             }
@@ -1314,7 +1430,7 @@ namespace CTSegmenter
                         X = p.X,
                         Y = p.Y,
                         Z = sliceIndex,
-                        Label = "Exterior"
+                        Label = "Exterior"  // Use Exterior for negative points from mask
                     });
                 }
             }
@@ -1448,6 +1564,49 @@ namespace CTSegmenter
 
             return fusedVolume;
         }
+        private static List<AnnotationPoint> BuildMixedPrompts(
+    IEnumerable<AnnotationPoint> slicePoints,
+    string targetMaterialName)
+        {
+            Logger.Log($"Building prompts for material: {targetMaterialName}");
+
+            // Create a new list for our processed points
+            List<AnnotationPoint> finalList = new List<AnnotationPoint>();
+
+            // Process each point in the slice
+            foreach (var pt in slicePoints)
+            {
+                AnnotationPoint newPoint = new AnnotationPoint
+                {
+                    ID = pt.ID,
+                    X = pt.X,
+                    Y = pt.Y,
+                    Z = pt.Z,
+                    Type = pt.Type
+                };
+
+                // Points belonging to the target material are marked as positive prompts
+                // All other points are negative prompts
+                if (pt.Label.Equals(targetMaterialName, StringComparison.OrdinalIgnoreCase))
+                {
+                    newPoint.Label = "Foreground"; // SAM2 expects "Foreground" for positive points
+                }
+                else
+                {
+                    newPoint.Label = "Exterior"; // SAM2 expects "Exterior" for negative points
+                }
+
+                finalList.Add(newPoint);
+            }
+
+            // Log counts for debugging
+            int positiveCount = finalList.Count(p => p.Label == "Foreground");
+            int negativeCount = finalList.Count(p => p.Label == "Exterior");
+            Logger.Log($"Generated {finalList.Count} total prompts: {positiveCount} positive, {negativeCount} negative");
+
+            return finalList;
+        }
+
 
         #endregion
     }

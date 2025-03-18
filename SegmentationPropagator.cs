@@ -117,9 +117,9 @@ namespace CTSegmenter
         #region XY Direction Propagation
 
         private static byte[,,] PropagateXYDirection(CTMemorySegmenter segmenter, MainForm mainForm,
-                                                   int width, int height, int depth, int threshold)
+                                              int width, int height, int depth, int threshold)
         {
-            // Find a segmented slice in XY direction (typically the slice the user already segmented)
+            // Find a segmented slice in XY direction
             int startZ = FindSegmentedXYSlice(mainForm, width, height, depth);
             if (startZ == -1)
             {
@@ -154,16 +154,34 @@ namespace CTSegmenter
 
             Logger.Log($"[SegmentationPropagator] Found {materials.Count} materials in XY slice: {string.Join(", ", materials.Select(m => m.Name))}");
 
-            // For each material, propagate forward and backward
+            // For each material, propagate forward and/or backward as needed
             foreach (var material in materials)
             {
                 Logger.Log($"[SegmentationPropagator] Propagating material '{material.Name}' (ID: {material.ID})");
 
-                // Propagate forward (increasing Z)
-                PropagateXYForward(segmenter, mainForm, width, height, depth, startZ, material, resultVolume, threshold);
+                // Check if we're at boundaries and only propagate in valid directions
+                bool canPropagateForward = startZ < depth - 1;
+                bool canPropagateBackward = startZ > 0;
 
-                // Propagate backward (decreasing Z)
-                PropagateXYBackward(segmenter, mainForm, width, height, depth, startZ, material, resultVolume, threshold);
+                if (canPropagateForward)
+                {
+                    Logger.Log($"[SegmentationPropagator] Propagating forward from Z={startZ}");
+                    PropagateXYForward(segmenter, mainForm, width, height, depth, startZ, material, resultVolume, threshold);
+                }
+                else
+                {
+                    Logger.Log($"[SegmentationPropagator] At last slice Z={startZ}, skipping forward propagation");
+                }
+
+                if (canPropagateBackward)
+                {
+                    Logger.Log($"[SegmentationPropagator] Propagating backward from Z={startZ}");
+                    PropagateXYBackward(segmenter, mainForm, width, height, depth, startZ, material, resultVolume, threshold);
+                }
+                else
+                {
+                    Logger.Log($"[SegmentationPropagator] At first slice Z={startZ}, skipping backward propagation");
+                }
             }
 
             return resultVolume;
@@ -250,6 +268,12 @@ namespace CTSegmenter
 
             for (int z = startZ + 1; z < depth; z++)
             {
+                // Safety check - don't try to propagate from the last slice
+                if (startZ >= depth - 1)
+                {
+                    Logger.Log($"[SegmentationPropagator] Cannot propagate forward from Z={startZ} (last slice)");
+                    return;
+                }
                 Logger.Log($"[SegmentationPropagator] Processing forward slice Z={z}");
 
                 // Generate base image for current slice
@@ -307,6 +331,11 @@ namespace CTSegmenter
                                               int width, int height, int depth,
                                               int startZ, Material material, byte[,,] volumeLabels, int threshold)
         {
+            if (startZ <= 0)
+            {
+                Logger.Log($"[SegmentationPropagator] Cannot propagate backward from Z={startZ} (first slice)");
+                return;
+            }
             Logger.Log($"[SegmentationPropagator] Propagating material '{material.Name}' backward from Z={startZ}");
 
             // Keep track of the previous slice's points for consistency
@@ -371,7 +400,7 @@ namespace CTSegmenter
         #region XZ Direction Propagation
 
         private static byte[,,] PropagateXZDirection(CTMemorySegmenter segmenter, MainForm mainForm,
-                                                   int width, int height, int depth, int threshold)
+                                             int width, int height, int depth, int threshold)
         {
             // Find a segmented slice in XZ direction
             int startY = FindSegmentedXZSlice(mainForm, width, height, depth);
@@ -408,16 +437,34 @@ namespace CTSegmenter
 
             Logger.Log($"[SegmentationPropagator] Found {materials.Count} materials in XZ slice: {string.Join(", ", materials.Select(m => m.Name))}");
 
-            // For each material, propagate forward and backward
+            // For each material, propagate forward and/or backward as needed
             foreach (var material in materials)
             {
                 Logger.Log($"[SegmentationPropagator] Propagating material '{material.Name}' (ID: {material.ID})");
 
-                // Propagate forward (increasing Y)
-                PropagateXZForward(segmenter, mainForm, width, height, depth, startY, material, resultVolume, threshold);
+                // Check if we're at boundaries and only propagate in valid directions
+                bool canPropagateForward = startY < height - 1;
+                bool canPropagateBackward = startY > 0;
 
-                // Propagate backward (decreasing Y)
-                PropagateXZBackward(segmenter, mainForm, width, height, depth, startY, material, resultVolume, threshold);
+                if (canPropagateForward)
+                {
+                    Logger.Log($"[SegmentationPropagator] Propagating forward from Y={startY}");
+                    PropagateXZForward(segmenter, mainForm, width, height, depth, startY, material, resultVolume, threshold);
+                }
+                else
+                {
+                    Logger.Log($"[SegmentationPropagator] At last slice Y={startY}, skipping forward propagation");
+                }
+
+                if (canPropagateBackward)
+                {
+                    Logger.Log($"[SegmentationPropagator] Propagating backward from Y={startY}");
+                    PropagateXZBackward(segmenter, mainForm, width, height, depth, startY, material, resultVolume, threshold);
+                }
+                else
+                {
+                    Logger.Log($"[SegmentationPropagator] At first slice Y={startY}, skipping backward propagation");
+                }
             }
 
             return resultVolume;
@@ -476,6 +523,12 @@ namespace CTSegmenter
                                              int width, int height, int depth,
                                              int startY, Material material, byte[,,] volumeLabels, int threshold)
         {
+            // Safety check - don't try to propagate from the last slice
+            if (startY >= height - 1)
+            {
+                Logger.Log($"[SegmentationPropagator] Cannot propagate forward from Y={startY} (last slice)");
+                return;
+            }
             Logger.Log($"[SegmentationPropagator] Propagating material '{material.Name}' forward from Y={startY}");
 
             // Keep track of the previous slice's points for consistency
@@ -539,6 +592,12 @@ namespace CTSegmenter
                                               int width, int height, int depth,
                                               int startY, Material material, byte[,,] volumeLabels, int threshold)
         {
+            // Safety check - don't try to propagate from the first slice
+            if (startY <= 0)
+            {
+                Logger.Log($"[SegmentationPropagator] Cannot propagate backward from Y={startY} (first slice)");
+                return;
+            }
             Logger.Log($"[SegmentationPropagator] Propagating material '{material.Name}' backward from Y={startY}");
 
             // Keep track of the previous slice's points for consistency
@@ -744,7 +803,7 @@ namespace CTSegmenter
         #region YZ Direction Propagation
 
         private static byte[,,] PropagateYZDirection(CTMemorySegmenter segmenter, MainForm mainForm,
-                                                   int width, int height, int depth, int threshold)
+                                              int width, int height, int depth, int threshold)
         {
             // Find a segmented slice in YZ direction
             int startX = FindSegmentedYZSlice(mainForm, width, height, depth);
@@ -781,16 +840,34 @@ namespace CTSegmenter
 
             Logger.Log($"[SegmentationPropagator] Found {materials.Count} materials in YZ slice: {string.Join(", ", materials.Select(m => m.Name))}");
 
-            // For each material, propagate forward and backward
+            // For each material, propagate forward and/or backward as needed
             foreach (var material in materials)
             {
                 Logger.Log($"[SegmentationPropagator] Propagating material '{material.Name}' (ID: {material.ID})");
 
-                // Propagate forward (increasing X)
-                PropagateYZForward(segmenter, mainForm, width, height, depth, startX, material, resultVolume, threshold);
+                // Check if we're at boundaries and only propagate in valid directions
+                bool canPropagateForward = startX < width - 1;
+                bool canPropagateBackward = startX > 0;
 
-                // Propagate backward (decreasing X)
-                PropagateYZBackward(segmenter, mainForm, width, height, depth, startX, material, resultVolume, threshold);
+                if (canPropagateForward)
+                {
+                    Logger.Log($"[SegmentationPropagator] Propagating forward from X={startX}");
+                    PropagateYZForward(segmenter, mainForm, width, height, depth, startX, material, resultVolume, threshold);
+                }
+                else
+                {
+                    Logger.Log($"[SegmentationPropagator] At last slice X={startX}, skipping forward propagation");
+                }
+
+                if (canPropagateBackward)
+                {
+                    Logger.Log($"[SegmentationPropagator] Propagating backward from X={startX}");
+                    PropagateYZBackward(segmenter, mainForm, width, height, depth, startX, material, resultVolume, threshold);
+                }
+                else
+                {
+                    Logger.Log($"[SegmentationPropagator] At first slice X={startX}, skipping backward propagation");
+                }
             }
 
             return resultVolume;
@@ -848,6 +925,12 @@ namespace CTSegmenter
                                              int width, int height, int depth,
                                              int startX, Material material, byte[,,] volumeLabels, int threshold)
         {
+            // Safety check - don't try to propagate from the last slice
+            if (startX >= width - 1)
+            {
+                Logger.Log($"[SegmentationPropagator] Cannot propagate forward from X={startX} (last slice)");
+                return;
+            }
             Logger.Log($"[SegmentationPropagator] Propagating material '{material.Name}' forward from X={startX}");
 
             // Keep track of the previous slice's points for consistency
@@ -911,6 +994,12 @@ namespace CTSegmenter
                                               int width, int height, int depth,
                                               int startX, Material material, byte[,,] volumeLabels, int threshold)
         {
+            // Safety check - don't try to propagate from the first slice
+            if (startX <= 0)
+            {
+                Logger.Log($"[SegmentationPropagator] Cannot propagate backward from X={startX} (first slice)");
+                return;
+            }
             Logger.Log($"[SegmentationPropagator] Propagating material '{material.Name}' backward from X={startX}");
 
             // Keep track of the previous slice's points for consistency

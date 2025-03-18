@@ -21,6 +21,7 @@ namespace CTSegmenter
         public string MemoryAttentionPath => Path.Combine(ModelFolderPath, "memory_attention_hiera_t.onnx");
         public string MemoryEncoderPath => Path.Combine(ModelFolderPath, "memory_encoder_hiera_t.onnx");
         public string MlpPath => Path.Combine(ModelFolderPath, "mlp_hiera_t.onnx");
+        public bool UseSelectiveHoleFilling { get; set; } = true;
     }
 
     public partial class SAMSettings : Form
@@ -35,7 +36,11 @@ namespace CTSegmenter
         private Label labelImageSize;
         private Label labelModelFolder;
         private CheckBox checkBoxRealTimeProcessing;
-        private CheckBox checkBoxEnableMlp; // new checkbox for MLP usage
+        private CheckBox checkBoxEnableMlp; // for MLP post–processing
+
+        // Declare radio buttons as class-level fields
+        private RadioButton rbtnSelective;
+        private RadioButton rbtnStandard;
 
         private SAMForm _parentForm;
         public SAMSettingsParams SettingsResult { get; private set; }
@@ -81,13 +86,29 @@ namespace CTSegmenter
             buttonBrowse = new Button() { Text = "Browse...", Left = 360, Top = 93, Width = 70 };
             buttonBrowse.Click += ButtonBrowse_Click;
 
-            // New checkboxes for Real Time and MLP options
             checkBoxRealTimeProcessing = new CheckBox() { Text = "Real Time Processing", Left = 20, Top = 140, AutoSize = true };
             checkBoxEnableMlp = new CheckBox() { Text = "Enable MLP Post-Processing", Left = 20, Top = 170, AutoSize = true };
 
-            buttonOK = new Button() { Text = "OK", Left = 150, Top = 210, Width = 80 };
+            // Create radio buttons as class-level fields
+            rbtnSelective = new RadioButton()
+            {
+                Text = "Selective Hole Filling",
+                Left = 20,
+                Top = 210,
+                AutoSize = true,
+                Checked = true // default option
+            };
+            rbtnStandard = new RadioButton()
+            {
+                Text = "Standard Hole Filling",
+                Left = 20,
+                Top = 240,
+                AutoSize = true
+            };
+
+            buttonOK = new Button() { Text = "OK", Left = 150, Top = 270, Width = 80 };
             buttonOK.Click += ButtonOK_Click;
-            buttonCancel = new Button() { Text = "Cancel", Left = 250, Top = 210, Width = 80 };
+            buttonCancel = new Button() { Text = "Cancel", Left = 250, Top = 270, Width = 80 };
             buttonCancel.Click += (s, e) => { this.DialogResult = DialogResult.Cancel; this.Close(); };
 
             this.Controls.Add(labelFusion);
@@ -99,6 +120,8 @@ namespace CTSegmenter
             this.Controls.Add(buttonBrowse);
             this.Controls.Add(checkBoxRealTimeProcessing);
             this.Controls.Add(checkBoxEnableMlp);
+            this.Controls.Add(rbtnSelective);
+            this.Controls.Add(rbtnStandard);
             this.Controls.Add(buttonOK);
             this.Controls.Add(buttonCancel);
         }
@@ -120,18 +143,16 @@ namespace CTSegmenter
                 FusionAlgorithm = comboBoxFusionAlgorithm.SelectedItem.ToString(),
                 ImageInputSize = (int)numericUpDownImageSize.Value,
                 ModelFolderPath = textBoxModelFolder.Text,
-                EnableMlp = checkBoxEnableMlp.Checked
+                EnableMlp = checkBoxEnableMlp.Checked,
+                UseSelectiveHoleFilling = rbtnSelective.Checked
             };
 
-            // Update the parent SAMForm’s live preview (real-time processing) flag.
             _parentForm.SetRealTimeProcessing(checkBoxRealTimeProcessing.Checked);
-
             _parentForm?.UpdateSettings(settings);
             this.SettingsResult = settings;
             this.DialogResult = DialogResult.OK;
             this.Close();
         }
-
-
     }
+
 }

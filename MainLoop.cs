@@ -122,7 +122,10 @@ namespace CTSegmenter
         public AnnotationManager AnnotationMgr { get; set; }
         // Demonstration: chunk dimension
         private const int CHUNK_DIM = 256;
-
+        public CTMemorySegmenter LiveSegmenter
+        {
+            get { return _liveSegmenter; }
+        }
         // Cache for rendered slices
         private Dictionary<int, byte[]> sliceCache = new Dictionary<int, byte[]>();
         private const int MAX_CACHE_SIZE = 5;
@@ -1474,6 +1477,13 @@ namespace CTSegmenter
                 return data;
             }
         }
+        public void ClearSliceCache()
+        {
+            lock (sliceCacheLock)
+            {
+                sliceCache.Clear();
+            }
+        }
 
         private CancellationTokenSource orthoRenderCts = new CancellationTokenSource();
 
@@ -1494,47 +1504,35 @@ namespace CTSegmenter
                     byte* rowPtr = basePtr + y * stride;
                     for (int x = 0; x < width; x++)
                     {
-                        // Base grayscale value
+                        // Start with the grayscale value from the volume.
                         byte gVal = volumeData?[x, y, sliceIndex] ?? (byte)128;
                         Color finalColor = Color.FromArgb(gVal, gVal, gVal);
 
-                        // Existing segmentation
-                        byte segID = volumeLabels?[x, y, sliceIndex] ?? (byte)0;
-                        if (segID != 0)
+                        // If a segmentation has been applied (volumeLabels), use it.
+                        byte appliedLabel = volumeLabels?[x, y, sliceIndex] ?? (byte)0;
+                        if (appliedLabel != 0)
                         {
-                            Material mat = Materials.FirstOrDefault(m => m.ID == segID);
+                            Material mat = Materials.FirstOrDefault(m => m.ID == appliedLabel);
                             if (mat != null)
                             {
-                                finalColor = RenderMaterials ? mat.Color :
-                                    BlendColors(finalColor, mat.Color, 0.5f);
+                                finalColor = RenderMaterials
+                                    ? mat.Color
+                                    : BlendColors(finalColor, mat.Color, 0.5f);
                             }
                         }
-
-                        // Threshold preview overlay
-                        if (currentTool == SegmentationTool.Thresholding &&
-                            currentSelection != null &&
-                            currentSelection[x, y] != 0)
-                        {
-                            Color materialColor = Materials[SelectedMaterialIndex].Color;
-                            Color complementary = Color.FromArgb(
-                                255 - materialColor.R,
-                                255 - materialColor.G,
-                                255 - materialColor.B
-                            );
-                            finalColor = BlendColors(finalColor, complementary, 0.5f);
-                        }
-
-                        // Temporary selection overlay
+                        // If a SAM segmentation mask is present (stored in currentSelection),
+                        // override with a higher opacity blend to make it stand out.
                         if (currentSelection != null && currentSelection[x, y] != 0)
                         {
                             Material selMat = Materials.FirstOrDefault(m => m.ID == currentSelection[x, y]);
                             if (selMat != null)
                             {
-                                finalColor = BlendColors(finalColor, selMat.Color, 0.6f);
+                                // Using 80% overlay so that the SAM mask becomes clearly visible.
+                                finalColor = BlendColors(finalColor, selMat.Color, 0.8f);
                             }
                         }
 
-                        // Set pixel values
+                        // Write the final color into the bitmap.
                         int offset = x * 3;
                         rowPtr[offset] = finalColor.B;
                         rowPtr[offset + 1] = finalColor.G;
@@ -1542,10 +1540,11 @@ namespace CTSegmenter
                     }
                 });
             }
-
             bmp.UnlockBits(bmpData);
             return bmp;
         }
+
+
 
 
 
@@ -2428,7 +2427,6 @@ namespace CTSegmenter
         {
             try
             {
-                // Retrieve current settings from SAMForm.
                 SAMSettingsParams settings = SamFormInstance.CurrentSettings;
                 string modelFolder = settings.ModelFolderPath;
                 int imageSize = settings.ImageInputSize;
@@ -2439,10 +2437,9 @@ namespace CTSegmenter
                 string memoryEncoderPath = Path.Combine(modelFolder, "memory_encoder_hiera_t.onnx");
                 string mlpPath = Path.Combine(modelFolder, "mlp_hiera_t.onnx");
 
-                CTMemorySegmenter segmenter = null;
-                if (this.RealTimeProcessing)
+                CTMemorySegmenter segmenter;
+                if (RealTimeProcessing)
                 {
-                    // Use a cached instance if available.
                     if (_liveSegmenter == null)
                     {
                         _liveSegmenter = new CTMemorySegmenter(
@@ -2452,13 +2449,20 @@ namespace CTSegmenter
                             memoryEncoderPath,
                             memoryAttentionPath,
                             mlpPath,
-                            imageSize);
+                            imageSize,
+                            false,
+                            settings.EnableMlp);
+
+                        // Get threshold from SAMForm if available
+                        if (SamFormInstance != null && !SamFormInstance.IsDisposed)
+                        {
+                            _liveSegmenter.MaskThreshold = SamFormInstance.GetThresholdValue();
+                        }
                     }
                     segmenter = _liveSegmenter;
                 }
                 else
                 {
-                    // Otherwise create a temporary instance.
                     segmenter = new CTMemorySegmenter(
                         imageEncoderPath,
                         promptEncoderPath,
@@ -2466,132 +2470,181 @@ namespace CTSegmenter
                         memoryEncoderPath,
                         memoryAttentionPath,
                         mlpPath,
-                        imageSize);
+                        imageSize,
+                        false,
+                        settings.EnableMlp);
+
+                    // Get threshold from SAMForm if available
+                    if (SamFormInstance != null && !SamFormInstance.IsDisposed)
+                    {
+                        segmenter.MaskThreshold = SamFormInstance.GetThresholdValue();
+                    }
                 }
 
-                int width = GetWidth();
-                int height = GetHeight();
-                int depth = GetDepth();
+                int currentZ = CurrentSlice;
+                int w = GetWidth();
+                int h = GetHeight();
 
-                // Retrieve the selected segmentation direction from SAMForm.
-                var dir = SamFormInstance.SelectedDirection;
-
-                // Process based on selected direction:
-                if (dir == SegmentationDirection.XY)
+                // Retrieve all annotation points for the current slice.
+                List<AnnotationPoint> annPoints = AnnotationMgr.GetPointsForSlice(currentZ).ToList();
+                if (annPoints.Count > 0)
                 {
-                    // Process only the XY view (current slice)
-                    int currentSlice = this.CurrentSlice;
-                    List<AnnotationPoint> annPointsXY = AnnotationMgr.GetPointsForSlice(currentSlice).ToList();
-                    if (annPointsXY.Any())
+                    using (Bitmap baseXY = GenerateXYBitmap(currentZ, w, h))
                     {
-                        using (Bitmap baseXY = GenerateXYBitmap(currentSlice))
+                        byte[,] previewMask = new byte[w, h];
+
+                        // Process one pass per material.
+                        // For each material, use BuildMixedPrompts to mark positive for the target material
+                        // and negative for all other points.
+                        foreach (var group in annPoints.GroupBy(p => p.Label))
                         {
-                            byte[,] maskXY = new byte[width, height];
-                            foreach (var group in annPointsXY.GroupBy(p => p.Label))
+                            string materialName = group.Key;
+                            List<AnnotationPoint> mergedPrompts = BuildMixedPrompts(annPoints, materialName);
+
+                            using (Bitmap resultMask = segmenter.ProcessXYSlice(currentZ, baseXY, mergedPrompts, null, null))
                             {
-                                List<Point> promptPoints = group.Select(p => new Point((int)p.X, (int)p.Y)).ToList();
-                                using (Bitmap maskResult = segmenter.ProcessSingleSlice(baseXY, promptPoints, null, null, null))
+                                Material mat = Materials.FirstOrDefault(m => m.Name.Equals(materialName, StringComparison.OrdinalIgnoreCase));
+                                byte matID = (mat != null) ? mat.ID : (byte)1;
+
+                                // For each pixel, only assign if it is not already labeled.
+                                for (int y = 0; y < h; y++)
                                 {
-                                    for (int yPix = 0; yPix < height; yPix++)
+                                    for (int x = 0; x < w; x++)
                                     {
-                                        for (int xPix = 0; xPix < width; xPix++)
+                                        Color c = resultMask.GetPixel(x, y);
+                                        if (c.R > 128 && previewMask[x, y] == 0)
                                         {
-                                            Color c = maskResult.GetPixel(xPix, yPix);
-                                            if (c.R > 128)
-                                            {
-                                                var mat = Materials.FirstOrDefault(m => m.Name == group.Key);
-                                                if (mat != null)
-                                                    maskXY[xPix, yPix] = mat.ID;
-                                            }
+                                            previewMask[x, y] = matID;
                                         }
                                     }
                                 }
                             }
-                            currentSelection = maskXY;
                         }
-                    }
-                }
-                else if (dir == SegmentationDirection.XZ)
-                {
-                    // Process only the XZ projection (using XzSliceY as fixed row)
-                    List<AnnotationPoint> annPointsXZ = AnnotationMgr.GetPointsForSlice(this.XzSliceY).ToList();
-                    if (annPointsXZ.Any())
-                    {
-                        using (Bitmap baseXZ = GenerateXZBitmap(this.XzSliceY, width, depth))
-                        {
-                            byte[,] maskXZ = new byte[width, depth];
-                            foreach (var group in annPointsXZ.GroupBy(p => p.Label))
-                            {
-                                List<Point> promptPoints = group.Select(p => new Point((int)p.X, (int)p.Z)).ToList();
-                                using (Bitmap maskResult = segmenter.ProcessSingleSlice(baseXZ, promptPoints, null, null, null))
-                                {
-                                    for (int zPix = 0; zPix < depth; zPix++)
-                                    {
-                                        for (int xPix = 0; xPix < width; xPix++)
-                                        {
-                                            Color c = maskResult.GetPixel(xPix, zPix);
-                                            if (c.R > 128)
-                                            {
-                                                var mat = Materials.FirstOrDefault(m => m.Name == group.Key);
-                                                if (mat != null)
-                                                    maskXZ[xPix, zPix] = mat.ID;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            currentSelectionXZ = maskXZ;
-                        }
-                    }
-                }
-                else if (dir == SegmentationDirection.YZ)
-                {
-                    // Process only the YZ projection (using YzSliceX as fixed column)
-                    List<AnnotationPoint> annPointsYZ = AnnotationMgr.GetPointsForSlice(this.YzSliceX).ToList();
-                    if (annPointsYZ.Any())
-                    {
-                        using (Bitmap baseYZ = GenerateYZBitmap(this.YzSliceX, height, depth))
-                        {
-                            byte[,] maskYZ = new byte[depth, height];
-                            foreach (var group in annPointsYZ.GroupBy(p => p.Label))
-                            {
-                                List<Point> promptPoints = group.Select(p => new Point((int)p.Z, (int)p.Y)).ToList();
-                                using (Bitmap maskResult = segmenter.ProcessSingleSlice(baseYZ, promptPoints, null, null, null))
-                                {
-                                    for (int yPix = 0; yPix < height; yPix++)
-                                    {
-                                        for (int zPix = 0; zPix < depth; zPix++)
-                                        {
-                                            Color c = maskResult.GetPixel(zPix, yPix);
-                                            if (c.R > 128)
-                                            {
-                                                var mat = Materials.FirstOrDefault(m => m.Name == group.Key);
-                                                if (mat != null)
-                                                    maskYZ[zPix, yPix] = mat.ID;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            currentSelectionYZ = maskYZ;
-                        }
+
+                        currentSelection = previewMask;
                     }
                 }
 
-                // Refresh the views.
+                // Redraw the view to display the overlay.
+                ShowMask = true;
+                ClearSliceCache();
                 RenderViews();
-                _ = RenderOrthoViewsAsync();
-
-                // If not using live preview, dispose the temporary segmenter.
-                if (!this.RealTimeProcessing)
-                {
-                    segmenter.Dispose();
-                }
             }
             catch (Exception ex)
             {
                 Logger.Log("[ProcessSegmentationPreview] Exception: " + ex.Message);
             }
+        }
+        /// <summary>
+        /// Builds a prompt list for one material pass.
+        /// If there is only a single positive point and no negatives, it returns that single point.
+        /// Otherwise, it returns all annotation points with the following rule:
+        /// - Points belonging to the target material are marked as "Foreground" (positive).
+        /// - All other points are marked as "Exterior" (negative).
+        /// </summary>
+        private List<AnnotationPoint> BuildMixedPrompts(
+            IEnumerable<AnnotationPoint> slicePoints,
+            string targetMaterialName)
+        {
+            // Separate positive and negative points.
+            var positivePoints = slicePoints.Where(pt => pt.Label.Equals(targetMaterialName, StringComparison.OrdinalIgnoreCase)).ToList();
+            var negativePoints = slicePoints.Where(pt => !pt.Label.Equals(targetMaterialName, StringComparison.OrdinalIgnoreCase)).ToList();
+
+            // If there is exactly one positive point and no negatives, return it directly.
+            if (positivePoints.Count == 1 && negativePoints.Count == 0)
+            {
+                return new List<AnnotationPoint>
+        {
+            new AnnotationPoint
+            {
+                ID = positivePoints[0].ID,
+                X = positivePoints[0].X,
+                Y = positivePoints[0].Y,
+                Z = positivePoints[0].Z,
+                Type = positivePoints[0].Type,
+                Label = "Foreground" // positive prompt
+            }
+        };
+            }
+
+            // Otherwise, build a merged list.
+            List<AnnotationPoint> finalPoints = new List<AnnotationPoint>();
+            foreach (var pt in slicePoints)
+            {
+                finalPoints.Add(new AnnotationPoint
+                {
+                    ID = pt.ID,
+                    X = pt.X,
+                    Y = pt.Y,
+                    Z = pt.Z,
+                    Type = pt.Type,
+                    Label = pt.Label.Equals(targetMaterialName, StringComparison.OrdinalIgnoreCase) ? "Foreground" : "Exterior"
+                });
+            }
+            return finalPoints;
+        }
+
+
+
+        // Helper method to generate the XY slice bitmap in MainForm if you prefer it here:
+        public Bitmap GenerateXYBitmap(int sliceIndex, int width, int height)
+        {
+            Bitmap bmp = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    byte gVal = volumeData[x, y, sliceIndex];
+                    bmp.SetPixel(x, y, Color.FromArgb(gVal, gVal, gVal));
+                }
+            }
+            return bmp;
+        }
+
+        
+
+
+
+        // Applies the temporary XZ selection mask (if present and non-empty) to the fixed row slice.
+        public void ApplyXZSelection()
+        {
+            int fixedY = XzSliceY;
+            if (currentSelectionXZ == null)
+                return;
+
+            // For each pixel in the XZ mask, update the corresponding voxel at the fixed Y.
+            for (int z = 0; z < depth; z++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    byte sel = currentSelectionXZ[x, z];
+                    if (sel != 0)
+                        volumeLabels[x, fixedY, z] = sel;
+                }
+            }
+            // Clear the temporary mask for XZ.
+            currentSelectionXZ = new byte[width, depth];
+        }
+
+        // Applies the temporary YZ selection mask (if present and non-empty) to the fixed column slice.
+        public void ApplyYZSelection()
+        {
+            int fixedX = YzSliceX;
+            if (currentSelectionYZ == null)
+                return;
+
+            // Note: currentSelectionYZ is organized as [depth, height] in this code.
+            for (int z = 0; z < depth; z++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    byte sel = currentSelectionYZ[z, y];
+                    if (sel != 0)
+                        volumeLabels[fixedX, y, z] = sel;
+                }
+            }
+            // Clear the temporary mask for YZ.
+            currentSelectionYZ = new byte[depth, height];
         }
 
 

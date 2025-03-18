@@ -43,6 +43,10 @@
             this.toolStripButton3 = new System.Windows.Forms.ToolStripButton();
             this.btnApply = new System.Windows.Forms.ToolStripButton();
             this.toolStripSeparator2 = new System.Windows.Forms.ToolStripSeparator();
+            this.XYButton = new System.Windows.Forms.ToolStripButton();
+            this.XZButton = new System.Windows.Forms.ToolStripButton();
+            this.YZButton = new System.Windows.Forms.ToolStripButton();
+            this.toolStripSeparator3 = new System.Windows.Forms.ToolStripSeparator();
             this.helpToolStripButton = new System.Windows.Forms.ToolStripButton();
             this.dataGridPoints = new System.Windows.Forms.DataGridView();
             this.ID = new System.Windows.Forms.DataGridViewTextBoxColumn();
@@ -51,12 +55,13 @@
             this.Z = new System.Windows.Forms.DataGridViewTextBoxColumn();
             this.Type = new System.Windows.Forms.DataGridViewTextBoxColumn();
             this.Label = new System.Windows.Forms.DataGridViewComboBoxColumn();
-            this.XYButton = new System.Windows.Forms.ToolStripButton();
-            this.XZButton = new System.Windows.Forms.ToolStripButton();
-            this.YZButton = new System.Windows.Forms.ToolStripButton();
-            this.toolStripSeparator3 = new System.Windows.Forms.ToolStripSeparator();
+            this.panel1 = new System.Windows.Forms.Panel();
+            this.lblThr = new System.Windows.Forms.Label();
+            this.thresholdingTrackbar = new System.Windows.Forms.TrackBar();
             this.toolStrip1.SuspendLayout();
             ((System.ComponentModel.ISupportInitialize)(this.dataGridPoints)).BeginInit();
+            this.panel1.SuspendLayout();
+            ((System.ComponentModel.ISupportInitialize)(this.thresholdingTrackbar)).BeginInit();
             this.SuspendLayout();
             // 
             // toolStrip1
@@ -85,7 +90,7 @@
             this.toolStrip1.Location = new System.Drawing.Point(0, 0);
             this.toolStrip1.Name = "toolStrip1";
             this.toolStrip1.RenderMode = System.Windows.Forms.ToolStripRenderMode.System;
-            this.toolStrip1.Size = new System.Drawing.Size(937, 32);
+            this.toolStrip1.Size = new System.Drawing.Size(1069, 32);
             this.toolStrip1.TabIndex = 0;
             this.toolStrip1.Text = "toolStrip1";
             // 
@@ -197,6 +202,44 @@
             this.toolStripSeparator2.Name = "toolStripSeparator2";
             this.toolStripSeparator2.Size = new System.Drawing.Size(6, 32);
             // 
+            // XYButton
+            // 
+            this.XYButton.Checked = true;
+            this.XYButton.CheckState = System.Windows.Forms.CheckState.Checked;
+            this.XYButton.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
+            this.XYButton.Image = ((System.Drawing.Image)(resources.GetObject("XYButton.Image")));
+            this.XYButton.ImageTransparentColor = System.Drawing.Color.Magenta;
+            this.XYButton.Name = "XYButton";
+            this.XYButton.Size = new System.Drawing.Size(29, 29);
+            this.XYButton.Text = "toolStripButton4";
+            this.XYButton.ToolTipText = "Process XY";
+            this.XYButton.Click += new System.EventHandler(this.XYButton_Click);
+            // 
+            // XZButton
+            // 
+            this.XZButton.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
+            this.XZButton.Image = ((System.Drawing.Image)(resources.GetObject("XZButton.Image")));
+            this.XZButton.ImageTransparentColor = System.Drawing.Color.Magenta;
+            this.XZButton.Name = "XZButton";
+            this.XZButton.Size = new System.Drawing.Size(29, 29);
+            this.XZButton.Text = "Process XZ";
+            this.XZButton.Click += new System.EventHandler(this.XZButton_Click);
+            // 
+            // YZButton
+            // 
+            this.YZButton.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
+            this.YZButton.Image = ((System.Drawing.Image)(resources.GetObject("YZButton.Image")));
+            this.YZButton.ImageTransparentColor = System.Drawing.Color.Magenta;
+            this.YZButton.Name = "YZButton";
+            this.YZButton.Size = new System.Drawing.Size(29, 29);
+            this.YZButton.Text = "Process YZ";
+            this.YZButton.Click += new System.EventHandler(this.YZButton_Click);
+            // 
+            // toolStripSeparator3
+            // 
+            this.toolStripSeparator3.Name = "toolStripSeparator3";
+            this.toolStripSeparator3.Size = new System.Drawing.Size(6, 32);
+            // 
             // helpToolStripButton
             // 
             this.helpToolStripButton.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
@@ -220,7 +263,7 @@
             this.dataGridPoints.Location = new System.Drawing.Point(0, 32);
             this.dataGridPoints.Name = "dataGridPoints";
             this.dataGridPoints.RowHeadersWidth = 51;
-            this.dataGridPoints.Size = new System.Drawing.Size(937, 553);
+            this.dataGridPoints.Size = new System.Drawing.Size(1069, 553);
             this.dataGridPoints.TabIndex = 1;
             this.dataGridPoints.CellContentClick += new System.Windows.Forms.DataGridViewCellEventHandler(this.dataGridPoints_CellContentClick);
             // 
@@ -266,49 +309,39 @@
             this.Label.Name = "Label";
             this.Label.Width = 125;
             // 
-            // XYButton
+            // panel1
             // 
-            this.XYButton.Checked = true;
-            this.XYButton.CheckState = System.Windows.Forms.CheckState.Checked;
-            this.XYButton.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
-            this.XYButton.Image = ((System.Drawing.Image)(resources.GetObject("XYButton.Image")));
-            this.XYButton.ImageTransparentColor = System.Drawing.Color.Magenta;
-            this.XYButton.Name = "XYButton";
-            this.XYButton.Size = new System.Drawing.Size(29, 29);
-            this.XYButton.Text = "toolStripButton4";
-            this.XYButton.ToolTipText = "Process XY";
-            this.XYButton.Click += new System.EventHandler(this.XYButton_Click);
+            this.panel1.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Right)));
+            this.panel1.Controls.Add(this.lblThr);
+            this.panel1.Controls.Add(this.thresholdingTrackbar);
+            this.panel1.Location = new System.Drawing.Point(813, 35);
+            this.panel1.Name = "panel1";
+            this.panel1.Size = new System.Drawing.Size(253, 93);
+            this.panel1.TabIndex = 2;
             // 
-            // XZButton
+            // lblThr
             // 
-            this.XZButton.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
-            this.XZButton.Image = ((System.Drawing.Image)(resources.GetObject("XZButton.Image")));
-            this.XZButton.ImageTransparentColor = System.Drawing.Color.Magenta;
-            this.XZButton.Name = "XZButton";
-            this.XZButton.Size = new System.Drawing.Size(29, 29);
-            this.XZButton.Text = "Process XZ";
-            this.XZButton.Click += new System.EventHandler(this.XZButton_Click);
+            this.lblThr.AutoSize = true;
+            this.lblThr.Location = new System.Drawing.Point(24, 57);
+            this.lblThr.Name = "lblThr";
+            this.lblThr.Size = new System.Drawing.Size(68, 15);
+            this.lblThr.TabIndex = 3;
+            this.lblThr.Text = "Threshold: ";
             // 
-            // YZButton
+            // thresholdingTrackbar
             // 
-            this.YZButton.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
-            this.YZButton.Image = ((System.Drawing.Image)(resources.GetObject("YZButton.Image")));
-            this.YZButton.ImageTransparentColor = System.Drawing.Color.Magenta;
-            this.YZButton.Name = "YZButton";
-            this.YZButton.Size = new System.Drawing.Size(29, 29);
-            this.YZButton.Text = "Process YZ";
-            this.YZButton.Click += new System.EventHandler(this.YZButton_Click);
-            // 
-            // toolStripSeparator3
-            // 
-            this.toolStripSeparator3.Name = "toolStripSeparator3";
-            this.toolStripSeparator3.Size = new System.Drawing.Size(6, 32);
+            this.thresholdingTrackbar.Location = new System.Drawing.Point(17, 16);
+            this.thresholdingTrackbar.Name = "thresholdingTrackbar";
+            this.thresholdingTrackbar.Size = new System.Drawing.Size(227, 56);
+            this.thresholdingTrackbar.TabIndex = 3;
+            this.thresholdingTrackbar.Scroll += new System.EventHandler(this.thresholdingTrackbar_Scroll);
             // 
             // SAMForm
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
-            this.ClientSize = new System.Drawing.Size(937, 585);
+            this.ClientSize = new System.Drawing.Size(1069, 585);
+            this.Controls.Add(this.panel1);
             this.Controls.Add(this.dataGridPoints);
             this.Controls.Add(this.toolStrip1);
             this.Icon = ((System.Drawing.Icon)(resources.GetObject("$this.Icon")));
@@ -317,6 +350,9 @@
             this.toolStrip1.ResumeLayout(false);
             this.toolStrip1.PerformLayout();
             ((System.ComponentModel.ISupportInitialize)(this.dataGridPoints)).EndInit();
+            this.panel1.ResumeLayout(false);
+            this.panel1.PerformLayout();
+            ((System.ComponentModel.ISupportInitialize)(this.thresholdingTrackbar)).EndInit();
             this.ResumeLayout(false);
             this.PerformLayout();
 
@@ -350,5 +386,8 @@
         private System.Windows.Forms.ToolStripButton XZButton;
         private System.Windows.Forms.ToolStripButton YZButton;
         private System.Windows.Forms.ToolStripSeparator toolStripSeparator3;
+        private System.Windows.Forms.Panel panel1;
+        private System.Windows.Forms.Label lblThr;
+        private System.Windows.Forms.TrackBar thresholdingTrackbar;
     }
 }

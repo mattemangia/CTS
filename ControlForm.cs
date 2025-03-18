@@ -899,6 +899,12 @@ namespace CTSegmenter
                     mainForm.Materials.Add(mat);
                     RefreshMaterialList();
                     lstMaterials.SelectedIndex = lstMaterials.Items.Count - 1;
+
+                    // If SAMForm is open, update its ComboBox with the new material.
+                    if (mainForm.SamFormInstance != null && !mainForm.SamFormInstance.IsDisposed)
+                    {
+                        mainForm.SamFormInstance.UpdateMaterialComboBox(mainForm.Materials);
+                    }
                 }
             }
             mainForm.SaveLabelsChk();

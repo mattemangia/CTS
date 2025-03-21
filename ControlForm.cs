@@ -186,7 +186,7 @@ namespace CTSegmenter
             segmentAnythingMenuItem.Click += (s, e) =>
             {
                 Logger.Log("[ControlForm] Opening Segment Anything - ONNX Processor");
-                SAMForm samForm = new SAMForm(mainForm, sharedAnnotationManager, mainForm.Materials);
+                SAMForm samForm = new SAMForm(mainForm, mainForm.Materials);
                 mainForm.SetSegmentationTool(SegmentationTool.Point);
                 samForm.Show();
             };
@@ -299,7 +299,7 @@ namespace CTSegmenter
                 Logger.Log("[ControlForm] Opening Segment Anything - ONNX Processor");
 
                 // Create new form and store reference
-                SAMForm samForm = new SAMForm(mainForm, sharedAnnotationManager, mainForm.Materials);
+                SAMForm samForm = new SAMForm(mainForm, mainForm.Materials);
                 mainForm.SamFormInstance = samForm;
                 currentSamForm = samForm;
 

@@ -2235,11 +2235,14 @@ namespace CTSegmenter
                 }
                 else if (currentTool == SegmentationTool.Point)
                 {
+
                     float sliceX = (e.X - panOffset.X) / globalZoom;
                     float sliceY = (e.Y - panOffset.Y) / globalZoom;
                     Material selectedMaterial = (SelectedMaterialIndex >= 0 && SelectedMaterialIndex < Materials.Count)
                         ? Materials[SelectedMaterialIndex]
                         : new Material("Default", Color.Red, 0, 0, 1);
+                    if (sliceX < 0 || sliceX >= width || sliceY < 0 || sliceY >= height)
+                        return; // Out of valid range, so don’t place a point.
                     AnnotationPoint point = AnnotationMgr.AddPoint(sliceX, sliceY, CurrentSlice, selectedMaterial.Name);
                     UpdateSAMFormWithPoint(point);
                 }
@@ -3343,6 +3346,8 @@ namespace CTSegmenter
                     Material selectedMaterial = (SelectedMaterialIndex >= 0 && SelectedMaterialIndex < Materials.Count)
                         ? Materials[SelectedMaterialIndex]
                         : new Material("Default", Color.Red, 0, 0, 1);
+                    if (x < 0 || x >= width || z < 0 || z >= depth)
+                        return;
                     AnnotationPoint point = AnnotationMgr.AddPoint(x, XzSliceY, z, selectedMaterial.Name);
                     UpdateSAMFormWithPoint(point);
                 }
@@ -3535,6 +3540,8 @@ namespace CTSegmenter
                     Material selectedMaterial = (SelectedMaterialIndex >= 0 && SelectedMaterialIndex < Materials.Count)
                         ? Materials[SelectedMaterialIndex]
                         : new Material("Default", Color.Red, 0, 0, 1);
+                    if (z < 0 || z >= depth || y < 0 || y >= height)
+                        return;
                     AnnotationPoint point = AnnotationMgr.AddPoint(YzSliceX, y, z, selectedMaterial.Name);
                     UpdateSAMFormWithPoint(point);
                 }

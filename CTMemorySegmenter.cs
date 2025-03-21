@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Linq;
+using System.Threading.Tasks;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 
@@ -25,7 +26,7 @@ namespace CTSegmenter
         public bool UseSelectiveHoleFilling { get; set; } = false;
 
         private static void Log(string message) => Logger.Log(message);
-        public int MaskThreshold { get; set; } = 220; // Default threshold value
+        public int MaskThreshold { get; set; } = 128; // Default threshold value
         public CTMemorySegmenter(
             string imageEncoderPath,
             string promptEncoderPath,
@@ -130,287 +131,410 @@ namespace CTSegmenter
                 Log($"Output Name: {output.Key} | Shape: {dims} | Type: {output.Value.ElementType}");
             }
         }
-
         /// <summary>
-        /// Processes a CT slice in the XY view using a list of AnnotationPoints.
-        /// Negative prompts have label="Exterior", positive="Foreground" for the target material.
+        /// INTERNAL helper that runs the same multi-channel prompt+mask steps
+        /// on any 2D Bitmap (whether XY, XZ, or YZ).
+        /// We re-use the same code in ProcessXZSlice, ProcessYZSlice, etc.
+        /// 
+        /// NOTE: Because the logic is the same, you might just call the same pipeline
+        /// or factor out XZ-scaling of points if needed. If your XZ or YZ slice points
+        /// need different coordinate scaling, handle that before calling here.
         /// </summary>
-        public Bitmap ProcessXYSlice(
-     int sliceIndex,
-     Bitmap baseXY,
-     List<AnnotationPoint> promptPoints,
-     object additionalParam1,
-     object additionalParam2)
+        /// <summary>
+        /// Shared internal method that processes a generic 2D slice (sliceBmp)
+        /// with promptPoints. We scale the points to the model input size (_imageSize),
+        /// run SAM, gather all channels from the decoder, pick the one with largest coverage.
+        /// </summary>
+        private Bitmap ProcessXYSlice_Internal(Bitmap sliceBmp, List<AnnotationPoint> promptPoints)
         {
             try
             {
-                Logger.Log($"[ProcessXYSlice] Start processing slice {sliceIndex} with {promptPoints?.Count ?? 0} points");
+                Logger.Log($"[ProcessXYSlice_Internal] #points={(promptPoints?.Count ?? 0)}");
 
-                // Validate input bitmap
-                if (baseXY == null)
-                    throw new ArgumentNullException(nameof(baseXY), "Input bitmap cannot be null");
-
-                if (baseXY.Width <= 0 || baseXY.Height <= 0)
-                    throw new ArgumentException("Invalid bitmap dimensions");
-
-                // Validate prompt points
+                if (sliceBmp == null)
+                    throw new ArgumentNullException(nameof(sliceBmp), "sliceBmp is null");
                 if (promptPoints == null || promptPoints.Count == 0)
+                    throw new ArgumentException("No prompt points", nameof(promptPoints));
+                if (sliceBmp.Width <= 0 || sliceBmp.Height <= 0)
+                    throw new ArgumentException("Invalid sliceBmp dimensions");
+
+                // 1) Convert slice to model input
+                float[] imageTensorData = BitmapToFloatTensor(sliceBmp, _imageSize, _imageSize);
+                var imageInput = new DenseTensor<float>(imageTensorData, new[] { 1, 3, _imageSize, _imageSize });
+
+                // 2) Run image encoder
+                Tensor<float> visionFeatures;
+                Tensor<float> visionPosEnc;
+                Tensor<float> highResFeatures1;
+                Tensor<float> highResFeatures2;
+
+                using (var imageEncoderOutputs = _imageEncoderSession.Run(
+                    new[] { NamedOnnxValue.CreateFromTensor("input_image", imageInput) }))
                 {
-                    Logger.Log("[ProcessXYSlice] Warning: No prompt points provided");
-                    throw new ArgumentException("No prompt points provided");
+                    visionFeatures = GetFirstTensor<float>(imageEncoderOutputs, "vision_features");
+                    visionPosEnc = GetFirstTensor<float>(imageEncoderOutputs, "vision_pos_enc_2");
+                    highResFeatures1 = GetFirstTensor<float>(imageEncoderOutputs, "backbone_fpn_0");
+                    highResFeatures2 = GetFirstTensor<float>(imageEncoderOutputs, "backbone_fpn_1");
                 }
 
-                // Log input details
-                int positiveCount = promptPoints.Count(p => p.Label.Equals("Foreground", StringComparison.OrdinalIgnoreCase));
-                int negativeCount = promptPoints.Count(p => p.Label.Equals("Exterior", StringComparison.OrdinalIgnoreCase));
-                Logger.Log($"[ProcessXYSlice] Points: {positiveCount} positive, {negativeCount} negative");
+                // 3) Prepare prompt points (Exterior=0 => negative, else=1 => positive)
+                int pointCount = promptPoints.Count;
+                float[] coordsArray = new float[pointCount * 2];
+                int[] labelArray = new int[pointCount];
 
-                // Convert bitmap to tensor
-                float[] imageTensor = BitmapToFloatTensor(baseXY, _imageSize, _imageSize);
-                var imageInput = new DenseTensor<float>(imageTensor, new[] { 1, 3, _imageSize, _imageSize });
+                for (int i = 0; i < pointCount; i++)
+                {
+                    // clamp & scale coords
+                    float xClamped = Math.Max(0, Math.Min(promptPoints[i].X, sliceBmp.Width - 1));
+                    float yClamped = Math.Max(0, Math.Min(promptPoints[i].Y, sliceBmp.Height - 1));
 
-                // Run image encoder
-                using (var imageEncoderOutputs = _imageEncoderSession.Run(new[] {
-            NamedOnnxValue.CreateFromTensor("input_image", imageInput)
+                    float xScale = (_imageSize - 1f) / Math.Max(1, sliceBmp.Width - 1f);
+                    float yScale = (_imageSize - 1f) / Math.Max(1, sliceBmp.Height - 1f);
+
+                    coordsArray[i * 2] = xClamped * xScale;
+                    coordsArray[i * 2 + 1] = yClamped * yScale;
+
+                    bool isExt = promptPoints[i].Label.Equals("Exterior", StringComparison.OrdinalIgnoreCase);
+                    labelArray[i] = isExt ? 0 : 1;
+                }
+
+                var coordsTensor = new DenseTensor<float>(coordsArray, new[] { 1, pointCount, 2 });
+                var labelsTensor = new DenseTensor<int>(labelArray, new[] { 1, pointCount });
+                // trivial mask input
+                var maskInputTensor = new DenseTensor<float>(
+                    Enumerable.Repeat(1f, 256 * 256).ToArray(),
+                    new[] { 1, 256, 256 });
+
+                // 4) Prompt encoder
+                Tensor<float> sparseEmb;
+                Tensor<float> denseEmb;
+
+                using (var promptEncoderOutputs = _promptEncoderSession.Run(new List<NamedOnnxValue>
+        {
+            NamedOnnxValue.CreateFromTensor("coords", coordsTensor),
+            NamedOnnxValue.CreateFromTensor("labels", labelsTensor),
+            NamedOnnxValue.CreateFromTensor("masks", maskInputTensor),
+            NamedOnnxValue.CreateFromTensor("masks_enable", new DenseTensor<int>(new[]{0}, new[]{1}))
         }))
                 {
-                    // Get encoder outputs
-                    var visionFeatures = GetFirstTensor<float>(imageEncoderOutputs, "vision_features");
-                    var visionPosEnc = GetFirstTensor<float>(imageEncoderOutputs, "vision_pos_enc_2");
-                    var highResFeatures1 = GetFirstTensor<float>(imageEncoderOutputs, "backbone_fpn_0");
-                    var highResFeatures2 = GetFirstTensor<float>(imageEncoderOutputs, "backbone_fpn_1");
+                    sparseEmb = GetFirstTensor<float>(promptEncoderOutputs, "sparse_embeddings");
+                    denseEmb = GetFirstTensor<float>(promptEncoderOutputs, "dense_embeddings");
+                }
 
-                    // Prepare prompt coordinates
-                    int pointCount = promptPoints.Count;
-                    float[] flattenedPromptCoords = new float[pointCount * 2];
-                    int[] flattenedPromptLabels = new int[pointCount];
-
-                    for (int i = 0; i < pointCount; i++)
-                    {
-                        // Clamp to original image dimensions
-                        float x = Math.Max(0, Math.Min(promptPoints[i].X, baseXY.Width - 1));
-                        float y = Math.Max(0, Math.Min(promptPoints[i].Y, baseXY.Height - 1));
-
-                        // Scale to model's input space
-                        float xScaleFactor = (_imageSize - 1f) / Math.Max(1, baseXY.Width - 1f);
-                        float yScaleFactor = (_imageSize - 1f) / Math.Max(1, baseXY.Height - 1f);
-                        float xScaled = x * xScaleFactor;
-                        float yScaled = y * yScaleFactor;
-
-                        flattenedPromptCoords[i * 2] = xScaled;
-                        flattenedPromptCoords[i * 2 + 1] = yScaled;
-
-                        // Set label (0 = Exterior/negative, 1 = Foreground/positive)
-                        string label = promptPoints[i].Label ?? "Foreground";
-                        flattenedPromptLabels[i] = label.Equals("Exterior", StringComparison.OrdinalIgnoreCase) ? 0 : 1;
-                    }
-
-                    // Create prompt tensors with explicit shapes
-                    var promptCoordsTensor = new DenseTensor<float>(
-                        flattenedPromptCoords,
-                        new[] { 1, pointCount, 2 }  // Batch x Points x XY
-                    );
-
-                    var promptLabelsTensor = new DenseTensor<int>(
-                        flattenedPromptLabels,
-                        new[] { 1, pointCount }     // Batch x Points
-                    );
-
-                    // Create mask input tensor (all ones)
-                    var maskInputTensor = new DenseTensor<float>(
-                        Enumerable.Repeat(1f, 256 * 256).ToArray(),
-                        new[] { 1, 256, 256 }
-                    );
-
-                    // Run prompt encoder
-                    var promptEncoderInputs = new List<NamedOnnxValue>
-            {
-                NamedOnnxValue.CreateFromTensor("coords", promptCoordsTensor),
-                NamedOnnxValue.CreateFromTensor("labels", promptLabelsTensor),
-                NamedOnnxValue.CreateFromTensor("masks", maskInputTensor),
-                NamedOnnxValue.CreateFromTensor("masks_enable", new DenseTensor<int>(new[] { 0 }, new[] { 1 }))
-            };
-
-                    using (var promptEncoderOutputs = _promptEncoderSession.Run(promptEncoderInputs))
-                    {
-                        // Process mask decoder
-                        var sparseEmbeddings = GetFirstTensor<float>(promptEncoderOutputs, "sparse_embeddings");
-                        var denseEmbeddings = GetFirstTensor<float>(promptEncoderOutputs, "dense_embeddings");
-
-                        var maskDecoderInputs = new List<NamedOnnxValue>
+                // 5) Mask decoder
+                Tensor<float> maskTensor;
+                using (var maskDecoderOutputs = _maskDecoderSession.Run(new List<NamedOnnxValue>
+        {
+            NamedOnnxValue.CreateFromTensor("image_embeddings", visionFeatures),
+            NamedOnnxValue.CreateFromTensor("image_pe",         visionPosEnc),
+            NamedOnnxValue.CreateFromTensor("sparse_prompt_embeddings", sparseEmb),
+            NamedOnnxValue.CreateFromTensor("dense_prompt_embeddings",  denseEmb),
+            NamedOnnxValue.CreateFromTensor("high_res_features1", highResFeatures1),
+            NamedOnnxValue.CreateFromTensor("high_res_features2", highResFeatures2),
+        }))
                 {
-                    NamedOnnxValue.CreateFromTensor("image_embeddings", visionFeatures),
-                    NamedOnnxValue.CreateFromTensor("image_pe", visionPosEnc),
-                    NamedOnnxValue.CreateFromTensor("sparse_prompt_embeddings", sparseEmbeddings),
-                    NamedOnnxValue.CreateFromTensor("dense_prompt_embeddings", denseEmbeddings),
-                    NamedOnnxValue.CreateFromTensor("high_res_features1", highResFeatures1),
-                    NamedOnnxValue.CreateFromTensor("high_res_features2", highResFeatures2)
-                };
+                    maskTensor = GetFirstTensor<float>(maskDecoderOutputs, "masks");
+                }
 
-                        using (var maskDecoderOutputs = _maskDecoderSession.Run(maskDecoderInputs))
+                // shape typically [1, 3, 256, 256]
+                int outChannels = maskTensor.Dimensions[1];
+                int maskH = maskTensor.Dimensions[2];
+                int maskW = maskTensor.Dimensions[3];
+                if (outChannels < 1)
+                    throw new Exception($"[ProcessXYSlice_Internal] No mask channels found. outChannels={outChannels}");
+
+                float[] maskData = maskTensor.ToArray();
+
+                float bestCoverage = -1f;
+                Bitmap bestMask = null;
+
+                // user can define threshold 0..255 => prob cutoff
+                float probCutoff = MaskThreshold / 255f; // e.g. 128 => 0.5
+
+                // 6) For each channel, threshold & pick best coverage
+                for (int c = 0; c < outChannels; c++)
+                {
+                    Bitmap rawMask = new Bitmap(maskW, maskH);
+                    int whiteCount = 0;
+                    int channelOffset = c * maskH * maskW;
+
+                    // (a) Build 256x256 raw mask
+                    for (int yy = 0; yy < maskH; yy++)
+                    {
+                        int rowOffset = channelOffset + yy * maskW;
+                        for (int xx = 0; xx < maskW; xx++)
                         {
-                            var maskTensor = GetFirstTensor<float>(maskDecoderOutputs, "masks");
-
-                            // Extract mask data and analyze values
-                            int maskHeight = maskTensor.Dimensions[2];
-                            int maskWidth = maskTensor.Dimensions[3];
-                            float[] maskData = new float[maskHeight * maskWidth];
-
-                            // Find min/max to understand value distribution
-                            float minValue = float.MaxValue;
-                            float maxValue = float.MinValue;
-                            float sum = 0;
-
-                            for (int y = 0; y < maskHeight; y++)
+                            float logit = maskData[rowOffset + xx];
+                            float prob = 1f / (1f + (float)Math.Exp(-logit));
+                            if (prob >= probCutoff)
                             {
-                                for (int x = 0; x < maskWidth; x++)
-                                {
-                                    float val = maskTensor[0, 0, y, x];
-                                    maskData[y * maskWidth + x] = val;
-                                    minValue = Math.Min(minValue, val);
-                                    maxValue = Math.Max(maxValue, val);
-                                    sum += val;
-                                }
+                                rawMask.SetPixel(xx, yy, Color.White);
+                                whiteCount++;
                             }
-
-                            float meanValue = sum / maskData.Length;
-                            Logger.Log($"[ProcessXYSlice] Mask raw logits - Min: {minValue:F2}, Max: {maxValue:F2}, Mean: {meanValue:F2}");
-
-                            // ADAPTIVE APPROACH: Find best parameters for this specific image
-
-                            // 1. Test multiple thresholds to find a good one
-                            int[] thresholds = new int[] { 80, 100, 120, 140, 160, 180 };
-                            float[] coveragePercents = new float[thresholds.Length];
-
-                            // First convert logits to probabilities with standard sigmoid
-                            float[] probabilities = new float[maskData.Length];
-                            for (int i = 0; i < maskData.Length; i++)
+                            else
                             {
-                                probabilities[i] = 1.0f / (1.0f + (float)Math.Exp(-maskData[i]));
+                                rawMask.SetPixel(xx, yy, Color.Black);
                             }
-
-                            // Test different thresholds
-                            for (int t = 0; t < thresholds.Length; t++)
-                            {
-                                int threshold = thresholds[t];
-                                int whiteCount = 0;
-
-                                for (int i = 0; i < probabilities.Length; i++)
-                                {
-                                    if ((probabilities[i] * 255) > threshold)
-                                        whiteCount++;
-                                }
-
-                                coveragePercents[t] = (float)whiteCount / probabilities.Length * 100;
-                                Logger.Log($"[ProcessXYSlice] Threshold {threshold}: {coveragePercents[t]:F1}% coverage");
-                            }
-
-                            // 2. Find the best threshold - preferably 5-20% coverage, not too large or small
-                            int selectedThresholdIndex = 0;
-                            for (int i = 0; i < thresholds.Length; i++)
-                            {
-                                if (coveragePercents[i] >= 5 && coveragePercents[i] <= 20)
-                                {
-                                    selectedThresholdIndex = i;
-                                    break;
-                                }
-                            }
-
-                            // If nothing in ideal range, find something reasonable
-                            if (coveragePercents[selectedThresholdIndex] < 1 || coveragePercents[selectedThresholdIndex] > 30)
-                            {
-                                // Find the threshold closest to 10% coverage
-                                float bestDistance = float.MaxValue;
-                                for (int i = 0; i < thresholds.Length; i++)
-                                {
-                                    float distance = Math.Abs(coveragePercents[i] - 10);
-                                    if (distance < bestDistance)
-                                    {
-                                        bestDistance = distance;
-                                        selectedThresholdIndex = i;
-                                    }
-                                }
-                            }
-
-                            int selectedThreshold = thresholds[selectedThresholdIndex];
-                            Logger.Log($"[ProcessXYSlice] Selected threshold: {selectedThreshold} ({coveragePercents[selectedThresholdIndex]:F1}% coverage)");
-
-                            // 3. Create raw mask with selected threshold
-                            Bitmap rawMask = new Bitmap(maskWidth, maskHeight);
-                            for (int y = 0; y < maskHeight; y++)
-                            {
-                                for (int x = 0; x < maskWidth; x++)
-                                {
-                                    float prob = probabilities[y * maskWidth + x];
-                                    bool isWhite = (prob * 255) > selectedThreshold;
-                                    rawMask.SetPixel(x, y, isWhite ? Color.White : Color.Black);
-                                }
-                            }
-
-                            // 4. Apply moderate dilation only if mask is sparse
-                            Bitmap processedMask = rawMask;
-                            if (coveragePercents[selectedThresholdIndex] < 15)
-                            {
-                                // Only dilate if coverage is low
-                                Bitmap dilatedMask = Dilate(rawMask, 3);  // Small kernel
-                                rawMask.Dispose();
-                                processedMask = dilatedMask;
-                            }
-
-                            // 5. Upscale to final dimensions
-                            Bitmap finalMask = new Bitmap(baseXY.Width, baseXY.Height);
-                            using (Graphics g = Graphics.FromImage(finalMask))
-                            {
-                                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-                                g.DrawImage(processedMask, new Rectangle(0, 0, baseXY.Width, baseXY.Height));
-                            }
-                            processedMask.Dispose();
-
-                            // 6. Verify final results
-                            int finalWhiteCount = 0;
-                            for (int y = 0; y < finalMask.Height; y++)
-                            {
-                                for (int x = 0; x < finalMask.Width; x++)
-                                {
-                                    if (finalMask.GetPixel(x, y).R > 128)
-                                        finalWhiteCount++;
-                                }
-                            }
-
-                            double finalPercent = (double)finalWhiteCount / (finalMask.Width * finalMask.Height) * 100;
-                            Logger.Log($"[ProcessXYSlice] Final mask: {finalWhiteCount} white pixels ({finalPercent:F1}%)");
-
-                            // 7. SAFETY CHECK: If too much of the image is white, use fallback
-                            if (finalPercent > 50)
-                            {
-                                Logger.Log("[ProcessXYSlice] Warning: Mask covers >50% of image. Using conservative fallback.");
-                                finalMask.Dispose();
-
-                                if (positiveCount > 0)
-                                {
-                                    finalMask = CreateFallbackSegmentation(baseXY.Width, baseXY.Height, promptPoints);
-                                }
-                                else
-                                {
-                                    // Create empty mask if no positive points
-                                    finalMask = new Bitmap(baseXY.Width, baseXY.Height);
-                                    using (Graphics g = Graphics.FromImage(finalMask))
-                                    {
-                                        g.Clear(Color.Black);
-                                    }
-                                }
-                            }
-
-                            return finalMask;
                         }
                     }
+
+                    float coveragePercent = whiteCount / (float)(maskH * maskW) * 100f;
+
+                    // (b) Optional dilation if coverage < 15%
+                    Bitmap processedMask = rawMask;
+                    if (coveragePercent > 0 && coveragePercent < 15f)
+                    {
+                        Bitmap dilated = Dilate(rawMask, 3);
+                        processedMask = dilated;
+                        rawMask.Dispose();
+                    }
+
+                    // (c) Upscale to sliceBmp size
+                    Bitmap finalMask = new Bitmap(sliceBmp.Width, sliceBmp.Height);
+                    using (Graphics g = Graphics.FromImage(finalMask))
+                    {
+                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        g.DrawImage(processedMask, new Rectangle(0, 0, sliceBmp.Width, sliceBmp.Height));
+                    }
+                    if (processedMask != rawMask) processedMask.Dispose();
+
+                    // measure coverage in final sized mask
+                    int finalWhiteCount = 0;
+                    for (int y2 = 0; y2 < finalMask.Height; y2++)
+                    {
+                        for (int x2 = 0; x2 < finalMask.Width; x2++)
+                        {
+                            if (finalMask.GetPixel(x2, y2).R > 128)
+                                finalWhiteCount++;
+                        }
+                    }
+                    float finalPerc = finalWhiteCount / (float)(sliceBmp.Width * sliceBmp.Height) * 100f;
+
+                    if (finalPerc > bestCoverage)
+                    {
+                        bestCoverage = finalPerc;
+                        if (bestMask != null) bestMask.Dispose();
+                        bestMask = finalMask;
+                    }
+                    else
+                    {
+                        finalMask.Dispose();
+                    }
                 }
+
+                Logger.Log($"[ProcessXYSlice_Internal] best coverage={bestCoverage:F1}%");
+                return bestMask ?? new Bitmap(sliceBmp.Width, sliceBmp.Height);
             }
             catch (Exception ex)
             {
-                Logger.Log($"[ProcessXYSlice] Error: {ex.Message}");
-                Logger.Log($"[ProcessXYSlice] Stack trace: {ex.StackTrace}");
+                Logger.Log($"[ProcessXYSlice_Internal] Error: {ex.Message}\n{ex.StackTrace}");
+                Bitmap errorMask = new Bitmap(sliceBmp.Width, sliceBmp.Height);
+                using (Graphics g = Graphics.FromImage(errorMask))
+                {
+                    g.Clear(Color.Black);
+                }
+                return errorMask;
+            }
+        }
 
+
+        /// <summary>
+        /// Processes a CT slice in the XY view using a list of AnnotationPoints.
+        /// Negative prompts (Exterior) => label=0, positive => label=1 in this pass.
+        /// We decode ALL mask channels from SAM, pick whichever channel has the largest coverage,
+        /// and return that as a single final Bitmap.
+        /// </summary>
+        public Bitmap ProcessXYSlice(
+    int sliceIndex,
+    Bitmap baseXY,
+    List<AnnotationPoint> promptPoints,
+    object additionalParam1,
+    object additionalParam2)
+        {
+            try
+            {
+                Logger.Log($"[ProcessXYSlice] Start slice={sliceIndex}, #points={(promptPoints?.Count ?? 0)}");
+
+                // Validation
+                if (baseXY == null)
+                    throw new ArgumentNullException(nameof(baseXY), "Input bitmap cannot be null");
+                if (promptPoints == null || promptPoints.Count == 0)
+                    throw new ArgumentException("No prompt points provided", nameof(promptPoints));
+                if (baseXY.Width <= 0 || baseXY.Height <= 0)
+                    throw new ArgumentException("Invalid baseXY dimensions");
+
+                // Convert to model’s input size
+                float[] imageTensorData = BitmapToFloatTensor(baseXY, _imageSize, _imageSize);
+                // You can store into DenseTensor<float> or Tensor<float>; doesn't matter now.
+                var imageInput = new DenseTensor<float>(imageTensorData, new[] { 1, 3, _imageSize, _imageSize });
+
+                // 1) Run image encoder
+                Tensor<float> visionFeatures;
+                Tensor<float> visionPosEnc;
+                Tensor<float> highResFeatures1;
+                Tensor<float> highResFeatures2;
+
+                using (var imageEncoderOutputs = _imageEncoderSession.Run(
+                    new[] { NamedOnnxValue.CreateFromTensor("input_image", imageInput) }))
+                {
+                    visionFeatures = GetFirstTensor<float>(imageEncoderOutputs, "vision_features");
+                    visionPosEnc = GetFirstTensor<float>(imageEncoderOutputs, "vision_pos_enc_2");
+                    highResFeatures1 = GetFirstTensor<float>(imageEncoderOutputs, "backbone_fpn_0");
+                    highResFeatures2 = GetFirstTensor<float>(imageEncoderOutputs, "backbone_fpn_1");
+                }
+
+                // 2) Prepare point prompts
+                int pointCount = promptPoints.Count;
+                float[] coordsArray = new float[pointCount * 2];
+                int[] labelArray = new int[pointCount];
+
+                for (int i = 0; i < pointCount; i++)
+                {
+                    // clamp & scale coords
+                    float xClamped = Math.Max(0, Math.Min(promptPoints[i].X, baseXY.Width - 1));
+                    float yClamped = Math.Max(0, Math.Min(promptPoints[i].Y, baseXY.Height - 1));
+                    float xScale = (_imageSize - 1f) / Math.Max(1, baseXY.Width - 1f);
+                    float yScale = (_imageSize - 1f) / Math.Max(1, baseXY.Height - 1f);
+
+                    coordsArray[i * 2] = xClamped * xScale;
+                    coordsArray[i * 2 + 1] = yClamped * yScale;
+
+                    // label=0 => negative, label=1 => positive
+                    bool isExterior = promptPoints[i].Label.Equals("Exterior", StringComparison.OrdinalIgnoreCase);
+                    labelArray[i] = isExterior ? 0 : 1;
+                }
+
+                var coordsTensor = new DenseTensor<float>(coordsArray, new[] { 1, pointCount, 2 });
+                var labelsTensor = new DenseTensor<int>(labelArray, new[] { 1, pointCount });
+                // trivial mask input
+                var maskInputTensor = new DenseTensor<float>(
+                    Enumerable.Repeat(1f, 256 * 256).ToArray(),
+                    new[] { 1, 256, 256 });
+
+                // 3) Run prompt encoder
+                Tensor<float> sparseEmb;
+                Tensor<float> denseEmb;
+                using (var promptEncoderOutputs = _promptEncoderSession.Run(new List<NamedOnnxValue>
+        {
+            NamedOnnxValue.CreateFromTensor("coords", coordsTensor),
+            NamedOnnxValue.CreateFromTensor("labels", labelsTensor),
+            NamedOnnxValue.CreateFromTensor("masks", maskInputTensor),
+            NamedOnnxValue.CreateFromTensor("masks_enable", new DenseTensor<int>(new[]{0}, new[]{1}))
+        }))
+                {
+                    sparseEmb = GetFirstTensor<float>(promptEncoderOutputs, "sparse_embeddings");
+                    denseEmb = GetFirstTensor<float>(promptEncoderOutputs, "dense_embeddings");
+                }
+
+                // 4) Run mask decoder
+                Tensor<float> maskTensor;
+                using (var maskDecoderOutputs = _maskDecoderSession.Run(new List<NamedOnnxValue>
+        {
+            NamedOnnxValue.CreateFromTensor("image_embeddings", visionFeatures),
+            NamedOnnxValue.CreateFromTensor("image_pe",         visionPosEnc),
+            NamedOnnxValue.CreateFromTensor("sparse_prompt_embeddings", sparseEmb),
+            NamedOnnxValue.CreateFromTensor("dense_prompt_embeddings",  denseEmb),
+            NamedOnnxValue.CreateFromTensor("high_res_features1", highResFeatures1),
+            NamedOnnxValue.CreateFromTensor("high_res_features2", highResFeatures2),
+        }))
+                {
+                    maskTensor = GetFirstTensor<float>(maskDecoderOutputs, "masks");
+                }
+
+                // Typically shape [1, 3, 256, 256]
+                int outChannels = maskTensor.Dimensions[1]; // typically 3
+                int maskH = maskTensor.Dimensions[2]; // 256
+                int maskW = maskTensor.Dimensions[3]; // 256
+                if (outChannels < 1)
+                    throw new Exception($"[ProcessXYSlice] Unexpected mask channels = {outChannels}");
+
+                // Convert entire maskTensor to float[] so we can index manually
+                float[] maskData = maskTensor.ToArray();
+                // The layout: [batch=0, channel=c, y, x]
+                // offset = (0 * outChannels * maskH * maskW) + (c * maskH * maskW) + (yy * maskW) + xx
+
+                float bestCoverage = -1f;
+                Bitmap bestMask = null;
+
+                float probCutoff = MaskThreshold / 255f;  // e.g. 128 => 0.5
+
+                // For each channel
+                for (int c = 0; c < outChannels; c++)
+                {
+                    Bitmap rawMask = new Bitmap(maskW, maskH);
+                    int whiteCount = 0;
+                    int channelOffset = c * maskH * maskW; // ignoring batch=0
+
+                    // (a) build raw 256x256 mask
+                    for (int yy = 0; yy < maskH; yy++)
+                    {
+                        int rowOffset = channelOffset + yy * maskW;
+                        for (int xx = 0; xx < maskW; xx++)
+                        {
+                            float logit = maskData[rowOffset + xx];
+                            float prob = 1f / (1f + (float)Math.Exp(-logit));
+                            if (prob >= probCutoff)
+                            {
+                                rawMask.SetPixel(xx, yy, Color.White);
+                                whiteCount++;
+                            }
+                            else
+                            {
+                                rawMask.SetPixel(xx, yy, Color.Black);
+                            }
+                        }
+                    }
+
+                    float coveragePercent = whiteCount / (float)(maskW * maskH) * 100f;
+
+                    // (b) Optionally do small dilation if coverage <15%
+                    Bitmap processedMask = rawMask;
+                    if (coveragePercent > 0 && coveragePercent < 15f)
+                    {
+                        Bitmap dilated = Dilate(rawMask, 3);
+                        processedMask = dilated;
+                        rawMask.Dispose();
+                    }
+
+                    // (c) Upscale to baseXY size
+                    Bitmap finalMask = new Bitmap(baseXY.Width, baseXY.Height);
+                    using (Graphics g = Graphics.FromImage(finalMask))
+                    {
+                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        g.DrawImage(processedMask, new Rectangle(0, 0, baseXY.Width, baseXY.Height));
+                    }
+                    if (processedMask != rawMask) processedMask.Dispose();
+
+                    // measure coverage
+                    int finalWhiteCount = 0;
+                    for (int y2 = 0; y2 < finalMask.Height; y2++)
+                    {
+                        for (int x2 = 0; x2 < finalMask.Width; x2++)
+                        {
+                            if (finalMask.GetPixel(x2, y2).R > 128)
+                                finalWhiteCount++;
+                        }
+                    }
+                    float finalPerc = finalWhiteCount / (float)(baseXY.Width * baseXY.Height) * 100f;
+
+                    if (finalPerc > bestCoverage)
+                    {
+                        bestCoverage = finalPerc;
+                        if (bestMask != null) bestMask.Dispose();
+                        bestMask = finalMask;
+                    }
+                    else
+                    {
+                        finalMask.Dispose();
+                    }
+                }
+
+                Logger.Log($"[ProcessXYSlice] Best channel coverage={bestCoverage:F1}%");
+                return bestMask ?? new Bitmap(baseXY.Width, baseXY.Height);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ProcessXYSlice] Error: {ex.Message}\n{ex.StackTrace}");
                 // Return empty mask on error
                 Bitmap errorMask = new Bitmap(baseXY.Width, baseXY.Height);
                 using (Graphics g = Graphics.FromImage(errorMask))
@@ -431,6 +555,10 @@ namespace CTSegmenter
         /// <summary>
         /// Processes a CT slice in the XZ view using a list of AnnotationPoints.
         /// </summary>
+        /// <summary>
+        /// Processes a CT slice in the XZ view. Same multi-channel approach as XY.
+        /// Returns whichever channel has largest coverage after thresholding.
+        /// </summary>
         public Bitmap ProcessXZSlice(
             int sliceIndex,
             Bitmap baseXZ,
@@ -440,17 +568,25 @@ namespace CTSegmenter
         {
             try
             {
-                Logger.Log($"[ProcessXZSlice] Processing slice {sliceIndex} with {promptPoints?.Count ?? 0} points");
+                Logger.Log($"[ProcessXZSlice] slice={sliceIndex}, points={(promptPoints?.Count ?? 0)}");
+                if (baseXZ == null)
+                    throw new ArgumentNullException(nameof(baseXZ), "XZ bitmap is null");
+                if (promptPoints == null || promptPoints.Count == 0)
+                    throw new ArgumentException("No prompt points", nameof(promptPoints));
 
-                // For XZ view, coordinate validation happens in ProcessXYSlice
-                return ProcessXYSlice(sliceIndex, baseXZ, promptPoints, p2, p3);
+                // The logic is identical to ProcessXYSlice but we just re-use the same code:
+                return ProcessXYSlice_Internal(baseXZ, promptPoints);
             }
             catch (Exception ex)
             {
-                Logger.Log($"[ProcessXZSlice] Error: {ex.Message}");
-                throw;
+                Logger.Log($"[ProcessXZSlice] Error: {ex.Message}\n{ex.StackTrace}");
+                // Return empty black
+                Bitmap errMask = new Bitmap(baseXZ.Width, baseXZ.Height);
+                using (var g = Graphics.FromImage(errMask)) g.Clear(Color.Black);
+                return errMask;
             }
         }
+
 
         /// <summary>
         /// Processes a CT slice in the XZ view using a list of Points and bool flag.
@@ -507,7 +643,8 @@ namespace CTSegmenter
         }
 
         /// <summary>
-        /// Processes a CT slice in the YZ view using a list of AnnotationPoints.
+        /// Processes a CT slice in the YZ view, multi-channel approach. 
+        /// Calls same internal routine as XY to keep code consistent.
         /// </summary>
         public Bitmap ProcessYZSlice(
             int sliceIndex,
@@ -518,46 +655,25 @@ namespace CTSegmenter
         {
             try
             {
-                Logger.Log($"[ProcessYZSlice] Processing slice {sliceIndex} with {promptPoints?.Count ?? 0} points");
-
-                // Validate bitmap dimensions for YZ view 
+                Logger.Log($"[ProcessYZSlice] slice={sliceIndex}, points={(promptPoints?.Count ?? 0)}");
                 if (baseYZ == null)
-                {
-                    Logger.Log($"Warning: Null bitmap provided for YZ slice {sliceIndex}");
-                    throw new ArgumentNullException(nameof(baseYZ), "YZ bitmap cannot be null");
-                }
-
-                Logger.Log($"YZ bitmap dimensions: {baseYZ.Width}x{baseYZ.Height}");
-
-                // Validate points for YZ view specifically
+                    throw new ArgumentNullException(nameof(baseYZ), "YZ bitmap is null");
                 if (promptPoints == null || promptPoints.Count == 0)
-                {
-                    Logger.Log($"Warning: No prompt points for YZ slice {sliceIndex}");
-                    throw new ArgumentException("No prompt points provided for YZ slice");
-                }
+                    throw new ArgumentException("No prompt points", nameof(promptPoints));
 
-                // Filter out invalid points for YZ view
-                var validPoints = promptPoints.Where(p => p != null &&
-                                                   !float.IsNaN(p.X) && !float.IsNaN(p.Y) &&
-                                                   !float.IsInfinity(p.X) && !float.IsInfinity(p.Y) &&
-                                                   p.X >= 0 && p.Y >= 0 &&
-                                                   p.X < baseYZ.Width && p.Y < baseYZ.Height).ToList();
-
-                if (validPoints.Count == 0)
-                {
-                    Logger.Log($"Warning: No valid points remain for YZ slice {sliceIndex} after filtering");
-                    throw new ArgumentException("No valid points for YZ slice after filtering");
-                }
-
-                // Delegate to main processing method
-                return ProcessXYSlice(sliceIndex, baseYZ, validPoints, p2, p3);
+                // Re-use the same multi-channel logic:
+                return ProcessXYSlice_Internal(baseYZ, promptPoints);
             }
             catch (Exception ex)
             {
-                Logger.Log($"[ProcessYZSlice] Error: {ex.Message}");
-                throw;
+                Logger.Log($"[ProcessYZSlice] Error: {ex.Message}\n{ex.StackTrace}");
+                // Return empty black
+                Bitmap errMask = new Bitmap(baseYZ.Width, baseYZ.Height);
+                using (var g = Graphics.FromImage(errMask)) g.Clear(Color.Black);
+                return errMask;
             }
         }
+
 
         /// <summary>
         /// Processes a CT slice in the YZ view using a list of Points and bool flag.
@@ -703,6 +819,155 @@ namespace CTSegmenter
             mask.Dispose();
             return closed;
         }*/
+        /// <summary>
+        /// Segments any number of materials on a single 2D slice (XY),
+        /// automatically excluding previously segmented areas for each subsequent material.
+        /// 
+        /// Usage Example:
+        ///   var multiResults = SegmentMultipleMaterialsOnSlice(
+        ///       sliceIndex,
+        ///       sliceBitmap,
+        ///       new List<(string MaterialName, List<AnnotationPoint> Positives)>
+        ///       {
+        ///           ("Material1", mat1PositivePoints),
+        ///           ("Material2", mat2PositivePoints),
+        ///           ("Material3", mat3PositivePoints),
+        ///           ...
+        ///       }
+        ///   );
+        /// Each entry in `multiResults` is the final mask for that material (in the same order).
+        /// 
+        /// The second pass automatically includes negative prompts from the region of the
+        /// first pass, so you won't re-segment the same region. The third pass excludes the
+        /// first + second, etc. Indefinite number of materials is supported.
+        /// </summary>
+        public List<Bitmap> SegmentMultipleMaterialsOnSlice(
+            int sliceIndex,
+            Bitmap sliceXY,
+            List<(string MaterialName, List<AnnotationPoint> PositivePoints)> materials)
+        {
+            if (sliceXY == null)
+                throw new ArgumentNullException(nameof(sliceXY), "Slice bitmap cannot be null");
+            if (materials == null || materials.Count == 0)
+                throw new ArgumentException("No materials specified");
+
+            Logger.Log($"[SegmentMultipleMaterialsOnSlice] slice={sliceIndex}, #materials={materials.Count}");
+
+            // We'll store the final mask for each material in this list:
+            var finalMasks = new List<Bitmap>();
+
+            // We'll keep a union of all previously segmented areas as a black-and-white “accumulated” mask.
+            // That union is used to generate negative prompts for each new material pass.
+            Bitmap accumulatedMask = new Bitmap(sliceXY.Width, sliceXY.Height);
+            using (Graphics g = Graphics.FromImage(accumulatedMask))
+            {
+                g.Clear(Color.Black);
+            }
+
+            foreach (var (materialName, positivePoints) in materials)
+            {
+                Logger.Log($"[SegmentMultipleMaterialsOnSlice] Now segmenting: {materialName}");
+
+                // 1) Convert user’s positive points for this material into AnnotationPoints labeled "Foreground"
+                //    We'll also generate negative points labeled "Exterior" from the ACCUMULATED mask so far.
+
+                // The user-supplied positives:
+                var allPrompts = new List<AnnotationPoint>();
+                foreach (var pt in positivePoints)
+                {
+                    // Make sure it is within slice bounds
+                    float xClamped = Math.Max(0, Math.Min(pt.X, sliceXY.Width - 1));
+                    float yClamped = Math.Max(0, Math.Min(pt.Y, sliceXY.Height - 1));
+
+                    allPrompts.Add(new AnnotationPoint
+                    {
+                        X = xClamped,
+                        Y = yClamped,
+                        Z = sliceIndex,
+                        Label = "Foreground"  // user wants this region
+                    });
+                }
+
+                // 2) Add negative points inside the union of previously segmented areas
+                //    This ensures we do NOT re-segment them. We'll sample some random
+                //    points from the accumulatedMask (where it is white).
+                var negativeSamples = SampleNegativePointsFromMask(accumulatedMask, 30);
+                // 30 => up to 30 negative points, adjust as needed
+                foreach (var (nx, ny) in negativeSamples)
+                {
+                    allPrompts.Add(new AnnotationPoint
+                    {
+                        X = nx,
+                        Y = ny,
+                        Z = sliceIndex,
+                        Label = "Exterior"  // force it negative
+                    });
+                }
+
+                // 3) Now call your normal multi-channel method (the same code as `ProcessXYSlice_Internal`)
+                Bitmap matMask = ProcessXYSlice_Internal(sliceXY, allPrompts);
+
+                finalMasks.Add(matMask);
+
+                // 4) Merge this material’s new mask into the ACCUMULATED mask
+                //    so that future materials exclude it
+                using (Graphics gAcc = Graphics.FromImage(accumulatedMask))
+                {
+                    // We can do a per-pixel combine, or simpler:
+                    //   - for each white pixel in matMask => set white in accumulatedMask
+                    for (int y = 0; y < matMask.Height; y++)
+                    {
+                        for (int x = 0; x < matMask.Width; x++)
+                        {
+                            if (matMask.GetPixel(x, y).R > 128)
+                            {
+                                accumulatedMask.SetPixel(x, y, Color.White);
+                            }
+                        }
+                    }
+                }
+
+                Logger.Log($"[SegmentMultipleMaterialsOnSlice] Done with material: {materialName}");
+            }
+
+            return finalMasks;
+        }
+        /// <summary>
+        /// Randomly selects up to 'count' coordinates inside 'mask' where pixel is White,
+        /// returning them as (x,y) pairs. We label them "Exterior" to exclude previously
+        /// segmented areas in the next pass.
+        /// </summary>
+        private List<(int X, int Y)> SampleNegativePointsFromMask(Bitmap mask, int count)
+        {
+            // We'll gather all white coords, then pick random up to 'count' of them
+            var whiteCoords = new List<(int, int)>();
+            for (int y = 0; y < mask.Height; y++)
+            {
+                for (int x = 0; x < mask.Width; x++)
+                {
+                    if (mask.GetPixel(x, y).R > 128)
+                    {
+                        whiteCoords.Add((x, y));
+                    }
+                }
+            }
+
+            var rnd = new Random();
+            // If less than 'count' white coords, we just sample all
+            // otherwise pick random subset
+            if (whiteCoords.Count <= count)
+                return whiteCoords;
+
+            // shuffle
+            for (int i = whiteCoords.Count - 1; i > 0; i--)
+            {
+                int j = rnd.Next(i + 1);
+                (whiteCoords[i], whiteCoords[j]) = (whiteCoords[j], whiteCoords[i]);
+            }
+            // take the first 'count'
+            return whiteCoords.Take(count).ToList();
+        }
+
         private Bitmap PostProcessMask(Bitmap mask)
         {
             // Use a customizable threshold instead of hardcoded value

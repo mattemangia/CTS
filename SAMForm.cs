@@ -705,45 +705,45 @@ namespace CTSegmenter
     IEnumerable<AnnotationPoint> slicePoints,
     string targetMaterialName)
         {
-            // Print some debugging information
             Logger.Log($"Building prompts for material: {targetMaterialName}");
-            var allLabels = slicePoints.Select(p => p.Label).Distinct().ToList();
-            Logger.Log($"All labels in slice: {string.Join(", ", allLabels)}");
 
-            var targetPoints = slicePoints.Where(pt => pt.Label.Equals(targetMaterialName, StringComparison.OrdinalIgnoreCase)).ToList();
-            var otherMaterialPoints = slicePoints.Where(pt => !pt.Label.Equals(targetMaterialName, StringComparison.OrdinalIgnoreCase)).ToList();
-
-            Logger.Log($"Found {targetPoints.Count} positive points and {otherMaterialPoints.Count} points for other materials/exterior");
-
+            // Create a new list for our processed points
             List<AnnotationPoint> finalList = new List<AnnotationPoint>();
 
-            // Add target points as Foreground (positive)
-            finalList.AddRange(targetPoints.Select(pt => new AnnotationPoint
+            // Process each point in the slice
+            foreach (var pt in slicePoints)
             {
-                ID = pt.ID,
-                X = pt.X,
-                Y = pt.Y,
-                Z = pt.Z,
-                Type = pt.Type,
-                Label = "Foreground"
-            }));
+                AnnotationPoint newPoint = new AnnotationPoint
+                {
+                    ID = pt.ID,
+                    X = pt.X,
+                    Y = pt.Y,
+                    Z = pt.Z,
+                    Type = pt.Type
+                };
 
-            // Add other material points as Exterior (negative)
-            finalList.AddRange(otherMaterialPoints.Select(pt => new AnnotationPoint
-            {
-                ID = pt.ID,
-                X = pt.X,
-                Y = pt.Y,
-                Z = pt.Z,
-                Type = pt.Type,
-                Label = "Exterior"
-            }));
+                // If the user has labeled this point as "targetMaterialName", treat it as "Foreground"
+                // Otherwise, treat it as "Exterior" so we do NOT re-segment that area.
+                if (pt.Label.Equals(targetMaterialName, StringComparison.OrdinalIgnoreCase))
+                {
+                    newPoint.Label = "Foreground";
+                }
+                else
+                {
+                    newPoint.Label = "Exterior";
+                }
 
-            // Log the final prompts
-            Logger.Log($"Generated {finalList.Count} total prompts: {finalList.Count(p => p.Label == "Foreground")} positive, {finalList.Count(p => p.Label == "Exterior")} negative");
+                finalList.Add(newPoint);
+            }
+
+            // Log counts for debugging
+            int positiveCount = finalList.Count(p => p.Label == "Foreground");
+            int negativeCount = finalList.Count(p => p.Label == "Exterior");
+            Logger.Log($"Generated {finalList.Count} total prompts: {positiveCount} positive, {negativeCount} negative");
 
             return finalList;
         }
+
         public void SetRealTimeProcessing(bool enable)
         {
             // mainForm is already stored in SAMForm (set during construction).

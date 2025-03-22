@@ -114,39 +114,33 @@ namespace CTSegmenter
                 Selections[direction] = new Dictionary<string, int>();
                 SelectedMasks[direction] = new Dictionary<string, Bitmap>();
 
-                // Skip if we don't have candidates for this direction
+                // Skip if no candidates for this direction
                 if (!_allCandidates.ContainsKey(direction))
                 {
                     tabControl.TabPages.Add(tab);
                     continue;
                 }
 
-                // Get all materials for this direction
                 var materials = _allCandidates[direction].Keys.ToList();
-
-                // Create a panel for each material to contain its candidates
                 TableLayoutPanel mainPanel = new TableLayoutPanel();
                 mainPanel.Dock = DockStyle.Fill;
                 mainPanel.AutoScroll = true;
                 mainPanel.CellBorderStyle = TableLayoutPanelCellBorderStyle.Single;
 
-                // Set up columns - one for each material
                 mainPanel.ColumnCount = materials.Count;
                 float colWidth = 100.0f / materials.Count;
+                for (int i = 0; i < materials.Count; i++)
+                    mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, colWidth));
 
                 for (int i = 0; i < materials.Count; i++)
                 {
-                    mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, colWidth));
+                    string materialName = materials[i];
+                    var candidates = _allCandidates[direction][materialName];
 
-                    // Create a panel for this material
                     Panel materialPanel = new Panel();
                     materialPanel.Dock = DockStyle.Fill;
                     materialPanel.AutoScroll = true;
 
-                    string materialName = materials[i];
-                    var candidates = _allCandidates[direction][materialName];
-
-                    // Add header label for material
                     Label headerLabel = new Label();
                     headerLabel.Text = materialName;
                     headerLabel.Dock = DockStyle.Top;
@@ -156,64 +150,42 @@ namespace CTSegmenter
                     headerLabel.BackColor = Color.LightGray;
                     materialPanel.Controls.Add(headerLabel);
 
-                    // Create a new panel solely to contain radio buttons - this ensures proper grouping
-                    Panel radioContainer = new Panel();
-                    radioContainer.Dock = DockStyle.Fill;
+                    FlowLayoutPanel radioContainer = new FlowLayoutPanel();
+                    radioContainer.FlowDirection = FlowDirection.TopDown;
                     radioContainer.AutoScroll = true;
+                    radioContainer.Dock = DockStyle.Fill;
+                    radioContainer.Padding = new Padding(0, 30, 0, 0);
 
-                    // Add each candidate
                     for (int j = 0; j < candidates.Count; j++)
                     {
-                        // Create a candidate row panel
-                        Panel candidatePanel = new Panel();
-                        candidatePanel.Width = materialPanel.Width - 30;
-                        candidatePanel.Height = 200;
-                        candidatePanel.Left = 10;
-                        candidatePanel.Top = j * 205; // Position each below the previous one
-
-                        // Create picture box for mask
                         PictureBox pb = new PictureBox();
-                        pb.Width = candidatePanel.Width - 20;
+                        pb.Width = materialPanel.Width - 30;
                         pb.Height = 170;
-                        pb.Left = 10;
-                        pb.Top = 5;
+                        pb.Margin = new Padding(10, 5, 10, 5);
                         pb.SizeMode = PictureBoxSizeMode.Zoom;
                         pb.Image = candidates[j];
                         pb.Tag = j;
                         pb.BorderStyle = BorderStyle.FixedSingle;
 
-                        // Create radio button - these will be grouped by the radioContainer parent
                         RadioButton rb = new RadioButton();
                         rb.Text = $"Candidate {j + 1}";
-                        rb.Left = 10;
-                        rb.Top = 175;
-                        rb.Width = candidatePanel.Width - 20;
+                        rb.Width = materialPanel.Width - 30;
                         rb.Height = 25;
+                        rb.Margin = new Padding(10, 0, 10, 10);
                         rb.Tag = new Tuple<string, int>(materialName, j);
-                        rb.Checked = (j == 0); // Default to first
+                        rb.Checked = (j == 0);
 
                         if (rb.Checked)
                         {
-                            // Initialize selection
-                            Selections[direction][materialName] = 0;
-                            SelectedMasks[direction][materialName] = new Bitmap(candidates[0]);
+                            Selections[direction][materialName] = j;
+                            SelectedMasks[direction][materialName] = new Bitmap(candidates[j]);
                         }
 
-                        // Set up events  
-                        int candidateIndex = j; // Capture for use in lambda
-                        pb.Click += (s, e) => {
-                            // Find the radio button in this panel and check it
-                            foreach (Control c in candidatePanel.Controls)
-                            {
-                                if (c is RadioButton)
-                                {
-                                    ((RadioButton)c).Checked = true;
-                                    break;
-                                }
-                            }
-                        };
+                        pb.Tag = rb;
+                        pb.Click += (s, e) => ((RadioButton)((PictureBox)s).Tag).Checked = true;
 
-                        rb.CheckedChanged += (s, e) => {
+                        rb.CheckedChanged += (s, e) =>
+                        {
                             if (((RadioButton)s).Checked)
                             {
                                 var tag = (Tuple<string, int>)((RadioButton)s).Tag;
@@ -221,17 +193,13 @@ namespace CTSegmenter
                                 int idx = tag.Item2;
                                 Selections[direction][mat] = idx;
 
-                                // Store selected bitmap
                                 if (_allCandidates[direction][mat].Count > idx)
-                                {
                                     SelectedMasks[direction][mat] = new Bitmap(_allCandidates[direction][mat][idx]);
-                                }
                             }
                         };
 
-                        candidatePanel.Controls.Add(pb);
-                        candidatePanel.Controls.Add(rb);
-                        radioContainer.Controls.Add(candidatePanel);
+                        radioContainer.Controls.Add(pb);
+                        radioContainer.Controls.Add(rb);
                     }
 
                     materialPanel.Controls.Add(radioContainer);

@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using System.Drawing.Imaging;
 
 namespace CTSegmenter
 {
@@ -100,7 +101,7 @@ namespace CTSegmenter
             if (directionResults.Count > 1)
             {
                 Logger.Log($"[SegmentationPropagator] Applying fusion for {directionResults.Count} directions using {settings.FusionAlgorithm}");
-                return ApplyFusion(directionResults, width, height, depth, settings.FusionAlgorithm);
+                return ApplyFusion(directionResults, width, height, depth, settings.FusionAlgorithm, mainForm);
             }
             else if (directionResults.Count == 1)
             {
@@ -1509,60 +1510,306 @@ namespace CTSegmenter
         }
 
         // Apply fusion to the results from multiple directions
+        /// <summary>
+        /// Applies fusion to segmentation results from multiple directions based on the selected algorithm
+        /// </summary>
         private static byte[,,] ApplyFusion(Dictionary<string, byte[,,]> directionResults,
-                                          int width, int height, int depth, string fusionAlgorithm)
+                                  int width, int height, int depth, string fusionAlgorithm,
+                                  MainForm mainForm = null)
         {
-            Logger.Log($"[SegmentationPropagator] Applying {fusionAlgorithm} to merge results from multiple directions");
+            Logger.Log($"[SegmentationPropagator] Applying {fusionAlgorithm} to merge results from {directionResults.Count} directions");
 
             byte[,,] fusedVolume = new byte[width, height, depth];
 
-            // For each voxel position
-            for (int z = 0; z < depth; z++)
+            // Get list of all material IDs present in results for processing
+            HashSet<byte> allMaterialIds = new HashSet<byte>();
+            foreach (var dirResult in directionResults.Values)
             {
-                for (int y = 0; y < height; y++)
+                for (int z = 0; z < depth; z++)
                 {
-                    for (int x = 0; x < width; x++)
+                    for (int y = 0; y < height; y++)
                     {
-                        // Collect all labels from different directions for this voxel
-                        Dictionary<byte, int> labelCounts = new Dictionary<byte, int>();
-
-                        foreach (var directionVolume in directionResults.Values)
+                        for (int x = 0; x < width; x++)
                         {
-                            byte label = directionVolume[x, y, z];
-                            if (label > 0)  // Only count non-zero labels
-                            {
-                                if (!labelCounts.ContainsKey(label))
-                                    labelCounts[label] = 0;
-                                labelCounts[label]++;
-                            }
-                        }
-
-                        // Apply fusion algorithm
-                        if (labelCounts.Count > 0)
-                        {
-                            switch (fusionAlgorithm)
-                            {
-                                case "Majority Voting Fusion":
-                                    // Pick the most frequent label
-                                    fusedVolume[x, y, z] = labelCounts.OrderByDescending(kvp => kvp.Value).First().Key;
-                                    break;
-
-                                case "Weighted Averaging Fusion":
-                                    // Weight by confidence (number of directions)
-                                    fusedVolume[x, y, z] = labelCounts.OrderByDescending(kvp => kvp.Value).First().Key;
-                                    break;
-
-                                default:
-                                    // Default to majority voting
-                                    fusedVolume[x, y, z] = labelCounts.OrderByDescending(kvp => kvp.Value).First().Key;
-                                    break;
-                            }
+                            byte label = dirResult[x, y, z];
+                            if (label > 0)
+                                allMaterialIds.Add(label);
                         }
                     }
                 }
             }
 
+            // Process each Z slice separately to make use of the 2D fusion methods
+            for (int z = 0; z < depth; z++)
+            {
+                Logger.Log($"[ApplyFusion] Processing slice {z + 1}/{depth}");
+
+                // Create slice bitmaps from each direction result
+                Dictionary<string, Bitmap> directionSlices = new Dictionary<string, Bitmap>();
+
+                foreach (var direction in directionResults.Keys)
+                {
+                    Bitmap sliceBitmap = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+
+                    // Fill the bitmap with the slice data
+                    BitmapData bmpData = sliceBitmap.LockBits(
+                        new Rectangle(0, 0, width, height),
+                        ImageLockMode.WriteOnly,
+                        sliceBitmap.PixelFormat);
+
+                    unsafe
+                    {
+                        byte* ptr = (byte*)bmpData.Scan0;
+                        int stride = bmpData.Stride;
+
+                        for (int y = 0; y < height; y++)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                byte label = directionResults[direction][x, y, z];
+                                int offset = y * stride + x * 3;
+                                ptr[offset] = label;
+                                ptr[offset + 1] = label;
+                                ptr[offset + 2] = label;
+                            }
+                        }
+                    }
+
+                    sliceBitmap.UnlockBits(bmpData);
+                    directionSlices[direction] = sliceBitmap;
+                }
+
+                // Apply appropriate fusion based on the algorithm
+                try
+                {
+                    Bitmap fusedSlice = null;
+
+                    switch (fusionAlgorithm)
+                    {
+                        case "Majority Voting Fusion":
+                            // For majority voting, we can use all direction slices directly
+                            fusedSlice = CTFusion.MajorityVotingFusion(directionSlices.Values.ToList());
+                            break;
+
+                        case "Weighted Averaging Fusion":
+                            // For weighted averaging, treat each direction equally
+                            fusedSlice = CTFusion.WeightedAveragingFusion(directionSlices.Values.ToList());
+                            break;
+
+                        case "Probability Map Fusion":
+                            // For material-wise probability map fusion, process each material separately
+                            // Create an empty result bitmap
+                            Bitmap resultMask = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+                            using (Graphics g = Graphics.FromImage(resultMask))
+                            {
+                                g.Clear(Color.Black);
+                            }
+
+                            // For each material, create probability maps and fuse them
+                            foreach (byte materialId in allMaterialIds)
+                            {
+                                // For each direction, create a binary mask for this material
+                                List<Bitmap> materialMasks = new List<Bitmap>();
+
+                                foreach (var direction in directionSlices.Keys)
+                                {
+                                    Bitmap dirSlice = directionSlices[direction];
+                                    Bitmap materialMask = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+
+                                    for (int y = 0; y < height; y++)
+                                    {
+                                        for (int x = 0; x < width; x++)
+                                        {
+                                            Color c = dirSlice.GetPixel(x, y);
+                                            if (c.R == materialId) // Material present
+                                                materialMask.SetPixel(x, y, Color.White);
+                                            else
+                                                materialMask.SetPixel(x, y, Color.Black);
+                                        }
+                                    }
+
+                                    materialMasks.Add(materialMask);
+                                }
+
+                                // Fuse probability maps for this material 
+                                using (Bitmap materialProb = CTFusion.ProbabilityMapFusion(materialMasks, 255))
+                                {
+                                    // Apply a threshold of 0.5 to the fused probability map
+                                    for (int y = 0; y < height; y++)
+                                    {
+                                        for (int x = 0; x < width; x++)
+                                        {
+                                            Color c = materialProb.GetPixel(x, y);
+                                            if (c.R >= 128) // Probability > 0.5
+                                            {
+                                                // Only assign if not already assigned or if probability is higher
+                                                Color current = resultMask.GetPixel(x, y);
+                                                if (current.R == 0) // No material yet
+                                                {
+                                                    resultMask.SetPixel(x, y, Color.FromArgb(materialId, materialId, materialId));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Clean up material masks
+                                foreach (var mask in materialMasks)
+                                    mask.Dispose();
+                            }
+
+                            fusedSlice = resultMask;
+                            break;
+
+                        case "CRF Fusion":
+                            // For CRF, we need the original grayscale image from the volume data
+                            MainForm mainFormRef = null;
+
+                            // Try to get a reference to the MainForm
+                            foreach (Form form in Application.OpenForms)
+                            {
+                                if (form is MainForm)
+                                {
+                                    mainFormRef = (MainForm)form;
+                                    break;
+                                }
+                            }
+
+                            if (mainFormRef != null && mainFormRef.volumeData != null)
+                            {
+                                // Get actual grayscale data for this slice
+                                using (Bitmap grayscaleSlice = GetGrayscaleSlice(mainFormRef, z, width, height))
+                                {
+                                    // Create a probability map from the existing segmentation
+                                    Bitmap probMap = null;
+
+                                    if (directionSlices.Count > 0)
+                                    {
+                                        // Use first direction as probability map
+                                        probMap = new Bitmap(directionSlices.Values.First());
+
+                                        // Apply CRF smoothing with real grayscale data
+                                        fusedSlice = CTFusion.CRFFusion(probMap, grayscaleSlice, 5, 1.0, 15.0);
+
+                                        // Clean up
+                                        probMap.Dispose();
+                                    }
+                                    else
+                                    {
+                                        // Fallback if we don't have enough data
+                                        Logger.Log("[ApplyFusion] Warning: Not enough data for CRF fusion, falling back to majority voting");
+                                        fusedSlice = CTFusion.MajorityVotingFusion(directionSlices.Values.ToList());
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                // Fallback to approximated grayscale if we can't get the real data
+                                Logger.Log("[ApplyFusion] Warning: Cannot access volume data for CRF fusion, using approximation");
+
+                                // Use one of the segmentation masks as the probability map
+                                Bitmap probMap = new Bitmap(directionSlices.Values.First());
+
+                                // Create a simple grayscale approximation
+                                Bitmap grayscaleApprox = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+                                using (Graphics g = Graphics.FromImage(grayscaleApprox))
+                                {
+                                    g.Clear(Color.Gray); // A flat gray image
+                                }
+
+                                // Apply CRF smoothing
+                                fusedSlice = CTFusion.CRFFusion(probMap, grayscaleApprox);
+
+                                // Clean up
+                                probMap.Dispose();
+                                grayscaleApprox.Dispose();
+                            }
+                            break;
+
+
+                        default:
+                            // Default to majority voting for unknown algorithms
+                            Logger.Log($"[ApplyFusion] Unknown fusion algorithm '{fusionAlgorithm}', defaulting to majority voting");
+                            fusedSlice = CTFusion.MajorityVotingFusion(directionSlices.Values.ToList());
+                            break;
+                    }
+
+                    // Copy the fused result back to the volume
+                    if (fusedSlice != null)
+                    {
+                        for (int y = 0; y < height; y++)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                Color c = fusedSlice.GetPixel(x, y);
+                                fusedVolume[x, y, z] = c.R; // Use R channel as the label
+                            }
+                        }
+
+                        // Clean up the fused slice
+                        fusedSlice.Dispose();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[ApplyFusion] Error applying fusion for slice {z}: {ex.Message}");
+
+                    // In case of error, copy one of the input slices as fallback
+                    if (directionResults.Count > 0)
+                    {
+                        var firstDir = directionResults.Keys.First();
+                        for (int y = 0; y < height; y++)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                fusedVolume[x, y, z] = directionResults[firstDir][x, y, z];
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    // Clean up all slice bitmaps
+                    foreach (var bitmap in directionSlices.Values)
+                        bitmap.Dispose();
+                }
+            }
+
+            Logger.Log("[ApplyFusion] Fusion completed successfully");
             return fusedVolume;
+        }
+
+        /// <summary>
+        /// Gets a grayscale bitmap slice from the volume data for a specific Z level
+        /// </summary>
+        private static Bitmap GetGrayscaleSlice(MainForm mainForm, int z, int width, int height)
+        {
+            Bitmap slice = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+            BitmapData bmpData = slice.LockBits(
+                new Rectangle(0, 0, width, height),
+                ImageLockMode.WriteOnly,
+                slice.PixelFormat);
+
+            unsafe
+            {
+                byte* ptr = (byte*)bmpData.Scan0;
+                int stride = bmpData.Stride;
+
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        byte value = mainForm.volumeData[x, y, z];
+                        int offset = y * stride + x * 3;
+                        ptr[offset] = value;
+                        ptr[offset + 1] = value;
+                        ptr[offset + 2] = value;
+                    }
+                }
+            }
+
+            slice.UnlockBits(bmpData);
+            return slice;
         }
         private static List<AnnotationPoint> BuildMixedPrompts(
     IEnumerable<AnnotationPoint> slicePoints,

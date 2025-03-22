@@ -337,6 +337,156 @@ namespace CTSegmenter
             }
         }
 
+        /// <summary>
+        /// Similar to ProcessXYSlice, but returns ALL mask candidates (often 3 channels)
+        /// from the decoder, so the user can pick one. Each returned Bitmap is
+        /// already upscaled to the original sliceBmp dimensions.
+        /// 
+        /// We do NOT pick one final "best" mask. Instead, we store them all in a List.
+        /// </summary>
+        public List<Bitmap> ProcessXYSlice_GetAllMasks(
+    int sliceIndex,
+    Bitmap sliceBmp,
+    List<AnnotationPoint> promptPoints,
+    object additionalParam1,
+    object additionalParam2)
+        {
+            List<Bitmap> channelMasks = new List<Bitmap>();
+            try
+            {
+                Logger.Log($"[ProcessXYSlice_GetAllMasks] slice={sliceIndex}, #points={(promptPoints?.Count ?? 0)}");
+
+                if (sliceBmp == null)
+                    throw new ArgumentNullException(nameof(sliceBmp));
+                if (promptPoints == null || promptPoints.Count == 0)
+                    throw new ArgumentException("No prompt points provided");
+                if (sliceBmp.Width <= 0 || sliceBmp.Height <= 0)
+                    throw new ArgumentException("Invalid sliceBmp dims");
+
+                // The same flow as single, except we keep all channels
+                float[] imageTensorData = BitmapToFloatTensor(sliceBmp, _imageSize, _imageSize);
+                var imageInput = new DenseTensor<float>(imageTensorData, new[] { 1, 3, _imageSize, _imageSize });
+
+                Tensor<float> visionFeat, visionPos, highRes1, highRes2;
+                using (var encOut = _imageEncoderSession.Run(new[] {
+            NamedOnnxValue.CreateFromTensor("input_image", imageInput) }))
+                {
+                    visionFeat = GetFirstTensor<float>(encOut, "vision_features");
+                    visionPos = GetFirstTensor<float>(encOut, "vision_pos_enc_2");
+                    highRes1 = GetFirstTensor<float>(encOut, "backbone_fpn_0");
+                    highRes2 = GetFirstTensor<float>(encOut, "backbone_fpn_1");
+                }
+
+                int ptCount = promptPoints.Count;
+                float[] coords = new float[ptCount * 2];
+                int[] labels = new int[ptCount];
+
+                for (int i = 0; i < ptCount; i++)
+                {
+                    float xC = Math.Max(0, Math.Min(promptPoints[i].X, sliceBmp.Width - 1));
+                    float yC = Math.Max(0, Math.Min(promptPoints[i].Y, sliceBmp.Height - 1));
+                    float xS = (_imageSize - 1f) / Math.Max(1, sliceBmp.Width - 1f);
+                    float yS = (_imageSize - 1f) / Math.Max(1, sliceBmp.Height - 1f);
+
+                    coords[i * 2] = xC * xS;
+                    coords[i * 2 + 1] = yC * yS;
+
+                    bool isExt = promptPoints[i].Label.Equals("Exterior", StringComparison.OrdinalIgnoreCase);
+                    labels[i] = isExt ? 0 : 1;
+                }
+                var coordsT = new DenseTensor<float>(coords, new[] { 1, ptCount, 2 });
+                var labelT = new DenseTensor<int>(labels, new[] { 1, ptCount });
+                var maskT = new DenseTensor<float>(Enumerable.Repeat(1f, 256 * 256).ToArray(), new[] { 1, 256, 256 });
+
+                Tensor<float> sparseE, denseE;
+                using (var promptOut = _promptEncoderSession.Run(new List<NamedOnnxValue>
+        {
+            NamedOnnxValue.CreateFromTensor("coords", coordsT),
+            NamedOnnxValue.CreateFromTensor("labels", labelT),
+            NamedOnnxValue.CreateFromTensor("masks", maskT),
+            NamedOnnxValue.CreateFromTensor("masks_enable", new DenseTensor<int>(new[]{0},new[]{1}))
+        }))
+                {
+                    sparseE = GetFirstTensor<float>(promptOut, "sparse_embeddings");
+                    denseE = GetFirstTensor<float>(promptOut, "dense_embeddings");
+                }
+
+                Tensor<float> decMask;
+                using (var decOut = _maskDecoderSession.Run(new List<NamedOnnxValue>
+        {
+            NamedOnnxValue.CreateFromTensor("image_embeddings", visionFeat),
+            NamedOnnxValue.CreateFromTensor("image_pe", visionPos),
+            NamedOnnxValue.CreateFromTensor("sparse_prompt_embeddings", sparseE),
+            NamedOnnxValue.CreateFromTensor("dense_prompt_embeddings",  denseE),
+            NamedOnnxValue.CreateFromTensor("high_res_features1", highRes1),
+            NamedOnnxValue.CreateFromTensor("high_res_features2", highRes2)
+        }))
+                {
+                    decMask = GetFirstTensor<float>(decOut, "masks");
+                }
+
+                int outC = decMask.Dimensions[1];
+                int maskH = decMask.Dimensions[2];
+                int maskW = decMask.Dimensions[3];
+                if (outC < 1) throw new Exception("[ProcessXYSlice_GetAllMasks] No channels found");
+                float[] data = decMask.ToArray();
+
+                float probCutoff = MaskThreshold / 255f;
+
+                // For each channel => produce one final upscaled mask
+                for (int c = 0; c < outC; c++)
+                {
+                    Bitmap rawMask = new Bitmap(maskW, maskH);
+                    int whiteCount = 0;
+                    int cOffset = c * (maskH * maskW);
+
+                    for (int yy = 0; yy < maskH; yy++)
+                    {
+                        int rowOff = cOffset + yy * maskW;
+                        for (int xx = 0; xx < maskW; xx++)
+                        {
+                            float logit = data[rowOff + xx];
+                            float prob = 1f / (1f + (float)Math.Exp(-logit));
+                            if (prob >= probCutoff)
+                            {
+                                rawMask.SetPixel(xx, yy, Color.White);
+                                whiteCount++;
+                            }
+                            else
+                            {
+                                rawMask.SetPixel(xx, yy, Color.Black);
+                            }
+                        }
+                    }
+                    float coverage = whiteCount / (float)(maskW * maskH) * 100f;
+                    Bitmap processed = rawMask;
+                    if (coverage > 0 && coverage < 15f)
+                    {
+                        Bitmap dilated = Dilate(rawMask, 3);
+                        processed = dilated;
+                        rawMask.Dispose();
+                    }
+
+                    // Upscale
+                    Bitmap finalMask = new Bitmap(sliceBmp.Width, sliceBmp.Height);
+                    using (Graphics g = Graphics.FromImage(finalMask))
+                    {
+                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        g.DrawImage(processed, new Rectangle(0, 0, sliceBmp.Width, sliceBmp.Height));
+                    }
+                    if (processed != rawMask) processed.Dispose();
+
+                    channelMasks.Add(finalMask);
+                }
+
+                return channelMasks;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ProcessXYSlice_GetAllMasks] Error: {ex.Message}");
+                return new List<Bitmap>(); // Return empty on error
+            }
+        }
 
         /// <summary>
         /// Processes a CT slice in the XY view using a list of AnnotationPoints.

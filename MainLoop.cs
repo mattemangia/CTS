@@ -168,10 +168,24 @@ namespace CTSegmenter
         public byte[,] currentSelectionXZ; // dimensions: [width, depth] for XZ view (fixed Y = XzSliceY)
         public byte[,] currentSelectionYZ; // dimensions: [depth, height] for YZ view (fixed X = YzSliceX)
 
+        private bool isBoxDrawingPossible = false;
+        private Point boxStartPoint;
+        private Point boxCurrentPoint;
+        private bool isActuallyDrawingBox = false;
         public bool RealTimeProcessing { get; set; } = false;
         private DateTime _lastRenderRequest = DateTime.MinValue;
         private const int RENDER_THROTTLE_MS = 50;
         private CancellationTokenSource xyRenderCts = new CancellationTokenSource();
+
+        private bool isXzBoxDrawingPossible = false;
+        private Point xzBoxStartPoint;
+        private Point xzBoxCurrentPoint;
+        private bool isXzActuallyDrawingBox = false;
+
+        private bool isYzBoxDrawingPossible = false;
+        private Point yzBoxStartPoint;
+        private Point yzBoxCurrentPoint;
+        private bool isYzActuallyDrawingBox = false;
 
         #endregion
 
@@ -247,7 +261,7 @@ namespace CTSegmenter
             mainView.MouseWheel += MainView_MouseWheel;
             mainView.MouseDown += MainView_MouseDown;
             mainView.MouseMove += MainView_MouseMove;
-
+            mainView.MouseUp += MainView_MouseUp;
             // XZ view
             xzView = new PictureBox
             {
@@ -273,6 +287,8 @@ namespace CTSegmenter
             yzView.Paint += YzView_Paint;
             yzView.MouseDown += YzView_MouseDown;
             yzView.MouseMove += YzView_MouseMove;
+            xzView.MouseUp += XzView_MouseUp;
+            yzView.MouseUp += YzView_MouseUp;
 
             this.Controls.Add(mainLayout);
         }
@@ -2008,16 +2024,66 @@ namespace CTSegmenter
         {
             foreach (var point in AnnotationMgr.GetPointsForSlice(CurrentSlice))
             {
-                float x = point.X * globalZoom + panOffset.X;
-                float y = point.Y * globalZoom + panOffset.Y;
-
                 Color materialColor = Materials.FirstOrDefault(m => m.Name == point.Label)?.Color ?? Color.Red;
-                using (var pen = new Pen(materialColor, 2))
-                using (var brush = new SolidBrush(materialColor))
+
+                if (point.Type == "Box")
                 {
-                    g.DrawLine(pen, x - 5, y, x + 5, y);
-                    g.DrawLine(pen, x, y - 5, x, y + 5);
-                    g.DrawString(point.ID.ToString(), Font, Brushes.Yellow, x + 5, y + 5);
+                    // Draw box annotation
+                    float x1 = point.X * globalZoom + panOffset.X;
+                    float y1 = point.Y * globalZoom + panOffset.Y;
+                    float x2 = point.X2 * globalZoom + panOffset.X;
+                    float y2 = point.Y2 * globalZoom + panOffset.Y;
+
+                    float boxX = Math.Min(x1, x2);
+                    float boxY = Math.Min(y1, y2);
+                    float boxWidth = Math.Abs(x2 - x1);
+                    float boxHeight = Math.Abs(y2 - y1);
+
+                    using (var pen = new Pen(materialColor, 2))
+                    {
+                        g.DrawRectangle(pen, boxX, boxY, boxWidth, boxHeight);
+                        g.DrawString(point.ID.ToString(), Font, Brushes.Yellow, boxX, boxY - 15);
+                    }
+                }
+                else // Draw point
+                {
+                    float x = point.X * globalZoom + panOffset.X;
+                    float y = point.Y * globalZoom + panOffset.Y;
+
+                    using (var pen = new Pen(materialColor, 2))
+                    using (var brush = new SolidBrush(materialColor))
+                    {
+                        g.DrawLine(pen, x - 5, y, x + 5, y);
+                        g.DrawLine(pen, x, y - 5, x, y + 5);
+                        g.DrawString(point.ID.ToString(), Font, Brushes.Yellow, x + 5, y + 5);
+                    }
+                }
+            }
+
+            // Draw box preview during dragging
+            if (isBoxDrawingPossible && isActuallyDrawingBox)
+            {
+                int boxX = Math.Min(boxStartPoint.X, boxCurrentPoint.X);
+                int boxY = Math.Min(boxStartPoint.Y, boxCurrentPoint.Y);
+                int boxWidth = Math.Abs(boxCurrentPoint.X - boxStartPoint.X);
+                int boxHeight = Math.Abs(boxCurrentPoint.Y - boxStartPoint.Y);
+
+                using (var pen = new Pen(Color.Yellow, 2))
+                {
+                    g.DrawRectangle(pen, boxX, boxY, boxWidth, boxHeight);
+                }
+            }
+        }
+        private void UpdateSAMFormWithBox(AnnotationPoint box)
+        {
+            // If a SAMForm is open, update its DataGridView
+            if (this.SamFormInstance != null && !this.SamFormInstance.IsDisposed)
+            {
+                DataGridView dgv = SamFormInstance.GetPointsDataGridView();
+                if (dgv != null)
+                {
+                    // Add entry to the DataGridView
+                    dgv.Rows.Add(box.ID, box.X, box.Y, box.Z, box.Type, box.Label);
                 }
             }
         }
@@ -2204,25 +2270,34 @@ namespace CTSegmenter
         {
             if (e.Button == MouseButtons.Left)
             {
+                // Existing left-click handling
                 lastMousePosition = e.Location;
                 mainView.Capture = true;
-                // Restart timer on panning initiation
                 renderTimer.Stop();
                 renderTimer.Start();
             }
             else if (e.Button == MouseButtons.Right)
             {
-                // For point tool, debounce as before.
+                // For point tool, check if we might be drawing a box
                 if (currentTool == SegmentationTool.Point)
                 {
                     DateTime now = DateTime.Now;
                     if ((now - _lastPointCreationTime).TotalMilliseconds < 200)
                         return;
-                    _lastPointCreationTime = now;
+
+                    // Start tracking potential box drawing
+                    isBoxDrawingPossible = true;
+                    boxStartPoint = e.Location;
+                    boxCurrentPoint = e.Location;
+                    isActuallyDrawingBox = false;
+
+                    // We'll defer point/box creation until mouse up
+                    return;
                 }
+
+                // Existing right-click handling for other tools
                 if (currentTool == SegmentationTool.Thresholding)
                 {
-                    // Update preview immediately when clicking in threshold mode
                     UpdateThresholdPreview();
                 }
                 if (currentTool == SegmentationTool.Brush)
@@ -2233,29 +2308,16 @@ namespace CTSegmenter
                 {
                     EraseMaskAt(e.Location, currentBrushSize);
                 }
-                else if (currentTool == SegmentationTool.Point)
-                {
 
-                    float sliceX = (e.X - panOffset.X) / globalZoom;
-                    float sliceY = (e.Y - panOffset.Y) / globalZoom;
-                    Material selectedMaterial = (SelectedMaterialIndex >= 0 && SelectedMaterialIndex < Materials.Count)
-                        ? Materials[SelectedMaterialIndex]
-                        : new Material("Default", Color.Red, 0, 0, 1);
-                    if (sliceX < 0 || sliceX >= width || sliceY < 0 || sliceY >= height)
-                        return; // Out of valid range, so don’t place a point.
-                    AnnotationPoint point = AnnotationMgr.AddPoint(sliceX, sliceY, CurrentSlice, selectedMaterial.Name);
-                    UpdateSAMFormWithPoint(point);
-                }
                 mainView.Invalidate();
-                // Restart timer to schedule render update
                 renderTimer.Stop();
                 renderTimer.Start();
 
-                // Immediately update segmentation preview if enabled.
                 if (RealTimeProcessing)
                     ProcessSegmentationPreview();
             }
         }
+
 
         public Bitmap GenerateXYBitmap(int sliceIndex)
         {
@@ -3105,7 +3167,7 @@ namespace CTSegmenter
         }
         private void MainView_MouseMove(object sender, MouseEventArgs e)
         {
-            // Update brush overlay for Brush/Eraser tools.
+            // Existing code for brush overlay and panning
             if (e.Button == MouseButtons.None &&
                 (currentTool == SegmentationTool.Brush || currentTool == SegmentationTool.Eraser))
             {
@@ -3115,8 +3177,22 @@ namespace CTSegmenter
                 renderTimer.Stop();
                 renderTimer.Start();
             }
-            // Panning with left mouse button.
-            if (e.Button == MouseButtons.Left && mainView.Capture)
+
+            // Handle box drawing (add this)
+            if (isBoxDrawingPossible && e.Button == MouseButtons.Right)
+            {
+                boxCurrentPoint = e.Location;
+
+                // If moved significantly, we're definitely drawing a box
+                if (Math.Abs(boxCurrentPoint.X - boxStartPoint.X) > 5 ||
+                    Math.Abs(boxCurrentPoint.Y - boxStartPoint.Y) > 5)
+                {
+                    isActuallyDrawingBox = true;
+                    mainView.Invalidate(); // Update UI to show box
+                }
+            }
+            // Existing panning and painting code
+            else if (e.Button == MouseButtons.Left && mainView.Capture)
             {
                 int dx = e.Location.X - lastMousePosition.X;
                 int dy = e.Location.Y - lastMousePosition.Y;
@@ -3127,7 +3203,6 @@ namespace CTSegmenter
                 renderTimer.Stop();
                 renderTimer.Start();
             }
-            // Painting (brush/eraser) with right mouse button.
             else if (e.Button == MouseButtons.Right)
             {
                 if (currentTool == SegmentationTool.Brush)
@@ -3146,7 +3221,60 @@ namespace CTSegmenter
         {
             if (e.Button == MouseButtons.Left)
                 mainView.Capture = false;
+
+            // Add box drawing finalization
+            if (e.Button == MouseButtons.Right && isBoxDrawingPossible)
+            {
+                if (isActuallyDrawingBox)
+                {
+                    // Create box annotation
+                    float x1 = (boxStartPoint.X - panOffset.X) / globalZoom;
+                    float y1 = (boxStartPoint.Y - panOffset.Y) / globalZoom;
+                    float x2 = (boxCurrentPoint.X - panOffset.X) / globalZoom;
+                    float y2 = (boxCurrentPoint.Y - panOffset.Y) / globalZoom;
+
+                    // Clamp to image boundaries
+                    x1 = Math.Max(0, Math.Min(x1, width - 1));
+                    y1 = Math.Max(0, Math.Min(y1, height - 1));
+                    x2 = Math.Max(0, Math.Min(x2, width - 1));
+                    y2 = Math.Max(0, Math.Min(y2, height - 1));
+
+                    Material selectedMaterial = (SelectedMaterialIndex >= 0 && SelectedMaterialIndex < Materials.Count)
+                        ? Materials[SelectedMaterialIndex]
+                        : new Material("Default", Color.Red, 0, 0, 1);
+
+                    AnnotationPoint box = AnnotationMgr.AddBox(x1, y1, x2, y2, CurrentSlice, selectedMaterial.Name);
+                    UpdateSAMFormWithBox(box);
+                }
+                else
+                {
+                    // Create point annotation (using the existing code)
+                    float sliceX = (boxStartPoint.X - panOffset.X) / globalZoom;
+                    float sliceY = (boxStartPoint.Y - panOffset.Y) / globalZoom;
+                    Material selectedMaterial = (SelectedMaterialIndex >= 0 && SelectedMaterialIndex < Materials.Count)
+                        ? Materials[SelectedMaterialIndex]
+                        : new Material("Default", Color.Red, 0, 0, 1);
+
+                    if (sliceX >= 0 && sliceX < width && sliceY >= 0 && sliceY < height)
+                    {
+                        _lastPointCreationTime = DateTime.Now;
+                        AnnotationPoint point = AnnotationMgr.AddPoint(sliceX, sliceY, CurrentSlice, selectedMaterial.Name);
+                        UpdateSAMFormWithPoint(point);
+                    }
+                }
+
+                isBoxDrawingPossible = false;
+                isActuallyDrawingBox = false;
+                mainView.Invalidate();
+
+                renderTimer.Stop();
+                renderTimer.Start();
+
+                if (RealTimeProcessing)
+                    ProcessSegmentationPreview();
+            }
         }
+
         private void ClampXzPan()
         {
             if (xzProjection == null) return;
@@ -3267,6 +3395,7 @@ namespace CTSegmenter
 
         private void XzView_Paint(object sender, PaintEventArgs e)
         {
+            // Keep existing drawing code
             e.Graphics.Clear(Color.Black);
             if (xzProjection == null)
                 return;
@@ -3276,12 +3405,13 @@ namespace CTSegmenter
             e.Graphics.DrawImage(xzProjection, destRect);
             DrawScaleBar(e.Graphics, xzView.ClientRectangle, xzZoom);
 
-            // Draw header and slice text as before
+            // Draw header and slice text
             using (Font font = new Font("Arial", 12, FontStyle.Bold))
             using (SolidBrush headerBrush = new SolidBrush(Color.Red))
             {
                 e.Graphics.DrawString("XZ", font, headerBrush, new PointF(5, 5));
             }
+
             string sliceText = $"Slice: {this.XzSliceY}";
             using (Font font = new Font("Arial", 10))
             using (SolidBrush textBrush = new SolidBrush(Color.White))
@@ -3291,30 +3421,73 @@ namespace CTSegmenter
                     new PointF(xzView.ClientSize.Width - textSize.Width - 5, xzView.ClientSize.Height - textSize.Height - 5));
             }
 
-            // ---- NEW: Draw annotation points on the XZ view ----
-            // Only show points whose Y coordinate is close to the fixed XZ slice (XzSliceY)
+            // Draw annotation points in XZ view
             float tolerance = 5.0f;
             foreach (var point in AnnotationMgr.Points)
             {
                 if (Math.Abs(point.Y - XzSliceY) <= tolerance)
                 {
-                    // In XZ view: horizontal axis = X and vertical axis = Z.
-                    float drawX = point.X * xzZoom + xzPan.X;
-                    float drawZ = point.Z * xzZoom + xzPan.Y;
                     Color pointColor = Materials.FirstOrDefault(m => m.Name == point.Label)?.Color ?? Color.Red;
-                    using (Pen pen = new Pen(pointColor, 2))
+
+                    if (point.Type == "Box")
                     {
-                        e.Graphics.DrawLine(pen, drawX - 5, drawZ, drawX + 5, drawZ);
-                        e.Graphics.DrawLine(pen, drawX, drawZ - 5, drawX, drawZ + 5);
+                        // In XZ view, draw box using X and Z coordinates
+                        float x1 = point.X * xzZoom + xzPan.X;
+                        float z1 = point.Z * xzZoom + xzPan.Y;
+
+                        // Use X2 and Z for the second corner if available
+                        float x2 = point.X2 * xzZoom + xzPan.X;
+                        float z2 = point.Y2 * xzZoom + xzPan.Y; // Y2 is actually storing Z2
+
+                        float boxX = Math.Min(x1, x2);
+                        float boxY = Math.Min(z1, z2);
+                        float boxWidth = Math.Abs(x2 - x1);
+                        float boxHeight = Math.Abs(z2 - z1);
+
+                        using (Pen pen = new Pen(pointColor, 2))
+                        {
+                            e.Graphics.DrawRectangle(pen, boxX, boxY, boxWidth, boxHeight);
+                        }
+                        using (Font font = new Font("Arial", 8))
+                        using (SolidBrush idBrush = new SolidBrush(Color.Yellow))
+                        {
+                            e.Graphics.DrawString(point.ID.ToString(), font, idBrush, boxX, boxY - 10);
+                        }
                     }
-                    using (Font font = new Font("Arial", 8))
-                    using (SolidBrush idBrush = new SolidBrush(Color.Yellow))
+                    else // Draw point
                     {
-                        e.Graphics.DrawString(point.ID.ToString(), font, idBrush, drawX + 5, drawZ + 5);
+                        float drawX = point.X * xzZoom + xzPan.X;
+                        float drawZ = point.Z * xzZoom + xzPan.Y;
+
+                        using (Pen pen = new Pen(pointColor, 2))
+                        {
+                            e.Graphics.DrawLine(pen, drawX - 5, drawZ, drawX + 5, drawZ);
+                            e.Graphics.DrawLine(pen, drawX, drawZ - 5, drawX, drawZ + 5);
+                        }
+                        using (Font font = new Font("Arial", 8))
+                        using (SolidBrush idBrush = new SolidBrush(Color.Yellow))
+                        {
+                            e.Graphics.DrawString(point.ID.ToString(), font, idBrush, drawX + 5, drawZ + 5);
+                        }
                     }
                 }
             }
+
+            // Draw box preview during dragging
+            if (isXzBoxDrawingPossible && isXzActuallyDrawingBox)
+            {
+                int boxX = Math.Min(xzBoxStartPoint.X, xzBoxCurrentPoint.X);
+                int boxY = Math.Min(xzBoxStartPoint.Y, xzBoxCurrentPoint.Y);
+                int boxWidth = Math.Abs(xzBoxCurrentPoint.X - xzBoxStartPoint.X);
+                int boxHeight = Math.Abs(xzBoxCurrentPoint.Y - xzBoxStartPoint.Y);
+
+                using (var pen = new Pen(Color.Yellow, 2))
+                {
+                    e.Graphics.DrawRectangle(pen, boxX, boxY, boxWidth, boxHeight);
+                }
+            }
         }
+
 
 
         private void XzView_MouseWheel(object sender, MouseEventArgs e)
@@ -3335,24 +3508,21 @@ namespace CTSegmenter
         {
             if (e.Button == MouseButtons.Right)
             {
+                if (currentTool == SegmentationTool.Point)
+                {
+                    // Start tracking potential box drawing in XZ view
+                    isXzBoxDrawingPossible = true;
+                    xzBoxStartPoint = e.Location;
+                    xzBoxCurrentPoint = e.Location;
+                    isXzActuallyDrawingBox = false;
+                    return;
+                }
+
                 if (currentTool == SegmentationTool.Brush)
                     PaintOrthoMaskAtXZ(e.Location, currentBrushSize);
                 else if (currentTool == SegmentationTool.Eraser)
                     EraseOrthoMaskAtXZ(e.Location, currentBrushSize);
-                else if (currentTool == SegmentationTool.Point)
-                {
-                    int x = (int)((e.X - xzPan.X) / xzZoom);
-                    int z = (int)((e.Y - xzPan.Y) / xzZoom);
-                    Material selectedMaterial = (SelectedMaterialIndex >= 0 && SelectedMaterialIndex < Materials.Count)
-                        ? Materials[SelectedMaterialIndex]
-                        : new Material("Default", Color.Red, 0, 0, 1);
-                    if (x < 0 || x >= width || z < 0 || z >= depth)
-                        return;
-                    AnnotationPoint point = AnnotationMgr.AddPoint(x, XzSliceY, z, selectedMaterial.Name);
-                    UpdateSAMFormWithPoint(point);
-                }
                 xzView.Invalidate();
-                // Restart timer on action in XZ view
                 renderTimer.Stop();
                 renderTimer.Start();
                 if (RealTimeProcessing)
@@ -3361,7 +3531,6 @@ namespace CTSegmenter
             else if (e.Button == MouseButtons.Left)
             {
                 lastMousePosition = e.Location;
-                // Optionally, restart timer for panning initiation.
                 renderTimer.Stop();
                 renderTimer.Start();
             }
@@ -3370,7 +3539,21 @@ namespace CTSegmenter
 
         private void XzView_MouseMove(object sender, MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.None &&
+            // Handle XZ box drawing
+            if (isXzBoxDrawingPossible && e.Button == MouseButtons.Right)
+            {
+                xzBoxCurrentPoint = e.Location;
+
+                // If moved significantly, we're definitely drawing a box
+                if (Math.Abs(xzBoxCurrentPoint.X - xzBoxStartPoint.X) > 5 ||
+                    Math.Abs(xzBoxCurrentPoint.Y - xzBoxStartPoint.Y) > 5)
+                {
+                    isXzActuallyDrawingBox = true;
+                    xzView.Invalidate(); // Update UI to show box
+                }
+            }
+            // Existing code
+            else if (e.Button == MouseButtons.None &&
                 (currentTool == SegmentationTool.Brush || currentTool == SegmentationTool.Eraser))
             {
                 xzOverlayCenter = e.Location;
@@ -3400,6 +3583,63 @@ namespace CTSegmenter
                 xzView.Invalidate();
                 renderTimer.Stop();
                 renderTimer.Start();
+            }
+        }
+        private void XzView_MouseUp(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Right && isXzBoxDrawingPossible)
+            {
+                if (isXzActuallyDrawingBox)
+                {
+                    // Create box annotation
+                    float x1 = (xzBoxStartPoint.X - xzPan.X) / xzZoom;
+                    float z1 = (xzBoxStartPoint.Y - xzPan.Y) / xzZoom;
+                    float x2 = (xzBoxCurrentPoint.X - xzPan.X) / xzZoom;
+                    float z2 = (xzBoxCurrentPoint.Y - xzPan.Y) / xzZoom;
+
+                    // Clamp to image boundaries
+                    x1 = Math.Max(0, Math.Min(x1, width - 1));
+                    z1 = Math.Max(0, Math.Min(z1, depth - 1));
+                    x2 = Math.Max(0, Math.Min(x2, width - 1));
+                    z2 = Math.Max(0, Math.Min(z2, depth - 1));
+
+                    Material selectedMaterial = (SelectedMaterialIndex >= 0 && SelectedMaterialIndex < Materials.Count)
+                        ? Materials[SelectedMaterialIndex]
+                        : new Material("Default", Color.Red, 0, 0, 1);
+
+                    // For XZ view, the Y coordinate is fixed at XzSliceY
+                    AnnotationPoint box = AnnotationMgr.AddBox(x1, XzSliceY, x2, XzSliceY, (int)((z1 + z2) / 2), selectedMaterial.Name);
+                    // Store Z values in the box's X2,Y2 coordinates
+                    box.X2 = x2;
+                    box.Y2 = z2;
+                    UpdateSAMFormWithBox(box);
+                }
+                else
+                {
+                    // Create point annotation
+                    int x = (int)((xzBoxStartPoint.X - xzPan.X) / xzZoom);
+                    int z = (int)((xzBoxStartPoint.Y - xzPan.Y) / xzZoom);
+
+                    if (x >= 0 && x < width && z >= 0 && z < depth)
+                    {
+                        Material selectedMaterial = (SelectedMaterialIndex >= 0 && SelectedMaterialIndex < Materials.Count)
+                            ? Materials[SelectedMaterialIndex]
+                            : new Material("Default", Color.Red, 0, 0, 1);
+
+                        AnnotationPoint point = AnnotationMgr.AddPoint(x, XzSliceY, z, selectedMaterial.Name);
+                        UpdateSAMFormWithPoint(point);
+                    }
+                }
+
+                isXzBoxDrawingPossible = false;
+                isXzActuallyDrawingBox = false;
+                xzView.Invalidate();
+
+                renderTimer.Stop();
+                renderTimer.Start();
+
+                if (RealTimeProcessing)
+                    ProcessSegmentationPreview();
             }
         }
 
@@ -3462,6 +3702,7 @@ namespace CTSegmenter
 
         private void YzView_Paint(object sender, PaintEventArgs e)
         {
+            // Keep existing drawing code
             e.Graphics.Clear(Color.Black);
             if (yzProjection == null)
                 return;
@@ -3485,27 +3726,67 @@ namespace CTSegmenter
                     new PointF(yzView.ClientSize.Width - textSize.Width - 5, yzView.ClientSize.Height - textSize.Height - 5));
             }
 
-            // ---- NEW: Draw annotation points on the YZ view ----
-            // In YZ view the fixed coordinate is X = YzSliceX; so display points whose X is near YzSliceX.
+            // Draw annotation points in YZ view
             float tolerance = 5.0f;
             foreach (var point in AnnotationMgr.Points)
             {
                 if (Math.Abs(point.X - YzSliceX) <= tolerance)
                 {
-                    // In YZ view: horizontal axis = Z, vertical axis = Y.
-                    float drawZ = point.Z * yzZoom + yzPan.X;
-                    float drawY = point.Y * yzZoom + yzPan.Y;
                     Color pointColor = Materials.FirstOrDefault(m => m.Name == point.Label)?.Color ?? Color.Red;
-                    using (Pen pen = new Pen(pointColor, 2))
+
+                    if (point.Type == "Box")
                     {
-                        e.Graphics.DrawLine(pen, drawZ - 5, drawY, drawZ + 5, drawY);
-                        e.Graphics.DrawLine(pen, drawZ, drawY - 5, drawZ, drawY + 5);
+                        // In YZ view, we draw box using Z and Y coordinates
+                        float z1 = point.X2 * yzZoom + yzPan.X; // X2 is storing Z1 for YZ boxes
+                        float y1 = point.Y * yzZoom + yzPan.Y;
+                        float z2 = point.Y2 * yzZoom + yzPan.X; // Y2 is storing Z2 for YZ boxes
+                        float y2 = point.Y2 * yzZoom + yzPan.Y;
+
+                        float boxX = Math.Min(z1, z2);
+                        float boxY = Math.Min(y1, y2);
+                        float boxWidth = Math.Abs(z2 - z1);
+                        float boxHeight = Math.Abs(y2 - y1);
+
+                        using (Pen pen = new Pen(pointColor, 2))
+                        {
+                            e.Graphics.DrawRectangle(pen, boxX, boxY, boxWidth, boxHeight);
+                        }
+                        using (Font font = new Font("Arial", 8))
+                        using (SolidBrush idBrush = new SolidBrush(Color.Yellow))
+                        {
+                            e.Graphics.DrawString(point.ID.ToString(), font, idBrush, boxX, boxY - 10);
+                        }
                     }
-                    using (Font font = new Font("Arial", 8))
-                    using (SolidBrush idBrush = new SolidBrush(Color.Yellow))
+                    else // Draw point
                     {
-                        e.Graphics.DrawString(point.ID.ToString(), font, idBrush, drawZ + 5, drawY + 5);
+                        float drawZ = point.Z * yzZoom + yzPan.X;
+                        float drawY = point.Y * yzZoom + yzPan.Y;
+
+                        using (Pen pen = new Pen(pointColor, 2))
+                        {
+                            e.Graphics.DrawLine(pen, drawZ - 5, drawY, drawZ + 5, drawY);
+                            e.Graphics.DrawLine(pen, drawZ, drawY - 5, drawZ, drawY + 5);
+                        }
+                        using (Font font = new Font("Arial", 8))
+                        using (SolidBrush idBrush = new SolidBrush(Color.Yellow))
+                        {
+                            e.Graphics.DrawString(point.ID.ToString(), font, idBrush, drawZ + 5, drawY + 5);
+                        }
                     }
+                }
+            }
+
+            // Draw box preview during dragging
+            if (isYzBoxDrawingPossible && isYzActuallyDrawingBox)
+            {
+                int boxX = Math.Min(yzBoxStartPoint.X, yzBoxCurrentPoint.X);
+                int boxY = Math.Min(yzBoxStartPoint.Y, yzBoxCurrentPoint.Y);
+                int boxWidth = Math.Abs(yzBoxCurrentPoint.X - yzBoxStartPoint.X);
+                int boxHeight = Math.Abs(yzBoxCurrentPoint.Y - yzBoxStartPoint.Y);
+
+                using (var pen = new Pen(Color.Yellow, 2))
+                {
+                    e.Graphics.DrawRectangle(pen, boxX, boxY, boxWidth, boxHeight);
                 }
             }
         }
@@ -3529,24 +3810,21 @@ namespace CTSegmenter
         {
             if (e.Button == MouseButtons.Right)
             {
+                if (currentTool == SegmentationTool.Point)
+                {
+                    // Start tracking potential box drawing in YZ view
+                    isYzBoxDrawingPossible = true;
+                    yzBoxStartPoint = e.Location;
+                    yzBoxCurrentPoint = e.Location;
+                    isYzActuallyDrawingBox = false;
+                    return;
+                }
+
                 if (currentTool == SegmentationTool.Brush)
                     PaintOrthoMaskAtYZ(e.Location, currentBrushSize);
                 else if (currentTool == SegmentationTool.Eraser)
                     EraseOrthoMaskAtYZ(e.Location, currentBrushSize);
-                else if (currentTool == SegmentationTool.Point)
-                {
-                    int z = (int)((e.X - yzPan.X) / yzZoom);
-                    int y = (int)((e.Y - yzPan.Y) / yzZoom);
-                    Material selectedMaterial = (SelectedMaterialIndex >= 0 && SelectedMaterialIndex < Materials.Count)
-                        ? Materials[SelectedMaterialIndex]
-                        : new Material("Default", Color.Red, 0, 0, 1);
-                    if (z < 0 || z >= depth || y < 0 || y >= height)
-                        return;
-                    AnnotationPoint point = AnnotationMgr.AddPoint(YzSliceX, y, z, selectedMaterial.Name);
-                    UpdateSAMFormWithPoint(point);
-                }
                 yzView.Invalidate();
-                // Restart timer on action in YZ view.
                 renderTimer.Stop();
                 renderTimer.Start();
                 if (RealTimeProcessing)
@@ -3555,7 +3833,6 @@ namespace CTSegmenter
             else if (e.Button == MouseButtons.Left)
             {
                 lastMousePosition = e.Location;
-                // Optionally, restart timer for panning initiation.
                 renderTimer.Stop();
                 renderTimer.Start();
             }
@@ -3565,7 +3842,21 @@ namespace CTSegmenter
 
         private void YzView_MouseMove(object sender, MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.None &&
+            // Handle YZ box drawing
+            if (isYzBoxDrawingPossible && e.Button == MouseButtons.Right)
+            {
+                yzBoxCurrentPoint = e.Location;
+
+                // If moved significantly, we're definitely drawing a box
+                if (Math.Abs(yzBoxCurrentPoint.X - yzBoxStartPoint.X) > 5 ||
+                    Math.Abs(yzBoxCurrentPoint.Y - yzBoxStartPoint.Y) > 5)
+                {
+                    isYzActuallyDrawingBox = true;
+                    yzView.Invalidate(); // Update UI to show box
+                }
+            }
+            // Existing code
+            else if (e.Button == MouseButtons.None &&
                 (currentTool == SegmentationTool.Brush || currentTool == SegmentationTool.Eraser))
             {
                 yzOverlayCenter = e.Location;
@@ -3595,6 +3886,63 @@ namespace CTSegmenter
                 yzView.Invalidate();
                 renderTimer.Stop();
                 renderTimer.Start();
+            }
+        }
+        private void YzView_MouseUp(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Right && isYzBoxDrawingPossible)
+            {
+                if (isYzActuallyDrawingBox)
+                {
+                    // Create box annotation
+                    float z1 = (yzBoxStartPoint.X - yzPan.X) / yzZoom;
+                    float y1 = (yzBoxStartPoint.Y - yzPan.Y) / yzZoom;
+                    float z2 = (yzBoxCurrentPoint.X - yzPan.X) / yzZoom;
+                    float y2 = (yzBoxCurrentPoint.Y - yzPan.Y) / yzZoom;
+
+                    // Clamp to image boundaries
+                    z1 = Math.Max(0, Math.Min(z1, depth - 1));
+                    y1 = Math.Max(0, Math.Min(y1, height - 1));
+                    z2 = Math.Max(0, Math.Min(z2, depth - 1));
+                    y2 = Math.Max(0, Math.Min(y2, height - 1));
+
+                    Material selectedMaterial = (SelectedMaterialIndex >= 0 && SelectedMaterialIndex < Materials.Count)
+                        ? Materials[SelectedMaterialIndex]
+                        : new Material("Default", Color.Red, 0, 0, 1);
+
+                    // For YZ view, the X coordinate is fixed at YzSliceX
+                    AnnotationPoint box = AnnotationMgr.AddBox(YzSliceX, y1, YzSliceX, y2, (int)((z1 + z2) / 2), selectedMaterial.Name);
+                    // Store Z values in the box's X2,Y2 coordinates
+                    box.X2 = z1; // Z1 in X2
+                    box.Y2 = z2; // Z2 in Y2
+                    UpdateSAMFormWithBox(box);
+                }
+                else
+                {
+                    // Create point annotation
+                    int z = (int)((yzBoxStartPoint.X - yzPan.X) / yzZoom);
+                    int y = (int)((yzBoxStartPoint.Y - yzPan.Y) / yzZoom);
+
+                    if (z >= 0 && z < depth && y >= 0 && y < height)
+                    {
+                        Material selectedMaterial = (SelectedMaterialIndex >= 0 && SelectedMaterialIndex < Materials.Count)
+                            ? Materials[SelectedMaterialIndex]
+                            : new Material("Default", Color.Red, 0, 0, 1);
+
+                        AnnotationPoint point = AnnotationMgr.AddPoint(YzSliceX, y, z, selectedMaterial.Name);
+                        UpdateSAMFormWithPoint(point);
+                    }
+                }
+
+                isYzBoxDrawingPossible = false;
+                isYzActuallyDrawingBox = false;
+                yzView.Invalidate();
+
+                renderTimer.Stop();
+                renderTimer.Start();
+
+                if (RealTimeProcessing)
+                    ProcessSegmentationPreview();
             }
         }
 

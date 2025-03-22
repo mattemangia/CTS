@@ -15,14 +15,32 @@ namespace CTSegmenter
     public partial class SAMForm : Form
 
     {
-        
+        // Store results per material
+        private class MaterialMaskResult
+        {
+            public string MaterialName;
+            public bool IsMulti;
+            public List<Bitmap> CandidateMasks; // multi
+            public Bitmap SingleMask;           // single
+            public int SelectedIndex;           // which candidate user picks in multi mode
+        }
+
+        // We'll keep them in a list that toolStripButton1_Click populates
+        private List<MaterialMaskResult> allMaterialsResults = new List<MaterialMaskResult>();
         private MainForm mainForm;
         private AnnotationManager annotationManager;
+        private List<Bitmap> currentCandidates = null; // store multiple masks if multi is on
+        private Bitmap singleCandidate = null;         // store single mask if multi is off
+        private int selectedCandidateIndex = 0;        // user picks among multi
+        private Dictionary<string, Dictionary<string, List<Bitmap>>> multiDirResults = new Dictionary<string, Dictionary<string, List<Bitmap>>>();
+        private Dictionary<string, Dictionary<string, int>> candidateSelections = null;
+
         public SAMSettingsParams CurrentSettings { get; set; } = new SAMSettingsParams
         {
             FusionAlgorithm = "Majority Voting Fusion",
             ImageInputSize = 1024,
-            ModelFolderPath = Application.StartupPath+"/ONNX/"
+            ModelFolderPath = Application.StartupPath+"/ONNX/",
+            EnableMultiMask=false
         };
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
@@ -49,6 +67,7 @@ namespace CTSegmenter
         public SAMForm(MainForm mainForm, List<Material> materials)
         {
             Logger.Log("[SAM] Constructor start");
+
             InitializeComponent();
             this.mainForm = mainForm;
             this.annotationManager = mainForm.AnnotationMgr;
@@ -67,7 +86,7 @@ namespace CTSegmenter
             }
             catch (Exception ex)
             {
-                // Optionally log or handle the exception.
+                Logger.Log("[SAMForm] Error: Cannot find 'favicon.ico'. "+ex.Message);
             }
             
            
@@ -304,9 +323,23 @@ namespace CTSegmenter
         {
             try
             {
-                Logger.Log("[SAMForm] Starting segmentation process");
+                Logger.Log("[SAMForm] Starting segmentation process for all directions");
+                Cursor = Cursors.WaitCursor;
 
-                // 1) Load models and initialize segmenter
+                // Check if multi-candidate mode is enabled
+                bool multiCandidate = CurrentSettings.EnableMultiMask;
+                Logger.Log($"[SAMForm] Multi-candidate mode: {multiCandidate}");
+
+                // Clear previous results
+                multiDirResults.Clear();
+                multiDirResults["XY"] = new Dictionary<string, List<Bitmap>>();
+                multiDirResults["XZ"] = new Dictionary<string, List<Bitmap>>();
+                multiDirResults["YZ"] = new Dictionary<string, List<Bitmap>>();
+
+                // Clear previous material results
+                allMaterialsResults.Clear();
+
+                // Set up model paths
                 string modelFolder = CurrentSettings.ModelFolderPath;
                 int imageSize = CurrentSettings.ImageInputSize;
                 string imageEncoderPath = Path.Combine(modelFolder, "image_encoder_hiera_t.onnx");
@@ -319,15 +352,19 @@ namespace CTSegmenter
                 string saveFolder = Path.Combine(Application.StartupPath, "SavedMasks");
                 Directory.CreateDirectory(saveFolder);
 
-                // Gather all non-Exterior materials from MainForm
-                var allMaterials = mainForm.Materials.Where(m =>
-                    !m.Name.Equals("Exterior", StringComparison.OrdinalIgnoreCase)).ToList();
+                // Determine which directions are active
+                bool processXY = XYButton.Checked;
+                bool processXZ = XZButton.Checked;
+                bool processYZ = YZButton.Checked;
 
-                Logger.Log($"[SAMForm] Found {allMaterials.Count} valid materials for segmentation");
-                foreach (var mat in allMaterials)
-                {
-                    Logger.Log($"  - Material: {mat.Name} (ID: {mat.ID})");
-                }
+                // Get volume dimensions
+                int width = mainForm.GetWidth();
+                int height = mainForm.GetHeight();
+                int depth = mainForm.GetDepth();
+                int currentZ = mainForm.CurrentSlice;
+                int fixedY = mainForm.XzSliceY;
+                int fixedX = mainForm.YzSliceX;
+                Logger.Log($"[SAMForm] Volume: {width}x{height}x{depth}");
 
                 using (var segmenter = new CTMemorySegmenter(
                     imageEncoderPath,
@@ -341,205 +378,85 @@ namespace CTSegmenter
                     CurrentSettings.EnableMlp))
                 {
                     segmenter.UseSelectiveHoleFilling = CurrentSettings.UseSelectiveHoleFilling;
-                    // Set the threshold from the trackbar
                     segmenter.MaskThreshold = thresholdingTrackbar.Value;
 
-                    int width = mainForm.GetWidth();
-                    int height = mainForm.GetHeight();
-                    int depth = mainForm.GetDepth();
-                    Logger.Log($"[SAMForm] Volume: {width}x{height}x{depth}");
-
-                    // For each direction (XY, XZ, YZ) that’s checked, we do a multi-material pass.
-                    // ---------------------------------------------------------------------
-                    if (XYButton.Checked)
+                    // ----- Process XY Direction -----
+                    if (processXY)
                     {
-                        int currentZ = mainForm.CurrentSlice;
-                        Logger.Log($"[SAMForm] Multi-material pass on XY slice Z={currentZ}");
-
-                        // Grab all points from annotation manager for this slice
-                        var slicePoints = annotationManager.GetPointsForSlice(currentZ);
-
-                        // We'll identify all material names (except 'Exterior')
-                        var uniqueMatNames = slicePoints
-                            .Select(pt => pt.Label)
-                            .Where(lbl => !lbl.Equals("Exterior", StringComparison.OrdinalIgnoreCase))
-                            .Distinct()
-                            .ToList();
-
-                        if (uniqueMatNames.Count == 0)
+                        Logger.Log($"[SAMForm] Processing XY slice at Z={currentZ}");
+                        using (Bitmap baseXY = GenerateXYBitmap(currentZ, width, height))
+                        using (Bitmap accumMask = new Bitmap(width, height))
                         {
-                            Logger.Log("[SAMForm] No material-labeled points found in XY slice");
-                        }
-                        else
-                        {
-                            using (Bitmap baseXY = GenerateXYBitmap(currentZ, width, height))
-                            using (Bitmap accumMask = new Bitmap(width, height))
+                            using (Graphics gAcc = Graphics.FromImage(accumMask))
+                                gAcc.Clear(Color.Black);
+
+                            var slicePoints = annotationManager.GetPointsForSlice(currentZ);
+                            var uniqueMats = slicePoints.Select(p => p.Label)
+                                .Where(lbl => !lbl.Equals("Exterior", StringComparison.OrdinalIgnoreCase))
+                                .Distinct().ToList();
+
+                            Logger.Log($"[SAMForm] XY: Found {uniqueMats.Count} materials to process");
+
+                            foreach (string matName in uniqueMats)
                             {
-                                using (Graphics ga = Graphics.FromImage(accumMask))
+                                Logger.Log($"[SAMForm] XY: Processing material '{matName}'");
+
+                                // Build prompts from points in this slice
+                                List<AnnotationPoint> prompts = BuildMixedPrompts(slicePoints, matName);
+
+                                // Add negative points sampled from accumMask so that already segmented areas are excluded
+                                var negatives = SampleNegativePointsFromMask(accumMask, 40);
+                                foreach (var (nx, ny) in negatives)
                                 {
-                                    // Start accumMask black => no region excluded yet
-                                    ga.Clear(Color.Black);
+                                    prompts.Add(new AnnotationPoint { X = nx, Y = ny, Z = currentZ, Label = "Exterior" });
                                 }
 
-                                // We'll do one pass per material in uniqueMatNames, in order of appearance
-                                foreach (var materialName in uniqueMatNames)
+                                if (multiCandidate)
                                 {
-                                    Logger.Log($"[SAMForm] Processing material '{materialName}' in XY slice={currentZ}");
+                                    // Multi-candidate mode
+                                    List<Bitmap> candidates = segmenter.ProcessXYSlice_GetAllMasks(currentZ, baseXY, prompts, null, null);
+                                    multiDirResults["XY"][matName] = candidates;
 
-                                    // Build standard "Foreground" for targetMaterial, "Exterior" for other-labeled points
-                                    // from BuildMixedPrompts
-                                    List<AnnotationPoint> basePrompts = BuildMixedPrompts(slicePoints, materialName);
-
-                                    // We'll now add negative points inside accumMask so we exclude previously segmented areas
-                                    var negativePoints = SampleNegativePointsFromMask(accumMask, 40); // up to 40 negative
-                                    foreach (var (nx, ny) in negativePoints)
+                                    // Merge first candidate (index 0) into accumMask for exclusion in subsequent passes
+                                    if (candidates.Count > 0)
                                     {
-                                        basePrompts.Add(new AnnotationPoint
+                                        Bitmap msk = candidates[0];
+                                        for (int y1 = 0; y1 < height; y1++)
                                         {
-                                            X = nx,
-                                            Y = ny,
-                                            Z = currentZ,
-                                            Label = "Exterior"
-                                        });
-                                    }
-
-                                    // Now run the segmentation
-                                    using (Bitmap mask = segmenter.ProcessXYSlice(
-                                        currentZ, baseXY, basePrompts, null, null))
-                                    {
-                                        // Save debug image
-                                        string fileName = Path.Combine(
-                                            saveFolder, $"XY_{materialName}_{currentZ}.jpg");
-                                        mask.Save(fileName, ImageFormat.Jpeg);
-
-                                        // Find the actual material
-                                        Material mat = mainForm.Materials.FirstOrDefault(m =>
-                                            m.Name.Equals(materialName, StringComparison.OrdinalIgnoreCase));
-                                        if (mat == null)
-                                        {
-                                            Logger.Log($"[SAMForm] Material '{materialName}' not found, skipping");
-                                            continue;
-                                        }
-                                        byte matID = mat.ID;
-
-                                        // (a) Apply mask to volume
-                                        int segmentedPixels = 0;
-                                        for (int y = 0; y < height; y++)
-                                        {
-                                            for (int x = 0; x < width; x++)
+                                            for (int x1 = 0; x1 < width; x1++)
                                             {
-                                                if (mask.GetPixel(x, y).R > 128 &&
-                                                    mainForm.volumeLabels[x, y, currentZ] == 0)
-                                                {
-                                                    mainForm.volumeLabels[x, y, currentZ] = matID;
-                                                    segmentedPixels++;
-                                                }
-                                            }
-                                        }
-                                        Logger.Log($"[SAMForm] Assigned {segmentedPixels} pixels to '{materialName}' (ID={matID}) in XY slice");
-
-                                        // (b) Merge that mask into accumMask so next pass excludes it
-                                        for (int y = 0; y < height; y++)
-                                        {
-                                            for (int x = 0; x < width; x++)
-                                            {
-                                                if (mask.GetPixel(x, y).R > 128)
-                                                {
-                                                    accumMask.SetPixel(x, y, Color.White);
-                                                }
+                                                if (msk.GetPixel(x1, y1).R > 128)
+                                                    accumMask.SetPixel(x1, y1, Color.White);
                                             }
                                         }
                                     }
                                 }
-                            }
-                        }
-                    } // XY end
-
-                    // ---------------------------------------------------------------------
-                    // XZ direction
-                    if (XZButton.Checked)
-                    {
-                        int fixedY = mainForm.XzSliceY;
-                        Logger.Log($"[SAMForm] Multi-material pass on XZ slice Y={fixedY}");
-
-                        // Points near Y=fixedY
-                        var slicePoints = annotationManager.Points
-                            .Where(p => Math.Abs(p.Y - fixedY) < 1.0f)
-                            .ToList();
-
-                        var uniqueMatNames = slicePoints
-                            .Select(pt => pt.Label)
-                            .Where(lbl => !lbl.Equals("Exterior", StringComparison.OrdinalIgnoreCase))
-                            .Distinct()
-                            .ToList();
-
-                        if (uniqueMatNames.Count == 0)
-                        {
-                            Logger.Log("[SAMForm] No material-labeled points found in XZ slice");
-                        }
-                        else
-                        {
-                            using (Bitmap baseXZ = GenerateXZBitmap(fixedY, width, depth))
-                            using (Bitmap accumMask = new Bitmap(width, depth))
-                            {
-                                using (Graphics ga = Graphics.FromImage(accumMask))
-                                    ga.Clear(Color.Black);
-
-                                foreach (var materialName in uniqueMatNames)
+                                else
                                 {
-                                    Logger.Log($"[SAMForm] Material '{materialName}' in XZ slice Y={fixedY}");
-                                    List<AnnotationPoint> basePrompts = BuildMixedPrompts(slicePoints, materialName);
+                                    // Single mask mode: call the single-candidate method and wrap it in a list.
+                                    Bitmap singleMask = segmenter.ProcessXYSlice(currentZ, baseXY, prompts, null, null);
 
-                                    // negative from accumMask
-                                    var negativePoints = SampleNegativePointsFromMask(accumMask, 40);
-                                    foreach (var (nx, nz) in negativePoints)
+                                    // Create a material result for this single mask
+                                    MaterialMaskResult result = new MaterialMaskResult
                                     {
-                                        basePrompts.Add(new AnnotationPoint
-                                        {
-                                            X = nx,
-                                            Y = fixedY,
-                                            Z = nz,
-                                            Label = "Exterior"
-                                        });
-                                    }
+                                        MaterialName = matName,
+                                        IsMulti = false,
+                                        SingleMask = singleMask,
+                                        SelectedIndex = 0
+                                    };
 
-                                    using (Bitmap mask = segmenter.ProcessXZSlice(fixedY, baseXZ, basePrompts, null, null))
+                                    allMaterialsResults.Add(result);
+
+                                    // Also store in multiDirResults for consistency
+                                    multiDirResults["XY"][matName] = new List<Bitmap> { singleMask };
+
+                                    // Merge the single mask into accumMask for exclusion in subsequent passes
+                                    for (int y1 = 0; y1 < height; y1++)
                                     {
-                                        string fname = Path.Combine(saveFolder, $"XZ_{materialName}_{fixedY}.jpg");
-                                        mask.Save(fname, ImageFormat.Jpeg);
-
-                                        Material mat = mainForm.Materials.FirstOrDefault(m =>
-                                            m.Name.Equals(materialName, StringComparison.OrdinalIgnoreCase));
-                                        if (mat == null) continue;
-                                        byte matID = mat.ID;
-
-                                        int segmentedPixels = 0;
-                                        for (int z = 0; z < depth; z++)
+                                        for (int x1 = 0; x1 < width; x1++)
                                         {
-                                            for (int x = 0; x < width; x++)
-                                            {
-                                                if (x < mask.Width && z < mask.Height &&
-                                                    mask.GetPixel(x, z).R > 128 &&
-                                                    mainForm.volumeLabels[x, fixedY, z] == 0)
-                                                {
-                                                    mainForm.volumeLabels[x, fixedY, z] = matID;
-                                                    segmentedPixels++;
-                                                }
-                                            }
-                                        }
-                                        Logger.Log($"[SAMForm] Assigned {segmentedPixels} px to '{materialName}' in XZ slice Y={fixedY}");
-
-                                        // accumulate
-                                        for (int z = 0; z < depth; z++)
-                                        {
-                                            for (int x = 0; x < width; x++)
-                                            {
-                                                if (x < mask.Width && z < mask.Height &&
-                                                    mask.GetPixel(x, z).R > 128)
-                                                {
-                                                    accumMask.SetPixel(x, z, Color.White);
-                                                }
-                                            }
+                                            if (singleMask.GetPixel(x1, y1).R > 128)
+                                                accumMask.SetPixel(x1, y1, Color.White);
                                         }
                                     }
                                 }
@@ -547,92 +464,83 @@ namespace CTSegmenter
                         }
                     }
 
-                    // ---------------------------------------------------------------------
-                    // YZ direction
-                    if (YZButton.Checked)
+                    // ----- Process XZ Direction -----
+                    if (processXZ)
                     {
-                        int fixedX = mainForm.YzSliceX;
-                        Logger.Log($"[SAMForm] Multi-material pass on YZ slice X={fixedX}");
-
-                        // Points near X=fixedX
-                        var slicePoints = annotationManager.Points
-                            .Where(p => Math.Abs(p.X - fixedX) < 1.0f)
-                            .ToList();
-
-                        var uniqueMatNames = slicePoints
-                            .Select(pt => pt.Label)
-                            .Where(lbl => !lbl.Equals("Exterior", StringComparison.OrdinalIgnoreCase))
-                            .Distinct()
-                            .ToList();
-
-                        if (uniqueMatNames.Count == 0)
+                        Logger.Log($"[SAMForm] Processing XZ slice at Y={fixedY}");
+                        using (Bitmap baseXZ = GenerateXZBitmap(fixedY, width, depth))
+                        using (Bitmap accumMask = new Bitmap(width, depth))
                         {
-                            Logger.Log("[SAMForm] No material-labeled points in YZ slice");
-                        }
-                        else
-                        {
-                            using (Bitmap baseYZ = GenerateYZBitmap(fixedX, height, depth))
-                            using (Bitmap accumMask = new Bitmap(depth, height))
+                            using (Graphics gAcc = Graphics.FromImage(accumMask))
+                                gAcc.Clear(Color.Black);
+
+                            var slicePoints = annotationManager.Points.Where(p => Math.Abs(p.Y - fixedY) < 1.0f).ToList();
+                            var uniqueMats = slicePoints.Select(p => p.Label)
+                                .Where(lbl => !lbl.Equals("Exterior", StringComparison.OrdinalIgnoreCase))
+                                .Distinct().ToList();
+
+                            Logger.Log($"[SAMForm] XZ: Found {uniqueMats.Count} materials to process");
+
+                            foreach (string matName in uniqueMats)
                             {
-                                using (Graphics ga = Graphics.FromImage(accumMask))
-                                    ga.Clear(Color.Black);
+                                Logger.Log($"[SAMForm] XZ: Processing material '{matName}'");
 
-                                foreach (var materialName in uniqueMatNames)
+                                // Build prompts from points in this slice
+                                List<AnnotationPoint> prompts = BuildMixedPrompts(slicePoints, matName);
+
+                                // Add negative points from accumMask
+                                var negatives = SampleNegativePointsFromMask(accumMask, 40);
+                                foreach (var (nx, nz) in negatives)
                                 {
-                                    Logger.Log($"[SAMForm] Material '{materialName}' in YZ slice X={fixedX}");
-                                    List<AnnotationPoint> basePrompts = BuildMixedPrompts(slicePoints, materialName);
+                                    prompts.Add(new AnnotationPoint { X = nx, Y = fixedY, Z = nz, Label = "Exterior" });
+                                }
 
-                                    // negative from accumMask
-                                    var negativePoints = SampleNegativePointsFromMask(accumMask, 40);
-                                    foreach (var (nz, ny) in negativePoints)
+                                if (multiCandidate)
+                                {
+                                    // For XZ we only get one mask for now - wrap it in a list
+                                    Bitmap singleMask = segmenter.ProcessXZSlice(fixedY, baseXZ, prompts, null, null);
+                                    List<Bitmap> candidates = new List<Bitmap> { singleMask };
+
+                                    multiDirResults["XZ"][matName] = candidates;
+
+                                    // Merge into accumMask
+                                    for (int z1 = 0; z1 < depth; z1++)
                                     {
-                                        basePrompts.Add(new AnnotationPoint
+                                        for (int x1 = 0; x1 < width; x1++)
                                         {
-                                            X = fixedX,
-                                            Y = ny,
-                                            Z = nz,
-                                            Label = "Exterior"
-                                        });
-                                    }
-
-                                    using (Bitmap mask = segmenter.ProcessYZSlice(fixedX, baseYZ, basePrompts, null, null))
-                                    {
-                                        string fname = Path.Combine(saveFolder, $"YZ_{materialName}_{fixedX}.jpg");
-                                        mask.Save(fname, ImageFormat.Jpeg);
-
-                                        Material mat = mainForm.Materials.FirstOrDefault(m =>
-                                            m.Name.Equals(materialName, StringComparison.OrdinalIgnoreCase));
-                                        if (mat == null) continue;
-                                        byte matID = mat.ID;
-
-                                        int segmentedPixels = 0;
-                                        // YZ => mask width=depth, mask height=height
-                                        for (int z = 0; z < depth; z++)
-                                        {
-                                            for (int y = 0; y < height; y++)
-                                            {
-                                                if (z < mask.Width && y < mask.Height &&
-                                                    mask.GetPixel(z, y).R > 128 &&
-                                                    mainForm.volumeLabels[fixedX, y, z] == 0)
-                                                {
-                                                    mainForm.volumeLabels[fixedX, y, z] = matID;
-                                                    segmentedPixels++;
-                                                }
-                                            }
+                                            if (x1 < singleMask.Width && z1 < singleMask.Height &&
+                                                singleMask.GetPixel(x1, z1).R > 128)
+                                                accumMask.SetPixel(x1, z1, Color.White);
                                         }
-                                        Logger.Log($"[SAMForm] Assigned {segmentedPixels} px to '{materialName}' in YZ slice X={fixedX}");
+                                    }
+                                }
+                                else
+                                {
+                                    // Single mask mode
+                                    Bitmap singleMask = segmenter.ProcessXZSlice(fixedY, baseXZ, prompts, null, null);
 
-                                        // accumulate
-                                        for (int y = 0; y < height; y++)
+                                    // Create a material result for this single mask
+                                    MaterialMaskResult result = new MaterialMaskResult
+                                    {
+                                        MaterialName = matName,
+                                        IsMulti = false,
+                                        SingleMask = singleMask,
+                                        SelectedIndex = 0
+                                    };
+
+                                    allMaterialsResults.Add(result);
+
+                                    // Also store in multiDirResults for consistency
+                                    multiDirResults["XZ"][matName] = new List<Bitmap> { singleMask };
+
+                                    // Merge the single mask into accumMask
+                                    for (int z1 = 0; z1 < depth; z1++)
+                                    {
+                                        for (int x1 = 0; x1 < width; x1++)
                                         {
-                                            for (int z = 0; z < depth; z++)
-                                            {
-                                                if (z < mask.Width && y < mask.Height &&
-                                                    mask.GetPixel(z, y).R > 128)
-                                                {
-                                                    accumMask.SetPixel(z, y, Color.White);
-                                                }
-                                            }
+                                            if (x1 < singleMask.Width && z1 < singleMask.Height &&
+                                                singleMask.GetPixel(x1, z1).R > 128)
+                                                accumMask.SetPixel(x1, z1, Color.White);
                                         }
                                     }
                                 }
@@ -640,23 +548,350 @@ namespace CTSegmenter
                         }
                     }
 
-                    // Done. Refresh everything
-                    mainForm.ClearSliceCache();
-                    mainForm.RenderViews();
-                    _ = mainForm.RenderOrthoViewsAsync();
+                    // ----- Process YZ Direction -----
+                    if (processYZ)
+                    {
+                        Logger.Log($"[SAMForm] Processing YZ slice at X={fixedX}");
+                        using (Bitmap baseYZ = GenerateYZBitmap(fixedX, height, depth))
+                        using (Bitmap accumMask = new Bitmap(depth, height))
+                        {
+                            using (Graphics gAcc = Graphics.FromImage(accumMask))
+                                gAcc.Clear(Color.Black);
 
-                    Logger.Log("[SAMForm] Segmentation multi-pass process completed successfully");
-                    MessageBox.Show("Segmentation completed for all materials on selected slices.", "Segmentation",
-                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            var slicePoints = annotationManager.Points.Where(p => Math.Abs(p.X - fixedX) < 1.0f).ToList();
+                            var uniqueMats = slicePoints.Select(p => p.Label)
+                                .Where(lbl => !lbl.Equals("Exterior", StringComparison.OrdinalIgnoreCase))
+                                .Distinct().ToList();
+
+                            Logger.Log($"[SAMForm] YZ: Found {uniqueMats.Count} materials to process");
+
+                            foreach (string matName in uniqueMats)
+                            {
+                                Logger.Log($"[SAMForm] YZ: Processing material '{matName}'");
+
+                                // Build prompts from points in this slice
+                                List<AnnotationPoint> prompts = BuildMixedPrompts(slicePoints, matName);
+
+                                // Add negative points from accumMask
+                                var negatives = SampleNegativePointsFromMask(accumMask, 40);
+                                foreach (var (nz, ny) in negatives)
+                                {
+                                    prompts.Add(new AnnotationPoint { X = fixedX, Y = ny, Z = nz, Label = "Exterior" });
+                                }
+
+                                if (multiCandidate)
+                                {
+                                    // For YZ we only get one mask for now - wrap it in a list
+                                    Bitmap singleMask = segmenter.ProcessYZSlice(fixedX, baseYZ, prompts, null, null);
+                                    List<Bitmap> candidates = new List<Bitmap> { singleMask };
+
+                                    multiDirResults["YZ"][matName] = candidates;
+
+                                    // Merge into accumMask
+                                    for (int y1 = 0; y1 < height; y1++)
+                                    {
+                                        for (int z1 = 0; z1 < depth; z1++)
+                                        {
+                                            if (z1 < singleMask.Width && y1 < singleMask.Height &&
+                                                singleMask.GetPixel(z1, y1).R > 128)
+                                                accumMask.SetPixel(z1, y1, Color.White);
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    // Single mask mode
+                                    Bitmap singleMask = segmenter.ProcessYZSlice(fixedX, baseYZ, prompts, null, null);
+
+                                    // Create a material result for this single mask
+                                    MaterialMaskResult result = new MaterialMaskResult
+                                    {
+                                        MaterialName = matName,
+                                        IsMulti = false,
+                                        SingleMask = singleMask,
+                                        SelectedIndex = 0
+                                    };
+
+                                    allMaterialsResults.Add(result);
+
+                                    // Also store in multiDirResults for consistency
+                                    multiDirResults["YZ"][matName] = new List<Bitmap> { singleMask };
+
+                                    // Merge the single mask into accumMask
+                                    for (int y1 = 0; y1 < height; y1++)
+                                    {
+                                        for (int z1 = 0; z1 < depth; z1++)
+                                        {
+                                            if (z1 < singleMask.Width && y1 < singleMask.Height &&
+                                                singleMask.GetPixel(z1, y1).R > 128)
+                                                accumMask.SetPixel(z1, y1, Color.White);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                } // end using segmenter
+
+                // If multi-candidate mode is enabled, open the candidate selector form
+                if (multiCandidate)
+                {
+                    // Check if we have any masks to show
+                    bool hasMasks = multiDirResults.Values.Any(dir => dir.Count > 0);
+
+                    if (!hasMasks)
+                    {
+                        MessageBox.Show("No segmentation masks were generated. Please ensure you have placed annotation points for at least one material.",
+                            "No Masks", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        Cursor = Cursors.Default;
+                        return;
+                    }
+
+                    CandidateSelectorForm csf = new CandidateSelectorForm(multiDirResults, this);
+                    if (csf.ShowDialog() == DialogResult.OK)
+                    {
+                        candidateSelections = csf.Selections;
+
+                        // Process selected masks for each direction and material
+                        foreach (string direction in csf.Selections.Keys)
+                        {
+                            foreach (string material in csf.Selections[direction].Keys)
+                            {
+                                if (multiDirResults.ContainsKey(direction) &&
+                                    multiDirResults[direction].ContainsKey(material))
+                                {
+                                    var candidates = multiDirResults[direction][material];
+                                    int selectedIdx = csf.Selections[direction][material];
+
+                                    if (selectedIdx < candidates.Count)
+                                    {
+                                        // Create a material result object
+                                        MaterialMaskResult result = new MaterialMaskResult
+                                        {
+                                            MaterialName = material,
+                                            IsMulti = true,
+                                            CandidateMasks = candidates,
+                                            SelectedIndex = selectedIdx
+                                        };
+
+                                        allMaterialsResults.Add(result);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Preview the selected masks
+                        string activeDirection = GetActiveDirection();
+                        if (activeDirection != null && csf.SelectedMasks.ContainsKey(activeDirection))
+                        {
+                            Dictionary<string, Bitmap> masksToShow = csf.SelectedMasks[activeDirection];
+                            if (masksToShow.Count > 0)
+                            {
+                                PreviewSelectedMasks(activeDirection, masksToShow);
+                                Logger.Log($"[SAMForm] Previewing {masksToShow.Count} selected masks in {activeDirection} view");
+                            }
+                        }
+                    }
                 }
+                else
+                {
+                    // In single-candidate mode, preview is already set up during processing
+
+                    // Check if we got any results
+                    if (allMaterialsResults.Count == 0)
+                    {
+                        MessageBox.Show("No segmentation masks were generated. Please ensure you have placed annotation points for at least one material.",
+                            "No Masks", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        Cursor = Cursors.Default;
+                        return;
+                    }
+
+                    // Preview the single masks in the active direction
+                    string activeDirection = GetActiveDirection();
+                    if (activeDirection != null)
+                    {
+                        Dictionary<string, Bitmap> masksToShow = new Dictionary<string, Bitmap>();
+
+                        foreach (var result in allMaterialsResults)
+                        {
+                            if (!result.IsMulti && result.SingleMask != null)
+                            {
+                                masksToShow[result.MaterialName] = result.SingleMask;
+                            }
+                        }
+
+                        if (masksToShow.Count > 0)
+                        {
+                            PreviewSelectedMasks(activeDirection, masksToShow);
+                            Logger.Log($"[SAMForm] Single-candidate mode: Previewing {masksToShow.Count} masks in {activeDirection} view");
+                        }
+                    }
+                }
+
+                Cursor = Cursors.Default;
+                MessageBox.Show("Segmentation completed. Review masks in the main view and click Apply to confirm.",
+                    "Segmentation", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
-                Logger.Log("[SAMForm] Error applying segmentation: " + ex.Message);
+                Cursor = Cursors.Default;
+                Logger.Log("[SAMForm] Error in segmentation process: " + ex.Message);
                 Logger.Log("[SAMForm] Stack trace: " + ex.StackTrace);
-                MessageBox.Show($"Error applying segmentation: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("Error applying segmentation: " + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
+
+        // Helper method to get active direction
+        private string GetActiveDirection()
+        {
+            if (XYButton.Checked) return "XY";
+            if (XZButton.Checked) return "XZ";
+            if (YZButton.Checked) return "YZ";
+            return null;
+        }
+
+
+
+
+        public void PreviewSelectedMasks(string direction, Dictionary<string, Bitmap> selectedMasks)
+        {
+            try
+            {
+                Logger.Log($"[SAMForm] Previewing masks for {direction} direction");
+
+                int width = mainForm.GetWidth();
+                int height = mainForm.GetHeight();
+                int depth = mainForm.GetDepth();
+                int currentZ = mainForm.CurrentSlice;
+                int fixedY = mainForm.XzSliceY;
+                int fixedX = mainForm.YzSliceX;
+
+                // Initialize temporary selections based on direction
+                if (direction == "XY")
+                {
+                    // Create or clear the temporary selection for XY direction
+                    if (mainForm.currentSelection == null ||
+                        mainForm.currentSelection.GetLength(0) != width ||
+                        mainForm.currentSelection.GetLength(1) != height)
+                    {
+                        mainForm.currentSelection = new byte[width, height];
+                    }
+                    else
+                    {
+                        // Clear existing selection
+                        Array.Clear(mainForm.currentSelection, 0, width * height);
+                    }
+                }
+                else if (direction == "XZ")
+                {
+                    // Create or clear the temporary selection for XZ direction
+                    if (mainForm.currentSelectionXZ == null ||
+                        mainForm.currentSelectionXZ.GetLength(0) != width ||
+                        mainForm.currentSelectionXZ.GetLength(1) != depth)
+                    {
+                        mainForm.currentSelectionXZ = new byte[width, depth];
+                    }
+                    else
+                    {
+                        // Clear existing selection
+                        Array.Clear(mainForm.currentSelectionXZ, 0, width * depth);
+                    }
+                }
+                else if (direction == "YZ")
+                {
+                    // Create or clear the temporary selection for YZ direction
+                    if (mainForm.currentSelectionYZ == null ||
+                        mainForm.currentSelectionYZ.GetLength(0) != depth ||
+                        mainForm.currentSelectionYZ.GetLength(1) != height)
+                    {
+                        mainForm.currentSelectionYZ = new byte[depth, height];
+                    }
+                    else
+                    {
+                        // Clear existing selection
+                        Array.Clear(mainForm.currentSelectionYZ, 0, depth * height);
+                    }
+                }
+
+                // Process masks for the appropriate direction
+                foreach (var entry in selectedMasks)
+                {
+                    string materialName = entry.Key;
+                    Bitmap mask = entry.Value;
+
+                    // Find material ID
+                    Material mat = mainForm.Materials.FirstOrDefault(m =>
+                        m.Name.Equals(materialName, StringComparison.OrdinalIgnoreCase));
+
+                    if (mat == null)
+                    {
+                        Logger.Log($"[PreviewSelectedMasks] Material '{materialName}' not found; skipping");
+                        continue;
+                    }
+
+                    byte materialID = mat.ID;
+
+                    // Apply mask to the appropriate preview overlay based on direction
+                    if (direction == "XY")
+                    {
+                        for (int y = 0; y < Math.Min(height, mask.Height); y++)
+                        {
+                            for (int x = 0; x < Math.Min(width, mask.Width); x++)
+                            {
+                                if (mask.GetPixel(x, y).R > 128)
+                                {
+                                    mainForm.currentSelection[x, y] = materialID;
+                                }
+                            }
+                        }
+                    }
+                    else if (direction == "XZ")
+                    {
+                        for (int z = 0; z < Math.Min(depth, mask.Height); z++)
+                        {
+                            for (int x = 0; x < Math.Min(width, mask.Width); x++)
+                            {
+                                if (mask.GetPixel(x, z).R > 128)
+                                {
+                                    mainForm.currentSelectionXZ[x, z] = materialID;
+                                }
+                            }
+                        }
+                    }
+                    else if (direction == "YZ")
+                    {
+                        for (int y = 0; y < Math.Min(height, mask.Height); y++)
+                        {
+                            for (int z = 0; z < Math.Min(depth, mask.Width); z++)
+                            {
+                                if (mask.GetPixel(z, y).R > 128)
+                                {
+                                    mainForm.currentSelectionYZ[z, y] = materialID;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Update views to show the preview
+                mainForm.ClearSliceCache();
+                mainForm.RenderViews();
+                _ = mainForm.RenderOrthoViewsAsync();
+
+                Logger.Log("[PreviewSelectedMasks] Preview masks applied to temporary overlay");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SAMForm] Error in preview masks: " + ex.Message);
+                Logger.Log("[SAMForm] Stack trace: " + ex.StackTrace);
+                MessageBox.Show("Error displaying preview: " + ex.Message,
+                    "Preview Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+
+
 
         /// <summary>
         /// Randomly picks up to 'count' white pixels from 'mask' to serve as negative prompts
@@ -819,33 +1054,165 @@ namespace CTSegmenter
         {
             try
             {
-                // Apply XY selection if available.
-                if (mainForm.currentSelection != null && ContainsNonZero(mainForm.currentSelection))
-                    mainForm.ApplyCurrentSelection();
+                Logger.Log("[btnApply_Click] Starting to apply selected masks");
 
-                // Apply XZ selection if available.
-                if (mainForm.currentSelectionXZ != null && ContainsNonZero(mainForm.currentSelectionXZ))
-                    mainForm.ApplyXZSelection();
+                int width = mainForm.GetWidth();
+                int height = mainForm.GetHeight();
+                int depth = mainForm.GetDepth();
+                int currentZ = mainForm.CurrentSlice;
+                int fixedY = mainForm.XzSliceY;
+                int fixedX = mainForm.YzSliceX;
 
-                // Apply YZ selection if available.
-                if (mainForm.currentSelectionYZ != null && ContainsNonZero(mainForm.currentSelectionYZ))
-                    mainForm.ApplyYZSelection();
+                // Track stats for reporting
+                int totalPixelsModified = 0;
+                int materialsApplied = 0;
 
-                // Force the main viewer to show the mask.
-                mainForm.ShowMask = true;
-                // Clear the cached slice so that the new segmentation is rendered.
+                // Process each direction's masks based on user selection
+                if (candidateSelections != null)
+                {
+                    // Apply XY masks
+                    if (XYButton.Checked && multiDirResults.ContainsKey("XY") && candidateSelections.ContainsKey("XY"))
+                    {
+                        foreach (var matName in candidateSelections["XY"].Keys)
+                        {
+                            // Find material ID
+                            Material mat = mainForm.Materials.FirstOrDefault(m =>
+                                m.Name.Equals(matName, StringComparison.OrdinalIgnoreCase));
+
+                            if (mat == null)
+                            {
+                                Logger.Log($"[btnApply] Warning: Material '{matName}' not found; skipping");
+                                continue;
+                            }
+
+                            // Get the selected candidate index and the mask
+                            int candidateIdx = candidateSelections["XY"][matName];
+
+                            if (multiDirResults["XY"].ContainsKey(matName) &&
+                                multiDirResults["XY"][matName].Count > candidateIdx)
+                            {
+                                Bitmap mask = multiDirResults["XY"][matName][candidateIdx];
+
+                                // Apply the mask
+                                int pixelsChanged = 0;
+                                for (int y = 0; y < height && y < mask.Height; y++)
+                                {
+                                    for (int x = 0; x < width && x < mask.Width; x++)
+                                    {
+                                        if (mask.GetPixel(x, y).R > 128 && mainForm.volumeLabels[x, y, currentZ] == 0)
+                                        {
+                                            mainForm.volumeLabels[x, y, currentZ] = mat.ID;
+                                            pixelsChanged++;
+                                        }
+                                    }
+                                }
+
+                                totalPixelsModified += pixelsChanged;
+                                materialsApplied++;
+                                Logger.Log($"[btnApply] Applied XY mask for {matName}, modified {pixelsChanged} pixels");
+                            }
+                        }
+                    }
+
+                    // Apply XZ masks
+                    if (XZButton.Checked && multiDirResults.ContainsKey("XZ") && candidateSelections.ContainsKey("XZ"))
+                    {
+                        foreach (var matName in candidateSelections["XZ"].Keys)
+                        {
+                            Material mat = mainForm.Materials.FirstOrDefault(m =>
+                                m.Name.Equals(matName, StringComparison.OrdinalIgnoreCase));
+
+                            if (mat == null)
+                            {
+                                Logger.Log($"[btnApply] Warning: Material '{matName}' not found; skipping");
+                                continue;
+                            }
+
+                            int candidateIdx = candidateSelections["XZ"][matName];
+
+                            if (multiDirResults["XZ"].ContainsKey(matName) &&
+                                multiDirResults["XZ"][matName].Count > candidateIdx)
+                            {
+                                Bitmap mask = multiDirResults["XZ"][matName][candidateIdx];
+
+                                // Apply the mask (XZ coordinates)
+                                int pixelsChanged = 0;
+                                for (int z = 0; z < depth && z < mask.Height; z++)
+                                {
+                                    for (int x = 0; x < width && x < mask.Width; x++)
+                                    {
+                                        if (mask.GetPixel(x, z).R > 128 && mainForm.volumeLabels[x, fixedY, z] == 0)
+                                        {
+                                            mainForm.volumeLabels[x, fixedY, z] = mat.ID;
+                                            pixelsChanged++;
+                                        }
+                                    }
+                                }
+
+                                totalPixelsModified += pixelsChanged;
+                                materialsApplied++;
+                                Logger.Log($"[btnApply] Applied XZ mask for {matName}, modified {pixelsChanged} pixels");
+                            }
+                        }
+                    }
+
+                    // Apply YZ masks
+                    if (YZButton.Checked && multiDirResults.ContainsKey("YZ") && candidateSelections.ContainsKey("YZ"))
+                    {
+                        foreach (var matName in candidateSelections["YZ"].Keys)
+                        {
+                            Material mat = mainForm.Materials.FirstOrDefault(m =>
+                                m.Name.Equals(matName, StringComparison.OrdinalIgnoreCase));
+
+                            if (mat == null)
+                            {
+                                Logger.Log($"[btnApply] Warning: Material '{matName}' not found; skipping");
+                                continue;
+                            }
+
+                            int candidateIdx = candidateSelections["YZ"][matName];
+
+                            if (multiDirResults["YZ"].ContainsKey(matName) &&
+                                multiDirResults["YZ"][matName].Count > candidateIdx)
+                            {
+                                Bitmap mask = multiDirResults["YZ"][matName][candidateIdx];
+
+                                // Apply the mask (YZ coordinates)
+                                int pixelsChanged = 0;
+                                for (int y = 0; y < height && y < mask.Height; y++)
+                                {
+                                    for (int z = 0; z < depth && z < mask.Width; z++)
+                                    {
+                                        if (mask.GetPixel(z, y).R > 128 && mainForm.volumeLabels[fixedX, y, z] == 0)
+                                        {
+                                            mainForm.volumeLabels[fixedX, y, z] = mat.ID;
+                                            pixelsChanged++;
+                                        }
+                                    }
+                                }
+
+                                totalPixelsModified += pixelsChanged;
+                                materialsApplied++;
+                                Logger.Log($"[btnApply] Applied YZ mask for {matName}, modified {pixelsChanged} pixels");
+                            }
+                        }
+                    }
+                }
+
+                // Refresh the views
                 mainForm.ClearSliceCache();
-
-                // Refresh views.
                 mainForm.RenderViews();
                 _ = mainForm.RenderOrthoViewsAsync();
 
-                MessageBox.Show("Segmentation masks have been applied to the volume.", "Apply", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                // Update user with results
+                MessageBox.Show($"Applied {materialsApplied} materials, modified {totalPixelsModified} pixels",
+                    "Segmentation Applied", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
-                Logger.Log("[SAMForm.btnApply_Click] Exception: " + ex.Message);
-                MessageBox.Show("An error occurred while applying segmentation: " + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Logger.Log("[SAMForm] Error applying segmentation: " + ex.Message);
+                Logger.Log("[SAMForm] Stack trace: " + ex.StackTrace);
+                MessageBox.Show("Error applying segmentation: " + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -955,6 +1322,24 @@ namespace CTSegmenter
             }
         }
 
+        private void ApplyMaskToVolume(Bitmap mask, byte matID, int sliceIndex)
+        {
+            int w = mainForm.GetWidth();
+            int h = mainForm.GetHeight();
+            int assigned = 0;
+            for (int y = 0; y < h; y++)
+            {
+                for (int x = 0; x < w; x++)
+                {
+                    if (mask.GetPixel(x, y).R > 128 && mainForm.volumeLabels[x, y, sliceIndex] == 0)
+                    {
+                        mainForm.volumeLabels[x, y, sliceIndex] = matID;
+                        assigned++;
+                    }
+                }
+            }
+            Logger.Log($"Applied mask, assigned {assigned} px to matID={matID}");
+        }
         public int GetThresholdValue()
         {
             return thresholdingTrackbar.Value;

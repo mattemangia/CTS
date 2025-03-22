@@ -14,6 +14,7 @@ namespace CTSegmenter
         public int ImageInputSize { get; set; }
         public string ModelFolderPath { get; set; }
         public bool EnableMlp { get; set; } // new option to enable MLP post–processing
+        public bool EnableMultiMask { get; set; } = false;
 
         public string ImageEncoderPath => Path.Combine(ModelFolderPath, "image_encoder_hiera_t.onnx");
         public string PromptEncoderPath => Path.Combine(ModelFolderPath, "prompt_encoder_hiera_t.onnx");
@@ -44,6 +45,7 @@ namespace CTSegmenter
 
         private SAMForm _parentForm;
         public SAMSettingsParams SettingsResult { get; private set; }
+        private CheckBox checkBoxMultiCandidate;
 
         public SAMSettings(SAMForm parentForm)
         {
@@ -64,7 +66,7 @@ namespace CTSegmenter
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.StartPosition = FormStartPosition.CenterParent;
-            this.ClientSize = new Size(470, 300);
+            this.ClientSize = new Size(470, 330); // Increased height to accommodate all controls
             this.TopMost = true;
 
             labelFusion = new Label() { Text = "Fusion Algorithm:", Left = 20, Top = 20, AutoSize = true };
@@ -89,26 +91,36 @@ namespace CTSegmenter
             checkBoxRealTimeProcessing = new CheckBox() { Text = "Real Time Processing", Left = 20, Top = 140, AutoSize = true };
             checkBoxEnableMlp = new CheckBox() { Text = "Enable MLP Post-Processing", Left = 20, Top = 170, AutoSize = true };
 
-            // Create radio buttons as class-level fields
+            // Add multi-candidate checkbox with proper spacing
+            checkBoxMultiCandidate = new CheckBox
+            {
+                Text = "Multi-Candidate Masks",
+                Left = 20,
+                Top = 200,
+                AutoSize = true
+            };
+
+            // Properly position radio buttons after the checkboxes
             rbtnSelective = new RadioButton()
             {
                 Text = "Selective Hole Filling",
                 Left = 20,
-                Top = 210,
+                Top = 230, // Moved down to avoid overlap
                 AutoSize = true,
                 Checked = true // default option
             };
+
             rbtnStandard = new RadioButton()
             {
                 Text = "Standard Hole Filling",
                 Left = 20,
-                Top = 240,
+                Top = 260, // Moved down to avoid overlap
                 AutoSize = true
             };
 
-            buttonOK = new Button() { Text = "OK", Left = 150, Top = 270, Width = 80 };
+            buttonOK = new Button() { Text = "OK", Left = 150, Top = 290, Width = 80 }; // Also moved down
             buttonOK.Click += ButtonOK_Click;
-            buttonCancel = new Button() { Text = "Cancel", Left = 250, Top = 270, Width = 80 };
+            buttonCancel = new Button() { Text = "Cancel", Left = 250, Top = 290, Width = 80 }; // Also moved down
             buttonCancel.Click += (s, e) => { this.DialogResult = DialogResult.Cancel; this.Close(); };
 
             this.Controls.Add(labelFusion);
@@ -120,11 +132,13 @@ namespace CTSegmenter
             this.Controls.Add(buttonBrowse);
             this.Controls.Add(checkBoxRealTimeProcessing);
             this.Controls.Add(checkBoxEnableMlp);
+            this.Controls.Add(checkBoxMultiCandidate);
             this.Controls.Add(rbtnSelective);
             this.Controls.Add(rbtnStandard);
             this.Controls.Add(buttonOK);
             this.Controls.Add(buttonCancel);
         }
+
 
         private void ButtonBrowse_Click(object sender, EventArgs e)
         {
@@ -144,7 +158,8 @@ namespace CTSegmenter
                 ImageInputSize = (int)numericUpDownImageSize.Value,
                 ModelFolderPath = textBoxModelFolder.Text,
                 EnableMlp = checkBoxEnableMlp.Checked,
-                UseSelectiveHoleFilling = rbtnSelective.Checked
+                UseSelectiveHoleFilling = rbtnSelective.Checked,
+                EnableMultiMask = checkBoxMultiCandidate.Checked
             };
 
             _parentForm.SetRealTimeProcessing(checkBoxRealTimeProcessing.Checked);

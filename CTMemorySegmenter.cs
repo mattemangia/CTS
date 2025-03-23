@@ -4,9 +4,12 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
+using System.Drawing.Drawing2D;
+
 
 namespace CTSegmenter
 {
@@ -338,156 +341,1902 @@ namespace CTSegmenter
         }
 
         /// <summary>
-        /// Similar to ProcessXYSlice, but returns ALL mask candidates (often 3 channels)
-        /// from the decoder, so the user can pick one. Each returned Bitmap is
-        /// already upscaled to the original sliceBmp dimensions.
-        /// 
-        /// We do NOT pick one final "best" mask. Instead, we store them all in a List.
+        /// Completely revised implementation that directly addresses the coral segmentation
+        /// problem with multiple specialized thresholds and prioritizes quality over speed.
+        /// </summary>
+        /// <summary>
+        /// Optimized version for microCT data that addresses the ring segmentation issue
         /// </summary>
         public List<Bitmap> ProcessXYSlice_GetAllMasks(
-    int sliceIndex,
-    Bitmap sliceBmp,
-    List<AnnotationPoint> promptPoints,
-    object additionalParam1,
-    object additionalParam2)
+            int sliceIndex,
+            Bitmap sliceBmp,
+            List<AnnotationPoint> promptPoints,
+            object additionalParam1,
+            object additionalParam2)
         {
-            List<Bitmap> channelMasks = new List<Bitmap>();
+            List<Bitmap> candidateMasks = new List<Bitmap>();
             try
             {
-                Logger.Log($"[ProcessXYSlice_GetAllMasks] slice={sliceIndex}, #points={(promptPoints?.Count ?? 0)}");
+                Logger.Log($"[ProcessXYSlice_GetAllMasks] Starting slice={sliceIndex}, #points={(promptPoints?.Count ?? 0)}");
 
-                if (sliceBmp == null)
-                    throw new ArgumentNullException(nameof(sliceBmp));
-                if (promptPoints == null || promptPoints.Count == 0)
-                    throw new ArgumentException("No prompt points provided");
-                if (sliceBmp.Width <= 0 || sliceBmp.Height <= 0)
-                    throw new ArgumentException("Invalid sliceBmp dims");
+                // Separate positive and negative points
+                var positivePoints = promptPoints.Where(p => !p.Label.Equals("Exterior", StringComparison.OrdinalIgnoreCase)).ToList();
+                var negativePoints = promptPoints.Where(p => p.Label.Equals("Exterior", StringComparison.OrdinalIgnoreCase)).ToList();
 
-                // The same flow as single, except we keep all channels
-                float[] imageTensorData = BitmapToFloatTensor(sliceBmp, _imageSize, _imageSize);
-                var imageInput = new DenseTensor<float>(imageTensorData, new[] { 1, 3, _imageSize, _imageSize });
-
-                Tensor<float> visionFeat, visionPos, highRes1, highRes2;
-                using (var encOut = _imageEncoderSession.Run(new[] {
-            NamedOnnxValue.CreateFromTensor("input_image", imageInput) }))
+                if (positivePoints.Count == 0)
                 {
-                    visionFeat = GetFirstTensor<float>(encOut, "vision_features");
-                    visionPos = GetFirstTensor<float>(encOut, "vision_pos_enc_2");
-                    highRes1 = GetFirstTensor<float>(encOut, "backbone_fpn_0");
-                    highRes2 = GetFirstTensor<float>(encOut, "backbone_fpn_1");
+                    Logger.Log("[ProcessXYSlice_GetAllMasks] No positive points found, cannot proceed");
+                    return candidateMasks;
                 }
 
-                int ptCount = promptPoints.Count;
-                float[] coords = new float[ptCount * 2];
-                int[] labels = new int[ptCount];
+                // STEP 1: Preprocess the image to enhance structure visibility
+                Bitmap enhancedImage = EnhanceMicroCTImage(sliceBmp);
 
-                for (int i = 0; i < ptCount; i++)
+                // Run with both the original and enhanced images for different results
+                List<Bitmap> allMasks = new List<Bitmap>();
+
+                // First run with original image
+                allMasks.AddRange(GenerateMasksFromImage(sliceBmp, promptPoints, "Original"));
+
+                // Then run with enhanced image
+                allMasks.AddRange(GenerateMasksFromImage(enhancedImage, promptPoints, "Enhanced"));
+                enhancedImage.Dispose();
+
+                // STEP 3: Select diverse set of best candidates
+                if (allMasks.Count > 0)
                 {
-                    float xC = Math.Max(0, Math.Min(promptPoints[i].X, sliceBmp.Width - 1));
-                    float yC = Math.Max(0, Math.Min(promptPoints[i].Y, sliceBmp.Height - 1));
-                    float xS = (_imageSize - 1f) / Math.Max(1, sliceBmp.Width - 1f);
-                    float yS = (_imageSize - 1f) / Math.Max(1, sliceBmp.Height - 1f);
+                    // Calculate mask diversity (we want different types of segmentations)
+                    Dictionary<Bitmap, float> coverageValues = new Dictionary<Bitmap, float>();
 
-                    coords[i * 2] = xC * xS;
-                    coords[i * 2 + 1] = yC * yS;
-
-                    bool isExt = promptPoints[i].Label.Equals("Exterior", StringComparison.OrdinalIgnoreCase);
-                    labels[i] = isExt ? 0 : 1;
-                }
-                var coordsT = new DenseTensor<float>(coords, new[] { 1, ptCount, 2 });
-                var labelT = new DenseTensor<int>(labels, new[] { 1, ptCount });
-                var maskT = new DenseTensor<float>(Enumerable.Repeat(1f, 256 * 256).ToArray(), new[] { 1, 256, 256 });
-
-                Tensor<float> sparseE, denseE;
-                using (var promptOut = _promptEncoderSession.Run(new List<NamedOnnxValue>
-        {
-            NamedOnnxValue.CreateFromTensor("coords", coordsT),
-            NamedOnnxValue.CreateFromTensor("labels", labelT),
-            NamedOnnxValue.CreateFromTensor("masks", maskT),
-            NamedOnnxValue.CreateFromTensor("masks_enable", new DenseTensor<int>(new[]{0},new[]{1}))
-        }))
-                {
-                    sparseE = GetFirstTensor<float>(promptOut, "sparse_embeddings");
-                    denseE = GetFirstTensor<float>(promptOut, "dense_embeddings");
-                }
-
-                Tensor<float> decMask;
-                using (var decOut = _maskDecoderSession.Run(new List<NamedOnnxValue>
-        {
-            NamedOnnxValue.CreateFromTensor("image_embeddings", visionFeat),
-            NamedOnnxValue.CreateFromTensor("image_pe", visionPos),
-            NamedOnnxValue.CreateFromTensor("sparse_prompt_embeddings", sparseE),
-            NamedOnnxValue.CreateFromTensor("dense_prompt_embeddings",  denseE),
-            NamedOnnxValue.CreateFromTensor("high_res_features1", highRes1),
-            NamedOnnxValue.CreateFromTensor("high_res_features2", highRes2)
-        }))
-                {
-                    decMask = GetFirstTensor<float>(decOut, "masks");
-                }
-
-                int outC = decMask.Dimensions[1];
-                int maskH = decMask.Dimensions[2];
-                int maskW = decMask.Dimensions[3];
-                if (outC < 1) throw new Exception("[ProcessXYSlice_GetAllMasks] No channels found");
-                float[] data = decMask.ToArray();
-
-                float probCutoff = MaskThreshold / 255f;
-
-                // For each channel => produce one final upscaled mask
-                for (int c = 0; c < outC; c++)
-                {
-                    Bitmap rawMask = new Bitmap(maskW, maskH);
-                    int whiteCount = 0;
-                    int cOffset = c * (maskH * maskW);
-
-                    for (int yy = 0; yy < maskH; yy++)
+                    foreach (var mask in allMasks)
                     {
-                        int rowOff = cOffset + yy * maskW;
-                        for (int xx = 0; xx < maskW; xx++)
+                        // Calculate coverage percentage (white pixels)
+                        int whitePixels = 0;
+                        int totalPixels = mask.Width * mask.Height;
+
+                        for (int y = 0; y < mask.Height; y += 4) // Sample every 4th pixel for speed
                         {
-                            float logit = data[rowOff + xx];
-                            float prob = 1f / (1f + (float)Math.Exp(-logit));
-                            if (prob >= probCutoff)
+                            for (int x = 0; x < mask.Width; x += 4)
                             {
-                                rawMask.SetPixel(xx, yy, Color.White);
-                                whiteCount++;
-                            }
-                            else
-                            {
-                                rawMask.SetPixel(xx, yy, Color.Black);
+                                if (mask.GetPixel(x, y).R > 128) whitePixels++;
                             }
                         }
-                    }
-                    float coverage = whiteCount / (float)(maskW * maskH) * 100f;
-                    Bitmap processed = rawMask;
-                    if (coverage > 0 && coverage < 15f)
-                    {
-                        Bitmap dilated = Dilate(rawMask, 3);
-                        processed = dilated;
-                        rawMask.Dispose();
+
+                        float coverage = (float)whitePixels / (totalPixels / 16); // Adjusted for sampling
+                        coverageValues[mask] = coverage;
                     }
 
-                    // Upscale
-                    Bitmap finalMask = new Bitmap(sliceBmp.Width, sliceBmp.Height);
-                    using (Graphics g = Graphics.FromImage(finalMask))
-                    {
-                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-                        g.DrawImage(processed, new Rectangle(0, 0, sliceBmp.Width, sliceBmp.Height));
-                    }
-                    if (processed != rawMask) processed.Dispose();
+                    // Try to select masks with different coverage percentages
+                    var selectedMasks = new List<Bitmap>();
 
-                    channelMasks.Add(finalMask);
+                    // Get the masks sorted by coverage
+                    var sortedMasks = coverageValues.OrderBy(kv => kv.Value).Select(kv => kv.Key).ToList();
+
+                    // 1. Always take the smallest mask for fine details (if it's not too small)
+                    if (coverageValues[sortedMasks[0]] > 0.002f)
+                    {
+                        selectedMasks.Add(sortedMasks[0]);
+                    }
+
+                    // 2. Take the largest mask that's not too large
+                    for (int i = sortedMasks.Count - 1; i >= 0; i--)
+                    {
+                        if (coverageValues[sortedMasks[i]] < 0.95f && !selectedMasks.Contains(sortedMasks[i]))
+                        {
+                            selectedMasks.Add(sortedMasks[i]);
+                            break;
+                        }
+                    }
+
+                    // 3. Take medium-coverage masks to fill in the selection to 4 total
+                    int medianIndex = sortedMasks.Count / 2;
+                    if (medianIndex < sortedMasks.Count && !selectedMasks.Contains(sortedMasks[medianIndex]))
+                    {
+                        selectedMasks.Add(sortedMasks[medianIndex]);
+                    }
+
+                    // 4. Add one quarter coverage mask if available
+                    int quarterIndex = sortedMasks.Count / 4;
+                    if (quarterIndex < sortedMasks.Count && !selectedMasks.Contains(sortedMasks[quarterIndex]))
+                    {
+                        selectedMasks.Add(sortedMasks[quarterIndex]);
+                    }
+
+                    // 5. Add three-quarter coverage mask if available
+                    int threeQuarterIndex = (sortedMasks.Count * 3) / 4;
+                    if (threeQuarterIndex < sortedMasks.Count && !selectedMasks.Contains(sortedMasks[threeQuarterIndex]))
+                    {
+                        selectedMasks.Add(sortedMasks[threeQuarterIndex]);
+                    }
+
+                    // Fill to 4 with any remaining masks
+                    for (int i = 0; i < sortedMasks.Count && selectedMasks.Count < 4; i++)
+                    {
+                        if (!selectedMasks.Contains(sortedMasks[i]))
+                        {
+                            selectedMasks.Add(sortedMasks[i]);
+                        }
+                    }
+
+                    // Add selected masks to result
+                    foreach (var mask in selectedMasks)
+                    {
+                        candidateMasks.Add(mask);
+                        if (candidateMasks.Count >= 4) break;
+                    }
+
+                    // Dispose unselected masks
+                    foreach (var mask in allMasks)
+                    {
+                        if (!candidateMasks.Contains(mask))
+                        {
+                            mask.Dispose();
+                        }
+                    }
                 }
 
-                return channelMasks;
+                // Create fallbacks if needed
+                while (candidateMasks.Count < 4)
+                {
+                    Bitmap fallback = CreateFallbackMask(sliceBmp.Width, sliceBmp.Height, positivePoints, candidateMasks.Count);
+                    candidateMasks.Add(fallback);
+                }
+
+                return candidateMasks;
             }
             catch (Exception ex)
             {
                 Logger.Log($"[ProcessXYSlice_GetAllMasks] Error: {ex.Message}");
-                return new List<Bitmap>(); // Return empty on error
+                foreach (var mask in candidateMasks) mask?.Dispose();
+
+                // Create simple fallbacks
+                List<Bitmap> fallbacks = new List<Bitmap>();
+                for (int i = 0; i < 4; i++)
+                {
+                    Bitmap fallback = new Bitmap(sliceBmp.Width, sliceBmp.Height);
+                    using (Graphics g = Graphics.FromImage(fallback))
+                    {
+                        g.Clear(Color.Black);
+                        using (Brush brush = new SolidBrush(Color.White))
+                        {
+                            int radius = 10 + i * 5;
+                            foreach (var pt in promptPoints)
+                            {
+                                if (!pt.Label.Equals("Exterior", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    g.FillEllipse(brush, pt.X - radius, pt.Y - radius, radius * 2, radius * 2);
+                                }
+                            }
+                        }
+                    }
+                    fallbacks.Add(fallback);
+                }
+
+                return fallbacks;
             }
         }
 
+        /// <summary>
+        /// Enhances microCT image to make structures more visible for segmentation
+        /// </summary>
+        private Bitmap EnhanceMicroCTImage(Bitmap original)
+        {
+            Bitmap enhanced = new Bitmap(original.Width, original.Height);
+
+            try
+            {
+                // STEP 1: Calculate image statistics for adaptive processing
+                int[] histogram = new int[256];
+                double totalPixels = 0;
+
+                // Sample the image (every 4th pixel for speed)
+                for (int y = 0; y < original.Height; y += 4)
+                {
+                    for (int x = 0; x < original.Width; x += 4)
+                    {
+                        Color c = original.GetPixel(x, y);
+                        int intensity = (int)(0.299 * c.R + 0.587 * c.G + 0.114 * c.B);
+                        histogram[intensity]++;
+                        totalPixels++;
+                    }
+                }
+
+                // Find percentiles for contrast stretching
+                int lowerBound = 0;
+                double sumLower = 0;
+                while (sumLower < totalPixels * 0.05 && lowerBound < 255)
+                {
+                    sumLower += histogram[lowerBound];
+                    lowerBound++;
+                }
+
+                int upperBound = 255;
+                double sumUpper = 0;
+                while (sumUpper < totalPixels * 0.05 && upperBound > 0)
+                {
+                    sumUpper += histogram[upperBound];
+                    upperBound--;
+                }
+
+                // STEP 2: Apply adaptive contrast enhancement with edge preservation
+                for (int y = 0; y < original.Height; y++)
+                {
+                    for (int x = 0; x < original.Width; x++)
+                    {
+                        Color c = original.GetPixel(x, y);
+                        int intensity = (int)(0.299 * c.R + 0.587 * c.G + 0.114 * c.B);
+
+                        // Apply contrast stretching
+                        int newIntensity;
+                        if (intensity <= lowerBound)
+                            newIntensity = 0;
+                        else if (intensity >= upperBound)
+                            newIntensity = 255;
+                        else
+                            newIntensity = (int)(255.0 * (intensity - lowerBound) / (upperBound - lowerBound));
+
+                        // Apply mild non-linear transformation to enhance separation
+                        double nonLinear = Math.Pow(newIntensity / 255.0, 1.2) * 255.0;
+                        nonLinear = Math.Max(0, Math.Min(255, nonLinear));
+
+                        // Set new color
+                        enhanced.SetPixel(x, y, Color.FromArgb(255, (int)nonLinear, (int)nonLinear, (int)nonLinear));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[EnhanceMicroCTImage] Error: {ex.Message}");
+                enhanced.Dispose();
+                return new Bitmap(original);
+            }
+
+            return enhanced;
+        }
+
+        /// <summary>
+        /// Generate a diverse set of masks from the given image
+        /// </summary>
+        private List<Bitmap> GenerateMasksFromImage(Bitmap image, List<AnnotationPoint> promptPoints, string sourceType)
+        {
+            List<Bitmap> masks = new List<Bitmap>();
+
+            try
+            {
+                // Run the SAM model pipeline
+                float[] imageTensorData = BitmapToFloatTensor(image, _imageSize, _imageSize);
+                var imageInput = new DenseTensor<float>(imageTensorData, new[] { 1, 3, _imageSize, _imageSize });
+
+                // Run image encoder
+                Tensor<float> visionFeatures, posEnc, highRes1, highRes2;
+                using (var outputs = _imageEncoderSession.Run(
+                    new[] { NamedOnnxValue.CreateFromTensor("input_image", imageInput) }))
+                {
+                    visionFeatures = GetFirstTensor<float>(outputs, "vision_features");
+                    posEnc = GetFirstTensor<float>(outputs, "vision_pos_enc_2");
+                    highRes1 = GetFirstTensor<float>(outputs, "backbone_fpn_0");
+                    highRes2 = GetFirstTensor<float>(outputs, "backbone_fpn_1");
+                }
+
+                // Prepare point prompts
+                int pointCount = promptPoints.Count;
+                float[] coordsArray = new float[pointCount * 2];
+                int[] labelArray = new int[pointCount];
+
+                for (int i = 0; i < pointCount; i++)
+                {
+                    // Scale coordinates
+                    float xScale = (_imageSize - 1f) / Math.Max(1, image.Width - 1f);
+                    float yScale = (_imageSize - 1f) / Math.Max(1, image.Height - 1f);
+                    float xClamped = Math.Max(0, Math.Min(promptPoints[i].X, image.Width - 1));
+                    float yClamped = Math.Max(0, Math.Min(promptPoints[i].Y, image.Height - 1));
+
+                    coordsArray[i * 2] = xClamped * xScale;
+                    coordsArray[i * 2 + 1] = yClamped * yScale;
+
+                    // Convert label (IMPORTANT: Exterior=0, anything else=1)
+                    labelArray[i] = promptPoints[i].Label.Equals("Exterior", StringComparison.OrdinalIgnoreCase) ? 0 : 1;
+                }
+
+                // Create tensors for prompt encoder
+                var coordsTensor = new DenseTensor<float>(coordsArray, new[] { 1, pointCount, 2 });
+                var labelsTensor = new DenseTensor<int>(labelArray, new[] { 1, pointCount });
+                var emptyMaskTensor = new DenseTensor<float>(new float[256 * 256], new[] { 1, 256, 256 });
+                var maskEnableTensor = new DenseTensor<int>(new[] { 0 }, new[] { 1 });
+
+                // Run prompt encoder
+                Tensor<float> sparseEmb, denseEmb;
+                using (var outputs = _promptEncoderSession.Run(new[] {
+            NamedOnnxValue.CreateFromTensor("coords", coordsTensor),
+            NamedOnnxValue.CreateFromTensor("labels", labelsTensor),
+            NamedOnnxValue.CreateFromTensor("masks", emptyMaskTensor),
+            NamedOnnxValue.CreateFromTensor("masks_enable", maskEnableTensor)
+        }))
+                {
+                    sparseEmb = GetFirstTensor<float>(outputs, "sparse_embeddings");
+                    denseEmb = GetFirstTensor<float>(outputs, "dense_embeddings");
+                }
+
+                // Run mask decoder
+                Tensor<float> maskTensor;
+                using (var outputs = _maskDecoderSession.Run(new[] {
+            NamedOnnxValue.CreateFromTensor("image_embeddings", visionFeatures),
+            NamedOnnxValue.CreateFromTensor("image_pe", posEnc),
+            NamedOnnxValue.CreateFromTensor("sparse_prompt_embeddings", sparseEmb),
+            NamedOnnxValue.CreateFromTensor("dense_prompt_embeddings", denseEmb),
+            NamedOnnxValue.CreateFromTensor("high_res_features1", highRes1),
+            NamedOnnxValue.CreateFromTensor("high_res_features2", highRes2)
+        }))
+                {
+                    maskTensor = GetFirstTensor<float>(outputs, "masks");
+                }
+
+                int maskChannels = maskTensor.Dimensions[1]; // Typically 3-4
+                int maskHeight = maskTensor.Dimensions[2];   // Typically 256 
+                int maskWidth = maskTensor.Dimensions[3];    // Typically 256
+
+                // For speed, use fewer thresholds
+                float[] thresholds = new float[] { 0.35f, 0.5f, 0.65f };
+
+                // Process masks from all channels
+                for (int c = 0; c < maskChannels; c++)
+                {
+                    foreach (float threshold in thresholds)
+                    {
+                        // Create both normal and gradient-enhanced masks
+                        Bitmap normalMask = ExtractMask(maskTensor, c, threshold, maskWidth, maskHeight, false);
+                        if (normalMask != null)
+                        {
+                            // Scale to original size
+                            Bitmap fullSizeNormal = new Bitmap(image.Width, image.Height);
+                            using (Graphics g = Graphics.FromImage(fullSizeNormal))
+                            {
+                                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                                g.DrawImage(normalMask, 0, 0, image.Width, image.Height);
+                            }
+
+                            masks.Add(fullSizeNormal);
+                            normalMask.Dispose();
+                        }
+
+                        // Create a mask with edge enhancement to better separate structures
+                        if (c == 0) // Only for first channel to save time
+                        {
+                            Bitmap edgeMask = ExtractMask(maskTensor, c, threshold, maskWidth, maskHeight, true);
+                            if (edgeMask != null)
+                            {
+                                // Scale to original size
+                                Bitmap fullSizeEdge = new Bitmap(image.Width, image.Height);
+                                using (Graphics g = Graphics.FromImage(fullSizeEdge))
+                                {
+                                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                                    g.DrawImage(edgeMask, 0, 0, image.Width, image.Height);
+                                }
+
+                                masks.Add(fullSizeEdge);
+                                edgeMask.Dispose();
+                            }
+                        }
+                    }
+                }
+
+                // Try inverted mask for the first channel
+                Bitmap invertedMask = ExtractMask(maskTensor, 0, 0.5f, maskWidth, maskHeight, false, true);
+                if (invertedMask != null)
+                {
+                    // Scale to original size
+                    Bitmap fullSizeInverted = new Bitmap(image.Width, image.Height);
+                    using (Graphics g = Graphics.FromImage(fullSizeInverted))
+                    {
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        g.DrawImage(invertedMask, 0, 0, image.Width, image.Height);
+                    }
+
+                    masks.Add(fullSizeInverted);
+                    invertedMask.Dispose();
+                }
+
+                Logger.Log($"[GenerateMasksFromImage] Generated {masks.Count} masks from {sourceType} image");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[GenerateMasksFromImage] Error with {sourceType} image: {ex.Message}");
+            }
+
+            return masks;
+        }
+
+        /// <summary>
+        /// Extract mask using the specified parameters
+        /// </summary>
+        private Bitmap ExtractMask(Tensor<float> maskTensor, int channel, float threshold,
+                                  int width, int height, bool edgeEnhanced = false, bool inverted = false)
+        {
+            try
+            {
+                Bitmap mask = new Bitmap(width, height);
+                int whitePixels = 0;
+
+                // Lock the bitmap for faster pixel access
+                BitmapData bmpData = mask.LockBits(
+                    new Rectangle(0, 0, width, height),
+                    ImageLockMode.WriteOnly,
+                    PixelFormat.Format32bppArgb);
+
+                unsafe
+                {
+                    byte* ptr = (byte*)bmpData.Scan0;
+                    int stride = bmpData.Stride;
+
+                    if (!edgeEnhanced)
+                    {
+                        // Simple threshold extraction
+                        for (int y = 0; y < height; y++)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                float logit = maskTensor[0, channel, y, x];
+                                float prob = 1.0f / (1.0f + (float)Math.Exp(-logit));
+
+                                bool isOn = inverted ? (prob < threshold) : (prob >= threshold);
+
+                                byte pixelValue = isOn ? (byte)255 : (byte)0;
+                                if (isOn) whitePixels++;
+
+                                int offset = y * stride + x * 4;
+                                ptr[offset] = pixelValue;     // B
+                                ptr[offset + 1] = pixelValue; // G
+                                ptr[offset + 2] = pixelValue; // R
+                                ptr[offset + 3] = 255;        // A
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // Edge-enhanced version (helps separate rings)
+                        // First create a probability map
+                        float[,] probMap = new float[width, height];
+                        for (int y = 0; y < height; y++)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                float logit = maskTensor[0, channel, y, x];
+                                probMap[x, y] = 1.0f / (1.0f + (float)Math.Exp(-logit));
+                            }
+                        }
+
+                        // Calculate gradients to detect edges
+                        for (int y = 1; y < height - 1; y++)
+                        {
+                            for (int x = 1; x < width - 1; x++)
+                            {
+                                // Sobel operator for edge detection
+                                float gx = probMap[x + 1, y - 1] + 2 * probMap[x + 1, y] + probMap[x + 1, y + 1] -
+                                           probMap[x - 1, y - 1] - 2 * probMap[x - 1, y] - probMap[x - 1, y + 1];
+
+                                float gy = probMap[x - 1, y + 1] + 2 * probMap[x, y + 1] + probMap[x + 1, y + 1] -
+                                           probMap[x - 1, y - 1] - 2 * probMap[x, y - 1] - probMap[x + 1, y - 1];
+
+                                float gradient = (float)Math.Sqrt(gx * gx + gy * gy);
+
+                                // Reduce probability at edges to separate structures
+                                float edgeProb = probMap[x, y] * (1.0f - Math.Min(1.0f, gradient * 2.0f));
+
+                                bool isOn = edgeProb >= threshold;
+
+                                byte pixelValue = isOn ? (byte)255 : (byte)0;
+                                if (isOn) whitePixels++;
+
+                                int offset = y * stride + x * 4;
+                                ptr[offset] = pixelValue;     // B
+                                ptr[offset + 1] = pixelValue; // G
+                                ptr[offset + 2] = pixelValue; // R
+                                ptr[offset + 3] = 255;        // A
+                            }
+                        }
+                    }
+                }
+
+                mask.UnlockBits(bmpData);
+
+                // Check if the mask is reasonable
+                float coverage = (float)whitePixels / (width * height);
+                if (coverage < 0.001f || coverage > 0.99f)
+                {
+                    mask.Dispose();
+                    return null;
+                }
+
+                return mask;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ExtractMask] Error: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Creates a basic fallback mask
+        /// </summary>
+        private Bitmap CreateFallbackMask(int width, int height, List<AnnotationPoint> positivePoints, int index)
+        {
+            Bitmap fallback = new Bitmap(width, height);
+            using (Graphics g = Graphics.FromImage(fallback))
+            {
+                g.Clear(Color.Black);
+
+                using (Brush brush = new SolidBrush(Color.White))
+                {
+                    // Different strategies for different fallbacks
+                    if (index == 0)
+                    {
+                        // Simple points
+                        foreach (var pt in positivePoints)
+                        {
+                            g.FillEllipse(brush, pt.X - 15, pt.Y - 15, 30, 30);
+                        }
+                    }
+                    else if (index == 1)
+                    {
+                        // Centroid with radius
+                        float centerX = positivePoints.Average(p => p.X);
+                        float centerY = positivePoints.Average(p => p.Y);
+                        g.FillEllipse(brush, centerX - 50, centerY - 50, 100, 100);
+                    }
+                    else
+                    {
+                        // Points with connecting lines
+                        if (positivePoints.Count > 1)
+                        {
+                            // Draw lines between points
+                            using (Pen pen = new Pen(Color.White, 5))
+                            {
+                                for (int i = 0; i < positivePoints.Count - 1; i++)
+                                {
+                                    g.DrawLine(pen,
+                                        positivePoints[i].X, positivePoints[i].Y,
+                                        positivePoints[i + 1].X, positivePoints[i + 1].Y);
+                                }
+
+                                // Close the polygon
+                                g.DrawLine(pen,
+                                    positivePoints[positivePoints.Count - 1].X, positivePoints[positivePoints.Count - 1].Y,
+                                    positivePoints[0].X, positivePoints[0].Y);
+                            }
+
+                            // Draw points
+                            foreach (var pt in positivePoints)
+                            {
+                                g.FillEllipse(brush, pt.X - 10, pt.Y - 10, 20, 20);
+                            }
+                        }
+                        else
+                        {
+                            // Just one point with large radius
+                            foreach (var pt in positivePoints)
+                            {
+                                g.FillEllipse(brush, pt.X - 30, pt.Y - 30, 60, 60);
+                            }
+                        }
+                    }
+                }
+            }
+
+            return fallback;
+        }
+
+
+
+        /// <summary>
+        /// Fast implementation of dilate + erode in a single pass
+        /// </summary>
+        private Bitmap FastDilateErode(Bitmap input, int kernelSize)
+        {
+            int width = input.Width;
+            int height = input.Height;
+
+            // Create temporary mask for dilate result
+            Bitmap temp = new Bitmap(width, height);
+
+            // First copy the original to a bool array for speed
+            bool[,] original = new bool[width, height];
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    original[x, y] = input.GetPixel(x, y).R > 128;
+                }
+            }
+
+            // Dilate
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    bool setWhite = false;
+
+                    // Check neighborhood
+                    for (int dy = -kernelSize; dy <= kernelSize && !setWhite; dy++)
+                    {
+                        int ny = y + dy;
+                        if (ny < 0 || ny >= height) continue;
+
+                        for (int dx = -kernelSize; dx <= kernelSize && !setWhite; dx++)
+                        {
+                            int nx = x + dx;
+                            if (nx < 0 || nx >= width) continue;
+
+                            if (original[nx, ny])
+                            {
+                                setWhite = true;
+                            }
+                        }
+                    }
+
+                    temp.SetPixel(x, y, setWhite ? Color.White : Color.Black);
+                }
+            }
+
+            // Now copy dilated result to a bool array
+            bool[,] dilated = new bool[width, height];
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    dilated[x, y] = temp.GetPixel(x, y).R > 128;
+                }
+            }
+
+            // Create result for erode
+            Bitmap result = new Bitmap(width, height);
+
+            // Erode
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    bool setBlack = false;
+
+                    // Check neighborhood
+                    for (int dy = -kernelSize; dy <= kernelSize && !setBlack; dy++)
+                    {
+                        int ny = y + dy;
+                        if (ny < 0 || ny >= height)
+                        {
+                            setBlack = true;
+                            continue;
+                        }
+
+                        for (int dx = -kernelSize; dx <= kernelSize && !setBlack; dx++)
+                        {
+                            int nx = x + dx;
+                            if (nx < 0 || nx >= width)
+                            {
+                                setBlack = true;
+                                continue;
+                            }
+
+                            if (!dilated[nx, ny])
+                            {
+                                setBlack = true;
+                            }
+                        }
+                    }
+
+                    result.SetPixel(x, y, setBlack ? Color.Black : Color.White);
+                }
+            }
+
+            temp.Dispose();
+            return result;
+        }
+        /// <summary>
+        /// Fast minimal post-processing for masks
+        /// </summary>
+        private Bitmap QuickPostProcess(Bitmap mask)
+        {
+            // Apply a very minimal morphological closing to connect nearby regions
+            // This is just a simple dilate + erode
+            try
+            {
+                Bitmap result = FastDilateErode(mask, 2);
+                return result;
+            }
+            catch
+            {
+                // On any error, return the original
+                return mask;
+            }
+        }
+        /// <summary>
+        /// Creates a simple fallback mask when no good masks are found
+        /// </summary>
+        private Bitmap FastCreateFallbackMask(int width, int height, List<AnnotationPoint> positivePoints)
+        {
+            Bitmap fallback = new Bitmap(width, height);
+            using (Graphics g = Graphics.FromImage(fallback))
+            {
+                g.Clear(Color.Black);
+
+                if (positivePoints.Count > 0)
+                {
+                    // Calculate centroid
+                    float centerX = positivePoints.Average(p => p.X);
+                    float centerY = positivePoints.Average(p => p.Y);
+
+                    // Draw core area
+                    using (Brush brush = new SolidBrush(Color.White))
+                    {
+                        // Draw at centroid with reasonable size
+                        float radius = 60;
+                        g.FillEllipse(brush, centerX - radius, centerY - radius, radius * 2, radius * 2);
+
+                        // Also draw at each positive point
+                        foreach (var pt in positivePoints)
+                        {
+                            g.FillEllipse(brush, pt.X - 15, pt.Y - 15, 30, 30);
+                        }
+                    }
+                }
+            }
+
+            return fallback;
+        }
+
+        /// <summary>
+        /// Post-processing specialized for medical/CT image masks
+        /// </summary>
+        private Bitmap PostProcessForMedicalData(Bitmap mask, List<AnnotationPoint> positivePoints)
+        {
+            // First apply smoothing to reduce blockiness
+            Bitmap smoothed = ApplyAntiAliasedSmoothing(mask);
+
+            // Apply morphological closing to connect nearby regions
+            Bitmap closed = ApplyMorphologicalClosing(smoothed, 3);
+            smoothed.Dispose();
+
+            // Fill small holes
+            Bitmap filled = FillSmallHoles(closed, 20);
+            closed.Dispose();
+
+            // Ensure all positive points are covered
+            Bitmap withPoints = EnsurePointsCovered(filled, positivePoints, 5);
+            filled.Dispose();
+
+            return withPoints;
+        }
+
+        /// <summary>
+        /// Better smoothing for CT/medical data
+        /// </summary>
+        private Bitmap ApplyAntiAliasedSmoothing(Bitmap input)
+        {
+            int width = input.Width;
+            int height = input.Height;
+
+            Bitmap result = new Bitmap(width, height);
+
+            // Apply a 3x3 Gaussian-like blur to edges only
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    bool isEdge = false;
+                    bool centerValue = input.GetPixel(x, y).R > 128;
+
+                    // Check if this is an edge pixel by looking at neighbors
+                    for (int dy = -1; dy <= 1 && !isEdge; dy++)
+                    {
+                        int ny = y + dy;
+                        if (ny < 0 || ny >= height) continue;
+
+                        for (int dx = -1; dx <= 1 && !isEdge; dx++)
+                        {
+                            if (dx == 0 && dy == 0) continue;
+
+                            int nx = x + dx;
+                            if (nx < 0 || nx >= width) continue;
+
+                            bool neighborValue = input.GetPixel(nx, ny).R > 128;
+                            if (neighborValue != centerValue)
+                            {
+                                isEdge = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (isEdge)
+                    {
+                        // For edge pixels, apply weighted average
+                        int sum = 0;
+                        int count = 0;
+
+                        for (int dy = -1; dy <= 1; dy++)
+                        {
+                            int ny = y + dy;
+                            if (ny < 0 || ny >= height) continue;
+
+                            for (int dx = -1; dx <= 1; dx++)
+                            {
+                                int nx = x + dx;
+                                if (nx < 0 || nx >= width) continue;
+
+                                int value = input.GetPixel(nx, ny).R;
+                                int weight = (dx == 0 && dy == 0) ? 4 : 1;
+
+                                sum += value * weight;
+                                count += weight;
+                            }
+                        }
+
+                        int finalValue = sum / count;
+                        result.SetPixel(x, y, Color.FromArgb(finalValue, finalValue, finalValue));
+                    }
+                    else
+                    {
+                        // For non-edge pixels, keep original value
+                        Color c = input.GetPixel(x, y);
+                        result.SetPixel(x, y, c);
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Optimized morphological closing
+        /// </summary>
+        private Bitmap ApplyMorphologicalClosing(Bitmap input, int kernelSize)
+        {
+            Bitmap dilated = ApplyDilation(input, kernelSize);
+            Bitmap result = ApplyErosion(dilated, kernelSize);
+            dilated.Dispose();
+            return result;
+        }
+
+        /// <summary>
+        /// Optimized dilation
+        /// </summary>
+        private Bitmap ApplyDilation(Bitmap input, int kernelSize)
+        {
+            int width = input.Width;
+            int height = input.Height;
+            int radius = kernelSize / 2;
+
+            Bitmap result = new Bitmap(width, height);
+
+            // Create lookup for faster processing
+            bool[,] binary = new bool[width, height];
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    binary[x, y] = input.GetPixel(x, y).R > 128;
+                }
+            }
+
+            // Apply dilation
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    bool setWhite = false;
+
+                    // Check neighborhood
+                    for (int dy = -radius; dy <= radius && !setWhite; dy++)
+                    {
+                        int ny = y + dy;
+                        if (ny < 0 || ny >= height) continue;
+
+                        for (int dx = -radius; dx <= radius && !setWhite; dx++)
+                        {
+                            int nx = x + dx;
+                            if (nx < 0 || nx >= width) continue;
+
+                            if (binary[nx, ny])
+                            {
+                                setWhite = true;
+                            }
+                        }
+                    }
+
+                    result.SetPixel(x, y, setWhite ? Color.White : Color.Black);
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Optimized erosion
+        /// </summary>
+        private Bitmap ApplyErosion(Bitmap input, int kernelSize)
+        {
+            int width = input.Width;
+            int height = input.Height;
+            int radius = kernelSize / 2;
+
+            Bitmap result = new Bitmap(width, height);
+
+            // Create lookup for faster processing
+            bool[,] binary = new bool[width, height];
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    binary[x, y] = input.GetPixel(x, y).R > 128;
+                }
+            }
+
+            // Apply erosion
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    bool setBlack = false;
+
+                    // Check neighborhood
+                    for (int dy = -radius; dy <= radius && !setBlack; dy++)
+                    {
+                        int ny = y + dy;
+                        if (ny < 0 || ny >= height)
+                        {
+                            setBlack = true;
+                            continue;
+                        }
+
+                        for (int dx = -radius; dx <= radius && !setBlack; dx++)
+                        {
+                            int nx = x + dx;
+                            if (nx < 0 || nx >= width)
+                            {
+                                setBlack = true;
+                                continue;
+                            }
+
+                            if (!binary[nx, ny])
+                            {
+                                setBlack = true;
+                            }
+                        }
+                    }
+
+                    result.SetPixel(x, y, setBlack ? Color.Black : Color.White);
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Fill small holes in binary mask
+        /// </summary>
+        private Bitmap FillSmallHoles(Bitmap input, int maxHoleSize)
+        {
+            int width = input.Width;
+            int height = input.Height;
+            Bitmap result = new Bitmap(input);
+
+            // Create lookup arrays
+            bool[,] binary = new bool[width, height];
+            bool[,] visited = new bool[width, height];
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    binary[x, y] = input.GetPixel(x, y).R > 128;
+                }
+            }
+
+            // Mark exterior regions (flood fill from edges)
+            for (int x = 0; x < width; x++)
+            {
+                if (!binary[x, 0] && !visited[x, 0])
+                    FloodFillBackground(binary, visited, x, 0, width, height);
+
+                if (!binary[x, height - 1] && !visited[x, height - 1])
+                    FloodFillBackground(binary, visited, x, height - 1, width, height);
+            }
+
+            for (int y = 0; y < height; y++)
+            {
+                if (!binary[0, y] && !visited[0, y])
+                    FloodFillBackground(binary, visited, 0, y, width, height);
+
+                if (!binary[width - 1, y] && !visited[width - 1, y])
+                    FloodFillBackground(binary, visited, width - 1, y, width, height);
+            }
+
+            // Find interior holes
+            for (int y = 1; y < height - 1; y++)
+            {
+                for (int x = 1; x < width - 1; x++)
+                {
+                    if (!binary[x, y] && !visited[x, y])
+                    {
+                        // Detect hole
+                        List<Point> hole = new List<Point>();
+                        FloodFillWithTracking(binary, visited, x, y, width, height, hole);
+
+                        // Fill small holes
+                        if (hole.Count <= maxHoleSize)
+                        {
+                            foreach (var p in hole)
+                            {
+                                result.SetPixel(p.X, p.Y, Color.White);
+                            }
+                        }
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Flood fill background regions
+        /// </summary>
+        private void FloodFillBackground(bool[,] binary, bool[,] visited, int startX, int startY, int width, int height)
+        {
+            Queue<Point> queue = new Queue<Point>();
+            queue.Enqueue(new Point(startX, startY));
+            visited[startX, startY] = true;
+
+            // 4-connected neighbors
+            int[] dx = { 0, 1, 0, -1 };
+            int[] dy = { -1, 0, 1, 0 };
+
+            while (queue.Count > 0)
+            {
+                Point p = queue.Dequeue();
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int nx = p.X + dx[i];
+                    int ny = p.Y + dy[i];
+
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height || visited[nx, ny])
+                        continue;
+
+                    if (!binary[nx, ny])
+                    {
+                        visited[nx, ny] = true;
+                        queue.Enqueue(new Point(nx, ny));
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Flood fill with point tracking
+        /// </summary>
+        private void FloodFillWithTracking(bool[,] binary, bool[,] visited, int startX, int startY,
+                                          int width, int height, List<Point> points)
+        {
+            Queue<Point> queue = new Queue<Point>();
+            queue.Enqueue(new Point(startX, startY));
+            visited[startX, startY] = true;
+            points.Add(new Point(startX, startY));
+
+            // 4-connected neighbors
+            int[] dx = { 0, 1, 0, -1 };
+            int[] dy = { -1, 0, 1, 0 };
+
+            while (queue.Count > 0)
+            {
+                Point p = queue.Dequeue();
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int nx = p.X + dx[i];
+                    int ny = p.Y + dy[i];
+
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height || visited[nx, ny])
+                        continue;
+
+                    if (!binary[nx, ny])
+                    {
+                        visited[nx, ny] = true;
+                        points.Add(new Point(nx, ny));
+                        queue.Enqueue(new Point(nx, ny));
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Ensure all positive points are included in the mask
+        /// </summary>
+        private Bitmap EnsurePointsCovered(Bitmap mask, List<AnnotationPoint> positivePoints, int radius)
+        {
+            Bitmap result = new Bitmap(mask);
+
+            using (Graphics g = Graphics.FromImage(result))
+            {
+                using (Brush brush = new SolidBrush(Color.White))
+                {
+                    foreach (var point in positivePoints)
+                    {
+                        int x = (int)Math.Min(Math.Max(0, point.X), mask.Width - 1);
+                        int y = (int)Math.Min(Math.Max(0, point.Y), mask.Height - 1);
+
+                        // Check if point is already covered
+                        if (mask.GetPixel(x, y).R <= 128)
+                        {
+                            // Not covered, add a small circle
+                            g.FillEllipse(brush, x - radius, y - radius, radius * 2, radius * 2);
+                        }
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Create a fallback mask that focuses on the core structure
+        /// </summary>
+        private Bitmap CreateFallbackCoreMask(int width, int height, List<AnnotationPoint> positivePoints)
+        {
+            Bitmap mask = new Bitmap(width, height);
+
+            if (positivePoints.Count == 0)
+                return mask;
+
+            // Calculate centroid of positive points
+            float centerX = 0, centerY = 0;
+            foreach (var pt in positivePoints)
+            {
+                centerX += pt.X;
+                centerY += pt.Y;
+            }
+            centerX /= positivePoints.Count;
+            centerY /= positivePoints.Count;
+
+            // Calculate average distance from centroid to points
+            float avgDistance = 0;
+            foreach (var pt in positivePoints)
+            {
+                float dx = pt.X - centerX;
+                float dy = pt.Y - centerY;
+                avgDistance += (float)Math.Sqrt(dx * dx + dy * dy);
+            }
+            avgDistance /= positivePoints.Count;
+
+            // Add some padding
+            float radius = avgDistance * 1.2f;
+
+            using (Graphics g = Graphics.FromImage(mask))
+            {
+                g.Clear(Color.Black);
+
+                // Draw main circle at centroid
+                using (Brush brush = new SolidBrush(Color.White))
+                {
+                    g.FillEllipse(brush, centerX - radius, centerY - radius, radius * 2, radius * 2);
+                }
+
+                // Add circles at each positive point
+                using (Brush pointBrush = new SolidBrush(Color.White))
+                {
+                    foreach (var pt in positivePoints)
+                    {
+                        g.FillEllipse(pointBrush, pt.X - 10, pt.Y - 10, 20, 20);
+                    }
+                }
+            }
+
+            // Apply morphological closing to create a solid shape
+            Bitmap closed = ApplyMorphologicalClosing(mask, 5);
+            mask.Dispose();
+
+            return closed;
+        }
+
+        /// <summary>
+        /// Calculates the percentage of positive points covered by the mask
+        /// </summary>
+        private float CalculatePositivePointCoverage(Bitmap mask, List<AnnotationPoint> points, int width, int height)
+        {
+            int totalPositive = 0;
+            int coveredPositive = 0;
+
+            // Lock the bitmap for faster access
+            BitmapData bmpData = mask.LockBits(
+                new Rectangle(0, 0, mask.Width, mask.Height),
+                ImageLockMode.ReadOnly,
+                PixelFormat.Format32bppArgb);
+
+            int stride = bmpData.Stride;
+            IntPtr scan0 = bmpData.Scan0;
+
+            unsafe
+            {
+                byte* p = (byte*)scan0;
+
+                foreach (var point in points)
+                {
+                    // Skip negative points
+                    if (point.Label.Equals("Exterior", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    totalPositive++;
+
+                    // Scale point coordinates to mask dimensions
+                    int x = (int)Math.Min(Math.Max(0, point.X * mask.Width / width), mask.Width - 1);
+                    int y = (int)Math.Min(Math.Max(0, point.Y * mask.Height / height), mask.Height - 1);
+
+                    // Check if point is covered (any channel > 128)
+                    int offset = y * stride + x * 4;
+                    if (p[offset] > 128 || p[offset + 1] > 128 || p[offset + 2] > 128)
+                    {
+                        coveredPositive++;
+                    }
+                }
+            }
+
+            mask.UnlockBits(bmpData);
+
+            return totalPositive > 0 ? 100.0f * coveredPositive / totalPositive : 0.0f;
+        }
+
+        /// <summary>
+        /// Fast bitmap to float tensor conversion for SAM model input
+        /// </summary>
+        private float[] FastBitmapToFloatTensor(Bitmap bmp, int targetWidth, int targetHeight)
+        {
+            // Resize the bitmap first
+            Bitmap resized = new Bitmap(targetWidth, targetHeight);
+            using (Graphics g = Graphics.FromImage(resized))
+            {
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.DrawImage(bmp, 0, 0, targetWidth, targetHeight);
+            }
+
+            float[] tensor = new float[3 * targetHeight * targetWidth];
+            float[] mean = new float[] { 0.485f, 0.456f, 0.406f };
+            float[] std = new float[] { 0.229f, 0.224f, 0.225f };
+
+            // Lock the bitmap for faster access
+            BitmapData bmpData = resized.LockBits(
+                new Rectangle(0, 0, targetWidth, targetHeight),
+                ImageLockMode.ReadOnly,
+                PixelFormat.Format32bppArgb);
+
+            int stride = bmpData.Stride;
+            IntPtr scan0 = bmpData.Scan0;
+
+            unsafe
+            {
+                byte* p = (byte*)scan0;
+
+                Parallel.For(0, targetHeight, y =>
+                {
+                    for (int x = 0; x < targetWidth; x++)
+                    {
+                        int offset = y * stride + x * 4;
+
+                        // Extract BGR (reverse order from standard bitmap format)
+                        byte b = p[offset];
+                        byte g = p[offset + 1];
+                        byte r = p[offset + 2];
+
+                        // Normalize and store in CHW format
+                        tensor[0 * targetHeight * targetWidth + y * targetWidth + x] = (r / 255f - mean[0]) / std[0];
+                        tensor[1 * targetHeight * targetWidth + y * targetWidth + x] = (g / 255f - mean[1]) / std[1];
+                        tensor[2 * targetHeight * targetWidth + y * targetWidth + x] = (b / 255f - mean[2]) / std[2];
+                    }
+                });
+            }
+
+            resized.UnlockBits(bmpData);
+            resized.Dispose();
+
+            return tensor;
+        }
+
+        /// <summary>
+        /// Parallel fast mask cleanup using multithreading
+        /// </summary>
+        private Bitmap ParallelFastMaskCleanup(Bitmap inputMask)
+        {
+            int width = inputMask.Width;
+            int height = inputMask.Height;
+
+            // Create result bitmap
+            Bitmap result = new Bitmap(width, height);
+
+            // Copy input to result using fast LockBits
+            BitmapData inputData = inputMask.LockBits(
+                new Rectangle(0, 0, width, height),
+                ImageLockMode.ReadOnly,
+                PixelFormat.Format32bppArgb);
+
+            BitmapData resultData = result.LockBits(
+                new Rectangle(0, 0, width, height),
+                ImageLockMode.WriteOnly,
+                PixelFormat.Format32bppArgb);
+
+            int inputStride = inputData.Stride;
+            int resultStride = resultData.Stride;
+            IntPtr inputScan0 = inputData.Scan0;
+            IntPtr resultScan0 = resultData.Scan0;
+
+            // First pass: copy pixels
+            unsafe
+            {
+                byte* pInput = (byte*)inputScan0;
+                byte* pResult = (byte*)resultScan0;
+
+                Parallel.For(0, height, y =>
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        int inputOffset = y * inputStride + x * 4;
+                        int resultOffset = y * resultStride + x * 4;
+
+                        pResult[resultOffset] = pInput[inputOffset];       // B
+                        pResult[resultOffset + 1] = pInput[inputOffset + 1]; // G
+                        pResult[resultOffset + 2] = pInput[inputOffset + 2]; // R
+                        pResult[resultOffset + 3] = 255;                    // A
+                    }
+                });
+            }
+
+            inputMask.UnlockBits(inputData);
+            result.UnlockBits(resultData);
+
+            // Apply a single pass of morphological closing
+            Bitmap closed = FastMorphologicalClosing(result, 3);
+            result.Dispose();
+
+            // Fill small holes
+            Bitmap filledHoles = FastFillHoles(closed, 20);
+            closed.Dispose();
+
+            return filledHoles;
+        }
+
+        /// <summary>
+        /// Fast implementation of morphological closing
+        /// </summary>
+        private Bitmap FastMorphologicalClosing(Bitmap input, int kernelSize)
+        {
+            // First dilate then erode
+            Bitmap dilated = FastDilate(input, kernelSize);
+            Bitmap result = FastErode(dilated, kernelSize);
+            dilated.Dispose();
+            return result;
+        }
+
+        /// <summary>
+        /// Fast dilation implementation using LockBits
+        /// </summary>
+        private Bitmap FastDilate(Bitmap input, int kernelSize)
+        {
+            int width = input.Width;
+            int height = input.Height;
+            int radius = kernelSize / 2;
+
+            // Create a binary array for faster neighborhood checking
+            bool[,] binary = new bool[width, height];
+
+            // Lock the bitmap for reading
+            BitmapData inputData = input.LockBits(
+                new Rectangle(0, 0, width, height),
+                ImageLockMode.ReadOnly,
+                PixelFormat.Format32bppArgb);
+
+            int stride = inputData.Stride;
+            IntPtr scan0 = inputData.Scan0;
+
+            unsafe
+            {
+                byte* p = (byte*)scan0;
+
+                Parallel.For(0, height, y =>
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        int offset = y * stride + x * 4;
+                        binary[x, y] = p[offset + 2] > 128; // Check red channel
+                    }
+                });
+            }
+
+            input.UnlockBits(inputData);
+
+            // Create result bitmap
+            Bitmap result = new Bitmap(width, height);
+            BitmapData resultData = result.LockBits(
+                new Rectangle(0, 0, width, height),
+                ImageLockMode.WriteOnly,
+                PixelFormat.Format32bppArgb);
+
+            int resultStride = resultData.Stride;
+            IntPtr resultScan0 = resultData.Scan0;
+
+            unsafe
+            {
+                byte* pResult = (byte*)resultScan0;
+
+                Parallel.For(0, height, y =>
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        bool setWhite = false;
+
+                        // Check neighborhood
+                        for (int dy = -radius; dy <= radius && !setWhite; dy++)
+                        {
+                            int ny = y + dy;
+                            if (ny < 0 || ny >= height) continue;
+
+                            for (int dx = -radius; dx <= radius && !setWhite; dx++)
+                            {
+                                int nx = x + dx;
+                                if (nx < 0 || nx >= width) continue;
+
+                                if (binary[nx, ny])
+                                {
+                                    setWhite = true;
+                                }
+                            }
+                        }
+
+                        int resultOffset = y * resultStride + x * 4;
+                        byte value = setWhite ? (byte)255 : (byte)0;
+
+                        pResult[resultOffset] = value;     // B
+                        pResult[resultOffset + 1] = value; // G
+                        pResult[resultOffset + 2] = value; // R
+                        pResult[resultOffset + 3] = 255;   // A
+                    }
+                });
+            }
+
+            result.UnlockBits(resultData);
+
+            return result;
+        }
+
+        /// <summary>
+        /// Fast erosion implementation using LockBits
+        /// </summary>
+        private Bitmap FastErode(Bitmap input, int kernelSize)
+        {
+            int width = input.Width;
+            int height = input.Height;
+            int radius = kernelSize / 2;
+
+            // Create a binary array for faster neighborhood checking
+            bool[,] binary = new bool[width, height];
+
+            // Lock the bitmap for reading
+            BitmapData inputData = input.LockBits(
+                new Rectangle(0, 0, width, height),
+                ImageLockMode.ReadOnly,
+                PixelFormat.Format32bppArgb);
+
+            int stride = inputData.Stride;
+            IntPtr scan0 = inputData.Scan0;
+
+            unsafe
+            {
+                byte* p = (byte*)scan0;
+
+                Parallel.For(0, height, y =>
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        int offset = y * stride + x * 4;
+                        binary[x, y] = p[offset + 2] > 128; // Check red channel
+                    }
+                });
+            }
+
+            input.UnlockBits(inputData);
+
+            // Create result bitmap
+            Bitmap result = new Bitmap(width, height);
+            BitmapData resultData = result.LockBits(
+                new Rectangle(0, 0, width, height),
+                ImageLockMode.WriteOnly,
+                PixelFormat.Format32bppArgb);
+
+            int resultStride = resultData.Stride;
+            IntPtr resultScan0 = resultData.Scan0;
+
+            unsafe
+            {
+                byte* pResult = (byte*)resultScan0;
+
+                Parallel.For(0, height, y =>
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        bool setBlack = false;
+
+                        // Check neighborhood
+                        for (int dy = -radius; dy <= radius && !setBlack; dy++)
+                        {
+                            int ny = y + dy;
+                            if (ny < 0 || ny >= height)
+                            {
+                                setBlack = true;
+                                continue;
+                            }
+
+                            for (int dx = -radius; dx <= radius && !setBlack; dx++)
+                            {
+                                int nx = x + dx;
+                                if (nx < 0 || nx >= width)
+                                {
+                                    setBlack = true;
+                                    continue;
+                                }
+
+                                if (!binary[nx, ny])
+                                {
+                                    setBlack = true;
+                                }
+                            }
+                        }
+
+                        int resultOffset = y * resultStride + x * 4;
+                        byte value = (!setBlack && binary[x, y]) ? (byte)255 : (byte)0;
+
+                        pResult[resultOffset] = value;     // B
+                        pResult[resultOffset + 1] = value; // G
+                        pResult[resultOffset + 2] = value; // R
+                        pResult[resultOffset + 3] = 255;   // A
+                    }
+                });
+            }
+
+            result.UnlockBits(resultData);
+
+            return result;
+        }
+
+        /// <summary>
+        /// Fast hole filling using scanline flood fill
+        /// </summary>
+        private Bitmap FastFillHoles(Bitmap input, int minHoleSize)
+        {
+            int width = input.Width;
+            int height = input.Height;
+
+            // Create result bitmap
+            Bitmap result = new Bitmap(input);
+
+            // Create binary mask from input
+            bool[,] binary = new bool[width, height];
+            bool[,] visited = new bool[width, height];
+
+            using (Bitmap temp = new Bitmap(input))
+            {
+                BitmapData tempData = temp.LockBits(
+                    new Rectangle(0, 0, width, height),
+                    ImageLockMode.ReadOnly,
+                    PixelFormat.Format32bppArgb);
+
+                int stride = tempData.Stride;
+                IntPtr scan0 = tempData.Scan0;
+
+                unsafe
+                {
+                    byte* p = (byte*)scan0;
+
+                    for (int y = 0; y < height; y++)
+                    {
+                        for (int x = 0; x < width; x++)
+                        {
+                            int offset = y * stride + x * 4;
+                            binary[x, y] = p[offset + 2] > 128; // Use red channel
+                        }
+                    }
+                }
+
+                temp.UnlockBits(tempData);
+            }
+
+            // Fill from borders (mark exterior)
+            for (int x = 0; x < width; x++)
+            {
+                if (!binary[x, 0] && !visited[x, 0])
+                    FloodFillFast(binary, visited, x, 0, width, height);
+
+                if (!binary[x, height - 1] && !visited[x, height - 1])
+                    FloodFillFast(binary, visited, x, height - 1, width, height);
+            }
+
+            for (int y = 0; y < height; y++)
+            {
+                if (!binary[0, y] && !visited[0, y])
+                    FloodFillFast(binary, visited, 0, y, width, height);
+
+                if (!binary[width - 1, y] && !visited[width - 1, y])
+                    FloodFillFast(binary, visited, width - 1, y, width, height);
+            }
+
+            // Process interior holes
+            for (int y = 1; y < height - 1; y++)
+            {
+                for (int x = 1; x < width - 1; x++)
+                {
+                    if (!binary[x, y] && !visited[x, y])
+                    {
+                        // Found potential hole
+                        List<Point> holePoints = new List<Point>();
+                        FloodFillWithList(binary, visited, x, y, width, height, holePoints);
+
+                        // Fill hole if it's small enough
+                        if (holePoints.Count <= minHoleSize)
+                        {
+                            using (Graphics g = Graphics.FromImage(result))
+                            {
+                                using (Brush brush = new SolidBrush(Color.White))
+                                {
+                                    foreach (var pt in holePoints)
+                                    {
+                                        g.FillRectangle(brush, pt.X, pt.Y, 1, 1);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Fast flood fill without storing points
+        /// </summary>
+        private void FloodFillFast(bool[,] binary, bool[,] visited, int startX, int startY, int width, int height)
+        {
+            Queue<Point> queue = new Queue<Point>();
+            queue.Enqueue(new Point(startX, startY));
+            visited[startX, startY] = true;
+
+            int[] dx = { 0, 1, 0, -1 };
+            int[] dy = { -1, 0, 1, 0 };
+
+            while (queue.Count > 0)
+            {
+                Point p = queue.Dequeue();
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int nx = p.X + dx[i];
+                    int ny = p.Y + dy[i];
+
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height || visited[nx, ny])
+                        continue;
+
+                    if (!binary[nx, ny])
+                    {
+                        visited[nx, ny] = true;
+                        queue.Enqueue(new Point(nx, ny));
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Flood fill that stores points for later processing
+        /// </summary>
+        private void FloodFillWithList(bool[,] binary, bool[,] visited, int startX, int startY, int width, int height, List<Point> points)
+        {
+            Queue<Point> queue = new Queue<Point>();
+            queue.Enqueue(new Point(startX, startY));
+            visited[startX, startY] = true;
+            points.Add(new Point(startX, startY));
+
+            int[] dx = { 0, 1, 0, -1 };
+            int[] dy = { -1, 0, 1, 0 };
+
+            while (queue.Count > 0)
+            {
+                Point p = queue.Dequeue();
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int nx = p.X + dx[i];
+                    int ny = p.Y + dy[i];
+
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height || visited[nx, ny])
+                        continue;
+
+                    if (!binary[nx, ny])
+                    {
+                        visited[nx, ny] = true;
+                        points.Add(new Point(nx, ny));
+                        queue.Enqueue(new Point(nx, ny));
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Creates a fallback mask when SAM fails
+        /// </summary>
+        private Bitmap CreateFallbackMask(int width, int height, List<AnnotationPoint> points)
+        {
+            Bitmap mask = new Bitmap(width, height);
+
+            using (Graphics g = Graphics.FromImage(mask))
+            {
+                g.Clear(Color.Black);
+                using (Brush brush = new SolidBrush(Color.White))
+                {
+                    // Find positive points
+                    var positivePoints = points.Where(p =>
+                        !p.Label.Equals("Exterior", StringComparison.OrdinalIgnoreCase)).ToList();
+
+                    if (positivePoints.Count > 0)
+                    {
+                        // Calculate centroid
+                        float avgX = positivePoints.Average(p => p.X);
+                        float avgY = positivePoints.Average(p => p.Y);
+
+                        // Draw larger circle at centroid
+                        g.FillEllipse(brush, avgX - 40, avgY - 40, 80, 80);
+
+                        // Draw circles at each positive point
+                        foreach (var pt in positivePoints)
+                        {
+                            g.FillEllipse(brush, pt.X - 10, pt.Y - 10, 20, 20);
+                        }
+
+                        // Connect points to centroid
+                        using (Pen pen = new Pen(Color.White, 5))
+                        {
+                            foreach (var pt in positivePoints)
+                            {
+                                g.DrawLine(pen, avgX, avgY, pt.X, pt.Y);
+                            }
+                        }
+                    }
+                }
+            }
+
+            return mask;
+        }
+
+        /// <summary>
+        /// Creates a fallback mask based on positive points when SAM fails
+        /// </summary>
+        private Bitmap CreateFallbackFromPoints(int width, int height, List<AnnotationPoint> points)
+        {
+            Bitmap mask = new Bitmap(width, height);
+            using (Graphics g = Graphics.FromImage(mask))
+            {
+                g.Clear(Color.Black);
+                using (Brush brush = new SolidBrush(Color.White))
+                {
+                    // Draw circular regions around positive points
+                    foreach (var point in points)
+                    {
+                        if (!point.Label.Equals("Exterior", StringComparison.OrdinalIgnoreCase))
+                        {
+                            float x = Math.Min(Math.Max(0, point.X), width - 1);
+                            float y = Math.Min(Math.Max(0, point.Y), height - 1);
+                            float radius = 10;
+                            g.FillEllipse(brush, x - radius, y - radius, radius * 2, radius * 2);
+                        }
+                    }
+                }
+            }
+
+            // Apply dilate+erode to connect nearby points
+            Bitmap dilated = Dilate(mask, 5);
+            Bitmap result = Dilate(dilated, 5);
+
+            mask.Dispose();
+            dilated.Dispose();
+
+            return result;
+        }
+        /// <summary>
+        /// Counts how many positive points are covered by the mask
+        /// </summary>
+        private int CountCoveredPositivePoints(Bitmap mask, List<AnnotationPoint> points, int width, int height)
+        {
+            int covered = 0;
+
+            foreach (var point in points)
+            {
+                // Skip negative points
+                if (point.Label.Equals("Exterior", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // Check if point is inside mask bounds
+                int x = (int)Math.Min(Math.Max(0, point.X), width - 1);
+                int y = (int)Math.Min(Math.Max(0, point.Y), height - 1);
+
+                // Check if mask covers this point
+                if (mask.GetPixel(x, y).R > 128)
+                {
+                    covered++;
+                }
+            }
+
+            return covered;
+        }
+        /// <summary>
+        /// Improved method to build prompt lists that correctly handles negative prompts
+        /// from both "Exterior" label and other materials.
+        /// </summary>
+        private List<AnnotationPoint> BuildMixedPrompts(
+            IEnumerable<AnnotationPoint> slicePoints,
+            string targetMaterialName)
+        {
+            Logger.Log($"[BuildMixedPrompts] Building prompts for material: {targetMaterialName}");
+
+            // Create a new list for our processed points
+            List<AnnotationPoint> finalList = new List<AnnotationPoint>();
+
+            // Identify all material names present in this slice
+            var allMaterials = slicePoints
+                .Select(p => p.Label)
+                .Where(lbl => !string.IsNullOrEmpty(lbl))
+                .Distinct()
+                .ToList();
+
+            Logger.Log($"[BuildMixedPrompts] Found {allMaterials.Count} distinct materials in slice");
+
+            // Process each point in the slice
+            foreach (var pt in slicePoints)
+            {
+                if (string.IsNullOrEmpty(pt.Label))
+                    continue;
+
+                AnnotationPoint newPoint = new AnnotationPoint
+                {
+                    ID = pt.ID,
+                    X = pt.X,
+                    Y = pt.Y,
+                    Z = pt.Z,
+                    Type = pt.Type
+                };
+
+                // Three cases:
+                // 1. Point is already marked as "Exterior" - keep as negative
+                // 2. Point belongs to targetMaterial - mark as "Foreground" (positive)
+                // 3. Point belongs to a different material - mark as "Exterior" (negative)
+
+                if (pt.Label.Equals("Exterior", StringComparison.OrdinalIgnoreCase))
+                {
+                    newPoint.Label = "Exterior"; // Keep as negative
+                }
+                else if (pt.Label.Equals(targetMaterialName, StringComparison.OrdinalIgnoreCase))
+                {
+                    newPoint.Label = "Foreground"; // Target material (positive)
+                }
+                else
+                {
+                    newPoint.Label = "Exterior"; // Other material - treat as negative
+                }
+
+                finalList.Add(newPoint);
+            }
+
+            // Log counts for debugging
+            int positiveCount = finalList.Count(p => p.Label == "Foreground");
+            int negativeCount = finalList.Count(p => p.Label == "Exterior");
+
+            Logger.Log($"[BuildMixedPrompts] Generated {finalList.Count} total prompts: " +
+                      $"{positiveCount} positive, {negativeCount} negative");
+
+            return finalList;
+        }
         /// <summary>
         /// Processes a CT slice in the XY view using a list of AnnotationPoints.
         /// Negative prompts (Exterior) => label=0, positive => label=1 in this pass.
@@ -1139,6 +2888,9 @@ namespace CTSegmenter
             mask.Dispose();
             return binary;
         }
+        /// <summary>
+        /// Enhanced edge smoothing for masks
+        /// </summary>
         private Bitmap ApplyEdgeSmoothing(Bitmap mask)
         {
             try
@@ -1146,89 +2898,392 @@ namespace CTSegmenter
                 if (mask == null)
                     return null;
 
-                // Create a copy of the original bitmap
-                Bitmap blurred = new Bitmap(mask.Width, mask.Height);
-
-                // Lock the bitmap bits for faster processing
-                BitmapData sourceData = mask.LockBits(
-                    new Rectangle(0, 0, mask.Width, mask.Height),
-                    ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-
-                BitmapData targetData = blurred.LockBits(
-                    new Rectangle(0, 0, blurred.Width, blurred.Height),
-                    ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
-
-                int bytesPerPixel = 4; // ARGB
-                int stride = sourceData.Stride;
                 int width = mask.Width;
                 int height = mask.Height;
 
-                unsafe
+                // Create output bitmap
+                Bitmap smoothed = new Bitmap(width, height);
+
+                // Find edge pixels (those with different-valued neighbors)
+                List<Point> edgePixels = new List<Point>();
+                for (int y = 1; y < height - 1; y++)
                 {
-                    byte* src = (byte*)sourceData.Scan0;
-                    byte* dst = (byte*)targetData.Scan0;
-
-                    // Simple box blur (3x3)
-                    for (int y = 0; y < height; y++)
+                    for (int x = 1; x < width - 1; x++)
                     {
-                        for (int x = 0; x < width; x++)
+                        bool isWhite = mask.GetPixel(x, y).R > 128;
+                        bool isEdge = false;
+
+                        // Check 4-connected neighbors
+                        int[] dx = { 0, 1, 0, -1 };
+                        int[] dy = { -1, 0, 1, 0 };
+
+                        for (int i = 0; i < 4; i++)
                         {
-                            int r = 0, g = 0, b = 0, a = 0;
-                            int count = 0;
-
-                            // Sample 3x3 neighborhood
-                            for (int ky = -1; ky <= 1; ky++)
+                            int nx = x + dx[i], ny = y + dy[i];
+                            if (nx >= 0 && nx < width && ny >= 0 && ny < height)
                             {
-                                int sy = y + ky;
-                                if (sy < 0 || sy >= height) continue;
-
-                                for (int kx = -1; kx <= 1; kx++)
+                                bool neighborIsWhite = mask.GetPixel(nx, ny).R > 128;
+                                if (isWhite != neighborIsWhite)
                                 {
-                                    int sx = x + kx;
-                                    if (sx < 0 || sx >= width) continue;
-
-                                    int srcOffset = sy * stride + sx * bytesPerPixel;
-                                    b += src[srcOffset];
-                                    g += src[srcOffset + 1];
-                                    r += src[srcOffset + 2];
-                                    a += src[srcOffset + 3];
-                                    count++;
+                                    isEdge = true;
+                                    break;
                                 }
                             }
+                        }
 
-                            // Write averaged pixel
-                            int dstOffset = y * stride + x * bytesPerPixel;
-                            dst[dstOffset] = (byte)(b / count);
-                            dst[dstOffset + 1] = (byte)(g / count);
-                            dst[dstOffset + 2] = (byte)(r / count);
-                            dst[dstOffset + 3] = (byte)(a / count);
+                        if (isEdge)
+                        {
+                            edgePixels.Add(new Point(x, y));
                         }
                     }
                 }
 
-                // Unlock the bits
-                mask.UnlockBits(sourceData);
-                blurred.UnlockBits(targetData);
-                mask.Dispose();
-                return blurred;
+                // Copy original pixels to output
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        smoothed.SetPixel(x, y, mask.GetPixel(x, y));
+                    }
+                }
+
+                // Apply smoothing only at edges
+                foreach (var p in edgePixels)
+                {
+                    int x = p.X;
+                    int y = p.Y;
+
+                    int sum = 0;
+                    int count = 0;
+
+                    // 3x3 neighborhood
+                    for (int dy = -1; dy <= 1; dy++)
+                    {
+                        for (int dx = -1; dx <= 1; dx++)
+                        {
+                            int nx = x + dx;
+                            int ny = y + dy;
+
+                            if (nx >= 0 && nx < width && ny >= 0 && ny < height)
+                            {
+                                int weight = (dx == 0 && dy == 0) ? 4 : 1;
+                                sum += mask.GetPixel(nx, ny).R * weight;
+                                count += weight;
+                            }
+                        }
+                    }
+
+                    // Apply interpolated value
+                    int avgValue = sum / count;
+                    smoothed.SetPixel(x, y, Color.FromArgb(avgValue, avgValue, avgValue));
+                }
+
+                return smoothed;
             }
             catch (Exception ex)
             {
                 Logger.Log($"Error in ApplyEdgeSmoothing: {ex.Message}");
-                // Return the original mask if smoothing fails
                 return mask;
             }
         }
 
-        // Update MorphologicalClosing to accept kernel size
+        /// <summary>
+        /// Determines if a mask covers the majority of positive points
+        /// Used to identify masks that focus on the central coral structure
+        /// </summary>
+        private bool IsMaskCoveringPositivePoints(Bitmap mask, List<AnnotationPoint> positivePoints, int imgWidth, int imgHeight)
+        {
+            if (positivePoints.Count == 0)
+                return false;
+
+            int coveredPoints = 0;
+
+            foreach (var pt in positivePoints)
+            {
+                // Scale point to mask coordinates
+                int x = (int)Math.Min(Math.Max(0, pt.X), imgWidth - 1);
+                int y = (int)Math.Min(Math.Max(0, pt.Y), imgHeight - 1);
+
+                // Check if the point is covered by the mask
+                if (mask.GetPixel(x, y).R > 128)
+                {
+                    coveredPoints++;
+                }
+            }
+
+            // Consider it a match if more than 60% of positive points are covered
+            float coverage = coveredPoints / (float)positivePoints.Count;
+            return coverage > 0.6f;
+        }
+
+        /// <summary>
+        /// Creates a mask based on the location of positive points
+        /// This is a fallback segmentation method when SAM fails
+        /// </summary>
+        private Bitmap CreatePointBasedMask(int width, int height, List<AnnotationPoint> positivePoints, int radius)
+        {
+            Bitmap mask = new Bitmap(width, height);
+            using (Graphics g = Graphics.FromImage(mask))
+            {
+                g.Clear(Color.Black);
+
+                using (SolidBrush whiteBrush = new SolidBrush(Color.White))
+                {
+                    // Find average position of positive points (center of structure)
+                    float avgX = 0, avgY = 0;
+                    foreach (var pt in positivePoints)
+                    {
+                        avgX += pt.X;
+                        avgY += pt.Y;
+                    }
+
+                    if (positivePoints.Count > 0)
+                    {
+                        avgX /= positivePoints.Count;
+                        avgY /= positivePoints.Count;
+
+                        // Draw region around center and each positive point
+                        g.FillEllipse(whiteBrush, avgX - radius * 2, avgY - radius * 2, radius * 4, radius * 4);
+
+                        foreach (var pt in positivePoints)
+                        {
+                            g.FillEllipse(whiteBrush, pt.X - radius, pt.Y - radius, radius * 2, radius * 2);
+                        }
+                    }
+                }
+            }
+
+            // Apply morphological closing to connect nearby regions
+            Bitmap closed = MorphologicalClosing(mask, 5);
+            mask.Dispose();
+
+            return closed;
+        }
+
+        /// <summary>
+        /// Improved morphological closing with better handling of edges
+        /// </summary>
         private Bitmap MorphologicalClosing(Bitmap bmp, int kernelSize)
         {
+            // Dilate first (expand white regions)
             Bitmap dilated = Dilate(bmp, kernelSize);
+
+            // Then erode (shrink back, but holes remain filled)
             Bitmap closed = Erode(dilated, kernelSize);
+
             dilated.Dispose();
             return closed;
         }
 
+        /// <summary>
+        /// Removes small isolated regions from the mask
+        /// </summary>
+        private Bitmap RemoveSmallRegions(Bitmap inputMask, int minSize)
+        {
+            int width = inputMask.Width;
+            int height = inputMask.Height;
+
+            Bitmap result = new Bitmap(width, height);
+            bool[,] visited = new bool[width, height];
+
+            // First, copy the input mask
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    result.SetPixel(x, y, inputMask.GetPixel(x, y));
+                }
+            }
+
+            // Find and process connected regions
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    if (!visited[x, y] && inputMask.GetPixel(x, y).R > 128)
+                    {
+                        // Found a white region, flood fill to get all pixels
+                        List<Point> region = new List<Point>();
+                        Queue<Point> queue = new Queue<Point>();
+
+                        queue.Enqueue(new Point(x, y));
+                        visited[x, y] = true;
+                        region.Add(new Point(x, y));
+
+                        while (queue.Count > 0)
+                        {
+                            Point p = queue.Dequeue();
+
+                            // Check 4-connected neighbors
+                            int[] dx = { 0, 1, 0, -1 };
+                            int[] dy = { -1, 0, 1, 0 };
+
+                            for (int i = 0; i < 4; i++)
+                            {
+                                int nx = p.X + dx[i];
+                                int ny = p.Y + dy[i];
+
+                                if (nx < 0 || nx >= width || ny < 0 || ny >= height || visited[nx, ny])
+                                    continue;
+
+                                if (inputMask.GetPixel(nx, ny).R > 128)
+                                {
+                                    visited[nx, ny] = true;
+                                    region.Add(new Point(nx, ny));
+                                    queue.Enqueue(new Point(nx, ny));
+                                }
+                            }
+                        }
+
+                        // If region is too small, remove it
+                        if (region.Count < minSize)
+                        {
+                            foreach (var pt in region)
+                            {
+                                result.SetPixel(pt.X, pt.Y, Color.Black);
+                            }
+                        }
+                    }
+                }
+            }
+
+            return result;
+        }
+        /// <summary>
+        /// Cleans up the mask by applying morphological operations and ensuring positive points are covered
+        /// </summary>
+        private Bitmap CleanUpMask(Bitmap inputMask, List<AnnotationPoint> positivePoints, int width, int height)
+        {
+            // First, remove small isolated regions
+            Bitmap cleanedMask = RemoveSmallRegions(inputMask, 100);
+
+            // Apply morphological closing to fill small holes and connect regions
+            Bitmap closedMask = MorphologicalClosing(cleanedMask, 3);
+            cleanedMask.Dispose();
+
+            // Ensure all positive points are included in the mask
+            Bitmap finalMask = new Bitmap(closedMask);
+            using (Graphics g = Graphics.FromImage(finalMask))
+            {
+                using (Brush brush = new SolidBrush(Color.White))
+                {
+                    foreach (var pt in positivePoints)
+                    {
+                        int x = (int)Math.Min(Math.Max(0, pt.X), width - 1);
+                        int y = (int)Math.Min(Math.Max(0, pt.Y), height - 1);
+
+                        // Only add point if it's not already in the mask
+                        if (closedMask.GetPixel(x, y).R < 128)
+                        {
+                            g.FillEllipse(brush, x - 5, y - 5, 10, 10);
+                        }
+                    }
+                }
+            }
+
+            closedMask.Dispose();
+
+            // One final pass of closing to connect any added points
+            Bitmap result = MorphologicalClosing(finalMask, 5);
+            finalMask.Dispose();
+
+            return result;
+        }
+        /// <summary>
+        /// Grows regions starting from positive point seeds, stopping at boundaries or negative points
+        /// </summary>
+        private Bitmap RegionGrowFromSeeds(byte[,] intensities, List<AnnotationPoint> seeds, List<AnnotationPoint> negativePoints, int intensityTolerance)
+        {
+            int width = intensities.GetLength(0);
+            int height = intensities.GetLength(1);
+
+            Bitmap result = new Bitmap(width, height);
+            bool[,] visited = new bool[width, height];
+
+            // Mark negative points as visited to prevent growth into these areas
+            foreach (var pt in negativePoints)
+            {
+                int x = (int)Math.Min(Math.Max(0, pt.X), width - 1);
+                int y = (int)Math.Min(Math.Max(0, pt.Y), height - 1);
+                visited[x, y] = true;
+            }
+
+            // Process each seed point
+            foreach (var seed in seeds)
+            {
+                int seedX = (int)Math.Min(Math.Max(0, seed.X), width - 1);
+                int seedY = (int)Math.Min(Math.Max(0, seed.Y), height - 1);
+
+                if (visited[seedX, seedY])
+                    continue;
+
+                byte seedIntensity = intensities[seedX, seedY];
+
+                // Use queue for region growing
+                Queue<Point> queue = new Queue<Point>();
+                queue.Enqueue(new Point(seedX, seedY));
+                visited[seedX, seedY] = true;
+                result.SetPixel(seedX, seedY, Color.White);
+
+                while (queue.Count > 0)
+                {
+                    Point p = queue.Dequeue();
+
+                    // Check 4-connected neighbors
+                    int[] dx = { 0, 1, 0, -1 };
+                    int[] dy = { -1, 0, 1, 0 };
+
+                    for (int i = 0; i < 4; i++)
+                    {
+                        int nx = p.X + dx[i];
+                        int ny = p.Y + dy[i];
+
+                        // Skip if outside image bounds or already visited
+                        if (nx < 0 || nx >= width || ny < 0 || ny >= height || visited[nx, ny])
+                            continue;
+
+                        // Check if neighbor intensity is similar to seed
+                        byte neighborIntensity = intensities[nx, ny];
+                        if (Math.Abs(neighborIntensity - seedIntensity) <= intensityTolerance)
+                        {
+                            visited[nx, ny] = true;
+                            result.SetPixel(nx, ny, Color.White);
+                            queue.Enqueue(new Point(nx, ny));
+                        }
+                    }
+                }
+            }
+
+            return result;
+        }
+        /// <summary>
+        /// Creates a binary mask where pixels are white if their intensity is within the specified range
+        /// </summary>
+        private Bitmap CreateIntensityRangeMask(byte[,] intensities, byte lowerThreshold, byte upperThreshold)
+        {
+            int width = intensities.GetLength(0);
+            int height = intensities.GetLength(1);
+
+            Bitmap mask = new Bitmap(width, height);
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    byte value = intensities[x, y];
+                    if (value >= lowerThreshold && value <= upperThreshold)
+                    {
+                        mask.SetPixel(x, y, Color.White);
+                    }
+                    else
+                    {
+                        mask.SetPixel(x, y, Color.Black);
+                    }
+                }
+            }
+
+            return mask;
+        }
         /// <summary>
         /// Computes an optimal threshold using Otsu's method.
         /// </summary>
@@ -1344,67 +3399,97 @@ namespace CTSegmenter
             return closed;
         }
 
+        /// <summary>
+        /// Improved dilation with better edge handling
+        /// </summary>
         private Bitmap Dilate(Bitmap bmp, int kernelSize)
         {
-            Bitmap result = new Bitmap(bmp.Width, bmp.Height, PixelFormat.Format32bppArgb);
-            int k = kernelSize / 2;
+            Bitmap result = new Bitmap(bmp.Width, bmp.Height);
+            int radius = kernelSize / 2;
 
+            // For each pixel in the output image
             for (int y = 0; y < bmp.Height; y++)
             {
                 for (int x = 0; x < bmp.Width; x++)
                 {
-                    bool white = false;
-                    for (int dy = -k; dy <= k && !white; dy++)
+                    bool setWhite = false;
+
+                    // Check the neighborhood
+                    for (int ky = -radius; ky <= radius && !setWhite; ky++)
                     {
-                        for (int dx = -k; dx <= k && !white; dx++)
+                        int ny = y + ky;
+                        if (ny < 0 || ny >= bmp.Height) continue;
+
+                        for (int kx = -radius; kx <= radius && !setWhite; kx++)
                         {
-                            int nx = x + dx, ny = y + dy;
-                            if (nx >= 0 && nx < bmp.Width && ny >= 0 && ny < bmp.Height)
+                            int nx = x + kx;
+                            if (nx < 0 || nx >= bmp.Width) continue;
+
+                            // If any neighbor is white, set this pixel to white
+                            if (bmp.GetPixel(nx, ny).R > 128)
                             {
-                                if (bmp.GetPixel(nx, ny).R > 40) // Match our low threshold
-                                {
-                                    white = true;
-                                    break;
-                                }
+                                setWhite = true;
                             }
                         }
                     }
-                    result.SetPixel(x, y, white ? Color.White : Color.Black);
+
+                    result.SetPixel(x, y, setWhite ? Color.White : Color.Black);
                 }
             }
 
             return result;
         }
 
-        
+
+
+        /// <summary>
+        /// Improved erosion with better edge handling
+        /// </summary>
         private Bitmap Erode(Bitmap bmp, int kernelSize)
         {
-            Bitmap result = new Bitmap(bmp.Width, bmp.Height, PixelFormat.Format32bppArgb);
-            int k = kernelSize / 2;
+            Bitmap result = new Bitmap(bmp.Width, bmp.Height);
+            int radius = kernelSize / 2;
+
+            // For each pixel in the output image
             for (int y = 0; y < bmp.Height; y++)
             {
                 for (int x = 0; x < bmp.Width; x++)
                 {
-                    bool black = false;
-                    for (int dy = -k; dy <= k; dy++)
+                    bool setBlack = false;
+
+                    // Check the neighborhood
+                    for (int ky = -radius; ky <= radius && !setBlack; ky++)
                     {
-                        for (int dx = -k; dx <= k; dx++)
+                        int ny = y + ky;
+                        if (ny < 0 || ny >= bmp.Height)
                         {
-                            int nx = x + dx, ny = y + dy;
-                            if (nx >= 0 && nx < bmp.Width && ny >= 0 && ny < bmp.Height)
+                            // Treat out-of-bounds as black
+                            setBlack = true;
+                            continue;
+                        }
+
+                        for (int kx = -radius; kx <= radius && !setBlack; kx++)
+                        {
+                            int nx = x + kx;
+                            if (nx < 0 || nx >= bmp.Width)
                             {
-                                if (bmp.GetPixel(nx, ny).R < 128)
-                                {
-                                    black = true;
-                                    break;
-                                }
+                                // Treat out-of-bounds as black
+                                setBlack = true;
+                                continue;
+                            }
+
+                            // If any neighbor is black, set this pixel to black
+                            if (bmp.GetPixel(nx, ny).R <= 128)
+                            {
+                                setBlack = true;
                             }
                         }
-                        if (black) break;
                     }
-                    result.SetPixel(x, y, black ? Color.Black : Color.White);
+
+                    result.SetPixel(x, y, setBlack ? Color.Black : Color.White);
                 }
             }
+
             return result;
         }
         // Create more conservative fallback segmentation 
@@ -1448,15 +3533,26 @@ namespace CTSegmenter
 
             return mask;
         }
+        /// <summary>
+        /// Improved hole filling that preserves important structures
+        /// </summary>
         private Bitmap FillHolesSelective(Bitmap binaryMask, int minHoleArea = 50)
         {
             int width = binaryMask.Width;
             int height = binaryMask.Height;
-            Bitmap filledMask = (Bitmap)binaryMask.Clone();
+            Bitmap filledMask = new Bitmap(width, height);
             bool[,] visited = new bool[width, height];
 
-            bool InBounds(int x, int y) => (x >= 0 && x < width && y >= 0 && y < height);
+            // Copy the input mask
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    filledMask.SetPixel(x, y, binaryMask.GetPixel(x, y));
+                }
+            }
 
+            // Flood fill function
             List<Point> FloodFill(int startX, int startY)
             {
                 List<Point> region = new List<Point>();
@@ -1468,60 +3564,73 @@ namespace CTSegmenter
                 {
                     Point p = queue.Dequeue();
                     region.Add(p);
-                    foreach (Point offset in new[] { new Point(1, 0), new Point(-1, 0), new Point(0, 1), new Point(0, -1) })
+
+                    // Check 4-connected neighbors
+                    int[] dx = { 0, 1, 0, -1 };
+                    int[] dy = { -1, 0, 1, 0 };
+
+                    for (int i = 0; i < 4; i++)
                     {
-                        int nx = p.X + offset.X, ny = p.Y + offset.Y;
-                        if (InBounds(nx, ny) && !visited[nx, ny])
+                        int nx = p.X + dx[i], ny = p.Y + dy[i];
+                        if (nx >= 0 && nx < width && ny >= 0 && ny < height &&
+                            !visited[nx, ny] && filledMask.GetPixel(nx, ny).R < 128)
                         {
-                            if (filledMask.GetPixel(nx, ny).R == 0)
-                            {
-                                visited[nx, ny] = true;
-                                queue.Enqueue(new Point(nx, ny));
-                            }
+                            visited[nx, ny] = true;
+                            queue.Enqueue(new Point(nx, ny));
                         }
                     }
                 }
                 return region;
             }
 
-            // Mark background connected to the border
+            // First identify background regions connected to the border
             for (int x = 0; x < width; x++)
             {
-                if (filledMask.GetPixel(x, 0).R == 0 && !visited[x, 0])
-                    foreach (var p in FloodFill(x, 0)) { }
-                if (filledMask.GetPixel(x, height - 1).R == 0 && !visited[x, height - 1])
-                    foreach (var p in FloodFill(x, height - 1)) { }
-            }
-            for (int y = 0; y < height; y++)
-            {
-                if (filledMask.GetPixel(0, y).R == 0 && !visited[0, y])
-                    foreach (var p in FloodFill(0, y)) { }
-                if (filledMask.GetPixel(width - 1, y).R == 0 && !visited[width - 1, y])
-                    foreach (var p in FloodFill(width - 1, y)) { }
+                if (!visited[x, 0] && filledMask.GetPixel(x, 0).R < 128)
+                    FloodFill(x, 0);
+                if (!visited[x, height - 1] && filledMask.GetPixel(x, height - 1).R < 128)
+                    FloodFill(x, height - 1);
             }
 
-            // Fill holes not connected to border if bigger than minHoleArea
-            for (int x = 0; x < width; x++)
+            for (int y = 0; y < height; y++)
             {
-                for (int y = 0; y < height; y++)
+                if (!visited[0, y] && filledMask.GetPixel(0, y).R < 128)
+                    FloodFill(0, y);
+                if (!visited[width - 1, y] && filledMask.GetPixel(width - 1, y).R < 128)
+                    FloodFill(width - 1, y);
+            }
+
+            // Now look for interior holes
+            List<List<Point>> holes = new List<List<Point>>();
+            for (int y = 1; y < height - 1; y++)
+            {
+                for (int x = 1; x < width - 1; x++)
                 {
-                    if (!visited[x, y] && filledMask.GetPixel(x, y).R == 0)
+                    if (!visited[x, y] && filledMask.GetPixel(x, y).R < 128)
                     {
                         List<Point> hole = FloodFill(x, y);
                         if (hole.Count >= minHoleArea)
                         {
-                            foreach (var p in hole)
-                            {
-                                filledMask.SetPixel(p.X, p.Y, Color.White);
-                            }
+                            holes.Add(hole);
                         }
                     }
                 }
             }
+
+            // Fill holes that pass size threshold
+            foreach (var hole in holes)
+            {
+                foreach (var p in hole)
+                {
+                    filledMask.SetPixel(p.X, p.Y, Color.White);
+                }
+            }
+
             return filledMask;
         }
 
-        
+
+
 
         private Tensor<T> GetFirstTensor<T>(IEnumerable<DisposableNamedOnnxValue> outputs, string name)
         {

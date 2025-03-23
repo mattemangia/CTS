@@ -936,48 +936,58 @@ namespace CTSegmenter
         /// - Points belonging to the target material are marked as "Foreground" (positive).
         /// - All other points are marked as "Exterior" (negative).
         /// </summary>
+        /// <summary>
+        /// Builds a prompt list for segmentation, making sure all labels are properly assigned
+        /// </summary>
         private List<AnnotationPoint> BuildMixedPrompts(
-    IEnumerable<AnnotationPoint> slicePoints,
-    string targetMaterialName)
+            IEnumerable<AnnotationPoint> slicePoints,
+            string targetMaterialName)
         {
-            Logger.Log($"Building prompts for material: {targetMaterialName}");
+            if (slicePoints == null)
+                return new List<AnnotationPoint>();
 
-            // Create a new list for our processed points
-            List<AnnotationPoint> finalList = new List<AnnotationPoint>();
+            var points = slicePoints.ToList();
 
-            // Process each point in the slice
-            foreach (var pt in slicePoints)
+            Logger.Log($"[BuildMixedPrompts] Building prompts for material '{targetMaterialName}' from {points.Count} points");
+
+            List<AnnotationPoint> result = new List<AnnotationPoint>();
+
+            foreach (var point in points)
             {
+                if (string.IsNullOrEmpty(point.Label))
+                    continue;
+
                 AnnotationPoint newPoint = new AnnotationPoint
                 {
-                    ID = pt.ID,
-                    X = pt.X,
-                    Y = pt.Y,
-                    Z = pt.Z,
-                    Type = pt.Type
+                    ID = point.ID,
+                    X = point.X,
+                    Y = point.Y,
+                    Z = point.Z,
+                    Type = point.Type
                 };
 
-                // If the user has labeled this point as "targetMaterialName", treat it as "Foreground"
-                // Otherwise, treat it as "Exterior" so we do NOT re-segment that area.
-                if (pt.Label.Equals(targetMaterialName, StringComparison.OrdinalIgnoreCase))
+                if (point.Label.Equals(targetMaterialName, StringComparison.OrdinalIgnoreCase))
                 {
                     newPoint.Label = "Foreground";
+                    Logger.Log($"  Point {point.ID} at ({point.X},{point.Y}) - POSITIVE (original: {point.Label})");
                 }
                 else
                 {
                     newPoint.Label = "Exterior";
+                    Logger.Log($"  Point {point.ID} at ({point.X},{point.Y}) - NEGATIVE (original: {point.Label})");
                 }
 
-                finalList.Add(newPoint);
+                result.Add(newPoint);
             }
 
-            // Log counts for debugging
-            int positiveCount = finalList.Count(p => p.Label == "Foreground");
-            int negativeCount = finalList.Count(p => p.Label == "Exterior");
-            Logger.Log($"Generated {finalList.Count} total prompts: {positiveCount} positive, {negativeCount} negative");
+            int positiveCount = result.Count(p => p.Label == "Foreground");
+            int negativeCount = result.Count(p => p.Label == "Exterior");
 
-            return finalList;
+            Logger.Log($"[BuildMixedPrompts] Created {result.Count} prompt points: {positiveCount} positive, {negativeCount} negative");
+
+            return result;
         }
+
 
         public void SetRealTimeProcessing(bool enable)
         {

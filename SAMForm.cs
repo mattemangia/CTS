@@ -24,7 +24,7 @@ namespace CTSegmenter
             public Bitmap SingleMask;           // single
             public int SelectedIndex;           // which candidate user picks in multi mode
         }
-
+        public byte MaskThreshold => (byte)thresholdingTrackbar.Value;
         // We'll keep them in a list that toolStripButton1_Click populates
         private List<MaterialMaskResult> allMaterialsResults = new List<MaterialMaskResult>();
         private MainForm mainForm;
@@ -318,11 +318,95 @@ namespace CTSegmenter
             _ = mainForm.RenderOrthoViewsAsync();
         }*/
 
+        private bool VerifyModelPaths()
+        {
+            if (string.IsNullOrEmpty(CurrentSettings.ModelFolderPath) ||
+                !Directory.Exists(CurrentSettings.ModelFolderPath))
+            {
+                DialogResult result = MessageBox.Show(
+                    "Model folder path is not set or invalid. Would you like to locate the ONNX folder now?",
+                    "Configuration Required",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
+
+                if (result == DialogResult.Yes)
+                {
+                    using (var folderDialog = new FolderBrowserDialog())
+                    {
+                        folderDialog.Description = "Select the folder containing ONNX model files";
+                        folderDialog.ShowNewFolderButton = false;
+
+                        if (folderDialog.ShowDialog() == DialogResult.OK)
+                        {
+                            string selectedPath = folderDialog.SelectedPath;
+
+                            // Check if the selected folder contains the model files
+                            bool hasSAM2Models = File.Exists(Path.Combine(selectedPath, "sam2.1_large.encoder.onnx")) &&
+                                                 File.Exists(Path.Combine(selectedPath, "sam2.1_large.decoder.onnx"));
+
+                            if (hasSAM2Models)
+                            {
+                                CurrentSettings.ModelFolderPath = selectedPath;
+                                return true;
+                            }
+                            else
+                            {
+                                MessageBox.Show(
+                                    "The selected folder does not contain the required SAM 2.1 model files.",
+                                    "Invalid Folder",
+                                    MessageBoxButtons.OK,
+                                    MessageBoxIcon.Error);
+                                return false;
+                            }
+                        }
+                    }
+                }
+                return false;
+            }
+
+            return true;
+        }
 
         private void toolStripButton1_Click(object sender, EventArgs e)
         {
+            
             try
             {
+
+                if (string.IsNullOrEmpty(CurrentSettings.ModelFolderPath))
+                {
+                    Logger.Log("[SAMForm] ERROR: Model folder path is null or empty");
+
+                    // Try to find a default path
+                    string defaultPath = Path.Combine(Application.StartupPath, "ONNX");
+                    if (Directory.Exists(defaultPath))
+                    {
+                        Logger.Log($"[SAMForm] Using default model folder path: {defaultPath}");
+                        CurrentSettings.ModelFolderPath = defaultPath;
+                    }
+                    else
+                    {
+                        MessageBox.Show("Model folder path is not set. Please configure it.",
+                                       "Configuration Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        if (!VerifyModelPaths())
+                        {
+                            // Exit the method if model paths couldn't be set
+                            return;
+                        }
+                        
+                    }
+                }
+
+                // Now check that the model files exist
+                string encoderPath = Path.Combine(CurrentSettings.ModelFolderPath, "sam2.1_large.encoder.onnx");
+                string decoderPath = Path.Combine(CurrentSettings.ModelFolderPath, "sam2.1_large.decoder.onnx");
+
+                if (!File.Exists(encoderPath) || !File.Exists(decoderPath))
+                {
+                    MessageBox.Show($"Required model files not found in:\n{CurrentSettings.ModelFolderPath}\n\nPlease check the model folder path in SAM Settings.",
+                                   "Missing Model Files", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
                 Logger.Log("[SAMForm] Starting segmentation process for all directions");
                 Cursor = Cursors.WaitCursor;
 
@@ -339,15 +423,62 @@ namespace CTSegmenter
                 // Clear previous material results
                 allMaterialsResults.Clear();
 
-                // Set up model paths
+                // Set up model paths based on which SAM version is being used
                 string modelFolder = CurrentSettings.ModelFolderPath;
                 int imageSize = CurrentSettings.ImageInputSize;
-                string imageEncoderPath = Path.Combine(modelFolder, "image_encoder_hiera_t.onnx");
-                string promptEncoderPath = Path.Combine(modelFolder, "prompt_encoder_hiera_t.onnx");
-                string maskDecoderPath = Path.Combine(modelFolder, "mask_decoder_hiera_t.onnx");
-                string memoryAttentionPath = Path.Combine(modelFolder, "memory_attention_hiera_t.onnx");
-                string memoryEncoderPath = Path.Combine(modelFolder, "memory_encoder_hiera_t.onnx");
-                string mlpPath = Path.Combine(modelFolder, "mlp_hiera_t.onnx");
+                bool usingSam2 = CurrentSettings.UseSam2Models;
+                Logger.Log($"[SAMForm] Using SAM 2.1 models: {usingSam2}");
+
+                string imageEncoderPath, promptEncoderPath, maskDecoderPath;
+                string memoryEncoderPath, memoryAttentionPath, mlpPath;
+
+                if (usingSam2)
+                {
+                    // SAM 2.1 paths
+                    imageEncoderPath = Path.Combine(modelFolder, "sam2.1_large.encoder.onnx");
+                    promptEncoderPath = ""; // Kept for compatibility
+                    maskDecoderPath = Path.Combine(modelFolder, "sam2.1_large.decoder.onnx");
+                    memoryEncoderPath = ""; // Not used in SAM 2.1
+                    memoryAttentionPath = ""; // Not used in SAM 2.1
+                    mlpPath = ""; // Not used in SAM 2.1
+
+                    // Validate SAM 2.1 models
+                    if (!File.Exists(imageEncoderPath) || !File.Exists(maskDecoderPath))
+                    {
+                        string missingModels = "";
+                        if (!File.Exists(imageEncoderPath)) missingModels += $"- SAM 2.1 encoder: {imageEncoderPath}\n";
+                        if (!File.Exists(maskDecoderPath)) missingModels += $"- SAM 2.1 decoder: {maskDecoderPath}\n";
+
+                        MessageBox.Show($"SAM 2.1 models not found:\n{missingModels}\nPlease check your model folder settings.",
+                            "Models Missing", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        Cursor = Cursors.Default;
+                        return;
+                    }
+                }
+                else
+                {
+                    // Original SAM paths
+                    imageEncoderPath = Path.Combine(modelFolder, "image_encoder_hiera_t.onnx");
+                    promptEncoderPath = Path.Combine(modelFolder, "prompt_encoder_hiera_t.onnx");
+                    maskDecoderPath = Path.Combine(modelFolder, "mask_decoder_hiera_t.onnx");
+                    memoryEncoderPath = Path.Combine(modelFolder, "memory_encoder_hiera_t.onnx");
+                    memoryAttentionPath = Path.Combine(modelFolder, "memory_attention_hiera_t.onnx");
+                    mlpPath = Path.Combine(modelFolder, "mlp_hiera_t.onnx");
+
+                    // Validate original SAM models
+                    if (!File.Exists(imageEncoderPath) || !File.Exists(promptEncoderPath) || !File.Exists(maskDecoderPath))
+                    {
+                        string missingModels = "";
+                        if (!File.Exists(imageEncoderPath)) missingModels += $"- Image encoder: {imageEncoderPath}\n";
+                        if (!File.Exists(promptEncoderPath)) missingModels += $"- Prompt encoder: {promptEncoderPath}\n";
+                        if (!File.Exists(maskDecoderPath)) missingModels += $"- Mask decoder: {maskDecoderPath}\n";
+
+                        MessageBox.Show($"Original SAM models not found:\n{missingModels}\nPlease check your model folder settings.",
+                            "Models Missing", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        Cursor = Cursors.Default;
+                        return;
+                    }
+                }
 
                 string saveFolder = Path.Combine(Application.StartupPath, "SavedMasks");
                 Directory.CreateDirectory(saveFolder);
@@ -375,10 +506,12 @@ namespace CTSegmenter
                     mlpPath,
                     imageSize,
                     false,
-                    CurrentSettings.EnableMlp))
+                    CurrentSettings.EnableMlp,
+                    CurrentSettings.UseCpuExecutionProvider))
                 {
                     segmenter.UseSelectiveHoleFilling = CurrentSettings.UseSelectiveHoleFilling;
                     segmenter.MaskThreshold = thresholdingTrackbar.Value;
+                    segmenter.StorePreviousEmbeddings = true; // Enable embedding storage for propagation
 
                     // ----- Process XY Direction -----
                     if (processXY)
@@ -391,7 +524,8 @@ namespace CTSegmenter
                                 gAcc.Clear(Color.Black);
 
                             var slicePoints = annotationManager.GetPointsForSlice(currentZ);
-                            var uniqueMats = slicePoints.Select(p => p.Label)
+                            var uniqueMats = slicePoints
+                                .Select(p => p.Label)
                                 .Where(lbl => !lbl.Equals("Exterior", StringComparison.OrdinalIgnoreCase))
                                 .Distinct().ToList();
 
@@ -475,7 +609,8 @@ namespace CTSegmenter
                                 gAcc.Clear(Color.Black);
 
                             var slicePoints = annotationManager.Points.Where(p => Math.Abs(p.Y - fixedY) < 1.0f).ToList();
-                            var uniqueMats = slicePoints.Select(p => p.Label)
+                            var uniqueMats = slicePoints
+                                .Select(p => p.Label)
                                 .Where(lbl => !lbl.Equals("Exterior", StringComparison.OrdinalIgnoreCase))
                                 .Distinct().ToList();
 
@@ -497,20 +632,45 @@ namespace CTSegmenter
 
                                 if (multiCandidate)
                                 {
-                                    // For XZ we only get one mask for now - wrap it in a list
-                                    Bitmap singleMask = segmenter.ProcessXZSlice(fixedY, baseXZ, prompts, null, null);
-                                    List<Bitmap> candidates = new List<Bitmap> { singleMask };
+                                    // For XZ we'll generate candidates even though the original code didn't
+                                    List<Bitmap> candidates = new List<Bitmap>();
+
+                                    // Generate multiple masks with different thresholds
+                                    byte[] thresholds = new byte[] {
+                                (byte)(MaskThreshold * 0.7), MaskThreshold,
+                                (byte)(MaskThreshold * 1.3), (byte)(MaskThreshold * 1.5)
+                            };
+
+                                    foreach (byte threshold in thresholds)
+                                    {
+                                        // Save original threshold
+                                        byte originalThreshold = (byte)segmenter.MaskThreshold;
+
+                                        // Set temporary threshold
+                                        segmenter.MaskThreshold = threshold;
+
+                                        // Generate mask with this threshold
+                                        Bitmap singleMask = segmenter.ProcessXZSlice(fixedY, baseXZ, prompts, null, null);
+                                        candidates.Add(singleMask);
+
+                                        // Restore original threshold
+                                        segmenter.MaskThreshold = originalThreshold;
+                                    }
 
                                     multiDirResults["XZ"][matName] = candidates;
 
-                                    // Merge into accumMask
-                                    for (int z1 = 0; z1 < depth; z1++)
+                                    // Merge first candidate into accumMask
+                                    if (candidates.Count > 0)
                                     {
-                                        for (int x1 = 0; x1 < width; x1++)
+                                        Bitmap msk = candidates[0];
+                                        for (int z1 = 0; z1 < depth; z1++)
                                         {
-                                            if (x1 < singleMask.Width && z1 < singleMask.Height &&
-                                                singleMask.GetPixel(x1, z1).R > 128)
-                                                accumMask.SetPixel(x1, z1, Color.White);
+                                            for (int x1 = 0; x1 < width; x1++)
+                                            {
+                                                if (x1 < msk.Width && z1 < msk.Height &&
+                                                    msk.GetPixel(x1, z1).R > 128)
+                                                    accumMask.SetPixel(x1, z1, Color.White);
+                                            }
                                         }
                                     }
                                 }
@@ -533,7 +693,7 @@ namespace CTSegmenter
                                     // Also store in multiDirResults for consistency
                                     multiDirResults["XZ"][matName] = new List<Bitmap> { singleMask };
 
-                                    // Merge the single mask into accumMask
+                                    // Merge the single mask into accumMask for exclusion in subsequent passes
                                     for (int z1 = 0; z1 < depth; z1++)
                                     {
                                         for (int x1 = 0; x1 < width; x1++)
@@ -559,7 +719,8 @@ namespace CTSegmenter
                                 gAcc.Clear(Color.Black);
 
                             var slicePoints = annotationManager.Points.Where(p => Math.Abs(p.X - fixedX) < 1.0f).ToList();
-                            var uniqueMats = slicePoints.Select(p => p.Label)
+                            var uniqueMats = slicePoints
+                                .Select(p => p.Label)
                                 .Where(lbl => !lbl.Equals("Exterior", StringComparison.OrdinalIgnoreCase))
                                 .Distinct().ToList();
 
@@ -581,20 +742,45 @@ namespace CTSegmenter
 
                                 if (multiCandidate)
                                 {
-                                    // For YZ we only get one mask for now - wrap it in a list
-                                    Bitmap singleMask = segmenter.ProcessYZSlice(fixedX, baseYZ, prompts, null, null);
-                                    List<Bitmap> candidates = new List<Bitmap> { singleMask };
+                                    // For YZ we'll also generate candidates
+                                    List<Bitmap> candidates = new List<Bitmap>();
+
+                                    // Generate multiple masks with different thresholds
+                                    byte[] thresholds = new byte[] {
+                                (byte)(MaskThreshold * 0.7), MaskThreshold,
+                                (byte)(MaskThreshold * 1.3), (byte)(MaskThreshold * 1.5)
+                            };
+
+                                    foreach (byte threshold in thresholds)
+                                    {
+                                        // Save original threshold
+                                        byte originalThreshold = (byte)segmenter.MaskThreshold;
+
+                                        // Set temporary threshold
+                                        segmenter.MaskThreshold = threshold;
+
+                                        // Generate mask with this threshold
+                                        Bitmap singleMask = segmenter.ProcessYZSlice(fixedX, baseYZ, prompts, null, null);
+                                        candidates.Add(singleMask);
+
+                                        // Restore original threshold
+                                        segmenter.MaskThreshold = originalThreshold;
+                                    }
 
                                     multiDirResults["YZ"][matName] = candidates;
 
-                                    // Merge into accumMask
-                                    for (int y1 = 0; y1 < height; y1++)
+                                    // Merge first candidate into accumMask
+                                    if (candidates.Count > 0)
                                     {
-                                        for (int z1 = 0; z1 < depth; z1++)
+                                        Bitmap msk = candidates[0];
+                                        for (int y1 = 0; y1 < height; y1++)
                                         {
-                                            if (z1 < singleMask.Width && y1 < singleMask.Height &&
-                                                singleMask.GetPixel(z1, y1).R > 128)
-                                                accumMask.SetPixel(z1, y1, Color.White);
+                                            for (int z1 = 0; z1 < depth; z1++)
+                                            {
+                                                if (z1 < msk.Width && y1 < msk.Height &&
+                                                    msk.GetPixel(z1, y1).R > 128)
+                                                    accumMask.SetPixel(z1, y1, Color.White);
+                                            }
                                         }
                                     }
                                 }
@@ -617,7 +803,7 @@ namespace CTSegmenter
                                     // Also store in multiDirResults for consistency
                                     multiDirResults["YZ"][matName] = new List<Bitmap> { singleMask };
 
-                                    // Merge the single mask into accumMask
+                                    // Merge the single mask into accumMask for exclusion in subsequent passes
                                     for (int y1 = 0; y1 < height; y1++)
                                     {
                                         for (int z1 = 0; z1 < depth; z1++)
@@ -741,6 +927,7 @@ namespace CTSegmenter
                 MessageBox.Show("Error applying segmentation: " + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
+
 
         // Helper method to get active direction
         private string GetActiveDirection()
@@ -1369,7 +1556,46 @@ namespace CTSegmenter
                     return;
                 }
 
-                // Call the static propagator class to perform the segmentation
+                // Validate models first
+                bool usingSam2 = CurrentSettings.UseSam2Models;
+                string modelFolder = CurrentSettings.ModelFolderPath;
+
+                if (usingSam2)
+                {
+                    string encoderPath = Path.Combine(modelFolder, "sam2.1_large.encoder.onnx");
+                    string decoderPath = Path.Combine(modelFolder, "sam2.1_large.decoder.onnx");
+
+                    if (!File.Exists(encoderPath) || !File.Exists(decoderPath))
+                    {
+                        string missingModels = "";
+                        if (!File.Exists(encoderPath)) missingModels += $"- SAM 2.1 encoder: {encoderPath}\n";
+                        if (!File.Exists(decoderPath)) missingModels += $"- SAM 2.1 decoder: {decoderPath}\n";
+
+                        MessageBox.Show($"SAM 2.1 models missing:\n{missingModels}\nPlease check model paths in settings.",
+                            "Models Missing", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+                }
+                else
+                {
+                    string imageEncoderPath = Path.Combine(modelFolder, "image_encoder_hiera_t.onnx");
+                    string promptEncoderPath = Path.Combine(modelFolder, "prompt_encoder_hiera_t.onnx");
+                    string maskDecoderPath = Path.Combine(modelFolder, "mask_decoder_hiera_t.onnx");
+
+                    if (!File.Exists(imageEncoderPath) || !File.Exists(promptEncoderPath) || !File.Exists(maskDecoderPath))
+                    {
+                        string missingModels = "";
+                        if (!File.Exists(imageEncoderPath)) missingModels += $"- Image encoder: {imageEncoderPath}\n";
+                        if (!File.Exists(promptEncoderPath)) missingModels += $"- Prompt encoder: {promptEncoderPath}\n";
+                        if (!File.Exists(maskDecoderPath)) missingModels += $"- Mask decoder: {maskDecoderPath}\n";
+
+                        MessageBox.Show($"Original SAM models missing:\n{missingModels}\nPlease check model paths in settings.",
+                            "Models Missing", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+                }
+
+                // Call the propagator with appropriate settings
                 byte[,,] result = SegmentationPropagator.Propagate(
                     mainForm,
                     CurrentSettings,
@@ -1378,7 +1604,7 @@ namespace CTSegmenter
 
                 if (result != null)
                 {
-                    // Copy results to ChunkedLabelVolume instead of direct assignment
+                    // Copy results to volume labels
                     CopyResultsToVolumeLabels(result);
 
                     // Update display after propagation

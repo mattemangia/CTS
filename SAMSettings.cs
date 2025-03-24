@@ -13,17 +13,28 @@ namespace CTSegmenter
         public string FusionAlgorithm { get; set; }
         public int ImageInputSize { get; set; }
         public string ModelFolderPath { get; set; }
-        public bool EnableMlp { get; set; } // new option to enable MLP post–processing
+        public bool EnableMlp { get; set; }
         public bool EnableMultiMask { get; set; } = false;
+        public bool UseSam2Models { get; set; } = true;
+        // New property for CPU execution - default to true for stability
+        public bool UseCpuExecutionProvider { get; set; } = true;
 
-        public string ImageEncoderPath => Path.Combine(ModelFolderPath, "image_encoder_hiera_t.onnx");
+        // Existing path properties remain unchanged...
+        public string ImageEncoderPath => Path.Combine(ModelFolderPath,
+            UseSam2Models ? "sam2.1_large.encoder.onnx" : "image_encoder_hiera_t.onnx");
         public string PromptEncoderPath => Path.Combine(ModelFolderPath, "prompt_encoder_hiera_t.onnx");
-        public string MaskDecoderPath => Path.Combine(ModelFolderPath, "mask_decoder_hiera_t.onnx");
+        public string MaskDecoderPath => Path.Combine(ModelFolderPath,
+            UseSam2Models ? "sam2.1_large.decoder.onnx" : "mask_decoder_hiera_t.onnx");
         public string MemoryAttentionPath => Path.Combine(ModelFolderPath, "memory_attention_hiera_t.onnx");
         public string MemoryEncoderPath => Path.Combine(ModelFolderPath, "memory_encoder_hiera_t.onnx");
         public string MlpPath => Path.Combine(ModelFolderPath, "mlp_hiera_t.onnx");
+
+        public string EncoderPath => Path.Combine(ModelFolderPath, "sam2.1_large.encoder.onnx");
+        public string DecoderPath => Path.Combine(ModelFolderPath, "sam2.1_large.decoder.onnx");
+
         public bool UseSelectiveHoleFilling { get; set; } = true;
     }
+
 
     public partial class SAMSettings : Form
     {
@@ -38,6 +49,9 @@ namespace CTSegmenter
         private Label labelModelFolder;
         private CheckBox checkBoxRealTimeProcessing;
         private CheckBox checkBoxEnableMlp; // for MLP post–processing
+        private CheckBox checkBoxUseSam2;
+        private CheckBox checkBoxUseCpu; // New field for CPU execution
+
 
         // Declare radio buttons as class-level fields
         private RadioButton rbtnSelective;
@@ -56,9 +70,12 @@ namespace CTSegmenter
             textBoxModelFolder.Text = Path.Combine(Application.StartupPath, "ONNX");
             checkBoxRealTimeProcessing.Checked = false;
             checkBoxEnableMlp.Checked = false; // default MLP off
+            checkBoxUseCpu.Checked = true; // Default to using CPU for stability
+
             if (_parentForm != null && _parentForm.Icon != null)
                 this.Icon = _parentForm.Icon;
         }
+
 
         private void InitializeComponent()
         {
@@ -66,7 +83,7 @@ namespace CTSegmenter
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.StartPosition = FormStartPosition.CenterParent;
-            this.ClientSize = new Size(470, 330); // Increased height to accommodate all controls
+            this.ClientSize = new Size(470, 410); // Increased height to accommodate all controls
             this.TopMost = true;
 
             labelFusion = new Label() { Text = "Fusion Algorithm:", Left = 20, Top = 20, AutoSize = true };
@@ -100,12 +117,22 @@ namespace CTSegmenter
                 AutoSize = true
             };
 
+            // Add CPU execution checkbox
+            checkBoxUseCpu = new CheckBox
+            {
+                Text = "Use CPU Execution Provider (more stable, slower)",
+                Left = 20,
+                Top = 230,
+                AutoSize = true,
+                Checked = true // Default to true for stability
+            };
+
             // Properly position radio buttons after the checkboxes
             rbtnSelective = new RadioButton()
             {
                 Text = "Selective Hole Filling",
                 Left = 20,
-                Top = 230, // Moved down to avoid overlap
+                Top = 260, // Moved down to avoid overlap
                 AutoSize = true,
                 Checked = true // default option
             };
@@ -114,13 +141,22 @@ namespace CTSegmenter
             {
                 Text = "Standard Hole Filling",
                 Left = 20,
-                Top = 260, // Moved down to avoid overlap
+                Top = 290, // Moved down to avoid overlap
                 AutoSize = true
             };
 
-            buttonOK = new Button() { Text = "OK", Left = 150, Top = 290, Width = 80 }; // Also moved down
+            checkBoxUseSam2 = new CheckBox()
+            {
+                Text = "Use SAM 2.1 Models",
+                Left = 20,
+                Top = 320, // Adjust position as needed
+                AutoSize = true,
+                Checked = true // Default to SAM 2.1
+            };
+
+            buttonOK = new Button() { Text = "OK", Left = 150, Top = 360, Width = 80 }; // Moved down
             buttonOK.Click += ButtonOK_Click;
-            buttonCancel = new Button() { Text = "Cancel", Left = 250, Top = 290, Width = 80 }; // Also moved down
+            buttonCancel = new Button() { Text = "Cancel", Left = 250, Top = 360, Width = 80 }; // Moved down
             buttonCancel.Click += (s, e) => { this.DialogResult = DialogResult.Cancel; this.Close(); };
 
             this.Controls.Add(labelFusion);
@@ -133,11 +169,14 @@ namespace CTSegmenter
             this.Controls.Add(checkBoxRealTimeProcessing);
             this.Controls.Add(checkBoxEnableMlp);
             this.Controls.Add(checkBoxMultiCandidate);
+            this.Controls.Add(checkBoxUseCpu); // Add the new checkbox
             this.Controls.Add(rbtnSelective);
             this.Controls.Add(rbtnStandard);
+            this.Controls.Add(checkBoxUseSam2);
             this.Controls.Add(buttonOK);
             this.Controls.Add(buttonCancel);
         }
+
 
 
         private void ButtonBrowse_Click(object sender, EventArgs e)
@@ -159,7 +198,9 @@ namespace CTSegmenter
                 ModelFolderPath = textBoxModelFolder.Text,
                 EnableMlp = checkBoxEnableMlp.Checked,
                 UseSelectiveHoleFilling = rbtnSelective.Checked,
-                EnableMultiMask = checkBoxMultiCandidate.Checked
+                EnableMultiMask = checkBoxMultiCandidate.Checked,
+                UseSam2Models = checkBoxUseSam2.Checked,
+                UseCpuExecutionProvider = checkBoxUseCpu.Checked // Save CPU execution setting
             };
 
             _parentForm.SetRealTimeProcessing(checkBoxRealTimeProcessing.Checked);

@@ -2495,12 +2495,35 @@ namespace CTSegmenter
                 SAMSettingsParams settings = SamFormInstance.CurrentSettings;
                 string modelFolder = settings.ModelFolderPath;
                 int imageSize = settings.ImageInputSize;
-                string imageEncoderPath = Path.Combine(modelFolder, "image_encoder_hiera_t.onnx");
-                string promptEncoderPath = Path.Combine(modelFolder, "prompt_encoder_hiera_t.onnx");
-                string maskDecoderPath = Path.Combine(modelFolder, "mask_decoder_hiera_t.onnx");
-                string memoryAttentionPath = Path.Combine(modelFolder, "memory_attention_hiera_t.onnx");
-                string memoryEncoderPath = Path.Combine(modelFolder, "memory_encoder_hiera_t.onnx");
-                string mlpPath = Path.Combine(modelFolder, "mlp_hiera_t.onnx");
+
+                // Check which model version to use
+                bool usingSam2 = settings.UseSam2Models;
+
+                string imageEncoderPath, promptEncoderPath, maskDecoderPath;
+                string memoryEncoderPath, memoryAttentionPath, mlpPath;
+
+                if (usingSam2)
+                {
+                    // SAM 2.1 paths
+                    imageEncoderPath = Path.Combine(modelFolder, "sam2.1_large.encoder.onnx");
+                    promptEncoderPath = ""; // Kept for compatibility
+                    maskDecoderPath = Path.Combine(modelFolder, "sam2.1_large.decoder.onnx");
+                    memoryEncoderPath = ""; // Not used in SAM 2.1
+                    memoryAttentionPath = ""; // Not used in SAM 2.1
+                    mlpPath = ""; // Not used in SAM 2.1
+
+                    Logger.Log($"[ProcessSegmentationPreview] Using SAM 2.1 models from {modelFolder}");
+                }
+                else
+                {
+                    // Original SAM paths
+                    imageEncoderPath = Path.Combine(modelFolder, "image_encoder_hiera_t.onnx");
+                    promptEncoderPath = Path.Combine(modelFolder, "prompt_encoder_hiera_t.onnx");
+                    maskDecoderPath = Path.Combine(modelFolder, "mask_decoder_hiera_t.onnx");
+                    memoryEncoderPath = Path.Combine(modelFolder, "memory_encoder_hiera_t.onnx");
+                    memoryAttentionPath = Path.Combine(modelFolder, "memory_attention_hiera_t.onnx");
+                    mlpPath = Path.Combine(modelFolder, "mlp_hiera_t.onnx");
+                }
 
                 CTMemorySegmenter segmenter;
                 if (RealTimeProcessing)
@@ -2516,7 +2539,7 @@ namespace CTSegmenter
                             mlpPath,
                             imageSize,
                             false,
-                            settings.EnableMlp);
+                            settings.EnableMlp, settings.UseCpuExecutionProvider);
 
                         // Get threshold from SAMForm if available
                         if (SamFormInstance != null && !SamFormInstance.IsDisposed)
@@ -2528,6 +2551,7 @@ namespace CTSegmenter
                 }
                 else
                 {
+                    // Use a new segmenter instance each time
                     segmenter = new CTMemorySegmenter(
                         imageEncoderPath,
                         promptEncoderPath,
@@ -2539,7 +2563,6 @@ namespace CTSegmenter
                         false,
                         settings.EnableMlp);
 
-                    // Get threshold from SAMForm if available
                     if (SamFormInstance != null && !SamFormInstance.IsDisposed)
                     {
                         segmenter.MaskThreshold = SamFormInstance.GetThresholdValue();

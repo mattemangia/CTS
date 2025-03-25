@@ -1,4 +1,5 @@
-﻿using System;
+﻿// CTFusion.cs
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -8,19 +9,19 @@ namespace CTSegmenter
 {
     /// <summary>
     /// Provides various fusion strategies for segmentation volumes:
-    /// - Majority voting,
-    /// - Weighted averaging,
-    /// - Probability map generation,
-    /// - And a simple CRF-based (mean-field style) smoothing.
+    ///   - Majority Voting,
+    ///   - Weighted Averaging,
+    ///   - Probability Map,
+    ///   - Basic CRF smoothing.
     /// 
-    /// Assumes that input segmentation maps are represented as Bitmaps (24bpp RGB where R=G=B).
-    /// For CRF, the input probability map should be a grayscale Bitmap with pixel values in 0–255.
+    /// Typically, volumes are [width, height, depth], with each pixel a label or probability.
     /// </summary>
     public static class CTFusion
     {
         /// <summary>
         /// Fuse segmentation maps using majority voting.
-        /// For each pixel, the label is the one that occurs most frequently among the inputs.
+        /// For each pixel, the label is the one that occurs most frequently.
+        /// All inputs must be single-channel bitmaps with the same size.
         /// </summary>
         public static Bitmap MajorityVotingFusion(List<Bitmap> segmentationMaps)
         {
@@ -31,42 +32,30 @@ namespace CTSegmenter
             int height = segmentationMaps[0].Height;
             Bitmap fused = new Bitmap(width, height, PixelFormat.Format24bppRgb);
 
-            // Use LockBits for speed
-            BitmapData fusedData = fused.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, fused.PixelFormat);
-            int stride = fusedData.Stride;
-            unsafe
+            // Use naive approach: for each pixel, pick the label that appears the most
+            for (int y = 0; y < height; y++)
             {
-                byte* fusedPtr = (byte*)fusedData.Scan0;
-                for (int y = 0; y < height; y++)
+                for (int x = 0; x < width; x++)
                 {
-                    for (int x = 0; x < width; x++)
+                    var freq = new Dictionary<byte, int>();
+                    foreach (var bmp in segmentationMaps)
                     {
-                        // Count frequencies for this pixel
-                        Dictionary<byte, int> counts = new Dictionary<byte, int>();
-                        foreach (Bitmap bmp in segmentationMaps)
-                        {
-                            Color c = bmp.GetPixel(x, y); // for simplicity; for speed, use LockBits on each input too
-                            byte label = c.R;
-                            if (!counts.ContainsKey(label))
-                                counts[label] = 0;
-                            counts[label]++;
-                        }
-                        byte finalLabel = counts.OrderByDescending(kvp => kvp.Value).First().Key;
-                        int offset = y * stride + x * 3;
-                        fusedPtr[offset] = finalLabel;
-                        fusedPtr[offset + 1] = finalLabel;
-                        fusedPtr[offset + 2] = finalLabel;
+                        Color c = bmp.GetPixel(x, y);
+                        // We assume R=G=B for label
+                        byte label = c.R;
+                        if (!freq.ContainsKey(label)) freq[label] = 0;
+                        freq[label]++;
                     }
+                    byte finalLabel = freq.OrderByDescending(k => k.Value).First().Key;
+                    fused.SetPixel(x, y, Color.FromArgb(finalLabel, finalLabel, finalLabel));
                 }
             }
-            fused.UnlockBits(fusedData);
             return fused;
         }
 
         /// <summary>
-        /// Fuse probability maps using weighted averaging.
-        /// Each input is assumed to be a grayscale Bitmap (values 0–255 represent probabilities).
-        /// If weights are not provided, equal weighting is assumed.
+        /// Fuse probability maps using Weighted Averaging. Each input is grayscale in [0..255].
+        /// If weights are null, uses equal weighting.
         /// </summary>
         public static Bitmap WeightedAveragingFusion(List<Bitmap> probabilityMaps, List<double> weights = null)
         {
@@ -76,6 +65,7 @@ namespace CTSegmenter
             int width = probabilityMaps[0].Width;
             int height = probabilityMaps[0].Height;
             Bitmap fused = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+
             int n = probabilityMaps.Count;
             if (weights == null || weights.Count != n)
             {
@@ -83,33 +73,22 @@ namespace CTSegmenter
             }
             double totalWeight = weights.Sum();
 
-            // Use LockBits for output, but for simplicity here we use GetPixel on inputs.
-            BitmapData fusedData = fused.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, fused.PixelFormat);
-            int stride = fusedData.Stride;
-            unsafe
+            for (int y = 0; y < height; y++)
             {
-                byte* fusedPtr = (byte*)fusedData.Scan0;
-                for (int y = 0; y < height; y++)
+                for (int x = 0; x < width; x++)
                 {
-                    for (int x = 0; x < width; x++)
+                    double sum = 0;
+                    for (int i = 0; i < n; i++)
                     {
-                        double sum = 0;
-                        for (int i = 0; i < n; i++)
-                        {
-                            Color c = probabilityMaps[i].GetPixel(x, y);
-                            double prob = c.R / 255.0;
-                            sum += prob * weights[i];
-                        }
-                        double avgProb = sum / totalWeight;
-                        byte fusedValue = (byte)(avgProb * 255);
-                        int offset = y * stride + x * 3;
-                        fusedPtr[offset] = fusedValue;
-                        fusedPtr[offset + 1] = fusedValue;
-                        fusedPtr[offset + 2] = fusedValue;
+                        Color c = probabilityMaps[i].GetPixel(x, y);
+                        double prob = c.R / 255.0;
+                        sum += prob * weights[i];
                     }
+                    double avgProb = sum / totalWeight;
+                    byte fusedValue = (byte)(avgProb * 255.0);
+                    fused.SetPixel(x, y, Color.FromArgb(fusedValue, fusedValue, fusedValue));
                 }
             }
-            fused.UnlockBits(fusedData);
             return fused;
         }
 
@@ -124,151 +103,72 @@ namespace CTSegmenter
             int width = segmentationMaps[0].Width;
             int height = segmentationMaps[0].Height;
             Bitmap probMap = new Bitmap(width, height, PixelFormat.Format24bppRgb);
-            int n = segmentationMaps.Count;
 
-            BitmapData probData = probMap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, probMap.PixelFormat);
-            int stride = probData.Stride;
-            unsafe
+            int n = segmentationMaps.Count;
+            for (int y = 0; y < height; y++)
             {
-                byte* ptr = (byte*)probData.Scan0;
-                for (int y = 0; y < height; y++)
+                for (int x = 0; x < width; x++)
                 {
-                    for (int x = 0; x < width; x++)
+                    int count = 0;
+                    foreach (var bmp in segmentationMaps)
                     {
-                        int count = 0;
-                        foreach (Bitmap bmp in segmentationMaps)
-                        {
-                            Color c = bmp.GetPixel(x, y);
-                            if (c.R == targetLabel)
-                                count++;
-                        }
-                        double probability = (double)count / n;
-                        byte intensity = (byte)(probability * 255);
-                        int offset = y * stride + x * 3;
-                        ptr[offset] = intensity;
-                        ptr[offset + 1] = intensity;
-                        ptr[offset + 2] = intensity;
+                        byte label = bmp.GetPixel(x, y).R;
+                        if (label == targetLabel) count++;
                     }
+                    double freq = (double)count / n;
+                    byte val = (byte)(freq * 255);
+                    probMap.SetPixel(x, y, Color.FromArgb(val, val, val));
                 }
             }
-            probMap.UnlockBits(probData);
             return probMap;
         }
 
         /// <summary>
-        /// Applies a simple CRF smoothing to a probability map.
-        /// This method uses a mean-field style update over a 4-neighborhood.
-        /// It uses LockBits for fast pixel access.
-        /// Inputs:
-        ///   - probabilityMap: a grayscale Bitmap (24bpp, R=G=B) with values in 0–255.
-        ///   - originalImage: the corresponding original grayscale image (for appearance cues).
-        /// Hyperparameters:
-        ///   - iterations: number of iterations.
-        ///   - lambda: weight for the pairwise term.
-        ///   - sigma: controls sensitivity to intensity differences.
+        /// Simple CRF-like smoothing on a single grayscale mask, not a full multi-label CRF.
+        /// Typically you would do a more advanced approach, but here's a placeholder.
         /// </summary>
-        public static Bitmap CRFFusion(Bitmap probabilityMap, Bitmap originalImage, int iterations = 5, double lambda = 1.0, double sigma = 15.0)
+        public static Bitmap CRFSmoothing(Bitmap inputMask, int iterations = 1)
         {
-            if (probabilityMap == null || originalImage == null)
-                throw new ArgumentNullException("Both probabilityMap and originalImage must be provided.");
-
-            int width = probabilityMap.Width;
-            int height = probabilityMap.Height;
-            // We assume both images have the same dimensions.
-            // Convert probability map to float[,] in [0,1].
-            float[,] prob = new float[width, height];
-            float[,] unary = new float[width, height];
-            // Also extract the original intensity as float[,] (0 to 1)
-            float[,] intensity = new float[width, height];
-
-            // Use LockBits on both Bitmaps.
-            BitmapData probData = probabilityMap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, probabilityMap.PixelFormat);
-            BitmapData origData = originalImage.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, originalImage.PixelFormat);
-            int strideProb = probData.Stride;
-            int strideOrig = origData.Stride;
-            unsafe
+            if (inputMask == null) return null;
+            Bitmap result = new Bitmap(inputMask);
+            for (int i = 0; i < iterations; i++)
             {
-                byte* probPtr = (byte*)probData.Scan0;
-                byte* origPtr = (byte*)origData.Scan0;
-                for (int y = 0; y < height; y++)
-                {
-                    for (int x = 0; x < width; x++)
-                    {
-                        int offsetProb = y * strideProb + x * 3;
-                        int offsetOrig = y * strideOrig + x * 3;
-                        // Since images are grayscale, read one channel.
-                        byte pVal = probPtr[offsetProb];
-                        prob[x, y] = pVal / 255f;
-                        unary[x, y] = prob[x, y]; // use original probability as unary potential
-                        byte iVal = origPtr[offsetOrig];
-                        intensity[x, y] = iVal / 255f;
-                    }
-                }
+                result = SmoothOnce(result);
             }
-            probabilityMap.UnlockBits(probData);
-            originalImage.UnlockBits(origData);
+            return result;
+        }
 
-            // CRF smoothing: iterative update
-            float[,] Q = (float[,])prob.Clone(); // initial Q = probability map
-            float[,] newQ = new float[width, height];
+        private static Bitmap SmoothOnce(Bitmap input)
+        {
+            int width = input.Width;
+            int height = input.Height;
+            Bitmap output = new Bitmap(width, height, PixelFormat.Format24bppRgb);
 
-            // Precompute denominator constant for bilateral weight:
-            double twoSigmaSq = 2 * sigma * sigma;
-
-            // Use 4-neighborhood: offsets (0,-1), (-1,0), (1,0), (0,1)
-            int[] dx = { 0, -1, 1, 0 };
-            int[] dy = { -1, 0, 0, 1 };
-
-            for (int iter = 0; iter < iterations; iter++)
+            for (int y = 0; y < height; y++)
             {
-                for (int y = 0; y < height; y++)
+                for (int x = 0; x < width; x++)
                 {
-                    for (int x = 0; x < width; x++)
+                    // A trivial smoothing: average 3x3 neighborhood
+                    int sum = 0;
+                    int count = 0;
+                    for (int yy = -1; yy <= 1; yy++)
                     {
-                        double weightedSum = 0;
-                        double weightTotal = 0;
-                        // For each neighbor:
-                        for (int k = 0; k < 4; k++)
+                        for (int xx = -1; xx <= 1; xx++)
                         {
-                            int nx = x + dx[k];
-                            int ny = y + dy[k];
+                            int ny = y + yy;
+                            int nx = x + xx;
                             if (nx >= 0 && nx < width && ny >= 0 && ny < height)
                             {
-                                double diff = intensity[x, y] - intensity[nx, ny];
-                                double w = Math.Exp(-(diff * diff) / twoSigmaSq);
-                                weightedSum += w * Q[nx, ny];
-                                weightTotal += w;
+                                sum += input.GetPixel(nx, ny).R;
+                                count++;
                             }
                         }
-                        // Update rule: combine unary potential and pairwise average
-                        newQ[x, y] = (float)((unary[x, y] + lambda * weightedSum) / (1 + lambda * weightTotal));
                     }
-                }
-                // Swap newQ into Q for next iteration.
-                Array.Copy(newQ, Q, width * height);
-            }
-
-            // Now convert final Q back to Bitmap.
-            Bitmap refined = new Bitmap(width, height, PixelFormat.Format24bppRgb);
-            BitmapData refinedData = refined.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, refined.PixelFormat);
-            int strideRef = refinedData.Stride;
-            unsafe
-            {
-                byte* refPtr = (byte*)refinedData.Scan0;
-                for (int y = 0; y < height; y++)
-                {
-                    for (int x = 0; x < width; x++)
-                    {
-                        byte val = (byte)(Math.Max(0, Math.Min(1, Q[x, y])) * 255);
-                        int offset = y * strideRef + x * 3;
-                        refPtr[offset] = val;
-                        refPtr[offset + 1] = val;
-                        refPtr[offset + 2] = val;
-                    }
+                    byte val = (byte)(sum / count);
+                    output.SetPixel(x, y, Color.FromArgb(val, val, val));
                 }
             }
-            refined.UnlockBits(refinedData);
-            return refined;
+            return output;
         }
     }
 }

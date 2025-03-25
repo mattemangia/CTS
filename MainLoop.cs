@@ -2544,7 +2544,7 @@ namespace CTSegmenter
                         // Get threshold from SAMForm if available
                         if (SamFormInstance != null && !SamFormInstance.IsDisposed)
                         {
-                            _liveSegmenter.MaskThreshold = SamFormInstance.GetThresholdValue();
+                            _liveSegmenter.MaskBinarizationThreshold = 0.5f;
                         }
                     }
                     segmenter = _liveSegmenter;
@@ -2565,7 +2565,7 @@ namespace CTSegmenter
 
                     if (SamFormInstance != null && !SamFormInstance.IsDisposed)
                     {
-                        segmenter.MaskThreshold = SamFormInstance.GetThresholdValue();
+                        _liveSegmenter.MaskBinarizationThreshold = 0.5f;
                     }
                 }
 
@@ -2589,7 +2589,7 @@ namespace CTSegmenter
                             string materialName = group.Key;
                             List<AnnotationPoint> mergedPrompts = BuildMixedPrompts(annPoints, materialName);
 
-                            using (Bitmap resultMask = segmenter.ProcessXYSlice(currentZ, baseXY, mergedPrompts, null, null))
+                            using (Bitmap resultMask = segmenter.ProcessXYSlice(currentZ, baseXY, mergedPrompts, materialName))
                             {
                                 Material mat = Materials.FirstOrDefault(m => m.Name.Equals(materialName, StringComparison.OrdinalIgnoreCase));
                                 byte matID = (mat != null) ? mat.ID : (byte)1;

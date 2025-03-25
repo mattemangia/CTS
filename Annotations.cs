@@ -1,30 +1,35 @@
-﻿using System;
+﻿// Annotations.cs
+using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace CTSegmenter
 {
+    /// <summary>
+    /// Manages user annotations (points/boxes) for the SAM-based segmentation.
+    /// </summary>
     internal class Annotations
     {
     }
 
-    // If AnnotationPoint is already a separate class, add the X2/Y2 properties
+    // If AnnotationPoint is already a separate class, we add the X2/Y2 properties for boxes
     public class AnnotationPoint
     {
         public int ID { get; set; }
         public float X { get; set; }
         public float Y { get; set; }
         public int Z { get; set; }
-        public string Type { get; set; } = "Point"; // "Point" or "Box" 
-        public string Label { get; set; } // Material Name
+        public string Type { get; set; } = "Point"; // "Point" or "Box"
+        public string Label { get; set; } // The associated Material Name
 
-        // Add these properties for box support
+        // Box properties (only if Type=="Box")
         public float X2 { get; set; } = 0;
         public float Y2 { get; set; } = 0;
     }
 
+    /// <summary>
+    /// Manages a list of AnnotationPoints for all slices and directions.
+    /// </summary>
     public class AnnotationManager
     {
         public List<AnnotationPoint> Points { get; set; } = new List<AnnotationPoint>();
@@ -45,7 +50,7 @@ namespace CTSegmenter
             return point;
         }
 
-        // Add box creation method 
+        // Add box creation method
         public AnnotationPoint AddBox(float x1, float y1, float x2, float y2, int z, string label)
         {
             int nextID = Points.Count + 1;
@@ -77,6 +82,9 @@ namespace CTSegmenter
                 p.ID = counter++;
         }
 
+        /// <summary>
+        /// Returns all annotation points for a given slice Z.
+        /// </summary>
         public IEnumerable<AnnotationPoint> GetPointsForSlice(int z)
         {
             return Points.FindAll(p => p.Z == z);

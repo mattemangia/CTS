@@ -105,7 +105,8 @@ namespace CTSegmenter
                 settings.UseCpuExecutionProvider))
             {
                 segmenter.UseSelectiveHoleFilling = settings.UseSelectiveHoleFilling;
-                segmenter.MaskThreshold = threshold;
+                segmenter.MaskBinarizationThreshold = threshold / 255f;
+
 
                 // Enable embedding storage for SAM 2.1 propagation
                 segmenter.StorePreviousEmbeddings = true;
@@ -330,7 +331,7 @@ namespace CTSegmenter
                     List<AnnotationPoint> samPoints = BuildMixedPrompts(points, material.Name);
 
                     // Process the slice using SAM 2.1
-                    using (Bitmap mask = segmenter.ProcessXYSlice(z, baseImage, samPoints, null, null))
+                    using (Bitmap mask = segmenter.ProcessXYSlice(z, baseImage, samPoints, material.Name))
                     {
                         // Apply the mask to the volume
                         int pixelsSegmented = ApplyMaskToVolume(mask, width, height, z, material.ID, volumeLabels, threshold);
@@ -442,7 +443,7 @@ namespace CTSegmenter
                     List<AnnotationPoint> samPoints = BuildMixedPrompts(points, material.Name);
 
                     // Process the slice using SAM 2.1
-                    using (Bitmap mask = segmenter.ProcessXYSlice(z, baseImage, samPoints, null, null))
+                    using (Bitmap mask = segmenter.ProcessXYSlice(z, baseImage, samPoints, material.Name))
                     {
                         // Apply the mask to the volume
                         int pixelsSegmented = ApplyMaskToVolume(mask, width, height, z, material.ID, volumeLabels, threshold);
@@ -628,7 +629,7 @@ namespace CTSegmenter
                     List<AnnotationPoint> samPoints = BuildMixedPrompts(points, material.Name);
 
                     // Process the slice using SAM 2.1
-                    using (Bitmap mask = segmenter.ProcessXZSlice(y, baseImage, samPoints, null, null))
+                    using (Bitmap mask = segmenter.ProcessXZSlice(y, baseImage, samPoints, material.Name))
                     {
                         // Apply the mask to the volume
                         int pixelsSegmented = ApplyMaskToXZVolume(mask, width, depth, y, material.ID, volumeLabels, threshold);
@@ -740,7 +741,7 @@ namespace CTSegmenter
                     List<AnnotationPoint> samPoints = BuildMixedPrompts(points, material.Name);
 
                     // Process the slice using SAM 2.1
-                    using (Bitmap mask = segmenter.ProcessXZSlice(y, baseImage, samPoints, null, null))
+                    using (Bitmap mask = segmenter.ProcessXZSlice(y, baseImage, samPoints, material.Name))
                     {
                         // Apply the mask to the volume
                         int pixelsSegmented = ApplyMaskToXZVolume(mask, width, depth, y, material.ID, volumeLabels, threshold);
@@ -926,7 +927,7 @@ namespace CTSegmenter
                     List<AnnotationPoint> samPoints = BuildMixedPrompts(points, material.Name);
 
                     // Process the slice using SAM 2.1
-                    using (Bitmap mask = segmenter.ProcessYZSlice(x, baseImage, samPoints, null, null))
+                    using (Bitmap mask = segmenter.ProcessYZSlice(x, baseImage, samPoints, material.Name))
                     {
                         // Apply the mask to the volume
                         int pixelsSegmented = ApplyMaskToYZVolume(mask, height, depth, x, material.ID, volumeLabels, threshold);
@@ -1038,7 +1039,7 @@ namespace CTSegmenter
                     List<AnnotationPoint> samPoints = BuildMixedPrompts(points, material.Name);
 
                     // Process the slice using SAM 2.1
-                    using (Bitmap mask = segmenter.ProcessYZSlice(x, baseImage, samPoints, null, null))
+                    using (Bitmap mask = segmenter.ProcessYZSlice(x, baseImage, samPoints, material.Name))
                     {
                         // Apply the mask to the volume
                         int pixelsSegmented = ApplyMaskToYZVolume(mask, height, depth, x, material.ID, volumeLabels, threshold);
@@ -1228,7 +1229,7 @@ namespace CTSegmenter
                     List<AnnotationPoint> samPoints = BuildMixedPrompts(points, material.Name);
 
                     // Process the slice using SAM
-                    using (Bitmap mask = segmenter.ProcessXYSlice(z, baseImage, samPoints, null, null))
+                    using (Bitmap mask = segmenter.ProcessXYSlice(z, baseImage, samPoints, material.Name))
                     {
                         // Apply the mask to the volume
                         int pixelsSegmented = ApplyMaskToVolume(mask, width, height, z, material.ID, volumeLabels, threshold);
@@ -1341,7 +1342,7 @@ namespace CTSegmenter
                     List<AnnotationPoint> samPoints = BuildMixedPrompts(points, material.Name);
 
                     // Process the slice using SAM
-                    using (Bitmap mask = segmenter.ProcessXYSlice(z, baseImage, samPoints, null, null))
+                    using (Bitmap mask = segmenter.ProcessXYSlice(z, baseImage, samPoints, material.Name))
                     {
                         // Apply the mask to the volume
                         int pixelsSegmented = ApplyMaskToVolume(mask, width, height, z, material.ID, volumeLabels, threshold);
@@ -1528,7 +1529,7 @@ namespace CTSegmenter
                     List<AnnotationPoint> samPoints = BuildMixedPrompts(points, material.Name);
 
                     // Process the slice using SAM
-                    using (Bitmap mask = segmenter.ProcessXZSlice(y, baseImage, samPoints, null, null))
+                    using(Bitmap mask = segmenter.ProcessXZSlice(y, baseImage, samPoints, material.Name))
                     {
                         
                         // Apply the mask to the volume
@@ -1641,7 +1642,7 @@ namespace CTSegmenter
                     List<AnnotationPoint> samPoints = BuildMixedPrompts(points, material.Name);
 
                     // Process the slice using SAM
-                    using (Bitmap mask = segmenter.ProcessXZSlice(y, baseImage, samPoints, null, null))
+                    using (Bitmap mask = segmenter.ProcessXZSlice(y, baseImage, samPoints, material.Name))
                     {
                         // Apply the mask to the volume
                         int pixelsSegmented = ApplyMaskToXZVolume(mask, width, depth, y, material.ID, volumeLabels, threshold);
@@ -1827,7 +1828,7 @@ namespace CTSegmenter
                     List<AnnotationPoint> samPoints = BuildMixedPrompts(points, material.Name);
 
                     // Process the slice using SAM
-                    using (Bitmap mask = segmenter.ProcessYZSlice(x, baseImage, samPoints, null, null))
+                    using (Bitmap mask = segmenter.ProcessYZSlice(x, baseImage, samPoints, material.Name))
                     {
                         // Apply the mask to the volume
                         int pixelsSegmented = ApplyMaskToYZVolume(mask, height, depth, x, material.ID, volumeLabels, threshold);
@@ -1939,7 +1940,7 @@ namespace CTSegmenter
                     List<AnnotationPoint> samPoints = BuildMixedPrompts(points, material.Name);
 
                     // Process the slice using SAM
-                    using (Bitmap mask = segmenter.ProcessYZSlice(x, baseImage, samPoints, null, null))
+                    using (Bitmap mask = segmenter.ProcessYZSlice(x, baseImage, samPoints, material.Name))
                     {
                         // Apply the mask to the volume
                         int pixelsSegmented = ApplyMaskToYZVolume(mask, height, depth, x, material.ID, volumeLabels, threshold);

@@ -1,4 +1,5 @@
-﻿using System;
+﻿// SAMSettings.cs
+using System;
 using System.IO;
 using System.Drawing;
 using System.Windows.Forms;
@@ -7,6 +8,7 @@ namespace CTSegmenter
 {
     /// <summary>
     /// Holds settings for segmentation and fusion.
+    /// We remove the threshold trackbar concept, using SAM2.1 typical default 0.5 for mask binarization.
     /// </summary>
     public class SAMSettingsParams
     {
@@ -16,10 +18,9 @@ namespace CTSegmenter
         public bool EnableMlp { get; set; }
         public bool EnableMultiMask { get; set; } = false;
         public bool UseSam2Models { get; set; } = true;
-        // New property for CPU execution - default to true for stability
-        public bool UseCpuExecutionProvider { get; set; } = true;
+        public bool UseCpuExecutionProvider { get; set; } = true; // default to CPU for stability
+        public bool UseSelectiveHoleFilling { get; set; } = false;
 
-        // Existing path properties remain unchanged...
         public string ImageEncoderPath => Path.Combine(ModelFolderPath,
             UseSam2Models ? "sam2.1_large.encoder.onnx" : "image_encoder_hiera_t.onnx");
         public string PromptEncoderPath => Path.Combine(ModelFolderPath, "prompt_encoder_hiera_t.onnx");
@@ -28,13 +29,7 @@ namespace CTSegmenter
         public string MemoryAttentionPath => Path.Combine(ModelFolderPath, "memory_attention_hiera_t.onnx");
         public string MemoryEncoderPath => Path.Combine(ModelFolderPath, "memory_encoder_hiera_t.onnx");
         public string MlpPath => Path.Combine(ModelFolderPath, "mlp_hiera_t.onnx");
-
-        public string EncoderPath => Path.Combine(ModelFolderPath, "sam2.1_large.encoder.onnx");
-        public string DecoderPath => Path.Combine(ModelFolderPath, "sam2.1_large.decoder.onnx");
-
-        public bool UseSelectiveHoleFilling { get; set; } = true;
     }
-
 
     public partial class SAMSettings : Form
     {
@@ -47,19 +42,15 @@ namespace CTSegmenter
         private Label labelFusion;
         private Label labelImageSize;
         private Label labelModelFolder;
-        private CheckBox checkBoxRealTimeProcessing;
-        private CheckBox checkBoxEnableMlp; // for MLP post–processing
+        private CheckBox checkBoxEnableMlp;
         private CheckBox checkBoxUseSam2;
-        private CheckBox checkBoxUseCpu; // New field for CPU execution
-
-
-        // Declare radio buttons as class-level fields
-        private RadioButton rbtnSelective;
-        private RadioButton rbtnStandard;
+        private CheckBox checkBoxUseCpu;
+        private CheckBox checkBoxMultiMask;
+        private CheckBox checkBoxSelective;
 
         private SAMForm _parentForm;
+
         public SAMSettingsParams SettingsResult { get; private set; }
-        private CheckBox checkBoxMultiCandidate;
 
         public SAMSettings(SAMForm parentForm)
         {
@@ -68,14 +59,15 @@ namespace CTSegmenter
             comboBoxFusionAlgorithm.SelectedIndex = 0;
             numericUpDownImageSize.Value = 1024;
             textBoxModelFolder.Text = Path.Combine(Application.StartupPath, "ONNX");
-            checkBoxRealTimeProcessing.Checked = false;
-            checkBoxEnableMlp.Checked = false; // default MLP off
-            checkBoxUseCpu.Checked = true; // Default to using CPU for stability
+            checkBoxEnableMlp.Checked = false;
+            checkBoxUseCpu.Checked = true;
+            checkBoxUseSam2.Checked = true;
+            checkBoxMultiMask.Checked = false;
+            checkBoxSelective.Checked = false;
 
             if (_parentForm != null && _parentForm.Icon != null)
                 this.Icon = _parentForm.Icon;
         }
-
 
         private void InitializeComponent()
         {
@@ -83,81 +75,36 @@ namespace CTSegmenter
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.StartPosition = FormStartPosition.CenterParent;
-            this.ClientSize = new Size(470, 410); // Increased height to accommodate all controls
-            this.TopMost = true;
+            this.ClientSize = new Size(450, 350);
 
             labelFusion = new Label() { Text = "Fusion Algorithm:", Left = 20, Top = 20, AutoSize = true };
-            labelImageSize = new Label() { Text = "Image Input Size:", Left = 20, Top = 60, AutoSize = true };
-            labelModelFolder = new Label() { Text = "Model Folder Path:", Left = 20, Top = 100, AutoSize = true };
-
             comboBoxFusionAlgorithm = new ComboBox() { Left = 150, Top = 15, Width = 220, DropDownStyle = ComboBoxStyle.DropDownList };
             comboBoxFusionAlgorithm.Items.Add("Majority Voting Fusion");
             comboBoxFusionAlgorithm.Items.Add("Weighted Averaging Fusion");
             comboBoxFusionAlgorithm.Items.Add("Probability Map Fusion");
             comboBoxFusionAlgorithm.Items.Add("CRF Fusion");
+            comboBoxFusionAlgorithm.SelectedIndex = 0;
 
+            labelImageSize = new Label() { Text = "Image Input Size:", Left = 20, Top = 60, AutoSize = true };
             numericUpDownImageSize = new NumericUpDown() { Left = 150, Top = 55, Width = 100 };
             numericUpDownImageSize.Minimum = 256;
             numericUpDownImageSize.Maximum = 4096;
-            numericUpDownImageSize.Increment = 1;
+            numericUpDownImageSize.Value = 1024;
 
+            labelModelFolder = new Label() { Text = "Model Folder Path:", Left = 20, Top = 100, AutoSize = true };
             textBoxModelFolder = new TextBox() { Left = 150, Top = 95, Width = 200 };
             buttonBrowse = new Button() { Text = "Browse...", Left = 360, Top = 93, Width = 70 };
             buttonBrowse.Click += ButtonBrowse_Click;
 
-            checkBoxRealTimeProcessing = new CheckBox() { Text = "Real Time Processing", Left = 20, Top = 140, AutoSize = true };
-            checkBoxEnableMlp = new CheckBox() { Text = "Enable MLP Post-Processing", Left = 20, Top = 170, AutoSize = true };
+            checkBoxEnableMlp = new CheckBox() { Text = "Enable MLP", Left = 20, Top = 140, AutoSize = true };
+            checkBoxUseCpu = new CheckBox() { Text = "Use CPU Execution Provider", Left = 20, Top = 170, AutoSize = true };
+            checkBoxUseSam2 = new CheckBox() { Text = "Use SAM2.1 Models", Left = 20, Top = 200, AutoSize = true };
+            checkBoxMultiMask = new CheckBox() { Text = "Enable Multi-Mask", Left = 20, Top = 230, AutoSize = true };
+            checkBoxSelective = new CheckBox() { Text = "Selective Hole Filling", Left = 20, Top = 260, AutoSize = true };
 
-            // Add multi-candidate checkbox with proper spacing
-            checkBoxMultiCandidate = new CheckBox
-            {
-                Text = "Multi-Candidate Masks",
-                Left = 20,
-                Top = 200,
-                AutoSize = true
-            };
-
-            // Add CPU execution checkbox
-            checkBoxUseCpu = new CheckBox
-            {
-                Text = "Use CPU Execution Provider (more stable, slower)",
-                Left = 20,
-                Top = 230,
-                AutoSize = true,
-                Checked = true // Default to true for stability
-            };
-
-            // Properly position radio buttons after the checkboxes
-            rbtnSelective = new RadioButton()
-            {
-                Text = "Selective Hole Filling",
-                Left = 20,
-                Top = 260, // Moved down to avoid overlap
-                AutoSize = true,
-                Checked = true // default option
-            };
-
-            rbtnStandard = new RadioButton()
-            {
-                Text = "Standard Hole Filling",
-                Left = 20,
-                Top = 290, // Moved down to avoid overlap
-                AutoSize = true
-            };
-
-            checkBoxUseSam2 = new CheckBox()
-            {
-                Text = "Use SAM 2.1 Models",
-                Left = 20,
-                Top = 320, // Adjust position as needed
-                AutoSize = true,
-                Checked = true // Default to SAM 2.1
-            };
-
-            buttonOK = new Button() { Text = "OK", Left = 150, Top = 360, Width = 80 }; // Moved down
+            buttonOK = new Button() { Text = "OK", Left = 220, Width = 80, Top = 290, DialogResult = DialogResult.OK };
             buttonOK.Click += ButtonOK_Click;
-            buttonCancel = new Button() { Text = "Cancel", Left = 250, Top = 360, Width = 80 }; // Moved down
-            buttonCancel.Click += (s, e) => { this.DialogResult = DialogResult.Cancel; this.Close(); };
+            buttonCancel = new Button() { Text = "Cancel", Left = 320, Width = 80, Top = 290, DialogResult = DialogResult.Cancel };
 
             this.Controls.Add(labelFusion);
             this.Controls.Add(comboBoxFusionAlgorithm);
@@ -166,49 +113,41 @@ namespace CTSegmenter
             this.Controls.Add(labelModelFolder);
             this.Controls.Add(textBoxModelFolder);
             this.Controls.Add(buttonBrowse);
-            this.Controls.Add(checkBoxRealTimeProcessing);
             this.Controls.Add(checkBoxEnableMlp);
-            this.Controls.Add(checkBoxMultiCandidate);
-            this.Controls.Add(checkBoxUseCpu); // Add the new checkbox
-            this.Controls.Add(rbtnSelective);
-            this.Controls.Add(rbtnStandard);
+            this.Controls.Add(checkBoxUseCpu);
             this.Controls.Add(checkBoxUseSam2);
+            this.Controls.Add(checkBoxMultiMask);
+            this.Controls.Add(checkBoxSelective);
             this.Controls.Add(buttonOK);
             this.Controls.Add(buttonCancel);
         }
-
-
 
         private void ButtonBrowse_Click(object sender, EventArgs e)
         {
             using (FolderBrowserDialog fbd = new FolderBrowserDialog())
             {
-                fbd.SelectedPath = textBoxModelFolder.Text;
                 if (fbd.ShowDialog() == DialogResult.OK)
+                {
                     textBoxModelFolder.Text = fbd.SelectedPath;
+                }
             }
         }
 
         private void ButtonOK_Click(object sender, EventArgs e)
         {
-            SAMSettingsParams settings = new SAMSettingsParams
+            SettingsResult = new SAMSettingsParams
             {
                 FusionAlgorithm = comboBoxFusionAlgorithm.SelectedItem.ToString(),
                 ImageInputSize = (int)numericUpDownImageSize.Value,
                 ModelFolderPath = textBoxModelFolder.Text,
                 EnableMlp = checkBoxEnableMlp.Checked,
-                UseSelectiveHoleFilling = rbtnSelective.Checked,
-                EnableMultiMask = checkBoxMultiCandidate.Checked,
+                UseCpuExecutionProvider = checkBoxUseCpu.Checked,
                 UseSam2Models = checkBoxUseSam2.Checked,
-                UseCpuExecutionProvider = checkBoxUseCpu.Checked // Save CPU execution setting
+                EnableMultiMask = checkBoxMultiMask.Checked,
+                UseSelectiveHoleFilling = checkBoxSelective.Checked
             };
-
-            _parentForm.SetRealTimeProcessing(checkBoxRealTimeProcessing.Checked);
-            _parentForm?.UpdateSettings(settings);
-            this.SettingsResult = settings;
             this.DialogResult = DialogResult.OK;
             this.Close();
         }
     }
-
 }

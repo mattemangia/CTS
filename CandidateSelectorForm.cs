@@ -1,4 +1,5 @@
-﻿using System;
+﻿// CandidateSelectorForm.cs
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -8,6 +9,10 @@ using System.Windows.Forms;
 
 namespace CTSegmenter
 {
+    /// <summary>
+    /// Form that displays up to 4 candidate masks for each (direction, material) pair
+    /// and lets the user select which candidate (if any) to adopt for that material.
+    /// </summary>
     public class CandidateSelectorForm : Form
     {
         private TabControl tabControl;
@@ -15,32 +20,33 @@ namespace CTSegmenter
         private Button btnCancel;
         private Button btnPreview;
         private Button btnSaveComposite;
-        private SAMForm _parentForm; // Reference to parent form for previews
+        private SAMForm _parentForm; // Reference to parent form for preview
 
-        // Dictionary: key = direction ("XY", "XZ", "YZ")
-        // Value: Dictionary with key = material name, value = selected candidate index (int)
+        // For each direction: dictionary (materialName → selected candidate index).
         public Dictionary<string, Dictionary<string, int>> Selections { get; private set; }
 
-        // The full candidate images provided by SAM:
-        // Dictionary: key = direction; value = dictionary (material name → List of candidate Bitmaps)
+        // For each direction: dictionary (materialName → list of candidate bitmaps).
         private Dictionary<string, Dictionary<string, List<Bitmap>>> _allCandidates;
 
-        // Store the mask bitmaps for later retrieval
+        // For each direction: dictionary (materialName → the final chosen mask).
         public Dictionary<string, Dictionary<string, Bitmap>> SelectedMasks { get; private set; }
 
-        // Array of distinct colors for materials
+        // Distinct material colors if needed for composite
         private static readonly Color[] MaterialColors = new Color[] {
             Color.Red, Color.Green, Color.Blue, Color.Yellow, Color.Magenta,
             Color.Cyan, Color.Orange, Color.Purple, Color.Lime, Color.Teal,
             Color.Pink, Color.Brown, Color.Navy, Color.Maroon, Color.Olive
         };
 
-        public CandidateSelectorForm(Dictionary<string, Dictionary<string, List<Bitmap>>> allCandidates, SAMForm parentForm = null)
+        public CandidateSelectorForm(
+            Dictionary<string, Dictionary<string, List<Bitmap>>> allCandidates,
+            SAMForm parentForm = null)
         {
             _allCandidates = allCandidates;
             _parentForm = parentForm;
             Selections = new Dictionary<string, Dictionary<string, int>>();
             SelectedMasks = new Dictionary<string, Dictionary<string, Bitmap>>();
+
             InitializeComponent();
             PopulateTabs();
         }
@@ -48,23 +54,23 @@ namespace CTSegmenter
         private void InitializeComponent()
         {
             this.Text = "Select Candidate Masks";
-            this.Size = new Size(1000, 700); // Larger size for better viewing
+            this.Size = new Size(1100, 800);
             this.StartPosition = FormStartPosition.CenterParent;
-            this.FormBorderStyle = FormBorderStyle.Sizable; // Allow user to resize
+            this.FormBorderStyle = FormBorderStyle.Sizable;
             this.MinimumSize = new Size(800, 600);
 
             tabControl = new TabControl();
-            tabControl.Dock = DockStyle.Fill; // Fill the form
+            tabControl.Dock = DockStyle.Fill;
             tabControl.Padding = new Point(10, 10);
             this.Controls.Add(tabControl);
 
-            // Create button panel for all buttons
+            // Create button panel
             Panel buttonPanel = new Panel();
             buttonPanel.Dock = DockStyle.Bottom;
             buttonPanel.Height = 50;
             buttonPanel.Padding = new Padding(10);
 
-            // Preview button
+            // Preview
             btnPreview = new Button();
             btnPreview.Text = "Preview in Main View";
             btnPreview.Width = 150;
@@ -72,7 +78,7 @@ namespace CTSegmenter
             btnPreview.Location = new Point(15, 15);
             btnPreview.Click += BtnPreview_Click;
 
-            // Save Composite button
+            // Save composite
             btnSaveComposite = new Button();
             btnSaveComposite.Text = "Save Composite Image";
             btnSaveComposite.Width = 150;
@@ -80,7 +86,7 @@ namespace CTSegmenter
             btnSaveComposite.Location = new Point(175, 15);
             btnSaveComposite.Click += BtnSaveComposite_Click;
 
-            // OK button
+            // OK
             btnOK = new Button();
             btnOK.Text = "OK";
             btnOK.DialogResult = DialogResult.OK;
@@ -89,7 +95,7 @@ namespace CTSegmenter
             btnOK.Location = new Point(buttonPanel.Width - 180, 15);
             btnOK.Click += BtnOK_Click;
 
-            // Cancel button
+            // Cancel
             btnCancel = new Button();
             btnCancel.Text = "Cancel";
             btnCancel.DialogResult = DialogResult.Cancel;
@@ -101,20 +107,19 @@ namespace CTSegmenter
             buttonPanel.Controls.Add(btnSaveComposite);
             buttonPanel.Controls.Add(btnOK);
             buttonPanel.Controls.Add(btnCancel);
+
             this.Controls.Add(buttonPanel);
         }
 
         private void PopulateTabs()
         {
-            // For each direction, create a tab page
+            // We have directions like "XY", "XZ", "YZ"
             foreach (string direction in new string[] { "XY", "XZ", "YZ" })
             {
-                // Create tab and selections dict
                 TabPage tab = new TabPage(direction);
                 Selections[direction] = new Dictionary<string, int>();
                 SelectedMasks[direction] = new Dictionary<string, Bitmap>();
 
-                // Skip if no candidates for this direction
                 if (!_allCandidates.ContainsKey(direction))
                 {
                     tabControl.TabPages.Add(tab);
@@ -122,88 +127,76 @@ namespace CTSegmenter
                 }
 
                 var materials = _allCandidates[direction].Keys.ToList();
+
+                // We'll stack materials vertically
+                // Each row: material label + candidate images
                 TableLayoutPanel mainPanel = new TableLayoutPanel();
                 mainPanel.Dock = DockStyle.Fill;
                 mainPanel.AutoScroll = true;
                 mainPanel.CellBorderStyle = TableLayoutPanelCellBorderStyle.Single;
 
-                mainPanel.ColumnCount = materials.Count;
-                float colWidth = 100.0f / materials.Count;
-                for (int i = 0; i < materials.Count; i++)
-                    mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, colWidth));
+                // We'll do 1 column, as we'll place each material row with FlowLayout or something
+                mainPanel.ColumnCount = 1;
+                mainPanel.RowCount = materials.Count;
 
                 for (int i = 0; i < materials.Count; i++)
                 {
+                    mainPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+                    Panel rowPanel = new Panel();
+                    rowPanel.Dock = DockStyle.Top;
+                    rowPanel.Height = 200;
+                    rowPanel.AutoScroll = true;
+
                     string materialName = materials[i];
-                    var candidates = _allCandidates[direction][materialName];
+                    Selections[direction][materialName] = -1; // default: no selection yet
 
-                    Panel materialPanel = new Panel();
-                    materialPanel.Dock = DockStyle.Fill;
-                    materialPanel.AutoScroll = true;
+                    // Horizontal Flow: label + (4 candidate pictures)
+                    FlowLayoutPanel flow = new FlowLayoutPanel();
+                    flow.Dock = DockStyle.Fill;
+                    flow.AutoScroll = true;
 
-                    Label headerLabel = new Label();
-                    headerLabel.Text = materialName;
-                    headerLabel.Dock = DockStyle.Top;
-                    headerLabel.Height = 30;
-                    headerLabel.Font = new Font(headerLabel.Font, FontStyle.Bold);
-                    headerLabel.TextAlign = ContentAlignment.MiddleCenter;
-                    headerLabel.BackColor = Color.LightGray;
-                    materialPanel.Controls.Add(headerLabel);
+                    // Label on the left
+                    Label matLabel = new Label();
+                    matLabel.Text = materialName;
+                    matLabel.Font = new Font(matLabel.Font, FontStyle.Bold);
+                    matLabel.Width = 120;
+                    matLabel.Height = 30;
+                    matLabel.TextAlign = ContentAlignment.MiddleLeft;
+                    flow.Controls.Add(matLabel);
 
-                    FlowLayoutPanel radioContainer = new FlowLayoutPanel();
-                    radioContainer.FlowDirection = FlowDirection.TopDown;
-                    radioContainer.AutoScroll = true;
-                    radioContainer.Dock = DockStyle.Fill;
-                    radioContainer.Padding = new Padding(0, 30, 0, 0);
-
-                    for (int j = 0; j < candidates.Count; j++)
+                    // The candidate bitmaps
+                    var candidateBitmaps = _allCandidates[direction][materialName];
+                    for (int c = 0; c < candidateBitmaps.Count; c++)
                     {
+                        // c is index in the candidateBitmaps
+                        // We show them as a clickable PictureBox
                         PictureBox pb = new PictureBox();
-                        pb.Width = materialPanel.Width - 30;
-                        pb.Height = 170;
-                        pb.Margin = new Padding(10, 5, 10, 5);
+                        pb.Width = 160;
+                        pb.Height = 160;
                         pb.SizeMode = PictureBoxSizeMode.Zoom;
-                        pb.Image = candidates[j];
-                        pb.Tag = j;
                         pb.BorderStyle = BorderStyle.FixedSingle;
-
-                        RadioButton rb = new RadioButton();
-                        rb.Text = $"Candidate {j + 1}";
-                        rb.Width = materialPanel.Width - 30;
-                        rb.Height = 25;
-                        rb.Margin = new Padding(10, 0, 10, 10);
-                        rb.Tag = new Tuple<string, int>(materialName, j);
-                        rb.Checked = (j == 0);
-
-                        if (rb.Checked)
+                        pb.Image = candidateBitmaps[c];
+                        int localIndex = c;
+                        pb.Click += (s, e) =>
                         {
-                            Selections[direction][materialName] = j;
-                            SelectedMasks[direction][materialName] = new Bitmap(candidates[j]);
-                        }
-
-                        pb.Tag = rb;
-                        pb.Click += (s, e) => ((RadioButton)((PictureBox)s).Tag).Checked = true;
-
-                        rb.CheckedChanged += (s, e) =>
-                        {
-                            if (((RadioButton)s).Checked)
+                            // On click, set selection
+                            Selections[direction][materialName] = localIndex;
+                            // Also store the chosen mask
+                            SelectedMasks[direction][materialName] = candidateBitmaps[localIndex];
+                            // Update border color or something to indicate selection
+                            foreach (Control ctrl in flow.Controls)
                             {
-                                var tag = (Tuple<string, int>)((RadioButton)s).Tag;
-                                string mat = tag.Item1;
-                                int idx = tag.Item2;
-                                Selections[direction][mat] = idx;
-
-                                if (_allCandidates[direction][mat].Count > idx)
-                                    SelectedMasks[direction][mat] = new Bitmap(_allCandidates[direction][mat][idx]);
+                                if (ctrl is PictureBox picBox)
+                                    picBox.BackColor = Color.Transparent;
                             }
+                            pb.BackColor = Color.LightBlue;
                         };
-
-                        radioContainer.Controls.Add(pb);
-                        radioContainer.Controls.Add(rb);
+                        flow.Controls.Add(pb);
                     }
 
-                    materialPanel.Controls.Add(radioContainer);
-                    mainPanel.Controls.Add(materialPanel, i, 0);
+                    rowPanel.Controls.Add(flow);
+                    mainPanel.Controls.Add(rowPanel, 0, i);
                 }
 
                 tab.Controls.Add(mainPanel);
@@ -211,243 +204,290 @@ namespace CTSegmenter
             }
         }
 
-
-
-
+        private void BtnOK_Click(object sender, EventArgs e)
+        {
+            // On OK, we finalize the selections
+            this.DialogResult = DialogResult.OK;
+            this.Close();
+        }
 
         private void BtnPreview_Click(object sender, EventArgs e)
         {
-            try
+            // Send the current "SelectedMasks" to the main viewer or SAMForm to show a preview
+            if (_parentForm != null)
             {
-                // Get current tab to determine direction
-                string direction = tabControl.SelectedTab.Text; // "XY", "XZ", or "YZ"
-
-                // Only proceed if parent form available and we have masks to preview
-                if (_parentForm != null && SelectedMasks.ContainsKey(direction) && SelectedMasks[direction].Count > 0)
-                {
-                    // Pass selected masks to parent form for preview
-                    _parentForm.PreviewSelectedMasks(direction, SelectedMasks[direction]);
-
-                    MessageBox.Show($"Previewing masks in {direction} view. Click Apply in SAM Form to commit changes.",
-                        "Preview Active", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
-                else
-                {
-                    MessageBox.Show("No masks available to preview, or preview not available in this context.",
-                        "Preview Unavailable", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Error previewing masks: {ex.Message}",
-                    "Preview Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                _parentForm.PreviewCandidatesInMainView(SelectedMasks);
             }
         }
 
         private void BtnSaveComposite_Click(object sender, EventArgs e)
         {
-            try
+            // Saves the composite of the currently selected masks, direction by direction
+            using (SaveFileDialog sfd = new SaveFileDialog())
             {
-                // Get current tab to determine which view's composite to save
-                string direction = tabControl.SelectedTab.Text; // "XY", "XZ", or "YZ"
-
-                // Show save dialog
-                using (SaveFileDialog saveDialog = new SaveFileDialog())
+                sfd.Filter = "PNG File|*.png";
+                sfd.Title = "Save Composite Image";
+                if (sfd.ShowDialog() == DialogResult.OK)
                 {
-                    saveDialog.Filter = "PNG Image|*.png";
-                    saveDialog.Title = $"Save {direction} Composite Image";
-                    saveDialog.FileName = $"SAM_{direction}_Composite.png";
+                    Bitmap composite = CreateCompositeImage();
+                    composite.Save(sfd.FileName, ImageFormat.Png);
+                    composite.Dispose();
+                    MessageBox.Show("Composite saved.");
+                }
+            }
+        }
 
-                    if (saveDialog.ShowDialog() == DialogResult.OK)
+        /// <summary>
+        /// Creates one big composite image containing *all* candidate images
+        /// produced by the segmenter, for all directions/materials/candidates.
+        /// Rows = materials, columns = (directions * maxCandidateCount).
+        /// If applyJetColormap=true, we color each pixel via the Jet colormap
+        /// instead of copying raw grayscale/black/white.
+        /// 
+        /// If no images exist or we find zero width/height, we return a 200x200 fallback.
+        /// </summary>
+        private Bitmap CreateCompositeImage(bool applyJetColormap = false)
+        {
+            // 1) Gather all directions in _allCandidates
+            //    e.g. "XY", "XZ", "YZ"
+            var directions = _allCandidates.Keys.ToList();
+            // Sort them if you want a stable left->right order
+            directions.Sort();
+
+            // 2) Gather all materials that appear in *any* direction
+            HashSet<string> materialSet = new HashSet<string>();
+            foreach (var dir in directions)
+            {
+                foreach (var matKv in _allCandidates[dir].Keys)
+                {
+                    materialSet.Add(matKv);
+                }
+            }
+            var allMaterials = materialSet.ToList();
+            // Sort them if you want alphabetical top->bottom
+            allMaterials.Sort();
+
+            // 3) Find the maximum number of candidate images among all directions/materials
+            //    e.g. if most have 3, but some have 4, we use 4 as maxCandidateCount.
+            int maxCandidateCount = 0;
+            foreach (var dir in directions)
+            {
+                foreach (var mat in _allCandidates[dir].Keys)
+                {
+                    int count = _allCandidates[dir][mat].Count;
+                    if (count > maxCandidateCount)
+                        maxCandidateCount = count;
+                }
+            }
+
+            // 4) Determine the largest tile width/height among all bitmaps
+            //    so that every candidate can fit in an equally sized tile
+            int tileW = 0;
+            int tileH = 0;
+            foreach (var dir in directions)
+            {
+                foreach (var mat in _allCandidates[dir].Keys)
+                {
+                    var candidateList = _allCandidates[dir][mat];
+                    foreach (var bmp in candidateList)
                     {
-                        // Create and save the composite image
-                        using (Bitmap composite = CreateCompositeImage(direction))
+                        if (bmp != null)
                         {
-                            composite.Save(saveDialog.FileName, ImageFormat.Png);
-                            MessageBox.Show($"Composite image saved to {saveDialog.FileName}",
-                                "Save Successful", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            tileW = Math.Max(tileW, bmp.Width);
+                            tileH = Math.Max(tileH, bmp.Height);
                         }
                     }
                 }
             }
-            catch (Exception ex)
+
+            // If we found no valid images or the tile dimension is 0, return a fallback
+            if (tileW < 1 || tileH < 1 || allMaterials.Count == 0 || maxCandidateCount == 0)
             {
-                MessageBox.Show($"Error saving composite image: {ex.Message}",
-                    "Save Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private Bitmap CreateCompositeImage(string direction)
-        {
-            if (!_allCandidates.ContainsKey(direction) || _allCandidates[direction].Count == 0)
-                throw new InvalidOperationException($"No candidates available for {direction} direction");
-
-            // Get materials and determine dimensions
-            var materials = _allCandidates[direction].Keys.ToList();
-            int numMaterials = materials.Count;
-
-            // Determine max number of candidates
-            int maxCandidates = 0;
-            int sampleWidth = 0;
-            int sampleHeight = 0;
-
-            foreach (var material in materials)
-            {
-                var candidates = _allCandidates[direction][material];
-                maxCandidates = Math.Max(maxCandidates, candidates.Count);
-
-                if (candidates.Count > 0)
-                {
-                    sampleWidth = candidates[0].Width;
-                    sampleHeight = candidates[0].Height;
-                }
+                // No valid masks => return a small fallback
+                return new Bitmap(200, 200);
             }
 
-            if (maxCandidates == 0 || sampleWidth == 0 || sampleHeight == 0)
-                throw new InvalidOperationException("No valid candidates found");
+            // 5) Compute final composite size:
+            //    Each row = one material => we have allMaterials.Count rows
+            //    Each row's columns = directions.Count * maxCandidateCount
+            //    So total columns = directions.Count * maxCandidateCount
+            int totalCols = directions.Count * maxCandidateCount;
+            int finalWidth = totalCols * tileW;
+            int finalHeight = allMaterials.Count * tileH;
 
-            // Calculate composite image dimensions
-            const int padding = 10;
-            const int headerHeight = 50;
-            const int rowHeaderWidth = 120;
+            // If final dimension is invalid, also bail out
+            if (finalWidth < 1 || finalHeight < 1)
+            {
+                return new Bitmap(200, 200);
+            }
 
-            int cellWidth = sampleWidth;
-            int cellHeight = sampleHeight;
-            int imageWidth = rowHeaderWidth + (cellWidth + padding) * numMaterials + padding;
-            int imageHeight = headerHeight + (cellHeight + padding) * maxCandidates + padding;
-
-            // Create the composite image
-            Bitmap composite = new Bitmap(imageWidth, imageHeight);
-            using (Graphics g = Graphics.FromImage(composite))
+            Bitmap finalComposite = new Bitmap(finalWidth, finalHeight);
+            using (Graphics g = Graphics.FromImage(finalComposite))
             {
                 // Fill background
                 g.Clear(Color.Black);
+            }
 
-                // Draw header labels (material names)
-                using (Font headerFont = new Font("Arial", 12, FontStyle.Bold))
-                using (Brush textBrush = new SolidBrush(Color.White))
+            // Optionally build the Jet color table once (256 entries)
+            Color[] jetTable = null;
+            if (applyJetColormap)
+            {
+                jetTable = BuildJetLookupTable();
+            }
+
+            // 6) Now copy each candidate image into the correct "cell"
+            //    Row index = material index
+            //    Column index = directionIndex * maxCandidateCount + candidateIndex
+            for (int row = 0; row < allMaterials.Count; row++)
+            {
+                string materialName = allMaterials[row];
+
+                for (int dIdx = 0; dIdx < directions.Count; dIdx++)
                 {
-                    // Draw corner cell
-                    Rectangle cornerRect = new Rectangle(0, 0, rowHeaderWidth, headerHeight);
-                    g.DrawString("Candidate", headerFont, textBrush, cornerRect,
-                        new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
+                    string dir = directions[dIdx];
+                    // If this direction lacks that material, skip
+                    if (!_allCandidates[dir].ContainsKey(materialName))
+                        continue;
 
-                    // Draw column headers (material names)
-                    for (int i = 0; i < numMaterials; i++)
+                    var candidateList = _allCandidates[dir][materialName];
+                    for (int cIdx = 0; cIdx < candidateList.Count; cIdx++)
                     {
-                        Rectangle headerRect = new Rectangle(
-                            rowHeaderWidth + i * (cellWidth + padding),
-                            0,
-                            cellWidth,
-                            headerHeight);
+                        Bitmap src = candidateList[cIdx];
+                        if (src == null)
+                            continue;
 
-                        g.DrawString(materials[i], headerFont, textBrush, headerRect,
-                            new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
-                    }
-                }
+                        // Column offset for this direction and candidate
+                        int col = dIdx * maxCandidateCount + cIdx;
+                        // x,y in final composite
+                        int destX = col * tileW;
+                        int destY = row * tileH;
 
-                // Draw each cell with colored mask
-                for (int candidateIdx = 0; candidateIdx < maxCandidates; candidateIdx++)
-                {
-                    // Draw row header (candidate number)
-                    using (Font rowFont = new Font("Arial", 10))
-                    using (Brush textBrush = new SolidBrush(Color.White))
-                    {
-                        Rectangle rowHeaderRect = new Rectangle(
-                            0,
-                            headerHeight + candidateIdx * (cellHeight + padding),
-                            rowHeaderWidth,
-                            cellHeight);
-
-                        g.DrawString($"Candidate {candidateIdx + 1}", rowFont, textBrush, rowHeaderRect,
-                            new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
-                    }
-
-                    // Draw each material's mask for this candidate
-                    for (int matIdx = 0; matIdx < numMaterials; matIdx++)
-                    {
-                        string materialName = materials[matIdx];
-                        var candidates = _allCandidates[direction][materialName];
-
-                        if (candidateIdx < candidates.Count)
+                        // We'll do a pixel-by-pixel copy if applyJetColormap is true,
+                        // so we can color map them. Otherwise, we can do a quick DrawImage.
+                        if (!applyJetColormap)
                         {
-                            // Get color for this material
-                            Color materialColor = MaterialColors[matIdx % MaterialColors.Length];
-
-                            // Create colored version of the mask
-                            Bitmap origMask = candidates[candidateIdx];
-                            Bitmap coloredMask = new Bitmap(origMask.Width, origMask.Height);
-
-                            // Apply the color
-                            for (int y = 0; y < origMask.Height; y++)
+                            // Just do a standard draw:
+                            using (Graphics g2 = Graphics.FromImage(finalComposite))
                             {
-                                for (int x = 0; x < origMask.Width; x++)
+                                g2.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                                g2.DrawImage(src, destX, destY, tileW, tileH);
+                            }
+                        }
+                        else
+                        {
+                            // apply Jet color map:
+                            // We'll read each pixel from 'src', 
+                            // map its brightness to jet color,
+                            // and put it in finalComposite at [destX..destX+tileW, destY..destY+tileH].
+                            for (int yy = 0; yy < src.Height; yy++)
+                            {
+                                for (int xx = 0; xx < src.Width; xx++)
                                 {
-                                    Color pixelColor = origMask.GetPixel(x, y);
-                                    if (pixelColor.R > 128) // If mask is active here
+                                    Color c = src.GetPixel(xx, yy);
+                                    // assume grayscale or black/white => c.R ~ c.G ~ c.B
+                                    byte intensity = c.R;
+
+                                    // if you have black/white masks, c.R is 0 or 255 or something in-between
+                                    // map to [0..255]
+                                    int idx = intensity; // already 0..255
+                                                         // get color from jet table
+                                    Color jetColor = jetTable[idx];
+
+                                    // Write to final composite if you want “transparent for black”:
+                                    // if it's black (0?), skip. If we want always color, we do no skip
+                                    if (intensity > 0)
                                     {
-                                        coloredMask.SetPixel(x, y, materialColor);
+                                        finalComposite.SetPixel(
+                                            destX + xx,
+                                            destY + yy,
+                                            jetColor
+                                        );
                                     }
                                     else
                                     {
-                                        coloredMask.SetPixel(x, y, Color.Black);
+                                        // If you want fully black for zero-intensity:
+                                        // finalComposite.SetPixel(destX+xx, destY+yy, Color.Black);
+                                        // Or do nothing if you want to keep the background from a previous image
                                     }
                                 }
                             }
-
-                            // Draw to the composite
-                            int cellX = rowHeaderWidth + matIdx * (cellWidth + padding);
-                            int cellY = headerHeight + candidateIdx * (cellHeight + padding);
-                            g.DrawImage(coloredMask, cellX, cellY, cellWidth, cellHeight);
-
-                            // Draw border around selected candidate
-                            if (Selections[direction].ContainsKey(materialName) &&
-                                Selections[direction][materialName] == candidateIdx)
-                            {
-                                using (Pen selectedPen = new Pen(Color.White, 3))
-                                {
-                                    g.DrawRectangle(selectedPen,
-                                        cellX, cellY, cellWidth, cellHeight);
-                                }
-                            }
-
-                            // Clean up
-                            coloredMask.Dispose();
                         }
                     }
                 }
             }
 
-            return composite;
+            return finalComposite;
         }
 
-        private void BtnOK_Click(object sender, EventArgs e)
+        /// <summary>
+        /// Builds a 256-element Jet colormap that goes from deep blue (index=0)
+        /// through cyan/green/yellow to red (index=255).
+        /// This is a standard “Jet” approximation similar to MATLAB’s older colormap.
+        /// </summary>
+        private Color[] BuildJetLookupTable()
         {
-            // Make sure we have selections for all materials
-            foreach (string direction in new string[] { "XY", "XZ", "YZ" })
+            // We won't skip anything for brevity. We'll produce an explicit 
+            // interpolation from (0 => Blue) to (0.35 => Cyan) to (0.65 => Yellow) to (1 => Red).
+            // A typical formula approach is:
+
+            Color[] table = new Color[256];
+
+            // “Jet” can be approximated by dividing the range [0..1] into four intervals:
+            //  0.00..0.35 => from Blue to Cyan,
+            //  0.35..0.65 => from Cyan to Yellow,
+            //  0.65..1.00 => from Yellow to Red.
+            // We'll do a linear interpolation on each channel.
+
+            for (int i = 0; i < 256; i++)
             {
-                if (_allCandidates.ContainsKey(direction))
+                float x = i / 255f; // normalized [0..1]
+                float r, g, b;
+                r = g = b = 0f;
+
+                if (x <= 0.35f)
                 {
-                    foreach (var material in _allCandidates[direction].Keys)
-                    {
-                        if (!Selections[direction].ContainsKey(material))
-                        {
-                            // Default to candidate 0 if none selected
-                            Selections[direction][material] = 0;
-
-                            // Store the bitmap too
-                            if (_allCandidates[direction][material].Count > 0)
-                            {
-                                SelectedMasks[direction][material] =
-                                    new Bitmap(_allCandidates[direction][material][0]);
-                            }
-                        }
-                    }
+                    // Blue -> Cyan
+                    // at x=0.0 => (R=0, G=0, B=1)
+                    // at x=0.35 => (R=0, G=1, B=1)
+                    float t = x / 0.35f;
+                    r = 0f;
+                    g = t;
+                    b = 1f;
                 }
-            }
+                else if (x <= 0.65f)
+                {
+                    // Cyan -> Yellow
+                    // at x=0.35 => (R=0, G=1, B=1)
+                    // at x=0.65 => (R=1, G=1, B=0)
+                    float t = (x - 0.35f) / (0.65f - 0.35f);
+                    r = t;
+                    g = 1f;
+                    b = 1f - t;
+                }
+                else
+                {
+                    // Yellow -> Red
+                    // at x=0.65 => (R=1, G=1, B=0)
+                    // at x=1.0  => (R=1, G=0, B=0)
+                    float t = (x - 0.65f) / (0.35f);
+                    r = 1f;
+                    g = 1f - t;
+                    b = 0f;
+                }
 
-            this.DialogResult = DialogResult.OK;
-            this.Close();
+                // clamp r,g,b to [0..1] just in case
+                r = Math.Min(1f, Math.Max(0f, r));
+                g = Math.Min(1f, Math.Max(0f, g));
+                b = Math.Min(1f, Math.Max(0f, b));
+
+                byte rr = (byte)(r * 255);
+                byte gg = (byte)(g * 255);
+                byte bb = (byte)(b * 255);
+                table[i] = Color.FromArgb(rr, gg, bb);
+            }
+            return table;
         }
+
+
     }
 }

@@ -55,13 +55,8 @@
             this.Z = new System.Windows.Forms.DataGridViewTextBoxColumn();
             this.Type = new System.Windows.Forms.DataGridViewTextBoxColumn();
             this.Label = new System.Windows.Forms.DataGridViewComboBoxColumn();
-            this.panel1 = new System.Windows.Forms.Panel();
-            this.lblThr = new System.Windows.Forms.Label();
-            this.thresholdingTrackbar = new System.Windows.Forms.TrackBar();
             this.toolStrip1.SuspendLayout();
             ((System.ComponentModel.ISupportInitialize)(this.dataGridPoints)).BeginInit();
-            this.panel1.SuspendLayout();
-            ((System.ComponentModel.ISupportInitialize)(this.thresholdingTrackbar)).BeginInit();
             this.SuspendLayout();
             // 
             // toolStrip1
@@ -310,39 +305,11 @@
             this.Label.Name = "Label";
             this.Label.Width = 125;
             // 
-            // panel1
-            // 
-            this.panel1.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Right)));
-            this.panel1.Controls.Add(this.lblThr);
-            this.panel1.Controls.Add(this.thresholdingTrackbar);
-            this.panel1.Location = new System.Drawing.Point(813, 35);
-            this.panel1.Name = "panel1";
-            this.panel1.Size = new System.Drawing.Size(253, 93);
-            this.panel1.TabIndex = 2;
-            // 
-            // lblThr
-            // 
-            this.lblThr.AutoSize = true;
-            this.lblThr.Location = new System.Drawing.Point(24, 57);
-            this.lblThr.Name = "lblThr";
-            this.lblThr.Size = new System.Drawing.Size(68, 15);
-            this.lblThr.TabIndex = 3;
-            this.lblThr.Text = "Threshold: ";
-            // 
-            // thresholdingTrackbar
-            // 
-            this.thresholdingTrackbar.Location = new System.Drawing.Point(17, 16);
-            this.thresholdingTrackbar.Name = "thresholdingTrackbar";
-            this.thresholdingTrackbar.Size = new System.Drawing.Size(227, 56);
-            this.thresholdingTrackbar.TabIndex = 3;
-            this.thresholdingTrackbar.Scroll += new System.EventHandler(this.thresholdingTrackbar_Scroll);
-            // 
             // SAMForm
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.ClientSize = new System.Drawing.Size(1069, 585);
-            this.Controls.Add(this.panel1);
             this.Controls.Add(this.dataGridPoints);
             this.Controls.Add(this.toolStrip1);
             this.Icon = ((System.Drawing.Icon)(resources.GetObject("$this.Icon")));
@@ -351,9 +318,6 @@
             this.toolStrip1.ResumeLayout(false);
             this.toolStrip1.PerformLayout();
             ((System.ComponentModel.ISupportInitialize)(this.dataGridPoints)).EndInit();
-            this.panel1.ResumeLayout(false);
-            this.panel1.PerformLayout();
-            ((System.ComponentModel.ISupportInitialize)(this.thresholdingTrackbar)).EndInit();
             this.ResumeLayout(false);
             this.PerformLayout();
 
@@ -387,8 +351,5 @@
         private System.Windows.Forms.ToolStripButton XZButton;
         private System.Windows.Forms.ToolStripButton YZButton;
         private System.Windows.Forms.ToolStripSeparator toolStripSeparator3;
-        private System.Windows.Forms.Panel panel1;
-        private System.Windows.Forms.Label lblThr;
-        private System.Windows.Forms.TrackBar thresholdingTrackbar;
     }
 }

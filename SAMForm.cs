@@ -274,11 +274,10 @@ namespace CTSegmenter
         {
             try
             {
+                // 1) Ensure model folder path is valid
                 if (string.IsNullOrEmpty(CurrentSettings.ModelFolderPath))
                 {
                     Logger.Log("[SAMForm] ERROR: Model folder path is null or empty");
-
-                    // Try default path
                     string defaultPath = Path.Combine(Application.StartupPath, "ONNX");
                     if (Directory.Exists(defaultPath))
                     {
@@ -289,7 +288,6 @@ namespace CTSegmenter
                     {
                         MessageBox.Show("Model folder path is not set. Please configure it.",
                                        "Configuration Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-
                         if (!VerifyModelPaths())
                         {
                             return; // cannot proceed
@@ -297,7 +295,7 @@ namespace CTSegmenter
                     }
                 }
 
-                // Ensure the SAM2.1 model files exist (or older SAM if selected)
+                // 2) Check for SAM 2.1 model files (or older SAM if needed)
                 string encoderPath = Path.Combine(CurrentSettings.ModelFolderPath, "sam2.1_large.encoder.onnx");
                 string decoderPath = Path.Combine(CurrentSettings.ModelFolderPath, "sam2.1_large.decoder.onnx");
 
@@ -310,9 +308,11 @@ namespace CTSegmenter
                         MessageBoxIcon.Error);
                     return;
                 }
+
                 Logger.Log("[SAMForm] Starting segmentation process for all directions");
                 Cursor = Cursors.WaitCursor;
 
+                // 3) Check multi-candidate vs single-candidate
                 bool multiCandidate = CurrentSettings.EnableMultiMask;
                 Logger.Log($"[SAMForm] Multi-candidate mode: {multiCandidate}");
 
@@ -323,17 +323,17 @@ namespace CTSegmenter
                 multiDirResults["YZ"] = new Dictionary<string, List<Bitmap>>();
                 allMaterialsResults.Clear();
 
-                // Model path references for older or new SAM
+                // 4) Distinguish older SAM from SAM 2.1 (still possible if your code allows)
                 string modelFolder = CurrentSettings.ModelFolderPath;
                 int imageSize = CurrentSettings.ImageInputSize;
-                bool usingSam2 = CurrentSettings.UseSam2Models;
+                bool usingSam2 = CurrentSettings.UseSam2Models; // if your code has that option
 
                 string imageEncoderPath, promptEncoderPath, maskDecoderPath;
                 string memoryEncoderPath, memoryAttentionPath, mlpPath;
 
                 if (usingSam2)
                 {
-                    // SAM 2.1
+                    // 2.1
                     imageEncoderPath = Path.Combine(modelFolder, "sam2.1_large.encoder.onnx");
                     promptEncoderPath = "";
                     maskDecoderPath = Path.Combine(modelFolder, "sam2.1_large.decoder.onnx");
@@ -377,14 +377,16 @@ namespace CTSegmenter
                     }
                 }
 
+                // 5) Create folder for saving masks if desired
                 string saveFolder = Path.Combine(Application.StartupPath, "SavedMasks");
                 Directory.CreateDirectory(saveFolder);
 
-                // Directions are toggles
+                // 6) Identify which directions are toggled
                 bool processXY = XYButton.Checked;
                 bool processXZ = XZButton.Checked;
                 bool processYZ = YZButton.Checked;
 
+                // 7) Retrieve volume info from mainForm
                 int width = mainForm.GetWidth();
                 int height = mainForm.GetHeight();
                 int depth = mainForm.GetDepth();
@@ -394,6 +396,7 @@ namespace CTSegmenter
 
                 Logger.Log($"[SAMForm] Volume: {width}x{height}x{depth}");
 
+                // 8) Construct the segmenter
                 using (var segmenter = new CTMemorySegmenter(
                     imageEncoderPath,
                     promptEncoderPath,
@@ -406,20 +409,25 @@ namespace CTSegmenter
                     CurrentSettings.EnableMlp,
                     CurrentSettings.UseCpuExecutionProvider))
                 {
-                    // We removed trackbar-based threshold. SAM2.1 uses a default 0.5 internally.
+                    // SAM2.1 uses ~0.5 threshold internally, so no trackbar-based threshold
                     segmenter.StorePreviousEmbeddings = true;
                     segmenter.UseSelectiveHoleFilling = CurrentSettings.UseSelectiveHoleFilling;
 
-                    // *** XY ***
+                    // --------------------------
+                    // *** XY direction ***
+                    // --------------------------
                     if (processXY)
                     {
                         Logger.Log($"[SAMForm] Processing XY slice at Z={currentZ}");
+
                         using (Bitmap baseXY = GenerateXYBitmap(currentZ, width, height))
                         using (Bitmap accumMask = new Bitmap(width, height))
                         {
+                            // accumMask for negative prompts
                             using (Graphics gAcc = Graphics.FromImage(accumMask))
                                 gAcc.Clear(Color.Black);
 
+                            // Gather annotation points in this XY slice
                             var slicePoints = annotationManager.GetPointsForSlice(currentZ);
                             var uniqueMats = slicePoints
                                 .Select(p => p.Label)
@@ -434,7 +442,7 @@ namespace CTSegmenter
                                 Logger.Log($"[SAMForm] XY: Processing material '{matName}'");
                                 List<AnnotationPoint> prompts = BuildMixedPrompts(slicePoints, matName);
 
-                                // Negative prompts from the accumMask
+                                // Negative prompts from accumMask
                                 var negatives = SampleNegativePointsFromMask(accumMask, 40);
                                 foreach (var (nx, ny) in negatives)
                                 {
@@ -445,7 +453,7 @@ namespace CTSegmenter
                                 {
                                     // Multi-candidate approach
                                     List<Bitmap> candidates = segmenter
-                                .ProcessXYSlice_GetAllMasks(currentZ, baseXY, prompts, matName);
+                                        .ProcessXYSlice_GetAllMasks(currentZ, baseXY, prompts, matName);
                                     multiDirResults["XY"][matName] = candidates;
 
                                     // Merge first candidate into accumMask
@@ -466,7 +474,7 @@ namespace CTSegmenter
                                 {
                                     // Single-candidate approach
                                     Bitmap singleMask = segmenter
-                                .ProcessXYSlice(currentZ, baseXY, prompts, matName);
+                                        .ProcessXYSlice(currentZ, baseXY, prompts, matName);
                                     MaterialMaskResult res = new MaterialMaskResult
                                     {
                                         MaterialName = matName,
@@ -491,16 +499,20 @@ namespace CTSegmenter
                         }
                     }
 
-                    // *** XZ ***
+                    // --------------------------
+                    // *** XZ direction ***
+                    // --------------------------
                     if (processXZ)
                     {
                         Logger.Log($"[SAMForm] Processing XZ slice at Y={fixedY}");
+
                         using (Bitmap baseXZ = GenerateXZBitmap(fixedY, width, depth))
                         using (Bitmap accumMask = new Bitmap(width, depth))
                         {
                             using (Graphics gAcc = Graphics.FromImage(accumMask))
                                 gAcc.Clear(Color.Black);
 
+                            // Gather annotation points in this XZ slice
                             var slicePoints = annotationManager.Points
                                 .Where(p => Math.Abs(p.Y - fixedY) < 1.0f).ToList();
                             var uniqueMats = slicePoints
@@ -524,11 +536,8 @@ namespace CTSegmenter
 
                                 if (multiCandidate)
                                 {
-                                    // For demonstration, produce multiple XZ masks at different thresholds, etc.
                                     List<Bitmap> candidates = segmenter
-                            .ProcessXZSlice_GetAllMasks(fixedY, baseXZ, prompts, matName);
-                                    // Add more if you want different variations.
-
+                                        .ProcessXZSlice_GetAllMasks(fixedY, baseXZ, prompts, matName);
                                     multiDirResults["XZ"][matName] = candidates;
 
                                     // Merge first candidate
@@ -547,9 +556,8 @@ namespace CTSegmenter
                                 }
                                 else
                                 {
-                                    // Single mask
                                     Bitmap singleMask = segmenter
-                            .ProcessXZSlice(fixedY, baseXZ, prompts, matName);
+                                        .ProcessXZSlice(fixedY, baseXZ, prompts, matName);
                                     MaterialMaskResult res = new MaterialMaskResult
                                     {
                                         MaterialName = matName,
@@ -574,16 +582,20 @@ namespace CTSegmenter
                         }
                     }
 
-                    // *** YZ ***
+                    // --------------------------
+                    // *** YZ direction ***
+                    // --------------------------
                     if (processYZ)
                     {
                         Logger.Log($"[SAMForm] Processing YZ slice at X={fixedX}");
+
                         using (Bitmap baseYZ = GenerateYZBitmap(fixedX, height, depth))
                         using (Bitmap accumMask = new Bitmap(depth, height))
                         {
                             using (Graphics gAcc = Graphics.FromImage(accumMask))
                                 gAcc.Clear(Color.Black);
 
+                            // Gather annotation points in this YZ slice
                             var slicePoints = annotationManager.Points
                                 .Where(p => Math.Abs(p.X - fixedX) < 1.0f).ToList();
                             var uniqueMats = slicePoints
@@ -607,11 +619,8 @@ namespace CTSegmenter
 
                                 if (multiCandidate)
                                 {
-                                    // Possibly generate multiple YZ mask variations
                                     List<Bitmap> candidates = segmenter
-                            .ProcessYZSlice_GetAllMasks(fixedX, baseYZ, prompts, matName);
-                                    // etc. if you want more
-
+                                        .ProcessYZSlice_GetAllMasks(fixedX, baseYZ, prompts, matName);
                                     multiDirResults["YZ"][matName] = candidates;
 
                                     // Merge first candidate
@@ -630,9 +639,8 @@ namespace CTSegmenter
                                 }
                                 else
                                 {
-                                    // Single
                                     Bitmap singleMask = segmenter
-                            .ProcessYZSlice(fixedX, baseYZ, prompts, matName);
+                                        .ProcessYZSlice(fixedX, baseYZ, prompts, matName);
                                     MaterialMaskResult res = new MaterialMaskResult
                                     {
                                         MaterialName = matName,
@@ -656,10 +664,9 @@ namespace CTSegmenter
                             }
                         }
                     }
-
                 } // end using CTMemorySegmenter
 
-                // If multi-candidate is on, open the candidate selector
+                // 9) If multi-candidate, open candidate selector
                 if (multiCandidate)
                 {
                     bool hasMasks = multiDirResults.Values.Any(dir => dir.Count > 0);
@@ -675,8 +682,7 @@ namespace CTSegmenter
                     if (csf.ShowDialog() == DialogResult.OK)
                     {
                         candidateSelections = csf.Selections;
-
-                        // Build a MaterialMaskResult for each chosen mask
+                        // Build MaterialMaskResult for each chosen mask
                         foreach (string direction in csf.Selections.Keys)
                         {
                             foreach (string material in csf.Selections[direction].Keys)
@@ -701,7 +707,7 @@ namespace CTSegmenter
                             }
                         }
 
-                        // Attempt preview for the active direction
+                        // Possibly preview the chosen masks for the active direction
                         string activeDir = GetActiveDirection();
                         if (activeDir != null && csf.SelectedMasks.ContainsKey(activeDir))
                         {
@@ -716,6 +722,7 @@ namespace CTSegmenter
                 }
                 else
                 {
+                    // Single-candidate
                     if (allMaterialsResults.Count == 0)
                     {
                         MessageBox.Show("No segmentation masks were generated. Ensure you have annotation points.",
@@ -724,7 +731,7 @@ namespace CTSegmenter
                         return;
                     }
 
-                    // Single-candidate mode: preview them in the active direction
+                    // Directly preview in the active direction
                     string activeDir = GetActiveDirection();
                     if (activeDir != null)
                     {
@@ -743,8 +750,8 @@ namespace CTSegmenter
                         }
                     }
                 }
+
                 Logger.Log("[SAMForm] All directions done. Now handling multiCandidate UI...");
-                
                 Cursor = Cursors.Default;
                 MessageBox.Show("Segmentation completed. Review masks in the main view and click Apply to confirm.",
                     "Segmentation", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -757,6 +764,7 @@ namespace CTSegmenter
                 MessageBox.Show("Error applying segmentation: " + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
+
 
         private bool VerifyModelPaths()
         {

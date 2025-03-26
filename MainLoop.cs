@@ -4262,13 +4262,81 @@ namespace CTSegmenter
             return null;
         }
         #endregion
+    
+
+    /// <summary>
+/// Returns a 24-bit Bitmap of the XY slice at index z.
+/// (width = X dimension, height = Y dimension).
+/// </summary>
+public Bitmap GetSliceBitmap(int z)
+        {
+            // Create a new 24-bit Bitmap
+            Bitmap bmp = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    // If volumeData is the grayscale volume, read the voxel:
+                    byte intensity = volumeData[x, y, z];
+                    // Paint the same intensity in R,G,B => grayscale
+                    bmp.SetPixel(x, y, Color.FromArgb(intensity, intensity, intensity));
+                }
+            }
+
+            return bmp;
+        }
+
+        /// <summary>
+        /// Returns a 24-bit Bitmap of the XZ slice at Y=fixedY.
+        /// (width = X dimension, height = Z dimension).
+        /// Typically used for "vertical" slices or 3D orthographic views.
+        /// </summary>
+        public Bitmap GetXZSliceBitmap(int fixedY)
+        {
+            // Dimensions: X => width, Z => depth
+            // So the resulting image is width-by-depth
+            Bitmap bmp = new Bitmap(width, depth, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+
+            for (int z = 0; z < depth; z++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    byte intensity = volumeData[x, fixedY, z];
+                    bmp.SetPixel(x, z, Color.FromArgb(intensity, intensity, intensity));
+                }
+            }
+
+            return bmp;
+        }
+
+        /// <summary>
+        /// Returns a 24-bit Bitmap of the YZ slice at X=fixedX.
+        /// (width = Y dimension, height = Z dimension).
+        /// </summary>
+        public Bitmap GetYZSliceBitmap(int fixedX)
+        {
+            // Dimensions: Y => height, Z => depth
+            // So the resulting image is height-by-depth
+            Bitmap bmp = new Bitmap(height, depth, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+
+            for (int z = 0; z < depth; z++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    byte intensity = volumeData[fixedX, y, z];
+                    bmp.SetPixel(y, z, Color.FromArgb(intensity, intensity, intensity));
+                }
+            }
+
+            return bmp;
+        }
+
+
+
+
+
+
     }
-
-    
-
-    
-
-
-    
+    #endregion
 }
-#endregion

@@ -42,7 +42,7 @@ namespace CTSegmenter
         private Button btnAddSelection;
         private Button btnSubSelection;
         //private Button btnSegmentAnything;
-        private SAMForm currentSamForm = null; // Track the currently open SAM form
+       
         private Button btnRefresh;
         private Label lblSlice;
         private TrackBar sliceSlider;
@@ -185,10 +185,7 @@ namespace CTSegmenter
             segmentAnythingMenuItem = new ToolStripMenuItem("Segment Anything");
             segmentAnythingMenuItem.Click += (s, e) =>
             {
-                Logger.Log("[ControlForm] Opening Segment Anything - ONNX Processor");
-                SAMForm samForm = new SAMForm(mainForm, mainForm.Materials);
-                mainForm.SetSegmentationTool(SegmentationTool.Point);
-                samForm.Show();
+                //Placeholder
             };
             editMenu.DropDownItems.AddRange(new ToolStripItem[]
             {
@@ -286,40 +283,9 @@ namespace CTSegmenter
             ToolStripMenuItem segmentAnythingToolMenuItem = new ToolStripMenuItem("Segment Anything");
             segmentAnythingToolMenuItem.Click += (s, e) =>
             {
-                // Check if a SAM window is already open
-                if (currentSamForm != null && !currentSamForm.IsDisposed)
-                {
-                    // If it exists, just activate the existing window
-                    currentSamForm.Activate();
-                    return;
-                }
+                //Placeholder
 
-                // Otherwise, create a new SAM form
-                mainForm.SetSegmentationTool(SegmentationTool.Point);
-                Logger.Log("[ControlForm] Opening Segment Anything - ONNX Processor");
-
-                // Create new form and store reference
-                SAMForm samForm = new SAMForm(mainForm, mainForm.Materials);
-                mainForm.SamFormInstance = samForm;
-                currentSamForm = samForm;
-
-                // Disable tool menu items
-                panMenuItem.Enabled = false;
-                eraserMenuItem.Enabled = false;
-                brushMenuItem.Enabled = false;
-                thresholdingMenuItem.Enabled = false;
-
-                // When SAM closes, re-enable buttons and clear the reference
-                samForm.Disposed += (sender, args) =>
-                {
-                    panMenuItem.Enabled = true;
-                    eraserMenuItem.Enabled = true;
-                    brushMenuItem.Enabled = true;
-                    thresholdingMenuItem.Enabled = true;
-                    currentSamForm = null; // Clear reference when form is disposed
-                };
-
-                samForm.Show();
+                
             };
             toolsMenu.DropDownItems.Add(segmentAnythingToolMenuItem);
             dbgConsole.Click += (s, e) =>
@@ -959,11 +925,7 @@ namespace CTSegmenter
                     RefreshMaterialList();
                     lstMaterials.SelectedIndex = lstMaterials.Items.Count - 1;
 
-                    // If SAMForm is open, update its ComboBox with the new material.
-                    if (mainForm.SamFormInstance != null && !mainForm.SamFormInstance.IsDisposed)
-                    {
-                        mainForm.SamFormInstance.UpdateMaterialComboBox(mainForm.Materials);
-                    }
+                    
                 }
             }
             mainForm.SaveLabelsChk();

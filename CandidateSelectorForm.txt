@@ -151,7 +151,7 @@ namespace CTSegmenter
                     string materialName = materials[i];
                     Selections[direction][materialName] = -1; // default: no selection yet
 
-                    // Horizontal Flow: label + (4 candidate pictures)
+                    // Horizontal Flow: label + candidate pictures
                     FlowLayoutPanel flow = new FlowLayoutPanel();
                     flow.Dock = DockStyle.Fill;
                     flow.AutoScroll = true;
@@ -167,32 +167,50 @@ namespace CTSegmenter
 
                     // The candidate bitmaps
                     var candidateBitmaps = _allCandidates[direction][materialName];
-                    for (int c = 0; c < candidateBitmaps.Count; c++)
+
+                    if (candidateBitmaps.Count == 0)
                     {
-                        // c is index in the candidateBitmaps
-                        // We show them as a clickable PictureBox
-                        PictureBox pb = new PictureBox();
-                        pb.Width = 160;
-                        pb.Height = 160;
-                        pb.SizeMode = PictureBoxSizeMode.Zoom;
-                        pb.BorderStyle = BorderStyle.FixedSingle;
-                        pb.Image = candidateBitmaps[c];
-                        int localIndex = c;
-                        pb.Click += (s, e) =>
+                        Label noMasksLabel = new Label();
+                        noMasksLabel.Text = "No masks available";
+                        noMasksLabel.Width = 160;
+                        noMasksLabel.Height = 160;
+                        noMasksLabel.TextAlign = ContentAlignment.MiddleCenter;
+                        noMasksLabel.BorderStyle = BorderStyle.FixedSingle;
+                        flow.Controls.Add(noMasksLabel);
+                    }
+                    else
+                    {
+                        // Add each candidate bitmap
+                        for (int c = 0; c < candidateBitmaps.Count; c++)
                         {
-                            // On click, set selection
-                            Selections[direction][materialName] = localIndex;
-                            // Also store the chosen mask
-                            SelectedMasks[direction][materialName] = candidateBitmaps[localIndex];
-                            // Update border color or something to indicate selection
-                            foreach (Control ctrl in flow.Controls)
+                            // Create a picture box for this candidate
+                            PictureBox pb = new PictureBox();
+                            pb.Width = 160;
+                            pb.Height = 160;
+                            pb.SizeMode = PictureBoxSizeMode.Zoom;
+                            pb.BorderStyle = BorderStyle.FixedSingle;
+                            pb.Image = candidateBitmaps[c];
+                            int localIndex = c;
+
+                            // Set up click handler for selection
+                            pb.Click += (s, e) =>
                             {
-                                if (ctrl is PictureBox picBox)
-                                    picBox.BackColor = Color.Transparent;
-                            }
-                            pb.BackColor = Color.LightBlue;
-                        };
-                        flow.Controls.Add(pb);
+                                // On click, set selection
+                                Selections[direction][materialName] = localIndex;
+                                // Also store the chosen mask
+                                SelectedMasks[direction][materialName] = candidateBitmaps[localIndex];
+                                // Update border color to indicate selection
+                                foreach (Control ctrl in flow.Controls)
+                                {
+                                    if (ctrl is PictureBox picBox)
+                                        picBox.BackColor = Color.Transparent;
+                                }
+                                pb.BackColor = Color.LightBlue;
+                            };
+
+                            // Add the picture box to the flow layout
+                            flow.Controls.Add(pb);
+                        }
                     }
 
                     rowPanel.Controls.Add(flow);
@@ -203,6 +221,7 @@ namespace CTSegmenter
                 tabControl.TabPages.Add(tab);
             }
         }
+
 
         private void BtnOK_Click(object sender, EventArgs e)
         {

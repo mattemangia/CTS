@@ -24,119 +24,68 @@ namespace CTSegmenter
         /// <param name="directions">Directions to propagate</param>
         /// <returns>The segmented volume or null if propagation failed</returns>
         public static byte[,,] Propagate(MainForm mainForm,
-                                         SAMSettingsParams settings,
-                                         int threshold,
-                                         SAMForm.SegmentationDirection directions)
+                                 SAMSettingsParams settings,
+                                 int threshold,
+                                 SAMForm.SegmentationDirection directions)
         {
-            // Volume
             int width = mainForm.GetWidth();
             int height = mainForm.GetHeight();
             int depth = mainForm.GetDepth();
-            Logger.Log($"[SegmentationPropagator] Volume dimensions: {width}x{height}x{depth}");
 
-            // Model paths
-            string modelFolder = settings.ModelFolderPath;
-            int imageSize = settings.ImageInputSize;
-            bool usingSam2 = settings.UseSam2Models;
-            Logger.Log($"[SegmentationPropagator] Using SAM 2.1 models: {usingSam2}");
-
-            string imageEncoderPath, promptEncoderPath, maskDecoderPath;
-            string memoryEncoderPath, memoryAttentionPath, mlpPath;
-            if (usingSam2)
-            {
-                // SAM 2.1 
-                imageEncoderPath = Path.Combine(modelFolder, "sam2.1_large.encoder.onnx");
-                promptEncoderPath = ""; // Not used in SAM2.1
-                maskDecoderPath = Path.Combine(modelFolder, "sam2.1_large.decoder.onnx");
-                memoryEncoderPath = "";
-                memoryAttentionPath = "";
-                mlpPath = "";
-
-                // Validate
-                if (!File.Exists(imageEncoderPath) || !File.Exists(maskDecoderPath))
-                {
-                    string missingModels = "";
-                    if (!File.Exists(imageEncoderPath)) missingModels += $"- SAM 2.1 encoder: {imageEncoderPath}\n";
-                    if (!File.Exists(maskDecoderPath)) missingModels += $"- SAM 2.1 decoder: {maskDecoderPath}\n";
-                    Logger.Log($"[SegmentationPropagator] SAM 2.1 models missing:\n{missingModels}");
-                    return null;
-                }
-            }
-            else
-            {
-                // Original SAM
-                imageEncoderPath = Path.Combine(modelFolder, "image_encoder_hiera_t.onnx");
-                promptEncoderPath = Path.Combine(modelFolder, "prompt_encoder_hiera_t.onnx");
-                maskDecoderPath = Path.Combine(modelFolder, "mask_decoder_hiera_t.onnx");
-                memoryEncoderPath = Path.Combine(modelFolder, "memory_encoder_hiera_t.onnx");
-                memoryAttentionPath = Path.Combine(modelFolder, "memory_attention_hiera_t.onnx");
-                mlpPath = Path.Combine(modelFolder, "mlp_hiera_t.onnx");
-
-                // Validate
-                if (!File.Exists(imageEncoderPath) ||
-                    !File.Exists(promptEncoderPath) ||
-                    !File.Exists(maskDecoderPath))
-                {
-                    string missingModels = "";
-                    if (!File.Exists(imageEncoderPath)) missingModels += $"- Image encoder: {imageEncoderPath}\n";
-                    if (!File.Exists(promptEncoderPath)) missingModels += $"- Prompt encoder: {promptEncoderPath}\n";
-                    if (!File.Exists(maskDecoderPath)) missingModels += $"- Mask decoder: {maskDecoderPath}\n";
-                    Logger.Log($"[SegmentationPropagator] Original SAM models missing:\n{missingModels}");
-                    return null;
-                }
-            }
-
-            // We'll store partial results from each direction
             var directionResults = new Dictionary<string, byte[,,]>();
-
-            using (var segmenter = new CTMemorySegmenter(
-                imageEncoderPath,
-                promptEncoderPath,
-                maskDecoderPath,
-                memoryEncoderPath,
-                memoryAttentionPath,
-                mlpPath,
-                imageSize,
-                false,
-                settings.EnableMlp,
-                settings.UseCpuExecutionProvider))
+            // Determine model paths (only SAM 2.1 is supported now)
+            string modelFolder = settings.ModelFolderPath;
+            string imageEncoderPath = Path.Combine(modelFolder, "sam2.1_large.encoder.onnx");
+            string maskDecoderPath = Path.Combine(modelFolder, "sam2.1_large.decoder.onnx");
+            // If legacy paths were set, ignore them and log
+            if (!settings.UseSam2Models)
             {
-                segmenter.UseSelectiveHoleFilling = settings.UseSelectiveHoleFilling;
-                // Convert threshold in [0..255] => float in [0..1]
-                segmenter.MaskBinarizationThreshold = threshold / 255f;
-                // We'll store embeddings for SAM2.1 if needed, or just skip if old SAM
-                segmenter.StorePreviousEmbeddings = true;
+                Logger.Log("[SegmentationPropagator] Legacy SAM model support is removed. Forcing SAM 2.1 usage.");
+                settings.UseSam2Models = true;
+            }
+            // Validate SAM2.1 model files
+            if (!File.Exists(imageEncoderPath) || !File.Exists(maskDecoderPath))
+            {
+                if (!File.Exists(imageEncoderPath)) Logger.Log($"Missing SAM2.1 encoder: {imageEncoderPath}");
+                if (!File.Exists(maskDecoderPath)) Logger.Log($"Missing SAM2.1 decoder: {maskDecoderPath}");
+                return null;
+            }
 
-                // Actually run
-                if (usingSam2)
+            // Create segmenter (SAM 2.1 only)
+            using (var segmenter = new CTMemorySegmenter(imageEncoderPath, maskDecoderPath))
+            {
+                segmenter.MaskBinarizationThreshold = threshold / 255f; // use provided threshold (0.5 default)
+                segmenter.UseSelectiveHoleFilling = settings.UseSelectiveHoleFilling;
+
+                
+                // Propagate in each selected direction using SAM2.1 logic
+                if (directions.HasFlag(SAMForm.SegmentationDirection.XY))
                 {
-                    if (directions.HasFlag(SAMForm.SegmentationDirection.XY))
+                    var xyResult = PropagateSam2XYDirection(segmenter, mainForm, mainForm.GetWidth(), mainForm.GetHeight(), mainForm.GetDepth());
+                    if (xyResult != null)
                     {
-                        byte[,,] xyResult = PropagateSam2XYDirection(segmenter, mainForm, width, height, depth);
-                        if (xyResult != null)
-                        {
-                            directionResults["XY"] = xyResult;
-                            Logger.Log("[SegmentationPropagator] SAM2.1 XY direction propagation done.");
-                        }
+                        directionResults["XY"] = xyResult;
+                        Logger.Log("[SegmentationPropagator] SAM2.1 XY direction propagation done.");
                     }
-                    if (directions.HasFlag(SAMForm.SegmentationDirection.XZ))
+                }
+                if (directions.HasFlag(SAMForm.SegmentationDirection.XZ))
+                {
+                    var xzResult = PropagateSam2XZDirection(segmenter, mainForm, mainForm.GetWidth(), mainForm.GetHeight(), mainForm.GetDepth());
+                    if (xzResult != null)
                     {
-                        byte[,,] xzResult = PropagateSam2XZDirection(segmenter, mainForm, width, height, depth);
-                        if (xzResult != null)
-                        {
-                            directionResults["XZ"] = xzResult;
-                            Logger.Log("[SegmentationPropagator] SAM2.1 XZ direction propagation done.");
-                        }
+                        directionResults["XZ"] = xzResult;
+                        Logger.Log("[SegmentationPropagator] SAM2.1 XZ direction propagation done.");
                     }
-                    if (directions.HasFlag(SAMForm.SegmentationDirection.YZ))
+                }
+                if (directions.HasFlag(SAMForm.SegmentationDirection.YZ))
+                {
+                    var yzResult = PropagateSam2YZDirection(segmenter, mainForm, mainForm.GetWidth(), mainForm.GetHeight(), mainForm.GetDepth());
+                    if (yzResult != null)
                     {
-                        byte[,,] yzResult = PropagateSam2YZDirection(segmenter, mainForm, width, height, depth);
-                        if (yzResult != null)
-                        {
-                            directionResults["YZ"] = yzResult;
-                            Logger.Log("[SegmentationPropagator] SAM2.1 YZ direction propagation done.");
-                        }
+                        directionResults["YZ"] = yzResult;
+                        Logger.Log("[SegmentationPropagator] SAM2.1 YZ direction propagation done.");
                     }
+                
                 }
                 else
                 {

@@ -141,7 +141,6 @@
     <Reference Include="System.Xml.Linq" />
   </ItemGroup>
   <ItemGroup>
-    <None Include=".vs\CTSegmenter.csproj.dtbcache.json" />
     <None Include="App.config" />
     <None Include="packages.config" />
     <None Include="Properties\Settings.settings">
@@ -152,9 +151,6 @@
   <ItemGroup>
     <Compile Include="Annotations.cs" />
     <Compile Include="Binning.cs" />
-    <Compile Include="CandidateSelectorForm.cs">
-      <SubType>Form</SubType>
-    </Compile>
     <Compile Include="ChunkedLabelVolume.cs" />
     <Compile Include="ChunkedVolume.cs" />
     <Compile Include="ControlForm.cs">
@@ -197,15 +193,8 @@
       <DependentUpon>Settings.settings</DependentUpon>
     </Compile>
     <Compile Include="SafeInvokeAsync.cs" />
-    <Compile Include="SAMForm.cs">
-      <SubType>Form</SubType>
-    </Compile>
-    <Compile Include="SAMForm.Designer.cs">
-      <DependentUpon>SAMForm.cs</DependentUpon>
-    </Compile>
-    <Compile Include="CTMemorySegmenter.cs" />
-    <Compile Include="SAMSettings.cs" />
-    <Compile Include="SegmentationPropagator.cs" />
+    <Content Include="CTMemorySegmenter.txt" />
+    <Content Include="SegmentationPropagator.txt" />
     <Compile Include="VolumeExtensions.cs" />
   </ItemGroup>
   <ItemGroup>
@@ -224,9 +213,6 @@
     <EmbeddedResource Include="Properties\Resources.resx">
       <Generator>ResXFileCodeGenerator</Generator>
       <LastGenOutput>Resources1.Designer.cs</LastGenOutput>
-    </EmbeddedResource>
-    <EmbeddedResource Include="SAMForm.resx">
-      <DependentUpon>SAMForm.cs</DependentUpon>
     </EmbeddedResource>
   </ItemGroup>
   <ItemGroup>

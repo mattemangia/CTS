@@ -5,6 +5,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Linq;
 using CTSegmenter;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
@@ -12,6 +13,7 @@ using Microsoft.ML.OnnxRuntime.Tensors;
 /// <summary>
 /// A unified CTMemorySegmenter that supports both older 9/10-argument constructors
 /// and the new 2-argument constructor for SAM 2.1 (encoder + decoder).
+/// Also includes optional debugging logic to investigate black-mask issues.
 /// </summary>
 public class CTMemorySegmenter : IDisposable
 {
@@ -40,9 +42,25 @@ public class CTMemorySegmenter : IDisposable
     /// <summary>
     /// Mask binarization threshold in [0..1]. Default 0.5 => logit=0 => foreground.
     /// </summary>
-    public float MaskBinarizationThreshold { get; set; } = 0.5f;
+    public float MaskBinarizationThreshold { get; set; } = 0.0f;
 
-    private static void Log(string msg) => Debug.WriteLine(msg);
+    /// <summary>
+    /// When true, we add debug logs, min/max stats, optionally save mask images, etc.
+    /// </summary>
+    public bool DebugEnabled { get; set; } = true;
+
+    /// <summary>
+    /// If DebugEnabled is true, and this is also true, we save debug images to DebugOutputPath.
+    /// </summary>
+    public bool SaveDebugImages { get; set; } = true;
+
+    /// <summary>
+    /// Directory where we save debug images if SaveDebugImages is true.
+    /// Defaults to Application.StartupPath + "/DebugMasks"
+    /// </summary>
+    public string DebugOutputPath { get; set; } = ".\\DebugInfos";
+
+    private static void Log(string msg) => Logger.Log(msg);
 
     // ------------------------------------------------------------------------
     // Constructors
@@ -87,64 +105,49 @@ public class CTMemorySegmenter : IDisposable
     }
 
     /// <summary>
-    /// Old 10-argument constructor: originally for older SAM.
+    /// Old 10-argument constructor: originally for older SAM. We'll adapt it to also handle SAM 2.1 if so desired.
     /// </summary>
     public CTMemorySegmenter(
-        string imageEncoderPath,
-        string promptEncoderPath,
-        string maskDecoderPath,
-        string memoryEncoderPath,
-        string memoryAttentionPath,
-        string mlpPath,
-        int imageInputSize,
-        bool canUseTextPrompts,
-        bool enableMlp,
-        bool useCpuExecutionProvider)
+    string imageEncoderPath,
+    string promptEncoderPath,
+    string maskDecoderPath,
+    string memoryEncoderPath,
+    string memoryAttentionPath,
+    string mlpPath,
+    int imageInputSize,
+    bool canUseTextPrompts,
+    bool enableMlp,
+    bool useCpuExecutionProvider)
     {
-        // Store them in fields
+        // Store primary paths
         _imageEncoderPath = imageEncoderPath;
-        _promptEncoderPath = promptEncoderPath;
         _maskDecoderPath = maskDecoderPath;
-        _memoryEncoderPath = memoryEncoderPath;
-        _memoryAttentionPath = memoryAttentionPath;
-        _mlpPath = mlpPath;
         _imageInputSize = imageInputSize;
-        _canUseTextPrompts = canUseTextPrompts;
-        _enableMlp = enableMlp;
         _useCpuExecutionProvider = useCpuExecutionProvider;
+        // Log and ignore legacy model paths (not used in SAM 2.1)
+        if (!string.IsNullOrEmpty(promptEncoderPath) || !string.IsNullOrEmpty(memoryEncoderPath))
+            Log("[CTMemorySegmenter] Legacy SAM model support is removed. Ignoring prompt/memory encoder paths.");
 
-        Log("[CTMemorySegmenter] Old 10-arg constructor invoked.");
-
-        // Create runtime sessions for the main encoder/decoder ONNX:
-        SessionOptions options = new SessionOptions();
-        if (!useCpuExecutionProvider)
+        // Initialize ONNX runtime sessions for encoder and decoder only
+        var options = new SessionOptions();
+        if (!_useCpuExecutionProvider)
         {
-            try
-            {
-                // If you have GPU or CUDA, place code here like: options.AppendExecutionProvider_CUDA();
-                Log("[CTMemorySegmenter] Attempting GPU (dummy).");
-            }
-            catch (Exception ex)
-            {
-                Log("[CTMemorySegmenter] GPU not available; fallback to CPU: " + ex.Message);
-                options = new SessionOptions();
-                options.AppendExecutionProvider_CPU();
-            }
+            try { options.AppendExecutionProvider_CUDA(); }
+            catch { options = new SessionOptions(); options.AppendExecutionProvider_CPU(); }
         }
         else
         {
             options.AppendExecutionProvider_CPU();
         }
-
         if (File.Exists(_imageEncoderPath) && File.Exists(_maskDecoderPath))
         {
             _encoderSession = new InferenceSession(_imageEncoderPath, options);
             _decoderSession = new InferenceSession(_maskDecoderPath, options);
-            Log("[CTMemorySegmenter] Sessions loaded (possibly SAM 2.1 or older).");
+            Log("[CTMemorySegmenter] Initialized SAM2.1 encoder/decoder sessions.");
         }
         else
         {
-            Log("[CTMemorySegmenter] Could not find specified encoder/decoder ONNX. Not loading sessions.");
+            Log("[CTMemorySegmenter] Model files not found – encoder/decoder not loaded.");
         }
     }
 
@@ -190,12 +193,10 @@ public class CTMemorySegmenter : IDisposable
 
         // 2) Run encoder => image_embed, high_res_feats_0, high_res_feats_1
         Tensor<float> imageEmbeddings, highRes0, highRes1;
-        using (var encOut = _encoderSession.Run(new[]
-        {
+        using (var encOut = _encoderSession.Run(new[] {
             NamedOnnxValue.CreateFromTensor("image", imageInput)
         }))
         {
-            // For SAM 2.1, outputs typically named "image_embed", "high_res_feats_0", "high_res_feats_1".
             imageEmbeddings = GetFirstTensorOrNull<float>(encOut, "image_embed");
             highRes0 = GetFirstTensorOrNull<float>(encOut, "high_res_feats_0");
             highRes1 = GetFirstTensorOrNull<float>(encOut, "high_res_feats_1");
@@ -219,8 +220,7 @@ public class CTMemorySegmenter : IDisposable
 
         // 5) Run decoder => output masks + IoU
         Tensor<float> masksTensor, iouTensor;
-        using (var decOut = _decoderSession.Run(new List<NamedOnnxValue>
-        {
+        using (var decOut = _decoderSession.Run(new List<NamedOnnxValue> {
             NamedOnnxValue.CreateFromTensor("image_embed",      imageEmbeddings),
             NamedOnnxValue.CreateFromTensor("high_res_feats_0", highRes0),
             NamedOnnxValue.CreateFromTensor("high_res_feats_1", highRes1),
@@ -231,7 +231,7 @@ public class CTMemorySegmenter : IDisposable
             NamedOnnxValue.CreateFromTensor("orig_im_size",     origSizeTensor)
         }))
         {
-            masksTensor = GetFirstTensorOrNull<float>(decOut, "masks");  // shape [1,3,256,256]
+            masksTensor = GetFirstTensorOrNull<float>(decOut, "masks");   // shape [1,3,256,256]
             iouTensor = GetFirstTensorOrNull<float>(decOut, "iou_predictions"); // shape [1,3]
         }
 
@@ -248,15 +248,28 @@ public class CTMemorySegmenter : IDisposable
             return null;
         }
 
+        // If debugging, dump stats for each channel
+        if (DebugEnabled)
+        {
+            Log($"[ProcessXYSlice] iouTensor => shape=[1, {outC}]");
+            for (int c = 0; c < outC; c++)
+            {
+                float iouVal = iouTensor[0, c];
+                Log($"   Channel {c}: IoU={iouVal:F4}");
+            }
+            // Dump stats for the raw logits
+            DumpTensorStats(masksTensor, "XY_single", sliceIndex);
+        }
+
         // Pick best IoU
         float bestIoU = float.MinValue;
         int bestIndex = 0;
         for (int c = 0; c < outC; c++)
         {
-            float iouVal = iouTensor[0, c];
-            if (iouVal > bestIoU)
+            float iou = iouTensor[0, c];
+            if (iou > bestIoU)
             {
-                bestIoU = iouVal;
+                bestIoU = iou;
                 bestIndex = c;
             }
         }
@@ -265,11 +278,11 @@ public class CTMemorySegmenter : IDisposable
         // Convert that channel’s logits => binarized mask
         int maskH = masksTensor.Dimensions[2]; // 256
         int maskW = masksTensor.Dimensions[3]; // 256
-        var finalMask = BuildMaskFromDecoder(masksTensor, bestIndex, maskW, maskH, origW, origH, out maskBits);
+        var finalMask = BuildMaskFromDecoder(masksTensor, bestIndex, maskW, maskH, origW, origH, out maskBits, sliceIndex, "XY_single");
+
         return finalMask;
     }
 
-    // Overload returning just the mask as a Bitmap
     public Bitmap ProcessXYSlice(
         int sliceIndex,
         Bitmap baseXY,
@@ -283,9 +296,6 @@ public class CTMemorySegmenter : IDisposable
     // ------------------------------------------------------------------------
     // XZ methods
     // ------------------------------------------------------------------------
-    /// <summary>
-    /// Single best mask for XZ slice. 
-    /// </summary>
     public Bitmap ProcessXZSlice(
         int fixedY,
         Bitmap baseXZ,
@@ -309,10 +319,8 @@ public class CTMemorySegmenter : IDisposable
         float[] imageTensor = BitmapToFloatTensor(baseXZ, _imageInputSize, _imageInputSize);
         var imageInput = new DenseTensor<float>(imageTensor, new[] { 1, 3, _imageInputSize, _imageInputSize });
 
-        // encode
         Tensor<float> imageEmbeddings, highRes0, highRes1;
-        using (var encOut = _encoderSession.Run(new[]
-        {
+        using (var encOut = _encoderSession.Run(new[] {
             NamedOnnxValue.CreateFromTensor("image", imageInput)
         }))
         {
@@ -350,13 +358,19 @@ public class CTMemorySegmenter : IDisposable
             masksTensor = GetFirstTensorOrNull<float>(decOut, "masks");
             iouTensor = GetFirstTensorOrNull<float>(decOut, "iou_predictions");
         }
-        if (masksTensor == null || iouTensor == null)
-            return null;
+        if (masksTensor == null || iouTensor == null) return null;
 
-        int outC = masksTensor.Dimensions[1]; // typically 3
-        if (outC == 0) return null;
+        int outC = masksTensor.Dimensions[1];
+        if (DebugEnabled)
+        {
+            for (int c = 0; c < outC; c++)
+            {
+                float iouVal = iouTensor[0, c];
+                Log($"[ProcessXZSlice] Channel {c}, IoU={iouVal:F3}");
+            }
+            DumpTensorStats(masksTensor, "XZ_single", fixedY);
+        }
 
-        // pick best
         float bestIoU = float.MinValue;
         int bestIndex = 0;
         for (int c = 0; c < outC; c++)
@@ -372,7 +386,9 @@ public class CTMemorySegmenter : IDisposable
 
         int maskH = masksTensor.Dimensions[2];
         int maskW = masksTensor.Dimensions[3];
-        var finalMask = BuildMaskFromDecoder(masksTensor, bestIndex, maskW, maskH, origW, origH, out maskBits);
+        var finalMask = BuildMaskFromDecoder(masksTensor, bestIndex, maskW, maskH, origW, origH,
+                                             out maskBits, fixedY, "XZ_single");
+
         return finalMask;
     }
 
@@ -389,9 +405,6 @@ public class CTMemorySegmenter : IDisposable
     // ------------------------------------------------------------------------
     // YZ methods
     // ------------------------------------------------------------------------
-    /// <summary>
-    /// Single best mask for YZ slice.
-    /// </summary>
     public Bitmap ProcessYZSlice(
         int fixedX,
         Bitmap baseYZ,
@@ -416,8 +429,7 @@ public class CTMemorySegmenter : IDisposable
         var imageInput = new DenseTensor<float>(imageTensor, new[] { 1, 3, _imageInputSize, _imageInputSize });
 
         Tensor<float> imageEmbeddings, highRes0, highRes1;
-        using (var encOut = _encoderSession.Run(new[]
-        {
+        using (var encOut = _encoderSession.Run(new[] {
             NamedOnnxValue.CreateFromTensor("image", imageInput)
         }))
         {
@@ -425,8 +437,7 @@ public class CTMemorySegmenter : IDisposable
             highRes0 = GetFirstTensorOrNull<float>(encOut, "high_res_feats_0");
             highRes1 = GetFirstTensorOrNull<float>(encOut, "high_res_feats_1");
         }
-        if (imageEmbeddings == null || highRes0 == null || highRes1 == null)
-            return null;
+        if (imageEmbeddings == null || highRes0 == null || highRes1 == null) return null;
 
         int origW = baseYZ.Width;
         int origH = baseYZ.Height;
@@ -452,11 +463,18 @@ public class CTMemorySegmenter : IDisposable
             masksTensor = GetFirstTensorOrNull<float>(decOut, "masks");
             iouTensor = GetFirstTensorOrNull<float>(decOut, "iou_predictions");
         }
-        if (masksTensor == null || iouTensor == null)
-            return null;
+        if (masksTensor == null || iouTensor == null) return null;
 
         int outC = masksTensor.Dimensions[1];
-        if (outC == 0) return null;
+        if (DebugEnabled)
+        {
+            for (int c = 0; c < outC; c++)
+            {
+                float iouVal = iouTensor[0, c];
+                Log($"[ProcessYZSlice] Channel {c}, IoU={iouVal:F3}");
+            }
+            DumpTensorStats(masksTensor, "YZ_single", fixedX);
+        }
 
         float bestIoU = float.MinValue;
         int bestIndex = 0;
@@ -472,7 +490,8 @@ public class CTMemorySegmenter : IDisposable
 
         int maskH = masksTensor.Dimensions[2];
         int maskW = masksTensor.Dimensions[3];
-        var finalMask = BuildMaskFromDecoder(masksTensor, bestIndex, maskW, maskH, origW, origH, out maskBits);
+        var finalMask = BuildMaskFromDecoder(masksTensor, bestIndex, maskW, maskH, origW, origH,
+                                             out maskBits, fixedX, "YZ_single");
         return finalMask;
     }
 
@@ -487,25 +506,37 @@ public class CTMemorySegmenter : IDisposable
     }
 
     // ------------------------------------------------------------------------
-    // "GetAllMasks" multi-candidate versions (Optional)
+    // "GetAllMasks" multi-candidate versions
     // ------------------------------------------------------------------------
-    // The multi-mask code is not strictly required for basic propagation. It’s shown
-    // here just to illustrate how you can retrieve all candidate masks from SAM.
-    // You can remove or keep these as you prefer.
-
+    /// <summary>
+    /// Multi-mask version for XY. Returns all candidate masks as a List, sorted by IoU descending.
+    /// </summary>
     public List<Bitmap> ProcessXYSlice_GetAllMasks(
-        int sliceIndex,
-        Bitmap baseXY,
-        List<AnnotationPoint> slicePoints,
-        string targetMaterialName)
+     int sliceIndex,
+     Bitmap baseXY,
+     List<AnnotationPoint> slicePoints,
+     string targetMaterialName)
     {
         var results = new List<Bitmap>();
-        if (_encoderSession == null || _decoderSession == null) return results;
-        if (baseXY == null || slicePoints == null || slicePoints.Count == 0) return results;
 
-        // Encode
+        // Input validation
+        if (_encoderSession == null || _decoderSession == null)
+        {
+            Log("[ProcessXYSlice_GetAllMasks] Sessions not initialized");
+            return results;
+        }
+
+        if (baseXY == null || slicePoints == null || slicePoints.Count == 0)
+        {
+            Log("[ProcessXYSlice_GetAllMasks] Invalid inputs");
+            return results;
+        }
+
+        // 1. Convert the image to a tensor
         float[] imageTensor = BitmapToFloatTensor(baseXY, _imageInputSize, _imageInputSize);
         var imageInput = new DenseTensor<float>(imageTensor, new[] { 1, 3, _imageInputSize, _imageInputSize });
+
+        // 2. Run the encoder
         Tensor<float> imageEmbeddings, highRes0, highRes1;
         using (var encOut = _encoderSession.Run(new[] { NamedOnnxValue.CreateFromTensor("image", imageInput) }))
         {
@@ -513,99 +544,173 @@ public class CTMemorySegmenter : IDisposable
             highRes0 = GetFirstTensorOrNull<float>(encOut, "high_res_feats_0");
             highRes1 = GetFirstTensorOrNull<float>(encOut, "high_res_feats_1");
         }
-        if (imageEmbeddings == null || highRes0 == null || highRes1 == null) return results;
 
-        // Prompt
+        // 3. Validate encoder outputs
+        if (imageEmbeddings == null || highRes0 == null || highRes1 == null)
+        {
+            Log("[ProcessXYSlice_GetAllMasks] Encoder outputs are null");
+            return results;
+        }
+
+        // 4. Build prompt tensors
         int origW = baseXY.Width;
         int origH = baseXY.Height;
+        int maskH;
+        int maskW;
         var (coordTensor, labelTensor) = BuildSinglePromptTensors(slicePoints, origW, origH, targetMaterialName);
 
+        // 5. Prepare decoder inputs
         var origSizeTensor = new DenseTensor<int>(new[] { origH, origW }, new[] { 2 });
         int batchSize = coordTensor.Dimensions[0];
         var maskInputTensor = new DenseTensor<float>(new float[batchSize * 1 * 256 * 256], new[] { batchSize, 1, 256, 256 });
         var hasMaskInputTensor = new DenseTensor<float>(new float[batchSize], new[] { batchSize });
 
-        // Decode
+        // 6. Run the decoder
         Tensor<float> masksTensor, iouTensor;
         using (var decOut = _decoderSession.Run(new List<NamedOnnxValue> {
-            NamedOnnxValue.CreateFromTensor("image_embed",      imageEmbeddings),
-            NamedOnnxValue.CreateFromTensor("high_res_feats_0", highRes0),
-            NamedOnnxValue.CreateFromTensor("high_res_feats_1", highRes1),
-            NamedOnnxValue.CreateFromTensor("point_coords",     coordTensor),
-            NamedOnnxValue.CreateFromTensor("point_labels",     labelTensor),
-            NamedOnnxValue.CreateFromTensor("mask_input",       maskInputTensor),
-            NamedOnnxValue.CreateFromTensor("has_mask_input",   hasMaskInputTensor),
-            NamedOnnxValue.CreateFromTensor("orig_im_size",     origSizeTensor)
-        }))
+        NamedOnnxValue.CreateFromTensor("image_embed",      imageEmbeddings),
+        NamedOnnxValue.CreateFromTensor("high_res_feats_0", highRes0),
+        NamedOnnxValue.CreateFromTensor("high_res_feats_1", highRes1),
+        NamedOnnxValue.CreateFromTensor("point_coords",     coordTensor),
+        NamedOnnxValue.CreateFromTensor("point_labels",     labelTensor),
+        NamedOnnxValue.CreateFromTensor("mask_input",       maskInputTensor),
+        NamedOnnxValue.CreateFromTensor("has_mask_input",   hasMaskInputTensor),
+        NamedOnnxValue.CreateFromTensor("orig_im_size",     origSizeTensor)
+    }))
         {
             masksTensor = GetFirstTensorOrNull<float>(decOut, "masks");
             iouTensor = GetFirstTensorOrNull<float>(decOut, "iou_predictions");
         }
-        if (masksTensor == null || iouTensor == null) return results;
-        int outC = masksTensor.Dimensions[1];
-        if (outC == 0) return results;
 
-        // Sort channels by IoU
-        var iouList = new List<(float iouVal, int channel)>();
-        for (int c = 0; c < outC; c++)
-            iouList.Add((iouTensor[0, c], c));
-        iouList.Sort((a, b) => b.iouVal.CompareTo(a.iouVal));
-
-        int maskH = masksTensor.Dimensions[2];
-        int maskW = masksTensor.Dimensions[3];
-        foreach (var entry in iouList)
+        // 7. Validate decoder outputs
+        if (masksTensor == null || iouTensor == null)
         {
-            bool[,] dummy;
-            Bitmap candidate = BuildMaskFromDecoder(masksTensor, entry.channel, maskW, maskH, origW, origH, out dummy);
-            results.Add(candidate);
+            Log("[ProcessXYSlice_GetAllMasks] Decoder outputs are null");
+            return results;
         }
+
+        // 8. Get mask dimensions
+        int outC = masksTensor.Dimensions[1];
+        if (outC == 0)
+        {
+            Log("[ProcessXYSlice_GetAllMasks] No mask channels found in output tensor");
+            return results;
+        }
+
+        // 9. Log tensor dimensions and IoU values
+        string maskDimStr = $"{masksTensor.Dimensions[0]},{masksTensor.Dimensions[1]},{masksTensor.Dimensions[2]},{masksTensor.Dimensions[3]}";
+        string iouDimStr = $"{iouTensor.Dimensions[0]},{iouTensor.Dimensions[1]}";
+        Log($"[ProcessXYSlice_GetAllMasks] masks tensor shape: [{maskDimStr}]");
+        Log($"[ProcessXYSlice_GetAllMasks] iou tensor shape: [{iouDimStr}]");
+
+        Log($"[ProcessXYSlice_GetAllMasks] Got {outC} mask candidates (channels). IoUs:");
+        for (int chan = 0; chan < outC; chan++)
+        {
+            float iouValue = chan < iouTensor.Dimensions[1] ? iouTensor[0, chan] : 0.0f;
+            Log($"  - Mask {chan}: IoU={iouValue:F4}");
+
+            // Analyze mask content
+            float minLogit = float.MaxValue;
+            float maxLogit = float.MinValue;
+            maskH = masksTensor.Dimensions[2];
+            maskW = masksTensor.Dimensions[3];
+
+            for (int y = 0; y < maskH; y++)
+            {
+                for (int x = 0; x < maskW; x++)
+                {
+                    float val = masksTensor[0, chan, y, x];
+                    minLogit = Math.Min(minLogit, val);
+                    maxLogit = Math.Max(maxLogit, val);
+                }
+            }
+
+            Log($"  - Mask {chan} logit range: min={minLogit:F3}, max={maxLogit:F3}");
+        }
+
+        // 10. Sort mask channels by IoU descending
+        var sortedIndices = new List<(float iou, int idx)>();
+        for (int chan = 0; chan < outC; chan++)
+        {
+            // Always include all channels even if IoU is zero
+            sortedIndices.Add((iouTensor[0, chan], chan));
+        }
+        sortedIndices.Sort((a, b) => b.iou.CompareTo(a.iou));
+
+        // 11. Convert each mask logits channel to a Bitmap
+        maskH = masksTensor.Dimensions[2];
+        maskW = masksTensor.Dimensions[3];
+        foreach (var pair in sortedIndices)
+        {
+            int channelIndex = pair.idx;
+            bool[,] dummy;
+            try
+            {
+                Bitmap candidateMask = BuildMaskFromDecoder(
+                    masksTensor,
+                    channelIndex,
+                    maskW,
+                    maskH,
+                    origW,
+                    origH,
+                    out dummy,
+                    sliceIndex,
+                    debugTag: $"XY_multi_c{channelIndex}"
+                );
+                results.Add(candidateMask);
+            }
+            catch (Exception ex)
+            {
+                Log($"[ProcessXYSlice_GetAllMasks] Error building mask for channel {channelIndex}: {ex.Message}");
+            }
+        }
+
         return results;
     }
+
 
     /// <summary>
     /// Multi-mask version for XZ. Returns all candidate masks as a List, sorted by IoU descending.
     /// </summary>
     public List<Bitmap> ProcessXZSlice_GetAllMasks(
-        int fixedY,
-        Bitmap baseXZ,
-        List<AnnotationPoint> slicePoints,
-        string targetMaterialName)
+    int fixedY,
+    Bitmap baseXZ,
+    List<AnnotationPoint> slicePoints,
+    string targetMaterialName)
+{
+    var results = new List<Bitmap>();
+    if (_encoderSession == null || _decoderSession == null) 
+        return results;
+    if (baseXZ == null || slicePoints == null || slicePoints.Count == 0) 
+        return results;
+
+    // 1) Encode the XZ slice -> image_embed, high_res_feats
+    float[] imageTensor = BitmapToFloatTensor(baseXZ, _imageInputSize, _imageInputSize);
+    var imageInput = new DenseTensor<float>(imageTensor, new[] { 1, 3, _imageInputSize, _imageInputSize });
+    Tensor<float> imageEmbeddings, highRes0, highRes1;
+    using (var encOut = _encoderSession.Run(new[] { NamedOnnxValue.CreateFromTensor("image", imageInput) }))
     {
-        var results = new List<Bitmap>();
-        if (_encoderSession == null || _decoderSession == null) return results;
-        if (baseXZ == null || slicePoints == null || slicePoints.Count == 0) return results;
+        imageEmbeddings = GetFirstTensorOrNull<float>(encOut, "image_embed");
+        highRes0        = GetFirstTensorOrNull<float>(encOut, "high_res_feats_0");
+        highRes1        = GetFirstTensorOrNull<float>(encOut, "high_res_feats_1");
+    }
+    if (imageEmbeddings == null || highRes0 == null || highRes1 == null)
+        return results;
 
-        // 1) Encode XZ slice
-        float[] imageTensor = BitmapToFloatTensor(baseXZ, _imageInputSize, _imageInputSize);
-        var imageInput = new DenseTensor<float>(imageTensor, new[] { 1, 3, _imageInputSize, _imageInputSize });
+    // 2) Build prompt
+    int origW = baseXZ.Width;
+    int origH = baseXZ.Height;
+    var (coordTensor, labelTensor) = BuildSinglePromptTensors(slicePoints, origW, origH, targetMaterialName);
 
-        Tensor<float> imageEmbeddings, highRes0, highRes1;
-        using (var encOut = _encoderSession.Run(new[]
-        {
-        NamedOnnxValue.CreateFromTensor("image", imageInput)
-    }))
-        {
-            imageEmbeddings = GetFirstTensorOrNull<float>(encOut, "image_embed");
-            highRes0 = GetFirstTensorOrNull<float>(encOut, "high_res_feats_0");
-            highRes1 = GetFirstTensorOrNull<float>(encOut, "high_res_feats_1");
-        }
-        if (imageEmbeddings == null || highRes0 == null || highRes1 == null)
-            return results;
+    // 3) Prepare mask_input
+    int batchSize = coordTensor.Dimensions[0];
+    var maskInputTensor = new DenseTensor<float>(new float[batchSize * 1 * 256 * 256], new[] { batchSize, 1, 256, 256 });
+    var hasMaskInputTensor = new DenseTensor<float>(new float[batchSize], new[] { batchSize });
+    var origSizeTensor = new DenseTensor<int>(new[] { origH, origW }, new[] { 2 });
 
-        // 2) Build prompt
-        int origW = baseXZ.Width;
-        int origH = baseXZ.Height;
-        var (coordTensor, labelTensor) = BuildSinglePromptTensors(slicePoints, origW, origH, targetMaterialName);
-
-        // 3) Prepare other decoder inputs
-        var origSizeTensor = new DenseTensor<int>(new[] { origH, origW }, new[] { 2 });
-        var maskInputTensor = new DenseTensor<float>(new float[1 * 1 * 256 * 256], new[] { 1, 1, 256, 256 });
-        var hasMaskInputTensor = new DenseTensor<float>(new float[1], new[] { 1 });
-
-        // 4) Run decoder
-        Tensor<float> masksTensor, iouTensor;
-        using (var decOut = _decoderSession.Run(new List<NamedOnnxValue>
-    {
+    // 4) Decoder => output all mask channels + IoU
+    Tensor<float> masksTensor, iouTensor;
+    using (var decOut = _decoderSession.Run(new List<NamedOnnxValue> {
         NamedOnnxValue.CreateFromTensor("image_embed",      imageEmbeddings),
         NamedOnnxValue.CreateFromTensor("high_res_feats_0", highRes0),
         NamedOnnxValue.CreateFromTensor("high_res_feats_1", highRes1),
@@ -615,76 +720,86 @@ public class CTMemorySegmenter : IDisposable
         NamedOnnxValue.CreateFromTensor("has_mask_input",   hasMaskInputTensor),
         NamedOnnxValue.CreateFromTensor("orig_im_size",     origSizeTensor)
     }))
-        {
-            masksTensor = GetFirstTensorOrNull<float>(decOut, "masks");         // shape [1,3,256,256]
-            iouTensor = GetFirstTensorOrNull<float>(decOut, "iou_predictions"); // shape [1,3]
-        }
-        if (masksTensor == null || iouTensor == null) return results;
-
-        // 5) Sort the decoder’s channels by IoU
-        int outC = masksTensor.Dimensions[1];
-        var iouList = new List<(float iouVal, int channel)>();
-        for (int c = 0; c < outC; c++)
-            iouList.Add((iouTensor[0, c], c));
-        iouList.Sort((a, b) => b.iouVal.CompareTo(a.iouVal)); // descending
-
-        // 6) Build mask bitmaps for each channel
-        int maskH = masksTensor.Dimensions[2]; // 256
-        int maskW = masksTensor.Dimensions[3]; // 256
-        foreach (var entry in iouList)
-        {
-            bool[,] dummy;
-            Bitmap candidate = BuildMaskFromDecoder(masksTensor, entry.channel, maskW, maskH, origW, origH, out dummy);
-            results.Add(candidate);
-        }
-
+    {
+        masksTensor = GetFirstTensorOrNull<float>(decOut, "masks");          // shape [1,3,256,256]
+        iouTensor   = GetFirstTensorOrNull<float>(decOut, "iou_predictions"); // shape [1,3]
+    }
+    if (masksTensor == null || iouTensor == null)
         return results;
+
+    int outC = masksTensor.Dimensions[1];
+    if (outC == 0) 
+        return results;
+
+    // 5) Sort channels by IoU descending
+    var iouList = new List<(float iou, int c)>();
+    for (int c = 0; c < outC; c++)
+        iouList.Add((iouTensor[0,c], c));
+    iouList.Sort((a,b) => b.iou.CompareTo(a.iou));
+
+    // 6) Convert each channel’s logits to a Bitmap, in IoU desc order
+    int maskH = masksTensor.Dimensions[2];
+    int maskW = masksTensor.Dimensions[3];
+    foreach (var entry in iouList)
+    {
+        bool[,] dummy;
+        Bitmap candidate = BuildMaskFromDecoder(
+            masksTensor,
+            entry.c,
+            maskW,
+            maskH,
+            origW,
+            origH,
+            out dummy
+        );
+        results.Add(candidate);
     }
 
-    /// <summary>
-    /// Multi-mask version for YZ. Returns all candidate masks as a List, sorted by IoU descending.
-    /// </summary>
-    public List<Bitmap> ProcessYZSlice_GetAllMasks(
-        int fixedX,
-        Bitmap baseYZ,
-        List<AnnotationPoint> slicePoints,
-        string targetMaterialName)
+    return results;
+}
+
+/// <summary>
+/// Multi-mask version for YZ. Returns all candidate masks as a List, sorted by IoU descending.
+/// </summary>
+public List<Bitmap> ProcessYZSlice_GetAllMasks(
+    int fixedX,
+    Bitmap baseYZ,
+    List<AnnotationPoint> slicePoints,
+    string targetMaterialName)
+{
+    var results = new List<Bitmap>();
+    if (_encoderSession == null || _decoderSession == null) 
+        return results;
+    if (baseYZ == null || slicePoints == null || slicePoints.Count == 0) 
+        return results;
+
+    // 1) Encode the YZ slice
+    float[] imageTensor = BitmapToFloatTensor(baseYZ, _imageInputSize, _imageInputSize);
+    var imageInput = new DenseTensor<float>(imageTensor, new[] { 1, 3, _imageInputSize, _imageInputSize });
+    Tensor<float> imageEmbeddings, highRes0, highRes1;
+    using (var encOut = _encoderSession.Run(new[] { NamedOnnxValue.CreateFromTensor("image", imageInput) }))
     {
-        var results = new List<Bitmap>();
-        if (_encoderSession == null || _decoderSession == null) return results;
-        if (baseYZ == null || slicePoints == null || slicePoints.Count == 0) return results;
+        imageEmbeddings = GetFirstTensorOrNull<float>(encOut, "image_embed");
+        highRes0        = GetFirstTensorOrNull<float>(encOut, "high_res_feats_0");
+        highRes1        = GetFirstTensorOrNull<float>(encOut, "high_res_feats_1");
+    }
+    if (imageEmbeddings == null || highRes0 == null || highRes1 == null)
+        return results;
 
-        // 1) Encode YZ slice
-        float[] imageTensor = BitmapToFloatTensor(baseYZ, _imageInputSize, _imageInputSize);
-        var imageInput = new DenseTensor<float>(imageTensor, new[] { 1, 3, _imageInputSize, _imageInputSize });
+    // 2) Prompt
+    int origW = baseYZ.Width;
+    int origH = baseYZ.Height;
+    var (coordTensor, labelTensor) = BuildSinglePromptTensors(slicePoints, origW, origH, targetMaterialName);
 
-        Tensor<float> imageEmbeddings, highRes0, highRes1;
-        using (var encOut = _encoderSession.Run(new[]
-        {
-        NamedOnnxValue.CreateFromTensor("image", imageInput)
-    }))
-        {
-            imageEmbeddings = GetFirstTensorOrNull<float>(encOut, "image_embed");
-            highRes0 = GetFirstTensorOrNull<float>(encOut, "high_res_feats_0");
-            highRes1 = GetFirstTensorOrNull<float>(encOut, "high_res_feats_1");
-        }
-        if (imageEmbeddings == null || highRes0 == null || highRes1 == null)
-            return results;
+    // 3) Mask input
+    int batchSize = coordTensor.Dimensions[0];
+    var maskInputTensor = new DenseTensor<float>(new float[batchSize * 1 * 256 * 256], new[] { batchSize, 1, 256, 256 });
+    var hasMaskInputTensor = new DenseTensor<float>(new float[batchSize], new[] { batchSize });
+    var origSizeTensor = new DenseTensor<int>(new[] { origH, origW }, new[] { 2 });
 
-        // 2) Build prompt
-        int origW = baseYZ.Width;
-        int origH = baseYZ.Height;
-        var (coordTensor, labelTensor) = BuildSinglePromptTensors(slicePoints, origW, origH, targetMaterialName);
-
-        // 3) Prepare other decoder inputs
-        var origSizeTensor = new DenseTensor<int>(new[] { origH, origW }, new[] { 2 });
-        var maskInputTensor = new DenseTensor<float>(new float[1 * 1 * 256 * 256], new[] { 1, 1, 256, 256 });
-        var hasMaskInputTensor = new DenseTensor<float>(new float[1], new[] { 1 });
-
-        // 4) Run decoder
-        Tensor<float> masksTensor, iouTensor;
-        using (var decOut = _decoderSession.Run(new List<NamedOnnxValue>
-    {
+    // 4) Decode => all mask channels
+    Tensor<float> masksTensor, iouTensor;
+    using (var decOut = _decoderSession.Run(new List<NamedOnnxValue> {
         NamedOnnxValue.CreateFromTensor("image_embed",      imageEmbeddings),
         NamedOnnxValue.CreateFromTensor("high_res_feats_0", highRes0),
         NamedOnnxValue.CreateFromTensor("high_res_feats_1", highRes1),
@@ -694,76 +809,207 @@ public class CTMemorySegmenter : IDisposable
         NamedOnnxValue.CreateFromTensor("has_mask_input",   hasMaskInputTensor),
         NamedOnnxValue.CreateFromTensor("orig_im_size",     origSizeTensor)
     }))
-        {
-            masksTensor = GetFirstTensorOrNull<float>(decOut, "masks");         // shape [1,3,256,256]
-            iouTensor = GetFirstTensorOrNull<float>(decOut, "iou_predictions"); // shape [1,3]
-        }
-        if (masksTensor == null || iouTensor == null) return results;
-
-        // 5) Sort by IoU
-        int outC = masksTensor.Dimensions[1];
-        var iouList = new List<(float iouVal, int channel)>();
-        for (int c = 0; c < outC; c++)
-            iouList.Add((iouTensor[0, c], c));
-        iouList.Sort((a, b) => b.iouVal.CompareTo(a.iouVal));
-
-        // 6) Build mask bitmaps for each channel
-        int maskH = masksTensor.Dimensions[2]; // 256
-        int maskW = masksTensor.Dimensions[3]; // 256
-        foreach (var entry in iouList)
-        {
-            bool[,] dummy;
-            Bitmap candidate = BuildMaskFromDecoder(masksTensor, entry.channel, maskW, maskH, origW, origH, out dummy);
-            results.Add(candidate);
-        }
-
-        return results;
+    {
+        masksTensor = GetFirstTensorOrNull<float>(decOut, "masks");          // shape [1,3,256,256]
+        iouTensor   = GetFirstTensorOrNull<float>(decOut, "iou_predictions"); // shape [1,3]
     }
+    if (masksTensor == null || iouTensor == null)
+        return results;
+
+    int outC = masksTensor.Dimensions[1];
+    if (outC == 0) 
+        return results;
+
+    // 5) Sort channels by IoU
+    var iouList = new List<(float iou,int c)>();
+    for (int c = 0; c < outC; c++)
+        iouList.Add((iouTensor[0,c], c));
+    iouList.Sort((a,b) => b.iou.CompareTo(a.iou));
+
+    int maskH = masksTensor.Dimensions[2];
+    int maskW = masksTensor.Dimensions[3];
+    // 6) Convert each channel
+    foreach (var entry in iouList)
+    {
+        bool[,] dummy;
+        Bitmap candidate = BuildMaskFromDecoder(
+            masksTensor,
+            entry.c,
+            maskW,
+            maskH,
+            origW,
+            origH,
+            out dummy
+        );
+        results.Add(candidate);
+    }
+
+    return results;
+}
 
 
     // ------------------------------------------------------------------------
     // Private helper: Build prompt from points => label=1 if matches targetMaterial, else 0
     // ------------------------------------------------------------------------
     private (DenseTensor<float>, DenseTensor<float>) BuildSinglePromptTensors(
-        List<AnnotationPoint> prompts,
-        int origW, int origH,
-        string targetMaterialName)
+    List<AnnotationPoint> prompts, int origW, int origH, string targetMaterialName)
     {
-        // Scale XY coords to [0..(imageInputSize-1)]
-        float xScale = (_imageInputSize - 1f) / Math.Max(1, origW - 1);
-        float yScale = (_imageInputSize - 1f) / Math.Max(1, origH - 1);
-
+        // Compute normalized scale factors (to 0..1 range)
+        float xDenom = Math.Max(1, origW - 1);
+        float yDenom = Math.Max(1, origH - 1);
         var coordsList = new List<float>();
         var labelsList = new List<float>();
 
+        Log($"[BuildSinglePromptTensors] Building prompts for '{targetMaterialName}' with {prompts.Count} points");
+
         foreach (var p in prompts)
         {
+            // Clamp point within image bounds
             float cx = Math.Max(0, Math.Min(p.X, origW - 1));
             float cy = Math.Max(0, Math.Min(p.Y, origH - 1));
 
-            float row = cy * yScale;
-            float col = cx * xScale;
-            coordsList.Add(row);
-            coordsList.Add(col);
+            // Normalize coordinates to [0,1] range
+            float normX = cx / xDenom;
+            float normY = cy / yDenom;
 
-            // label = 1 if p.Label == targetMaterialName, else 0
-            bool isForeground = p.Label.Equals(targetMaterialName, StringComparison.OrdinalIgnoreCase);
-            labelsList.Add(isForeground ? 1f : 0f);
+            // FIXED ORDER: X first, then Y (SAM 2.1 expects this order)
+            coordsList.Add(normX); // Add X first
+            coordsList.Add(normY); // Then Y
+
+            // Label: 1 for target material (foreground prompt), 0 for others (negative prompt)
+            bool isFg = p.Label.Equals(targetMaterialName, StringComparison.OrdinalIgnoreCase);
+            labelsList.Add(isFg ? 1f : 0f);
+
+            Log($"Point at ({cx},{cy}) normalized to ({normX:F3},{normY:F3}), isForeground={isFg}");
         }
 
-        int numPoints = prompts.Count;
-        if (numPoints == 0)
+        // If no points, add a dummy point with label -1 (not a point)
+        if (coordsList.Count == 0)
         {
-            // Provide a dummy point if absolutely none exist
             coordsList.Add(0f); coordsList.Add(0f);
-            labelsList.Add(0f);
-            numPoints = 1;
+            labelsList.Add(-1f);
         }
 
+        // Create tensors of shape [1, numPoints, 2] and [1, numPoints]
+        int numPoints = labelsList.Count;
         var coordTensor = new DenseTensor<float>(coordsList.ToArray(), new[] { 1, numPoints, 2 });
         var labelTensor = new DenseTensor<float>(labelsList.ToArray(), new[] { 1, numPoints });
+
         return (coordTensor, labelTensor);
     }
+
+
+
+    // ------------------------------------------------------------------------
+    // Private helper: Convert raw logits => binarized mask => upscaled to original size
+    // ------------------------------------------------------------------------
+    private Bitmap BuildMaskFromDecoder(
+    Tensor<float> masksTensor,
+    int maskIndex,
+    int maskW,
+    int maskH,
+    int outW,
+    int outH,
+    out bool[,] maskBits,
+    int sliceIndex,
+    string debugTag)
+    {
+        float threshold = MaskBinarizationThreshold;
+        maskBits = new bool[maskH, maskW];
+
+        // Log tensor dimensions for debugging
+        string dimStr = $"{masksTensor.Dimensions[0]},{masksTensor.Dimensions[1]},{masksTensor.Dimensions[2]},{masksTensor.Dimensions[3]}";
+        Log($"[BuildMaskFromDecoder] masksTensor dimensions: [{dimStr}]");
+
+        // Check if maskIndex is valid for this tensor
+        if (maskIndex >= masksTensor.Dimensions[1])
+        {
+            Log($"[BuildMaskFromDecoder] ERROR: maskIndex {maskIndex} out of bounds (max is {masksTensor.Dimensions[1] - 1})");
+            // Return an empty black mask as fallback
+            Bitmap emptyMask = new Bitmap(outW, outH);
+            using (Graphics g = Graphics.FromImage(emptyMask))
+            {
+                g.Clear(Color.Black);
+            }
+            return emptyMask;
+        }
+
+        // Debug output
+        if (DebugEnabled && SaveDebugImages)
+        {
+            SaveMaskChannelAsImage(masksTensor, maskIndex, sliceIndex, debugTag, rawLogits: true);
+        }
+
+        try
+        {
+            // Build a 256x256 raw mask
+            Bitmap rawMask = new Bitmap(maskW, maskH, PixelFormat.Format24bppRgb);
+
+            // Track min/max logit values to see if mask contains usable data
+            float minLogit = float.MaxValue;
+            float maxLogit = float.MinValue;
+
+            for (int yy = 0; yy < maskH; yy++)
+            {
+                for (int xx = 0; xx < maskW; xx++)
+                {
+                    float logit = masksTensor[0, maskIndex, yy, xx];
+                    minLogit = Math.Min(minLogit, logit);
+                    maxLogit = Math.Max(maxLogit, logit);
+
+                    float prob = 1f / (1f + (float)Math.Exp(-logit)); // sigmoid
+                    bool isFg = (prob >= threshold);
+
+                    if (isFg)
+                    {
+                        rawMask.SetPixel(xx, yy, Color.White);
+                        maskBits[yy, xx] = true;
+                    }
+                    else
+                    {
+                        rawMask.SetPixel(xx, yy, Color.Black);
+                        maskBits[yy, xx] = false;
+                    }
+                }
+            }
+
+            Log($"[BuildMaskFromDecoder] Mask logit range: min={minLogit:F3}, max={maxLogit:F3}");
+
+            // Upscale to output dimensions
+            Bitmap finalMask = new Bitmap(outW, outH, PixelFormat.Format24bppRgb);
+            using (Graphics g = Graphics.FromImage(finalMask))
+            {
+                g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                g.DrawImage(rawMask, 0, 0, outW, outH);
+            }
+            rawMask.Dispose();
+
+            // Save final mask if debug enabled
+            if (DebugEnabled && SaveDebugImages)
+            {
+                string debugDir = DebugOutputPath ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DebugMasks");
+                Directory.CreateDirectory(debugDir);
+                string filePath = Path.Combine(debugDir, $"Mask_{debugTag}_slice{sliceIndex}_chan{maskIndex}.png");
+                finalMask.Save(filePath, ImageFormat.Png);
+            }
+
+            return finalMask;
+        }
+        catch (Exception ex)
+        {
+            Log($"[BuildMaskFromDecoder] Error processing mask: {ex.Message}");
+            Log($"[BuildMaskFromDecoder] Stack trace: {ex.StackTrace}");
+
+            // Return empty mask as fallback
+            Bitmap emptyMask = new Bitmap(outW, outH);
+            using (Graphics g = Graphics.FromImage(emptyMask))
+            {
+                g.Clear(Color.Black);
+            }
+            return emptyMask;
+        }
+    }
+
 
     // ------------------------------------------------------------------------
     // Private helper: Convert raw logits => binarized mask => upscaled to original size
@@ -820,9 +1066,7 @@ public class CTMemorySegmenter : IDisposable
     // ------------------------------------------------------------------------
     private float[] BitmapToFloatTensor(Bitmap bmp, int targetWidth, int targetHeight)
     {
-        // SAM's typical pixel mean/std
-        float[] pixelMean = { 123.675f, 116.28f, 103.53f };
-        float[] pixelStd = { 58.395f, 57.12f, 57.375f };
+       
 
         Bitmap resized = new Bitmap(targetWidth, targetHeight);
         using (Graphics g = Graphics.FromImage(resized))
@@ -831,7 +1075,8 @@ public class CTMemorySegmenter : IDisposable
             g.DrawImage(bmp, 0, 0, targetWidth, targetHeight);
         }
 
-        // Flatten in CHW order
+        float[] pixelMean = { 123.675f, 116.28f, 103.53f };
+        float[] pixelStd = { 58.395f, 57.12f, 57.375f };
         float[] data = new float[3 * targetWidth * targetHeight];
         int idx = 0;
         for (int y = 0; y < targetHeight; y++)
@@ -839,11 +1084,10 @@ public class CTMemorySegmenter : IDisposable
             for (int x = 0; x < targetWidth; x++)
             {
                 Color c = resized.GetPixel(x, y);
-                float r = c.R, gVal = c.G, b = c.B;
-
-                data[idx++] = (r - pixelMean[0]) / pixelStd[0];
-                data[idx++] = (gVal - pixelMean[1]) / pixelStd[1];
-                data[idx++] = (b - pixelMean[2]) / pixelStd[2];
+                // Normalize each channel (treat grayscale as RGB by repetition)
+                data[idx++] = (c.R - pixelMean[0]) / pixelStd[0];
+                data[idx++] = (c.G - pixelMean[1]) / pixelStd[1];
+                data[idx++] = (c.B - pixelMean[2]) / pixelStd[2];
             }
         }
         resized.Dispose();
@@ -859,19 +1103,118 @@ public class CTMemorySegmenter : IDisposable
     {
         foreach (var o in outputs)
         {
-            if (o.Name == name)
-                return o.AsTensor<T>();
+            if (o.Name == name) return o.AsTensor<T>();
         }
         return null; // not found
     }
 
     // ------------------------------------------------------------------------
-    // Region: "with mask input" methods (used in the new SAM2.1 propagation)
+    // Debugging utilities
     // ------------------------------------------------------------------------
-    #region PropagationHelpers
+    private void DumpTensorStats(Tensor<float> tensor, string tag, int sliceIndex)
+    {
+        // shape [1, channels, H, W]
+        if (tensor == null) return;
+        int cdim = tensor.Dimensions[1];
+        int hdim = tensor.Dimensions[2];
+        int wdim = tensor.Dimensions[3];
 
+        Log($"[DumpTensorStats] slice={sliceIndex}, tag={tag}, shape=[1,{cdim},{hdim},{wdim}]");
+
+        for (int c = 0; c < cdim; c++)
+        {
+            float minv = float.MaxValue;
+            float maxv = float.MinValue;
+            double sumv = 0;
+            long count = 0;
+
+            // Also count how many are >= 0.0 logit => prob>=0.5
+            long fgApprox = 0;
+
+            for (int y = 0; y < hdim; y++)
+            {
+                for (int x = 0; x < wdim; x++)
+                {
+                    float val = tensor[0, c, y, x];
+                    if (val < minv) minv = val;
+                    if (val > maxv) maxv = val;
+                    sumv += val;
+                    count++;
+
+                    if (val >= 0) fgApprox++;  // logit>=0 => prob>=0.5
+                }
+            }
+            float avg = (float)(sumv / count);
+            float fgFrac = (float)fgApprox / (float)count;
+
+            Log($"   Channel {c}: min={minv:F3}, max={maxv:F3}, mean={avg:F3}, #>0 = {fgFrac * 100:F1}%");
+        }
+    }
+
+    private void SaveMaskChannelAsImage(Tensor<float> tensor, int channelIndex,
+                                        int sliceIndex, string debugTag, bool rawLogits)
+    {
+        // shape [1,3,256,256] or [1,3,H,W]
+        int cdim = tensor.Dimensions[1];
+        int hdim = tensor.Dimensions[2];
+        int wdim = tensor.Dimensions[3];
+        if (channelIndex < 0 || channelIndex >= cdim) return;
+
+        string debugDir = DebugOutputPath ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DebugMasks");
+        Directory.CreateDirectory(debugDir);
+
+        // We'll build a grayscale image representing the raw logits or the probability
+        Bitmap bmp = new Bitmap(wdim, hdim, PixelFormat.Format24bppRgb);
+
+        // find min/max so we can scale to [0..255] for visualization
+        float minv = float.MaxValue;
+        float maxv = float.MinValue;
+        for (int y = 0; y < hdim; y++)
+        {
+            for (int x = 0; x < wdim; x++)
+            {
+                float val = tensor[0, channelIndex, y, x];
+                if (val < minv) minv = val;
+                if (val > maxv) maxv = val;
+            }
+        }
+        // Avoid degenerate case
+        if (minv == maxv) maxv = minv + 1e-5f;
+
+        for (int y = 0; y < hdim; y++)
+        {
+            for (int x = 0; x < wdim; x++)
+            {
+                float val = tensor[0, channelIndex, y, x];
+                float mapped;
+                if (rawLogits)
+                {
+                    // logit => scale from [minv..maxv] to [0..255]
+                    mapped = (val - minv) / (maxv - minv);
+                }
+                else
+                {
+                    // probability => sigmoid
+                    float prob = 1f / (1f + (float)Math.Exp(-val));
+                    mapped = prob;
+                }
+                byte g = (byte)(mapped * 255.0f);
+                bmp.SetPixel(x, y, Color.FromArgb(g, g, g));
+            }
+        }
+
+        string postfix = rawLogits ? "rawLogits" : "prob";
+        string filename = $"MaskRaw_{debugTag}_slice{sliceIndex}_chan{channelIndex}_{postfix}.png";
+        string path = Path.Combine(debugDir, filename);
+        bmp.Save(path, ImageFormat.Png);
+        bmp.Dispose();
+
+        Log($"[SaveMaskChannelAsImage] Wrote {postfix} for channel={channelIndex} to {path}");
+    }
+    #region PropagatorOverloads
     /// <summary>
-    /// Process XY slice with optional 'prevMaskLogits' as mask_input. Returns a binarized mask bool[,] (true=FG).
+    /// Processes an XY slice with optional 'prevMaskLogits' as mask_input. 
+    /// Returns a binarized bool[,] mask (true = foreground).
     /// </summary>
     public bool[,] ProcessXYSlice_WithMaskInput(
         Bitmap baseXY,
@@ -881,6 +1224,7 @@ public class CTMemorySegmenter : IDisposable
         int origW,
         int origH)
     {
+        // 1) Check session & inputs
         if (_encoderSession == null || _decoderSession == null)
         {
             Log("[ProcessXYSlice_WithMaskInput] No loaded sessions. Returning null.");
@@ -892,14 +1236,14 @@ public class CTMemorySegmenter : IDisposable
             return null;
         }
 
-        // (1) Encode image
+        // 2) Encode the image
         float[] imageTensor = BitmapToFloatTensor(baseXY, _imageInputSize, _imageInputSize);
         var imageInput = new DenseTensor<float>(imageTensor, new[] { 1, 3, _imageInputSize, _imageInputSize });
         Tensor<float> imgEmbed, hr0, hr1;
         using (var encOut = _encoderSession.Run(new[]
         {
-            NamedOnnxValue.CreateFromTensor("image", imageInput)
-        }))
+        NamedOnnxValue.CreateFromTensor("image", imageInput)
+    }))
         {
             imgEmbed = GetFirstTensorOrNull<float>(encOut, "image_embed");
             hr0 = GetFirstTensorOrNull<float>(encOut, "high_res_feats_0");
@@ -911,10 +1255,10 @@ public class CTMemorySegmenter : IDisposable
             return null;
         }
 
-        // (2) Build point prompts => (1, numPoints, 2) coords and (1, numPoints) labels
+        // 3) Build point prompts => (1, numPoints, 2) for coords & (1, numPoints) for labels
         var (coordTensor, labelTensor) = BuildSinglePromptTensors(slicePoints, origW, origH, targetMaterialName);
 
-        // (3) Build mask_input from prevMaskLogits or zeros
+        // 4) Build mask_input from prevMaskLogits or zeros
         DenseTensor<float> maskTensor;
         DenseTensor<float> hasMaskTensor;
         if (prevMaskLogits != null && prevMaskLogits.Length == 1 * 1 * 256 * 256)
@@ -928,22 +1272,22 @@ public class CTMemorySegmenter : IDisposable
             hasMaskTensor = new DenseTensor<float>(new float[] { 0 }, new[] { 1 });
         }
 
-        // (4) orig_im_size
+        // 5) Build orig_im_size
         var origSizeTensor = new DenseTensor<int>(new[] { origH, origW }, new[] { 2 });
 
-        // (5) Decoder => masks + iou
+        // 6) Run decoder => get masks + iou
         Tensor<float> masksTensor, iouTensor;
         using (var decOut = _decoderSession.Run(new List<NamedOnnxValue>
-        {
-            NamedOnnxValue.CreateFromTensor("image_embed",      imgEmbed),
-            NamedOnnxValue.CreateFromTensor("high_res_feats_0", hr0),
-            NamedOnnxValue.CreateFromTensor("high_res_feats_1", hr1),
-            NamedOnnxValue.CreateFromTensor("point_coords",     coordTensor),
-            NamedOnnxValue.CreateFromTensor("point_labels",     labelTensor),
-            NamedOnnxValue.CreateFromTensor("mask_input",       maskTensor),
-            NamedOnnxValue.CreateFromTensor("has_mask_input",   hasMaskTensor),
-            NamedOnnxValue.CreateFromTensor("orig_im_size",     origSizeTensor)
-        }))
+    {
+        NamedOnnxValue.CreateFromTensor("image_embed",      imgEmbed),
+        NamedOnnxValue.CreateFromTensor("high_res_feats_0", hr0),
+        NamedOnnxValue.CreateFromTensor("high_res_feats_1", hr1),
+        NamedOnnxValue.CreateFromTensor("point_coords",     coordTensor),
+        NamedOnnxValue.CreateFromTensor("point_labels",     labelTensor),
+        NamedOnnxValue.CreateFromTensor("mask_input",       maskTensor),
+        NamedOnnxValue.CreateFromTensor("has_mask_input",   hasMaskTensor),
+        NamedOnnxValue.CreateFromTensor("orig_im_size",     origSizeTensor)
+    }))
         {
             masksTensor = GetFirstTensorOrNull<float>(decOut, "masks");
             iouTensor = GetFirstTensorOrNull<float>(decOut, "iou_predictions");
@@ -954,8 +1298,8 @@ public class CTMemorySegmenter : IDisposable
             return null;
         }
 
-        // (6) Pick best channel by IoU
-        int outC = masksTensor.Dimensions[1]; // typically 3
+        // 7) Select best channel by IoU
+        int outC = masksTensor.Dimensions[1];
         float bestIoU = float.MinValue;
         int bestIndex = 0;
         for (int c = 0; c < outC; c++)
@@ -969,14 +1313,14 @@ public class CTMemorySegmenter : IDisposable
         }
         Log($"[ProcessXYSlice_WithMaskInput] Best channel={bestIndex}, IoU={bestIoU:F3}");
 
-        // (7) Convert logits => bool[,] 
+        // 8) Convert that channel’s logits => bool[,] mask
         bool[,] binMask = BuildMaskArrayFromLogits(masksTensor, bestIndex, origW, origH);
         return binMask;
     }
 
     /// <summary>
-    /// Process XZ slice with optional 'prevMaskLogits' as mask_input.
-    /// Returns a binarized bool[,] mask.
+    /// Processes an XZ slice with optional 'prevMaskLogits' as mask_input. 
+    /// Returns a binarized bool[,] mask (true = foreground).
     /// </summary>
     public bool[,] ProcessXZSlice_WithMaskInput(
         Bitmap baseXZ,
@@ -997,14 +1341,14 @@ public class CTMemorySegmenter : IDisposable
             return null;
         }
 
-        // (1) Encode
+        // 1) Encode
         float[] imageTensor = BitmapToFloatTensor(baseXZ, _imageInputSize, _imageInputSize);
         var imageInput = new DenseTensor<float>(imageTensor, new[] { 1, 3, _imageInputSize, _imageInputSize });
         Tensor<float> imgEmbed, hr0, hr1;
         using (var encOut = _encoderSession.Run(new[]
         {
-            NamedOnnxValue.CreateFromTensor("image", imageInput)
-        }))
+        NamedOnnxValue.CreateFromTensor("image", imageInput)
+    }))
         {
             imgEmbed = GetFirstTensorOrNull<float>(encOut, "image_embed");
             hr0 = GetFirstTensorOrNull<float>(encOut, "high_res_feats_0");
@@ -1016,10 +1360,10 @@ public class CTMemorySegmenter : IDisposable
             return null;
         }
 
-        // (2) Prompts
+        // 2) Prompts
         var (coordTensor, labelTensor) = BuildSinglePromptTensors(slicePoints, origW, origH, targetMaterialName);
 
-        // (3) Mask input
+        // 3) Mask input
         DenseTensor<float> maskTensor;
         DenseTensor<float> hasMaskTensor;
         if (prevMaskLogits != null && prevMaskLogits.Length == 1 * 1 * 256 * 256)
@@ -1033,22 +1377,22 @@ public class CTMemorySegmenter : IDisposable
             hasMaskTensor = new DenseTensor<float>(new float[] { 0 }, new[] { 1 });
         }
 
-        // (4) orig_im_size => [origH, origW]
+        // 4) orig_im_size => [origH, origW]
         var origSizeTensor = new DenseTensor<int>(new[] { origH, origW }, new[] { 2 });
 
-        // (5) Decode
+        // 5) Decode
         Tensor<float> masksTensor, iouTensor;
         using (var decOut = _decoderSession.Run(new List<NamedOnnxValue>
-        {
-            NamedOnnxValue.CreateFromTensor("image_embed",      imgEmbed),
-            NamedOnnxValue.CreateFromTensor("high_res_feats_0", hr0),
-            NamedOnnxValue.CreateFromTensor("high_res_feats_1", hr1),
-            NamedOnnxValue.CreateFromTensor("point_coords",     coordTensor),
-            NamedOnnxValue.CreateFromTensor("point_labels",     labelTensor),
-            NamedOnnxValue.CreateFromTensor("mask_input",       maskTensor),
-            NamedOnnxValue.CreateFromTensor("has_mask_input",   hasMaskTensor),
-            NamedOnnxValue.CreateFromTensor("orig_im_size",     origSizeTensor)
-        }))
+    {
+        NamedOnnxValue.CreateFromTensor("image_embed",      imgEmbed),
+        NamedOnnxValue.CreateFromTensor("high_res_feats_0", hr0),
+        NamedOnnxValue.CreateFromTensor("high_res_feats_1", hr1),
+        NamedOnnxValue.CreateFromTensor("point_coords",     coordTensor),
+        NamedOnnxValue.CreateFromTensor("point_labels",     labelTensor),
+        NamedOnnxValue.CreateFromTensor("mask_input",       maskTensor),
+        NamedOnnxValue.CreateFromTensor("has_mask_input",   hasMaskTensor),
+        NamedOnnxValue.CreateFromTensor("orig_im_size",     origSizeTensor)
+    }))
         {
             masksTensor = GetFirstTensorOrNull<float>(decOut, "masks");
             iouTensor = GetFirstTensorOrNull<float>(decOut, "iou_predictions");
@@ -1059,7 +1403,7 @@ public class CTMemorySegmenter : IDisposable
             return null;
         }
 
-        // (6) Pick best by IoU
+        // 6) Pick best by IoU
         int outC = masksTensor.Dimensions[1];
         float bestIoU = float.MinValue;
         int bestIndex = 0;
@@ -1074,13 +1418,14 @@ public class CTMemorySegmenter : IDisposable
         }
         Log($"[ProcessXZSlice_WithMaskInput] Best channel={bestIndex}, IoU={bestIoU:F3}");
 
-        // (7) Build binarized mask
+        // 7) Convert logits => bool[,] 
         bool[,] binMask = BuildMaskArrayFromLogits(masksTensor, bestIndex, origW, origH);
         return binMask;
     }
 
     /// <summary>
-    /// Process YZ slice with optional 'prevMaskLogits'. Returns a binarized bool[,] mask.
+    /// Processes a YZ slice with optional 'prevMaskLogits' as mask_input. 
+    /// Returns a binarized bool[,] mask (true = foreground).
     /// </summary>
     public bool[,] ProcessYZSlice_WithMaskInput(
         Bitmap baseYZ,
@@ -1101,14 +1446,14 @@ public class CTMemorySegmenter : IDisposable
             return null;
         }
 
-        // (1) Encode
+        // 1) Encode
         float[] imageTensor = BitmapToFloatTensor(baseYZ, _imageInputSize, _imageInputSize);
         var imageInput = new DenseTensor<float>(imageTensor, new[] { 1, 3, _imageInputSize, _imageInputSize });
         Tensor<float> imgEmbed, hr0, hr1;
         using (var encOut = _encoderSession.Run(new[]
         {
-            NamedOnnxValue.CreateFromTensor("image", imageInput)
-        }))
+        NamedOnnxValue.CreateFromTensor("image", imageInput)
+    }))
         {
             imgEmbed = GetFirstTensorOrNull<float>(encOut, "image_embed");
             hr0 = GetFirstTensorOrNull<float>(encOut, "high_res_feats_0");
@@ -1120,10 +1465,10 @@ public class CTMemorySegmenter : IDisposable
             return null;
         }
 
-        // (2) Prompts
+        // 2) Prompts
         var (coordTensor, labelTensor) = BuildSinglePromptTensors(slicePoints, origW, origH, targetMaterialName);
 
-        // (3) Mask input
+        // 3) Mask input
         DenseTensor<float> maskTensor;
         DenseTensor<float> hasMaskTensor;
         if (prevMaskLogits != null && prevMaskLogits.Length == 1 * 1 * 256 * 256)
@@ -1137,22 +1482,22 @@ public class CTMemorySegmenter : IDisposable
             hasMaskTensor = new DenseTensor<float>(new float[] { 0 }, new[] { 1 });
         }
 
-        // (4) orig_im_size => [origH, origW]
+        // 4) orig_im_size => [origH, origW]
         var origSizeTensor = new DenseTensor<int>(new[] { origH, origW }, new[] { 2 });
 
-        // (5) Decode
+        // 5) Decode
         Tensor<float> masksTensor, iouTensor;
         using (var decOut = _decoderSession.Run(new List<NamedOnnxValue>
-        {
-            NamedOnnxValue.CreateFromTensor("image_embed",      imgEmbed),
-            NamedOnnxValue.CreateFromTensor("high_res_feats_0", hr0),
-            NamedOnnxValue.CreateFromTensor("high_res_feats_1", hr1),
-            NamedOnnxValue.CreateFromTensor("point_coords",     coordTensor),
-            NamedOnnxValue.CreateFromTensor("point_labels",     labelTensor),
-            NamedOnnxValue.CreateFromTensor("mask_input",       maskTensor),
-            NamedOnnxValue.CreateFromTensor("has_mask_input",   hasMaskTensor),
-            NamedOnnxValue.CreateFromTensor("orig_im_size",     origSizeTensor)
-        }))
+    {
+        NamedOnnxValue.CreateFromTensor("image_embed",      imgEmbed),
+        NamedOnnxValue.CreateFromTensor("high_res_feats_0", hr0),
+        NamedOnnxValue.CreateFromTensor("high_res_feats_1", hr1),
+        NamedOnnxValue.CreateFromTensor("point_coords",     coordTensor),
+        NamedOnnxValue.CreateFromTensor("point_labels",     labelTensor),
+        NamedOnnxValue.CreateFromTensor("mask_input",       maskTensor),
+        NamedOnnxValue.CreateFromTensor("has_mask_input",   hasMaskTensor),
+        NamedOnnxValue.CreateFromTensor("orig_im_size",     origSizeTensor)
+    }))
         {
             masksTensor = GetFirstTensorOrNull<float>(decOut, "masks");
             iouTensor = GetFirstTensorOrNull<float>(decOut, "iou_predictions");
@@ -1163,7 +1508,7 @@ public class CTMemorySegmenter : IDisposable
             return null;
         }
 
-        // (6) Pick best
+        // 6) Pick best
         int outC = masksTensor.Dimensions[1];
         float bestIoU = float.MinValue;
         int bestIndex = 0;
@@ -1178,22 +1523,22 @@ public class CTMemorySegmenter : IDisposable
         }
         Log($"[ProcessYZSlice_WithMaskInput] Best channel={bestIndex}, IoU={bestIoU:F3}");
 
-        // (7) Convert to bool array
+        // 7) Convert logits => bool[,]
         bool[,] binMask = BuildMaskArrayFromLogits(masksTensor, bestIndex, origW, origH);
         return binMask;
     }
 
     /// <summary>
-    /// Converts the selected channel’s logits (256x256) to a bool[,] at the original slice size,
+    /// Converts a selected channel’s 256x256 logits to a bool[,] at the original size, 
     /// using nearest-neighbor upsampling and the MaskBinarizationThreshold property.
     /// </summary>
     private bool[,] BuildMaskArrayFromLogits(Tensor<float> masksTensor, int channelIndex,
                                              int origW, int origH)
     {
-        int maskH = masksTensor.Dimensions[2]; // 256
-        int maskW = masksTensor.Dimensions[3]; // 256
-        bool[,] binMask = new bool[origH, origW];
+        int maskH = masksTensor.Dimensions[2]; // typically 256
+        int maskW = masksTensor.Dimensions[3]; // typically 256
 
+        bool[,] binMask = new bool[origH, origW];
         for (int y = 0; y < origH; y++)
         {
             int yy256 = (int)Math.Round((y / (float)(origH - 1)) * (maskH - 1));
@@ -1202,12 +1547,12 @@ public class CTMemorySegmenter : IDisposable
             {
                 int xx256 = (int)Math.Round((x / (float)(origW - 1)) * (maskW - 1));
                 float logit = masksTensor[0, channelIndex, yy256, xx256];
+                logit = -logit;
                 float prob = 1f / (1f + (float)Math.Exp(-logit));
                 binMask[y, x] = (prob >= MaskBinarizationThreshold);
             }
         }
         return binMask;
     }
-
     #endregion
 }

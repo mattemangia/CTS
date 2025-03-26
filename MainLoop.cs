@@ -9,7 +9,6 @@ using System.IO.MemoryMappedFiles;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using static CTSegmenter.SAMForm;
 using System.Threading;
 using System.Runtime.InteropServices;
 
@@ -122,10 +121,7 @@ namespace CTSegmenter
         public AnnotationManager AnnotationMgr { get; set; }
         // Demonstration: chunk dimension
         private const int CHUNK_DIM = 256;
-        public CTMemorySegmenter LiveSegmenter
-        {
-            get { return _liveSegmenter; }
-        }
+        
         // Cache for rendered slices
         private Dictionary<int, byte[]> sliceCache = new Dictionary<int, byte[]>();
         private const int MAX_CACHE_SIZE = 5;
@@ -160,7 +156,7 @@ namespace CTSegmenter
         public Dictionary<int, byte[,]> sparseSelections = new Dictionary<int, byte[,]>();
         public enum Axis { X, Y, Z }
         
-        public SAMForm SamFormInstance { get; set; }
+        
 
         private byte nextMaterialID = 1; // 0 is reserved for Exterior.
         public byte[,] currentSelection;  // dimensions: [width, height] for current slice temporary selection
@@ -292,21 +288,12 @@ namespace CTSegmenter
 
             this.Controls.Add(mainLayout);
         }
-        // Cached segmenter instance for live preview
-        private CTMemorySegmenter _liveSegmenter = null;
+        
         // Add to class fields
         private readonly ReaderWriterLockSlim _bitmapLock = new ReaderWriterLockSlim();
         private Bitmap _scaledBitmap;
         private float _lastZoom = -1;
-        // Clears the cached segmenter (for example, when live preview is turned off or settings change)
-        public void ClearLiveSegmenter()
-        {
-            if (_liveSegmenter != null)
-            {
-                _liveSegmenter.Dispose();
-                _liveSegmenter = null;
-            }
-        }
+        
         private void UpdateBackingStore()
         {
             if (currentBitmap == null) return;
@@ -2074,19 +2061,7 @@ namespace CTSegmenter
                 }
             }
         }
-        private void UpdateSAMFormWithBox(AnnotationPoint box)
-        {
-            // If a SAMForm is open, update its DataGridView
-            if (this.SamFormInstance != null && !this.SamFormInstance.IsDisposed)
-            {
-                DataGridView dgv = SamFormInstance.GetPointsDataGridView();
-                if (dgv != null)
-                {
-                    // Add entry to the DataGridView
-                    dgv.Rows.Add(box.ID, box.X, box.Y, box.Z, box.Type, box.Label);
-                }
-            }
-        }
+        
         private void DrawBrushOverlay(Graphics g)
         {
             if (!showBrushOverlay || currentTool == SegmentationTool.Pan) return;
@@ -2313,8 +2288,7 @@ namespace CTSegmenter
                 renderTimer.Stop();
                 renderTimer.Start();
 
-                if (RealTimeProcessing)
-                    ProcessSegmentationPreview();
+                
             }
         }
 
@@ -2484,193 +2458,7 @@ namespace CTSegmenter
             return bmp;
         }
 
-        /// <summary>
-        /// If real-time processing is enabled in the settings, this method processes the current slice 
-        /// and the orthogonal views (XZ and YZ) to produce segmentation previews based on the current annotation points.
-        /// </summary>
-        public void ProcessSegmentationPreview()
-        {
-            try
-            {
-                SAMSettingsParams settings = SamFormInstance.CurrentSettings;
-                string modelFolder = settings.ModelFolderPath;
-                int imageSize = settings.ImageInputSize;
-
-                // Check which model version to use
-                bool usingSam2 = settings.UseSam2Models;
-
-                string imageEncoderPath, promptEncoderPath, maskDecoderPath;
-                string memoryEncoderPath, memoryAttentionPath, mlpPath;
-
-                if (usingSam2)
-                {
-                    // SAM 2.1 paths
-                    imageEncoderPath = Path.Combine(modelFolder, "sam2.1_large.encoder.onnx");
-                    promptEncoderPath = ""; // Kept for compatibility
-                    maskDecoderPath = Path.Combine(modelFolder, "sam2.1_large.decoder.onnx");
-                    memoryEncoderPath = ""; // Not used in SAM 2.1
-                    memoryAttentionPath = ""; // Not used in SAM 2.1
-                    mlpPath = ""; // Not used in SAM 2.1
-
-                    Logger.Log($"[ProcessSegmentationPreview] Using SAM 2.1 models from {modelFolder}");
-                }
-                else
-                {
-                    // Original SAM paths
-                    imageEncoderPath = Path.Combine(modelFolder, "image_encoder_hiera_t.onnx");
-                    promptEncoderPath = Path.Combine(modelFolder, "prompt_encoder_hiera_t.onnx");
-                    maskDecoderPath = Path.Combine(modelFolder, "mask_decoder_hiera_t.onnx");
-                    memoryEncoderPath = Path.Combine(modelFolder, "memory_encoder_hiera_t.onnx");
-                    memoryAttentionPath = Path.Combine(modelFolder, "memory_attention_hiera_t.onnx");
-                    mlpPath = Path.Combine(modelFolder, "mlp_hiera_t.onnx");
-                }
-
-                CTMemorySegmenter segmenter;
-                if (RealTimeProcessing)
-                {
-                    if (_liveSegmenter == null)
-                    {
-                        _liveSegmenter = new CTMemorySegmenter(
-                            imageEncoderPath,
-                            promptEncoderPath,
-                            maskDecoderPath,
-                            memoryEncoderPath,
-                            memoryAttentionPath,
-                            mlpPath,
-                            imageSize,
-                            false,
-                            settings.EnableMlp, settings.UseCpuExecutionProvider);
-
-                        // Get threshold from SAMForm if available
-                        if (SamFormInstance != null && !SamFormInstance.IsDisposed)
-                        {
-                            _liveSegmenter.MaskBinarizationThreshold = 0.5f;
-                        }
-                    }
-                    segmenter = _liveSegmenter;
-                }
-                else
-                {
-                    // Use a new segmenter instance each time
-                    segmenter = new CTMemorySegmenter(
-                        imageEncoderPath,
-                        promptEncoderPath,
-                        maskDecoderPath,
-                        memoryEncoderPath,
-                        memoryAttentionPath,
-                        mlpPath,
-                        imageSize,
-                        false,
-                        settings.EnableMlp);
-
-                    if (SamFormInstance != null && !SamFormInstance.IsDisposed)
-                    {
-                        _liveSegmenter.MaskBinarizationThreshold = 0.5f;
-                    }
-                }
-
-                int currentZ = CurrentSlice;
-                int w = GetWidth();
-                int h = GetHeight();
-
-                // Retrieve all annotation points for the current slice.
-                List<AnnotationPoint> annPoints = AnnotationMgr.GetPointsForSlice(currentZ).ToList();
-                if (annPoints.Count > 0)
-                {
-                    using (Bitmap baseXY = GenerateXYBitmap(currentZ, w, h))
-                    {
-                        byte[,] previewMask = new byte[w, h];
-
-                        // Process one pass per material.
-                        // For each material, use BuildMixedPrompts to mark positive for the target material
-                        // and negative for all other points.
-                        foreach (var group in annPoints.GroupBy(p => p.Label))
-                        {
-                            string materialName = group.Key;
-                            List<AnnotationPoint> mergedPrompts = BuildMixedPrompts(annPoints, materialName);
-
-                            using (Bitmap resultMask = segmenter.ProcessXYSlice(currentZ, baseXY, mergedPrompts, materialName))
-                            {
-                                Material mat = Materials.FirstOrDefault(m => m.Name.Equals(materialName, StringComparison.OrdinalIgnoreCase));
-                                byte matID = (mat != null) ? mat.ID : (byte)1;
-
-                                // For each pixel, only assign if it is not already labeled.
-                                for (int y = 0; y < h; y++)
-                                {
-                                    for (int x = 0; x < w; x++)
-                                    {
-                                        Color c = resultMask.GetPixel(x, y);
-                                        if (c.R > 128 && previewMask[x, y] == 0)
-                                        {
-                                            previewMask[x, y] = matID;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        currentSelection = previewMask;
-                    }
-                }
-
-                // Redraw the view to display the overlay.
-                ShowMask = true;
-                ClearSliceCache();
-                RenderViews();
-            }
-            catch (Exception ex)
-            {
-                Logger.Log("[ProcessSegmentationPreview] Exception: " + ex.Message);
-            }
-        }
-        /// <summary>
-        /// Builds a prompt list for one material pass.
-        /// If there is only a single positive point and no negatives, it returns that single point.
-        /// Otherwise, it returns all annotation points with the following rule:
-        /// - Points belonging to the target material are marked as "Foreground" (positive).
-        /// - All other points are marked as "Exterior" (negative).
-        /// </summary>
-        private List<AnnotationPoint> BuildMixedPrompts(
-            IEnumerable<AnnotationPoint> slicePoints,
-            string targetMaterialName)
-        {
-            // Separate positive and negative points.
-            var positivePoints = slicePoints.Where(pt => pt.Label.Equals(targetMaterialName, StringComparison.OrdinalIgnoreCase)).ToList();
-            var negativePoints = slicePoints.Where(pt => !pt.Label.Equals(targetMaterialName, StringComparison.OrdinalIgnoreCase)).ToList();
-
-            // If there is exactly one positive point and no negatives, return it directly.
-            if (positivePoints.Count == 1 && negativePoints.Count == 0)
-            {
-                return new List<AnnotationPoint>
-        {
-            new AnnotationPoint
-            {
-                ID = positivePoints[0].ID,
-                X = positivePoints[0].X,
-                Y = positivePoints[0].Y,
-                Z = positivePoints[0].Z,
-                Type = positivePoints[0].Type,
-                Label = "Foreground" // positive prompt
-            }
-        };
-            }
-
-            // Otherwise, build a merged list.
-            List<AnnotationPoint> finalPoints = new List<AnnotationPoint>();
-            foreach (var pt in slicePoints)
-            {
-                finalPoints.Add(new AnnotationPoint
-                {
-                    ID = pt.ID,
-                    X = pt.X,
-                    Y = pt.Y,
-                    Z = pt.Z,
-                    Type = pt.Type,
-                    Label = pt.Label.Equals(targetMaterialName, StringComparison.OrdinalIgnoreCase) ? "Foreground" : "Exterior"
-                });
-            }
-            return finalPoints;
-        }
+        
 
 
 
@@ -2738,30 +2526,7 @@ namespace CTSegmenter
 
 
 
-        private void UpdateSAMFormWithPoint(AnnotationPoint point)
-        {
-            // If a SAMForm is open, update its DataGridView.
-            if (this.SamFormInstance != null && !this.SamFormInstance.IsDisposed)
-            {
-                DataGridView dgv = SamFormInstance.GetPointsDataGridView();
-                if (dgv != null)
-                {
-                    dgv.Rows.Add(point.ID, point.X, point.Y, point.Z, point.Type, point.Label);
-                }
-            }
-        }
-        private void InsertPointToSAMForm(AnnotationPoint point)
-        {
-            foreach (Form frm in Application.OpenForms)
-            {
-                if (frm is SAMForm samForm)
-                {
-                    DataGridView dgv = samForm.Controls.Find("dataGridPoints", true)[0] as DataGridView;
-                    dgv.Rows.Add(point.ID, point.X, point.Y, point.Z, point.Type, point.Label);
-                    break;
-                }
-            }
-        }
+        
         private void PaintMaskAt(Point screenLocation, int brushSize)
         {
             interpolatedMask = null;
@@ -3235,8 +3000,7 @@ namespace CTSegmenter
                 mainView.Invalidate();
                 renderTimer.Stop();
                 renderTimer.Start();
-                if (RealTimeProcessing)
-                    ProcessSegmentationPreview();
+               
             }
         }
 
@@ -3267,7 +3031,7 @@ namespace CTSegmenter
                         : new Material("Default", Color.Red, 0, 0, 1);
 
                     AnnotationPoint box = AnnotationMgr.AddBox(x1, y1, x2, y2, CurrentSlice, selectedMaterial.Name);
-                    UpdateSAMFormWithBox(box);
+                   
                 }
                 else
                 {
@@ -3282,7 +3046,7 @@ namespace CTSegmenter
                     {
                         _lastPointCreationTime = DateTime.Now;
                         AnnotationPoint point = AnnotationMgr.AddPoint(sliceX, sliceY, CurrentSlice, selectedMaterial.Name);
-                        UpdateSAMFormWithPoint(point);
+                       
                     }
                 }
 
@@ -3293,8 +3057,7 @@ namespace CTSegmenter
                 renderTimer.Stop();
                 renderTimer.Start();
 
-                if (RealTimeProcessing)
-                    ProcessSegmentationPreview();
+                
             }
         }
 
@@ -3548,8 +3311,7 @@ namespace CTSegmenter
                 xzView.Invalidate();
                 renderTimer.Stop();
                 renderTimer.Start();
-                if (RealTimeProcessing)
-                    ProcessSegmentationPreview();
+                
             }
             else if (e.Button == MouseButtons.Left)
             {
@@ -3594,8 +3356,7 @@ namespace CTSegmenter
                 xzView.Invalidate();
                 renderTimer.Stop();
                 renderTimer.Start();
-                if (RealTimeProcessing)
-                    ProcessSegmentationPreview();
+                
             }
             else if (e.Button == MouseButtons.Left)
             {
@@ -3635,7 +3396,7 @@ namespace CTSegmenter
                     // Store Z values in the box's X2,Y2 coordinates
                     box.X2 = x2;
                     box.Y2 = z2;
-                    UpdateSAMFormWithBox(box);
+                    
                 }
                 else
                 {
@@ -3650,7 +3411,7 @@ namespace CTSegmenter
                             : new Material("Default", Color.Red, 0, 0, 1);
 
                         AnnotationPoint point = AnnotationMgr.AddPoint(x, XzSliceY, z, selectedMaterial.Name);
-                        UpdateSAMFormWithPoint(point);
+                       
                     }
                 }
 
@@ -3661,8 +3422,7 @@ namespace CTSegmenter
                 renderTimer.Stop();
                 renderTimer.Start();
 
-                if (RealTimeProcessing)
-                    ProcessSegmentationPreview();
+               
             }
         }
 
@@ -3850,8 +3610,7 @@ namespace CTSegmenter
                 yzView.Invalidate();
                 renderTimer.Stop();
                 renderTimer.Start();
-                if (RealTimeProcessing)
-                    ProcessSegmentationPreview();
+               
             }
             else if (e.Button == MouseButtons.Left)
             {
@@ -3897,8 +3656,7 @@ namespace CTSegmenter
                 yzView.Invalidate();
                 renderTimer.Stop();
                 renderTimer.Start();
-                if (RealTimeProcessing)
-                    ProcessSegmentationPreview();
+                
             }
             else if (e.Button == MouseButtons.Left)
             {
@@ -3938,7 +3696,7 @@ namespace CTSegmenter
                     // Store Z values in the box's X2,Y2 coordinates
                     box.X2 = z1; // Z1 in X2
                     box.Y2 = z2; // Z2 in Y2
-                    UpdateSAMFormWithBox(box);
+            
                 }
                 else
                 {
@@ -3953,7 +3711,7 @@ namespace CTSegmenter
                             : new Material("Default", Color.Red, 0, 0, 1);
 
                         AnnotationPoint point = AnnotationMgr.AddPoint(YzSliceX, y, z, selectedMaterial.Name);
-                        UpdateSAMFormWithPoint(point);
+                        
                     }
                 }
 
@@ -3964,8 +3722,7 @@ namespace CTSegmenter
                 renderTimer.Stop();
                 renderTimer.Start();
 
-                if (RealTimeProcessing)
-                    ProcessSegmentationPreview();
+              
             }
         }
 

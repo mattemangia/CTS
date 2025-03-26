@@ -128,6 +128,9 @@ namespace CTSegmenter
         private readonly object sliceCacheLock = new object(); // Protects sliceCache
         private Bitmap _backingStore;
         public int SelectedMaterialIndex { get; set; } = -1;
+        private List<Action<int>> sliceChangeCallbacks = new List<Action<int>>();
+        private List<Action<int>> xzRowChangeCallbacks = new List<Action<int>>();
+        private List<Action<int>> yzColChangeCallbacks = new List<Action<int>>();
         public byte PreviewMin { get; set; }
         public byte PreviewMax { get; set; }
 
@@ -3003,7 +3006,54 @@ namespace CTSegmenter
                
             }
         }
+        // Registration methods
+        public void RegisterSliceChangeCallback(Action<int> callback)
+        {
+            if (callback != null && !sliceChangeCallbacks.Contains(callback))
+            {
+                sliceChangeCallbacks.Add(callback);
+            }
+        }
 
+        public void UnregisterSliceChangeCallback(Action<int> callback)
+        {
+            if (callback != null)
+            {
+                sliceChangeCallbacks.Remove(callback);
+            }
+        }
+
+        public void RegisterXZRowChangeCallback(Action<int> callback)
+        {
+            if (callback != null && !xzRowChangeCallbacks.Contains(callback))
+            {
+                xzRowChangeCallbacks.Add(callback);
+            }
+        }
+
+        public void UnregisterXZRowChangeCallback(Action<int> callback)
+        {
+            if (callback != null)
+            {
+                xzRowChangeCallbacks.Remove(callback);
+            }
+        }
+
+        public void RegisterYZColChangeCallback(Action<int> callback)
+        {
+            if (callback != null && !yzColChangeCallbacks.Contains(callback))
+            {
+                yzColChangeCallbacks.Add(callback);
+            }
+        }
+
+        public void UnregisterYZColChangeCallback(Action<int> callback)
+        {
+            if (callback != null)
+            {
+                yzColChangeCallbacks.Remove(callback);
+            }
+        }
         private void MainView_MouseUp(object sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left)

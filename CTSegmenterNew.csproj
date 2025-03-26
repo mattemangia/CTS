@@ -195,6 +195,7 @@
     <Compile Include="SafeInvokeAsync.cs" />
     <Content Include="CTMemorySegmenter.txt" />
     <Content Include="SegmentationPropagator.txt" />
+    <Compile Include="SegmentAnythingCT.cs" />
     <Compile Include="VolumeExtensions.cs" />
   </ItemGroup>
   <ItemGroup>

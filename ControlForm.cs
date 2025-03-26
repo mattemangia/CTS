@@ -183,10 +183,37 @@ namespace CTSegmenter
             subtractThresholdedMenuItem.Click += (s, e) => SubThresholdedSelection();
             editSep2 = new ToolStripSeparator();
             segmentAnythingMenuItem = new ToolStripMenuItem("Segment Anything");
+            // Update the segmentAnythingMenuItem.Click event handler in ControlForm
             segmentAnythingMenuItem.Click += (s, e) =>
             {
-                //Placeholder
+                if (mainForm.volumeData == null)
+                {
+                    MessageBox.Show("Please load a dataset first.", "No Data",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                // Get the selected material
+                Material selectedMaterial;
+                if (lstMaterials.SelectedIndex > 0 && lstMaterials.SelectedIndex < mainForm.Materials.Count)
+                {
+                    selectedMaterial = mainForm.Materials[lstMaterials.SelectedIndex];
+                }
+                else
+                {
+                    // Default to the first non-exterior material
+                    selectedMaterial = mainForm.Materials.Count > 1 ? mainForm.Materials[1] : mainForm.Materials[0];
+                }
+
+                Logger.Log("[ControlForm] Opening Segment Anything CT tool");
+                SegmentAnythingCT segmentAnything = new SegmentAnythingCT(
+                    mainForm,
+                    selectedMaterial,
+                    sharedAnnotationManager);
+
+                segmentAnything.Show();
             };
+
             editMenu.DropDownItems.AddRange(new ToolStripItem[]
             {
                 addMaterialMenuItem, deleteMaterialMenuItem, renameMaterialMenuItem, editSep1,
@@ -283,9 +310,32 @@ namespace CTSegmenter
             ToolStripMenuItem segmentAnythingToolMenuItem = new ToolStripMenuItem("Segment Anything");
             segmentAnythingToolMenuItem.Click += (s, e) =>
             {
-                //Placeholder
+                if (mainForm.volumeData == null)
+                {
+                    MessageBox.Show("Please load a dataset first.", "No Data",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
 
-                
+                // Get the selected material
+                Material selectedMaterial;
+                if (lstMaterials.SelectedIndex > 0 && lstMaterials.SelectedIndex < mainForm.Materials.Count)
+                {
+                    selectedMaterial = mainForm.Materials[lstMaterials.SelectedIndex];
+                }
+                else
+                {
+                    // Default to the first non-exterior material
+                    selectedMaterial = mainForm.Materials.Count > 1 ? mainForm.Materials[1] : mainForm.Materials[0];
+                }
+
+                Logger.Log("[ControlForm] Opening Segment Anything CT tool from Tools menu");
+                SegmentAnythingCT segmentAnything = new SegmentAnythingCT(
+                    mainForm,
+                    selectedMaterial,
+                    sharedAnnotationManager);
+
+                segmentAnything.Show();
             };
             toolsMenu.DropDownItems.Add(segmentAnythingToolMenuItem);
             dbgConsole.Click += (s, e) =>

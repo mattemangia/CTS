@@ -602,6 +602,7 @@ namespace CTSegmenter
             Point lastPos = Point.Empty;
             bool isPanning = false;
 
+            // Replace the mousDown handler in SetupXYViewerEvents method:
             xyViewer.MouseDown += (s, e) => {
                 if (e.Button == MouseButtons.Left)
                 {
@@ -637,18 +638,20 @@ namespace CTSegmenter
                         // If we didn't delete a point, add a new one
                         if (!pointDeleted)
                         {
-                            // Use positive/negative as the label prefix to differentiate
-                            string label = currentMode == PromptMode.Positive ?
-                                "Pos_" + selectedMaterial.Name :
-                                "Neg_" + selectedMaterial.Name;
+                            // FIX: Store point type in a standardized way
+                            bool isPositive = (currentMode == PromptMode.Positive);
+
+                            // Use consistent naming - either "Positive" or "Negative" as the actual type
+                            string pointType = isPositive ? "Positive" : "Negative";
+                            string label = pointType + "_" + selectedMaterial.Name;
 
                             // Add the point
                             AnnotationPoint newPoint = annotationManager.AddPoint(pointX, pointY, xySlice, label);
 
                             // Track whether this is a positive or negative point in our dictionary
-                            pointTypes[newPoint.ID] = (currentMode == PromptMode.Positive);
+                            pointTypes[newPoint.ID] = isPositive;
 
-                            Logger.Log($"[SegmentAnythingCT] Added {(currentMode == PromptMode.Positive ? "positive" : "negative")} point at ({pointX}, {pointY})");
+                            Logger.Log($"[SegmentAnythingCT] Added {pointType.ToLower()} point at ({pointX}, {pointY})");
 
                             // Auto-update segmentation if enabled
                             if (chkAutoUpdate.Checked)
@@ -672,6 +675,7 @@ namespace CTSegmenter
                     lastPos = e.Location;
                 }
             };
+
 
             xyViewer.MouseMove += (s, e) => {
                 if (isPanning && e.Button == MouseButtons.Right)
@@ -1008,8 +1012,10 @@ namespace CTSegmenter
                 float x = point.X * xyZoom + xyPan.X;
                 float y = point.Y * xyZoom + xyPan.Y;
 
-                // Determine color based on point type
-                bool isPositive = point.Type == "Positive"; // Check the actual type value
+                // Use the pointTypes dictionary to determine if positive or negative
+                bool isPositive = pointTypes.ContainsKey(point.ID) && pointTypes[point.ID];
+
+                // Use different colors based on point type
                 Color pointColor = isPositive ? Color.Green : Color.Red;
 
                 // Draw larger point circle (10 pixel radius)
@@ -1019,8 +1025,9 @@ namespace CTSegmenter
                 g.DrawEllipse(new Pen(pointColor, 2),
                     x - radius, y - radius, radius * 2, radius * 2);
 
-                // Draw ID number
-                g.DrawString(point.ID.ToString(), new Font("Arial", 8), Brushes.White, x + radius, y + radius);
+                // Draw ID number with +/- indicator to make it clearer
+                string typeIndicator = isPositive ? "+" : "-";
+                g.DrawString($"{point.ID} {typeIndicator}", new Font("Arial", 8), Brushes.White, x + radius, y + radius);
             }
         }
 
@@ -1420,7 +1427,13 @@ namespace CTSegmenter
                 return;
             }
 
-            statusLabel.Text = "Segmenting...";
+            // Ensure UI is updated from the UI thread
+            Action updateStatus = () => statusLabel.Text = "Segmenting...";
+            if (samForm.InvokeRequired)
+                samForm.Invoke(updateStatus);
+            else
+                updateStatus();
+
             Logger.Log("[SegmentAnythingCT] Starting segmentation");
 
             try
@@ -1430,8 +1443,8 @@ namespace CTSegmenter
 
                 // Create input and run the encoder on a background thread
                 var encoderInputs = new List<NamedOnnxValue> {
-                    NamedOnnxValue.CreateFromTensor("image", imageInput)
-                };
+            NamedOnnxValue.CreateFromTensor("image", imageInput)
+        };
 
                 var encoderOutputs = await Task.Run(() => encoderSession.Run(encoderInputs));
 
@@ -1456,8 +1469,8 @@ namespace CTSegmenter
                         pointCoords[0, i, 0] = x;
                         pointCoords[0, i, 1] = y;
 
-                        // Determine if positive or negative based on point type
-                        bool isPositive = points[i].Type == "Positive";
+                        // FIX: Use pointTypes dictionary to determine if point is positive
+                        bool isPositive = pointTypes.ContainsKey(points[i].ID) && pointTypes[points[i].ID];
                         pointLabels[0, i] = isPositive ? 1.0f : 0.0f;
                     }
 
@@ -1471,27 +1484,30 @@ namespace CTSegmenter
 
                     // Run decoder on background thread
                     var decoderInputs = new List<NamedOnnxValue> {
-                        NamedOnnxValue.CreateFromTensor("image_embed", imageEmbed),
-                        NamedOnnxValue.CreateFromTensor("high_res_feats_0", highResFeats0),
-                        NamedOnnxValue.CreateFromTensor("high_res_feats_1", highResFeats1),
-                        NamedOnnxValue.CreateFromTensor("point_coords", pointCoords),
-                        NamedOnnxValue.CreateFromTensor("point_labels", pointLabels),
-                        NamedOnnxValue.CreateFromTensor("mask_input", maskInput),
-                        NamedOnnxValue.CreateFromTensor("has_mask_input", hasMaskInput),
-                        NamedOnnxValue.CreateFromTensor("orig_im_size", origImSize)
-                    };
+                NamedOnnxValue.CreateFromTensor("image_embed", imageEmbed),
+                NamedOnnxValue.CreateFromTensor("high_res_feats_0", highResFeats0),
+                NamedOnnxValue.CreateFromTensor("high_res_feats_1", highResFeats1),
+                NamedOnnxValue.CreateFromTensor("point_coords", pointCoords),
+                NamedOnnxValue.CreateFromTensor("point_labels", pointLabels),
+                NamedOnnxValue.CreateFromTensor("mask_input", maskInput),
+                NamedOnnxValue.CreateFromTensor("has_mask_input", hasMaskInput),
+                NamedOnnxValue.CreateFromTensor("orig_im_size", origImSize)
+            };
 
                     var decoderOutputs = await Task.Run(() => decoderSession.Run(decoderInputs));
 
                     try
                     {
                         // Process decoder outputs
+                        byte[,] tempMask = null;
+                        float bestIoU = 0;
+
                         await Task.Run(() => {
                             var masks = decoderOutputs.First(x => x.Name == "masks").AsTensor<float>();
                             var iouPredictions = decoderOutputs.First(x => x.Name == "iou_predictions").AsTensor<float>();
-
+                            SaveAllMasks(masks, iouPredictions); //Save masks to JPEG
                             int bestMaskIdx = 0;
-                            float bestIoU = iouPredictions[0, 0];
+                            bestIoU = iouPredictions[0, 0];
 
                             for (int i = 1; i < iouPredictions.Dimensions[1]; i++)
                             {
@@ -1506,30 +1522,23 @@ namespace CTSegmenter
 
                             int h = mainForm.GetHeight();
                             int w = mainForm.GetWidth();
-                            segmentationMask = new byte[w, h];
+                            tempMask = new byte[w, h];
 
                             for (int y = 0; y < h; y++)
                             {
                                 for (int x = 0; x < w; x++)
                                 {
-                                    segmentationMask[x, y] = masks[0, bestMaskIdx, y, x] > 0.0f ? selectedMaterial.ID : (byte)0;
+                                    tempMask[x, y] = masks[0, bestMaskIdx, y, x] > 0.0f ? selectedMaterial.ID : (byte)0;
                                 }
                             }
                         });
 
                         // Update UI on the UI thread
-                        if (samForm.InvokeRequired)
-                        {
-                            samForm.Invoke(new Action(() => {
-                                UpdateViewers();
-                                statusLabel.Text = "Segmentation complete";
-                            }));
-                        }
-                        else
-                        {
+                        samForm.Invoke(new Action(() => {
+                            segmentationMask = tempMask;
                             UpdateViewers();
-                            statusLabel.Text = "Segmentation complete";
-                        }
+                            statusLabel.Text = $"Segmentation complete (IoU: {bestIoU:F3})";
+                        }));
 
                         Logger.Log("[SegmentAnythingCT] Segmentation complete");
                     }
@@ -1545,20 +1554,136 @@ namespace CTSegmenter
             }
             catch (Exception ex)
             {
-                if (samForm.InvokeRequired)
-                {
-                    samForm.Invoke(new Action(() => {
-                        MessageBox.Show($"Error during segmentation: {ex.Message}");
-                        statusLabel.Text = $"Error: {ex.Message}";
-                    }));
-                }
-                else
-                {
+                samForm.Invoke(new Action(() => {
                     MessageBox.Show($"Error during segmentation: {ex.Message}");
                     statusLabel.Text = $"Error: {ex.Message}";
-                }
+                }));
 
                 Logger.Log($"[SegmentAnythingCT] Segmentation error: {ex.Message}");
+            }
+        }
+
+        private unsafe void SaveAllMasks(Tensor<float> masks, Tensor<float> iouPredictions)
+        {
+            try
+            {
+                // Create directory for saving masks if it doesn't exist
+                string masksDir = Path.Combine(Application.StartupPath, "SAM_Masks");
+                if (!Directory.Exists(masksDir))
+                {
+                    Directory.CreateDirectory(masksDir);
+                }
+
+                // Generate timestamp for unique filenames
+                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+
+                // Get dimensions
+                int width = mainForm.GetWidth();
+                int height = mainForm.GetHeight();
+                int numMasks = masks.Dimensions[1]; // Number of masks in the batch
+
+                Logger.Log($"[SegmentAnythingCT] Saving {numMasks} masks to {masksDir}");
+
+                // Save each mask
+                for (int maskIdx = 0; maskIdx < numMasks; maskIdx++)
+                {
+                    // Create a new bitmap for this mask
+                    using (Bitmap maskBitmap = new Bitmap(width, height, PixelFormat.Format24bppRgb))
+                    {
+                        // Lock the bitmap for direct memory access
+                        BitmapData bmpData = maskBitmap.LockBits(
+                            new Rectangle(0, 0, width, height),
+                            ImageLockMode.WriteOnly,
+                            PixelFormat.Format24bppRgb);
+
+                        int stride = bmpData.Stride;
+                        int bytesPerPixel = 3; // RGB
+
+                        byte* ptr = (byte*)bmpData.Scan0;
+
+                        // Fill the bitmap
+                        for (int y = 0; y < height; y++)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                // Get mask value and convert to byte (0 or 255)
+                                byte pixelValue = masks[0, maskIdx, y, x] > 0 ? (byte)255 : (byte)0;
+
+                                // Calculate position in bitmap memory
+                                int pos = y * stride + x * bytesPerPixel;
+
+                                // Set RGB values (same for grayscale)
+                                ptr[pos] = pixelValue;     // Blue
+                                ptr[pos + 1] = pixelValue; // Green
+                                ptr[pos + 2] = pixelValue; // Red
+                            }
+                        }
+
+                        // Unlock the bitmap
+                        maskBitmap.UnlockBits(bmpData);
+
+                        // Get the IoU for this mask
+                        float iou = iouPredictions[0, maskIdx];
+
+                        // Save the bitmap to a file
+                        string filename = Path.Combine(masksDir, $"mask_{timestamp}_{maskIdx}_IoU_{iou:F3}.jpg");
+                        maskBitmap.Save(filename, ImageFormat.Jpeg);
+
+                        Logger.Log($"[SegmentAnythingCT] Saved mask {maskIdx} with IoU {iou:F3}");
+                    }
+                }
+
+                // Also save a colored composite image showing all masks
+                using (Bitmap compositeMask = new Bitmap(width, height, PixelFormat.Format24bppRgb))
+                {
+                    // Create graphics for drawing
+                    using (Graphics g = Graphics.FromImage(compositeMask))
+                    {
+                        // Fill with black background
+                        g.Clear(Color.Black);
+
+                        // Array of distinct colors for different masks
+                        Color[] colors = new Color[] {
+                    Color.Red, Color.Green, Color.Blue, Color.Yellow,
+                    Color.Cyan, Color.Magenta, Color.Orange, Color.Purple
+                };
+
+                        // Draw each mask with semi-transparency
+                        for (int maskIdx = 0; maskIdx < numMasks; maskIdx++)
+                        {
+                            // Get a color for this mask
+                            Color maskColor = colors[maskIdx % colors.Length];
+                            using (SolidBrush brush = new SolidBrush(Color.FromArgb(128, maskColor)))
+                            {
+                                // Draw the mask onto the composite image
+                                for (int y = 0; y < height; y++)
+                                {
+                                    for (int x = 0; x < width; x++)
+                                    {
+                                        if (masks[0, maskIdx, y, x] > 0)
+                                        {
+                                            g.FillRectangle(brush, x, y, 1, 1);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Add IoU score text to the image
+                            float iou = iouPredictions[0, maskIdx];
+                            g.DrawString($"Mask {maskIdx}: IoU = {iou:F3}", new Font("Arial", 10),
+                                new SolidBrush(maskColor), 10, 20 + maskIdx * 20);
+                        }
+                    }
+
+                    // Save the composite image
+                    string compositeFilename = Path.Combine(masksDir, $"composite_masks_{timestamp}.jpg");
+                    compositeMask.Save(compositeFilename, ImageFormat.Jpeg);
+                    Logger.Log($"[SegmentAnythingCT] Saved composite mask image");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SegmentAnythingCT] Error saving masks: {ex.Message}");
             }
         }
 
@@ -1570,14 +1695,32 @@ namespace CTSegmenter
                 return;
             }
 
+            if (mainForm == null)
+            {
+                Logger.Log("[SegmentAnythingCT] Error: MainForm reference is null");
+                MessageBox.Show("Error: Cannot access the main application.");
+                return;
+            }
+
             try
             {
                 Logger.Log("[SegmentAnythingCT] Applying segmentation mask to volume labels");
+                statusLabel.Text = "Applying mask...";
+
+                // Get dimensions with null checks
+                int width = mainForm.GetWidth();
+                int height = mainForm.GetHeight();
+
+                if (width <= 0 || height <= 0)
+                {
+                    MessageBox.Show("Invalid volume dimensions.");
+                    return;
+                }
 
                 // Apply the mask to the MainForm's current slice
-                for (int y = 0; y < mainForm.GetHeight(); y++)
+                for (int y = 0; y < height; y++)
                 {
-                    for (int x = 0; x < mainForm.GetWidth(); x++)
+                    for (int x = 0; x < width; x++)
                     {
                         if (segmentationMask[x, y] > 0)
                         {
@@ -1588,16 +1731,16 @@ namespace CTSegmenter
 
                 // Update the mainForm's temporary selection
                 if (mainForm.currentSelection == null ||
-                    mainForm.currentSelection.GetLength(0) != mainForm.GetWidth() ||
-                    mainForm.currentSelection.GetLength(1) != mainForm.GetHeight())
+                    mainForm.currentSelection.GetLength(0) != width ||
+                    mainForm.currentSelection.GetLength(1) != height)
                 {
-                    mainForm.currentSelection = new byte[mainForm.GetWidth(), mainForm.GetHeight()];
+                    mainForm.currentSelection = new byte[width, height];
                 }
 
                 // Copy mask to current selection as well
-                for (int y = 0; y < mainForm.GetHeight(); y++)
+                for (int y = 0; y < height; y++)
                 {
-                    for (int x = 0; x < mainForm.GetWidth(); x++)
+                    for (int x = 0; x < width; x++)
                     {
                         if (segmentationMask[x, y] > 0)
                         {

@@ -85,6 +85,11 @@ namespace CTSegmenter
         // Slices information
         private int xySlice, xzRow, yzCol;
 
+        private DenseTensor<float> cachedImageEmbed = null;
+        private DenseTensor<float> cachedHighResFeats0 = null;
+        private DenseTensor<float> cachedHighResFeats1 = null;
+        private int cachedFeatureSlice = -1;
+        private int featureCacheRadius = 3; // How many slices to reuse encoder features for
         // Segmentation results
         private byte[,] segmentationMask;
 
@@ -367,7 +372,15 @@ namespace CTSegmenter
                 Height = 30
             };
             btnApply.Click += (s, e) => ApplySegmentationMask();
-
+            Button btnApplyToVolume = new Button
+            {
+                Text = "Apply to Volume",
+                Location = new Point(230, 300),
+                Width = 120,
+                Height = 30
+            };
+            btnApplyToVolume.Click += (s, e) => ApplyToVolume();
+            controlPanel.Controls.Add(btnApplyToVolume);
             btnClose = new Button
             {
                 Text = "Close",
@@ -1454,6 +1467,12 @@ namespace CTSegmenter
                 encoderSession?.Dispose();
                 decoderSession?.Dispose();
 
+                // Reset feature cache when loading new models
+                cachedImageEmbed = null;
+                cachedHighResFeats0 = null;
+                cachedHighResFeats1 = null;
+                cachedFeatureSlice = -1;
+
                 // Verify files exist
                 if (!File.Exists(encoderPath))
                 {
@@ -1469,27 +1488,37 @@ namespace CTSegmenter
                     return;
                 }
 
-                // Create session options based on selected device
+                // Create session options with enhanced performance settings
                 useGPU = rbGPU.Checked;
                 SessionOptions options = new SessionOptions();
 
+                // Set graph optimization level to maximum
+                options.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;
+
+                // Enable parallel execution
+                options.EnableMemoryPattern = true;
+                options.EnableCpuMemArena = true;
+
+                // Set intra-op and inter-op thread count for CPU 
+                int cpuThreads = Environment.ProcessorCount;
+                options.IntraOpNumThreads = Math.Max(1, cpuThreads / 2);
+
                 if (useGPU)
                 {
-                    // Configure for GPU
+                    // Configure for GPU with optimized settings
                     options.AppendExecutionProvider_CUDA();
-                    options.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;
-                    Logger.Log("[SegmentAnythingCT] Using GPU execution provider");
+                    Logger.Log("[SegmentAnythingCT] Using GPU execution provider with optimized settings");
                 }
                 else
                 {
-                    Logger.Log("[SegmentAnythingCT] Using CPU execution provider");
+                    Logger.Log("[SegmentAnythingCT] Using optimized CPU execution provider");
                 }
 
-                // Create sessions
+                // Create sessions with optimized settings
                 encoderSession = new InferenceSession(encoderPath, options);
                 decoderSession = new InferenceSession(decoderPath, options);
 
-                Logger.Log("[SegmentAnythingCT] Models loaded successfully");
+                Logger.Log("[SegmentAnythingCT] Models loaded successfully with optimized settings");
                 statusLabel.Text = "Models loaded successfully";
             }
             catch (Exception ex)
@@ -2516,6 +2545,1080 @@ namespace CTSegmenter
 
             bitmap.UnlockBits(bmpData);
         }
+
+        private async void ApplyToVolume()
+        {
+            if (segmentationMask == null)
+            {
+                MessageBox.Show("No segmentation result available. Please segment the current slice first.");
+                return;
+            }
+
+            if (encoderSession == null || decoderSession == null)
+            {
+                MessageBox.Show("Models not loaded. Please load models first.");
+                return;
+            }
+
+            // Improved configuration dialog with better layout
+            using (var dialog = new Form()
+            {
+                Width = 500,
+                Height = 380,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterScreen,
+                Text = "Volume Segmentation Settings",
+                MaximizeBox = false,
+                MinimizeBox = false
+            })
+            {
+                // Title
+                Label lblTitle = new Label()
+                {
+                    Text = "Configure Volume Segmentation",
+                    Font = new Font(SystemFonts.DefaultFont.FontFamily, 12, FontStyle.Bold),
+                    AutoSize = true,
+                    Left = 20,
+                    Top = 15
+                };
+
+                // Slice range section
+                GroupBox grpRange = new GroupBox()
+                {
+                    Text = "Slice Range",
+                    Left = 20,
+                    Top = 40,
+                    Width = 450,
+                    Height = 70
+                };
+
+                Label lblRange = new Label()
+                {
+                    Left = 15,
+                    Top = 25,
+                    Text = "Number of slices to segment in each direction:",
+                    Width = 250,
+                    AutoSize = true
+                };
+
+                NumericUpDown numRange = new NumericUpDown()
+                {
+                    Left = 270,
+                    Top = 23,
+                    Width = 60,
+                    Minimum = 1,
+                    Maximum = 1000,
+                    Value = 10
+                };
+
+                // Add feature cache control for performance tuning
+                CheckBox chkUseFeatureCache = new CheckBox()
+                {
+                    Left = 350,
+                    Top = 24,
+                    Text = "Use feature caching (faster)",
+                    Checked = true,
+                    Width = 200,
+                    AutoSize = true
+                };
+
+                grpRange.Controls.AddRange(new Control[] { lblRange, numRange, chkUseFeatureCache });
+
+                // Operation selection section
+                GroupBox grpOperation = new GroupBox()
+                {
+                    Text = "Operation",
+                    Left = 20,
+                    Top = 120,
+                    Width = 450,
+                    Height = 110
+                };
+
+                RadioButton rbCreateMaterial = new RadioButton()
+                {
+                    Left = 15,
+                    Top = 25,
+                    Text = "Create material from segmentation",
+                    Width = 300,
+                    Checked = true,
+                    AutoSize = true
+                };
+
+                RadioButton rbExportCropped = new RadioButton()
+                {
+                    Left = 15,
+                    Top = 50,
+                    Text = "Export cropped dataset of segmented region",
+                    Width = 300,
+                    AutoSize = true
+                };
+
+                // Sub-option for material creation
+                CheckBox chkNewMaterial = new CheckBox()
+                {
+                    Left = 35,
+                    Top = 75,
+                    Text = "Create new material (unchecked = use current material)",
+                    Checked = true,
+                    Width = 350,
+                    Visible = true,
+                    AutoSize = true
+                };
+
+                grpOperation.Controls.AddRange(new Control[] { rbCreateMaterial, rbExportCropped, chkNewMaterial });
+
+                // Processing strategy section
+                GroupBox grpProcessing = new GroupBox()
+                {
+                    Text = "Processing Strategy",
+                    Left = 20,
+                    Top = 240,
+                    Width = 450,
+                    Height = 70
+                };
+
+                Label lblProcessStrategy = new Label()
+                {
+                    Left = 15,
+                    Top = 25,
+                    Text = "Select method:",
+                    Width = 100,
+                    AutoSize = true
+                };
+
+                ComboBox cboStrategy = new ComboBox()
+                {
+                    Left = 120,
+                    Top = 23,
+                    Width = 300,
+                    DropDownStyle = ComboBoxStyle.DropDownList
+                };
+                cboStrategy.Items.AddRange(new string[] {
+            "Forward, then Backward",
+            "Forward and Backward simultaneously",
+            "Forward only"
+        });
+                cboStrategy.SelectedIndex = 0;  // Default to forward then backward
+
+                grpProcessing.Controls.AddRange(new Control[] { lblProcessStrategy, cboStrategy });
+
+                // Add event handler to control sub-option visibility
+                rbCreateMaterial.CheckedChanged += (s, e) => {
+                    chkNewMaterial.Enabled = rbCreateMaterial.Checked;
+                };
+
+                Button btnOk = new Button() { Text = "Start", Left = 300, Top = 320, Width = 75, DialogResult = DialogResult.OK };
+                Button btnCancel = new Button() { Text = "Cancel", Left = 390, Top = 320, Width = 75, DialogResult = DialogResult.Cancel };
+
+                // Add all controls to the dialog
+                dialog.Controls.AddRange(new Control[] {
+            lblTitle,
+            grpRange,
+            grpOperation,
+            grpProcessing,
+            btnOk, btnCancel
+        });
+
+                dialog.AcceptButton = btnOk;
+                dialog.CancelButton = btnCancel;
+
+                if (dialog.ShowDialog() != DialogResult.OK)
+                    return;
+
+                int sliceRange = (int)numRange.Value;
+                bool useFeatureCache = chkUseFeatureCache.Checked;
+                bool exportCropped = rbExportCropped.Checked;
+                bool createNewMaterial = !exportCropped && chkNewMaterial.Checked && chkNewMaterial.Enabled;
+                int processingStrategy = cboStrategy.SelectedIndex;
+
+                // Set feature caching radius based on user selection
+                featureCacheRadius = useFeatureCache ? 3 : 0;
+
+                if (exportCropped)
+                {
+                    // Export cropped dataset
+                    string outputFolder = null;
+                    using (FolderBrowserDialog folderDialog = new FolderBrowserDialog())
+                    {
+                        folderDialog.Description = "Select folder to save cropped dataset";
+                        folderDialog.ShowNewFolderButton = true;
+
+                        if (folderDialog.ShowDialog() == DialogResult.OK)
+                        {
+                            outputFolder = folderDialog.SelectedPath;
+                        }
+                        else
+                        {
+                            return;
+                        }
+                    }
+
+                    ProgressForm progressForm = new ProgressForm("Exporting cropped dataset...");
+                    progressForm.Show();
+
+                    try
+                    {
+                        await ExportCroppedDataset(sliceRange, outputFolder, progressForm);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"Error exporting dataset: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        Logger.Log($"[SegmentAnythingCT] Export error: {ex.Message}");
+                    }
+                    finally
+                    {
+                        progressForm.Close();
+                        progressForm.Dispose();
+                    }
+                }
+                else
+                {
+                    // Create progress form
+                    ProgressForm progressForm = new ProgressForm("Segmenting volume slices...");
+                    progressForm.Show();
+
+                    try
+                    {
+                        // Get or create material
+                        byte materialID;
+                        if (createNewMaterial)
+                        {
+                            // Create a new material for the segmented volume
+                            Material volumeMaterial = new Material(
+                                "SAM_Volume",
+                                selectedMaterial.Color,
+                                0, 255,
+                                mainForm.GetNextMaterialID());
+
+                            mainForm.Materials.Add(volumeMaterial);
+                            materialID = volumeMaterial.ID;
+
+                            // Refresh material list in ControlForm
+                            foreach (Form form in Application.OpenForms)
+                            {
+                                if (form.GetType().Name == "ControlForm")
+                                {
+                                    form.Invoke(new Action(() => {
+                                        var refreshMethod = form.GetType().GetMethod("RefreshMaterialList");
+                                        if (refreshMethod != null)
+                                            refreshMethod.Invoke(form, null);
+                                    }));
+                                    break;
+                                }
+                            }
+
+                            mainForm.SaveLabelsChk();
+                        }
+                        else
+                        {
+                            materialID = selectedMaterial.ID;
+                        }
+
+                        // Apply current slice segmentation to the volume
+                        ApplyMaskToVolume(segmentationMask, xySlice, materialID);
+
+                        // Calculate slice range
+                        int startSlice = Math.Max(0, xySlice - sliceRange);
+                        int endSlice = Math.Min(mainForm.GetDepth() - 1, xySlice + sliceRange);
+
+                        // Get relevant points for propagation
+                        var relevantPoints = GetRelevantPointsForCurrentView();
+
+                        switch (processingStrategy)
+                        {
+                            case 0:  // Forward, then Backward (sequential)
+                                await SegmentVolumeSequential(startSlice, endSlice, xySlice, materialID,
+                                                             relevantPoints, progressForm);
+                                break;
+
+                            case 1:  // Forward and Backward simultaneously (parallel)
+                                await SegmentVolumeParallel(startSlice, endSlice, xySlice, materialID,
+                                                          relevantPoints, progressForm);
+                                break;
+
+                            case 2:  // Forward only 
+                                await SegmentVolumeForwardOnly(xySlice, endSlice, materialID,
+                                                             relevantPoints, progressForm);
+                                break;
+                        }
+
+                        // Update MainForm's views
+                        mainForm.RenderViews();
+                        await mainForm.RenderOrthoViewsAsync();
+                        mainForm.SaveLabelsChk();
+
+                        MessageBox.Show("Volume segmentation complete!", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"Error during volume segmentation: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        Logger.Log($"[SegmentAnythingCT] Volume segmentation error: {ex.Message}");
+                    }
+                    finally
+                    {
+                        progressForm.Close();
+                        progressForm.Dispose();
+                    }
+                }
+            }
+        }
+        private async Task SegmentVolumeSequential(int startSlice, int endSlice, int currentSlice,
+                                           byte materialID, List<AnnotationPoint> relevantPoints,
+                                           ProgressForm progressForm)
+        {
+            int totalSlices = (endSlice - currentSlice) + (currentSlice - startSlice);
+            int processedSlices = 0;
+
+            // Current mask starts with segmentation from current slice
+            byte[,] currentMask = segmentationMask;
+
+            // Propagate forward
+            progressForm.UpdateProgress(processedSlices, totalSlices, "Propagating forward...");
+            for (int slice = currentSlice + 1; slice <= endSlice; slice++)
+            {
+                // Update progress
+                processedSlices++;
+                progressForm.SafeUpdateProgress(processedSlices, totalSlices,
+                    $"Processing slice {slice} (forward)...");
+
+                // Segment this slice using previous mask as guidance
+                currentMask = await SegmentSliceWithMask(slice, currentMask, relevantPoints);
+
+                // If segmentation failed or mask is empty, stop
+                if (currentMask == null)
+                {
+                    Logger.Log($"[SegmentAnythingCT] Forward propagation stopped at slice {slice}");
+                    break;
+                }
+
+                // Apply mask to volume
+                ApplyMaskToVolume(currentMask, slice, materialID);
+            }
+
+            // Reset to current slice for backward propagation
+            currentMask = segmentationMask;
+
+            // Propagate backward
+            progressForm.UpdateProgress(processedSlices, totalSlices, "Propagating backward...");
+            for (int slice = currentSlice - 1; slice >= startSlice; slice--)
+            {
+                // Update progress
+                processedSlices++;
+                progressForm.SafeUpdateProgress(processedSlices, totalSlices,
+                    $"Processing slice {slice} (backward)...");
+
+                // Segment this slice using previous mask as guidance
+                currentMask = await SegmentSliceWithMask(slice, currentMask, relevantPoints);
+
+                // If segmentation failed or mask is empty, stop
+                if (currentMask == null)
+                {
+                    Logger.Log($"[SegmentAnythingCT] Backward propagation stopped at slice {slice}");
+                    break;
+                }
+
+                // Apply mask to volume
+                ApplyMaskToVolume(currentMask, slice, materialID);
+            }
+        }
+        private async Task SegmentVolumeParallel(int startSlice, int endSlice, int currentSlice,
+                                        byte materialID, List<AnnotationPoint> relevantPoints,
+                                        ProgressForm progressForm)
+        {
+            int totalSlices = (endSlice - currentSlice) + (currentSlice - startSlice);
+            int processedSlices = 0;
+
+            byte[,] forwardMask = segmentationMask;
+            byte[,] backwardMask = segmentationMask;
+
+            // Create progress reporting
+            var progress = new Progress<(int processed, string message)>(update => {
+                processedSlices = update.processed;
+                progressForm.SafeUpdateProgress(processedSlices, totalSlices, update.message);
+            });
+
+            // Process forward and backward in parallel
+            await Task.WhenAll(
+                SegmentForward(currentSlice + 1, endSlice, forwardMask, materialID, relevantPoints, progress),
+                SegmentBackward(currentSlice - 1, startSlice, backwardMask, materialID, relevantPoints, progress)
+            );
+        }
+        private async Task SegmentForward(int startSlice, int endSlice, byte[,] initialMask,
+                                byte materialID, List<AnnotationPoint> relevantPoints,
+                                IProgress<(int, string)> progress)
+        {
+            byte[,] currentMask = initialMask;
+            int processed = 0;
+
+            for (int slice = startSlice; slice <= endSlice; slice++)
+            {
+                processed++;
+                progress.Report((processed, $"Processing slice {slice} (forward)..."));
+
+                // Segment this slice
+                currentMask = await SegmentSliceWithMask(slice, currentMask, relevantPoints);
+
+                // If segmentation failed, stop
+                if (currentMask == null)
+                {
+                    Logger.Log($"[SegmentAnythingCT] Forward propagation stopped at slice {slice}");
+                    break;
+                }
+
+                // Apply mask to volume
+                ApplyMaskToVolume(currentMask, slice, materialID);
+            }
+        }
+
+        // Helper for parallel backward segmentation
+        private async Task SegmentBackward(int startSlice, int endSlice, byte[,] initialMask,
+                                 byte materialID, List<AnnotationPoint> relevantPoints,
+                                 IProgress<(int, string)> progress)
+        {
+            byte[,] currentMask = initialMask;
+            int processed = 0;
+
+            for (int slice = startSlice; slice >= endSlice; slice--)
+            {
+                processed++;
+                progress.Report((processed, $"Processing slice {slice} (backward)..."));
+
+                // Segment this slice
+                currentMask = await SegmentSliceWithMask(slice, currentMask, relevantPoints);
+
+                // If segmentation failed, stop
+                if (currentMask == null)
+                {
+                    Logger.Log($"[SegmentAnythingCT] Backward propagation stopped at slice {slice}");
+                    break;
+                }
+
+                // Apply mask to volume
+                ApplyMaskToVolume(currentMask, slice, materialID);
+            }
+        }
+        // Process forward direction only
+        private async Task SegmentVolumeForwardOnly(int startSlice, int endSlice, byte materialID,
+                                           List<AnnotationPoint> relevantPoints, ProgressForm progressForm)
+        {
+            int totalSlices = endSlice - startSlice;
+            int processedSlices = 0;
+
+            // Current mask starts with segmentation from current slice
+            byte[,] currentMask = segmentationMask;
+
+            // Propagate forward
+            progressForm.UpdateProgress(processedSlices, totalSlices, "Propagating forward only...");
+            for (int slice = startSlice + 1; slice <= endSlice; slice++)
+            {
+                // Update progress
+                processedSlices++;
+                progressForm.SafeUpdateProgress(processedSlices, totalSlices,
+                    $"Processing slice {slice} (forward)...");
+
+                // Segment this slice using previous mask as guidance
+                currentMask = await SegmentSliceWithMask(slice, currentMask, relevantPoints);
+
+                // If segmentation failed or mask is empty, stop
+                if (currentMask == null)
+                {
+                    Logger.Log($"[SegmentAnythingCT] Forward propagation stopped at slice {slice}");
+                    break;
+                }
+
+                // Apply mask to volume
+                ApplyMaskToVolume(currentMask, slice, materialID);
+            }
+        }
+
+        /// <summary>
+        /// Exports a cropped dataset containing only the segmented region
+        /// </summary>
+        private async Task ExportCroppedDataset(int sliceRange, string outputFolder, ProgressForm progressForm)
+        {
+            // First we need to segment the volume slices forward and backward
+            var relevantPoints = GetRelevantPointsForCurrentView();
+
+            // Current slice's mask
+            byte[,] currentMask = segmentationMask;
+
+            // Calculate slice range
+            int startSlice = Math.Max(0, xySlice - sliceRange);
+            int endSlice = Math.Min(mainForm.GetDepth() - 1, xySlice + sliceRange);
+            int totalSlices = endSlice - startSlice + 1;
+
+            // Dictionary to store masks for each slice
+            Dictionary<int, byte[,]> allSliceMasks = new Dictionary<int, byte[,]>();
+
+            // Add current slice mask
+            allSliceMasks[xySlice] = segmentationMask;
+
+            int processedSlices = 1; // Start at 1 because we already have the current slice
+
+            // Progress reporting
+            progressForm.UpdateProgress(processedSlices, totalSlices * 2, "Segmenting volume...");
+
+            // First pass - forward propagation
+            for (int slice = xySlice + 1; slice <= endSlice; slice++)
+            {
+                // Update progress
+                processedSlices++;
+                progressForm.SafeUpdateProgress(processedSlices, totalSlices * 2,
+                    $"Segmenting slice {slice} (forward)...");
+
+                // Segment this slice using previous mask as guidance
+                currentMask = await SegmentSliceWithMask(slice, currentMask, relevantPoints);
+
+                // If segmentation failed or mask is empty, stop
+                if (currentMask == null)
+                {
+                    Logger.Log($"[SegmentAnythingCT] Forward propagation stopped at slice {slice}");
+                    break;
+                }
+
+                // Store the mask
+                allSliceMasks[slice] = currentMask;
+            }
+
+            // Reset to current slice for backward propagation
+            currentMask = segmentationMask;
+
+            // Second pass - backward propagation
+            for (int slice = xySlice - 1; slice >= startSlice; slice--)
+            {
+                // Update progress
+                processedSlices++;
+                progressForm.SafeUpdateProgress(processedSlices, totalSlices * 2,
+                    $"Segmenting slice {slice} (backward)...");
+
+                // Segment this slice using previous mask as guidance
+                currentMask = await SegmentSliceWithMask(slice, currentMask, relevantPoints);
+
+                // If segmentation failed or mask is empty, stop
+                if (currentMask == null)
+                {
+                    Logger.Log($"[SegmentAnythingCT] Backward propagation stopped at slice {slice}");
+                    break;
+                }
+
+                // Store the mask
+                allSliceMasks[slice] = currentMask;
+            }
+
+            // Now we have masks for all slices in range, determine the bounds of the segmented region
+            int minX = int.MaxValue, minY = int.MaxValue, minZ = int.MaxValue;
+            int maxX = int.MinValue, maxY = int.MinValue, maxZ = int.MinValue;
+
+            // Calculate the bounds and check if this is a "dark" or "bright" segmentation
+            bool isDarkSegmentation = await Task.Run(() => {
+                long totalPixelValue = 0;
+                long totalPixelCount = 0;
+
+                foreach (var slicePair in allSliceMasks)
+                {
+                    int z = slicePair.Key;
+                    byte[,] mask = slicePair.Value;
+
+                    // Update Z bounds
+                    minZ = Math.Min(minZ, z);
+                    maxZ = Math.Max(maxZ, z);
+
+                    // Calculate bounds for this slice
+                    for (int y = 0; y < mask.GetLength(1); y++)
+                    {
+                        for (int x = 0; x < mask.GetLength(0); x++)
+                        {
+                            if (mask[x, y] > 0)
+                            {
+                                // Update XY bounds
+                                minX = Math.Min(minX, x);
+                                minY = Math.Min(minY, y);
+                                maxX = Math.Max(maxX, x);
+                                maxY = Math.Max(maxY, y);
+
+                                // Add pixel value to total for average calculation
+                                byte pixelValue = mainForm.volumeData[x, y, z];
+                                totalPixelValue += pixelValue;
+                                totalPixelCount++;
+                            }
+                        }
+                    }
+                }
+
+                // Calculate average pixel intensity in the segmented region
+                double avgIntensity = totalPixelCount > 0 ? (double)totalPixelValue / totalPixelCount : 128;
+
+                // If average intensity is less than 128, it's a dark segmentation
+                return avgIntensity < 128;
+            });
+
+            // Ensure we found some bounds
+            if (minX == int.MaxValue || minY == int.MaxValue || minZ == int.MaxValue ||
+                maxX == int.MinValue || maxY == int.MinValue || maxZ == int.MinValue)
+            {
+                throw new Exception("Could not determine bounds of segmented region!");
+            }
+
+            // Calculate dimensions of cropped volume
+            int croppedWidth = maxX - minX + 1;
+            int croppedHeight = maxY - minY + 1;
+            int croppedDepth = maxZ - minZ + 1;
+
+            // Create output directory if it doesn't exist
+            if (!Directory.Exists(outputFolder))
+            {
+                Directory.CreateDirectory(outputFolder);
+            }
+
+            // Create metadata file
+            using (StreamWriter writer = new StreamWriter(Path.Combine(outputFolder, "metadata.txt")))
+            {
+                writer.WriteLine($"Original Size: {mainForm.GetWidth()} x {mainForm.GetHeight()} x {mainForm.GetDepth()}");
+                writer.WriteLine($"Cropped Size: {croppedWidth} x {croppedHeight} x {croppedDepth}");
+                writer.WriteLine($"Cropped Bounds: X[{minX}-{maxX}], Y[{minY}-{maxY}], Z[{minZ}-{maxZ}]");
+                writer.WriteLine($"Pixel Size: {mainForm.GetPixelSize()} m");
+                writer.WriteLine($"Segmentation Type: {(isDarkSegmentation ? "Dark" : "Bright")} area");
+                writer.WriteLine($"Created: {DateTime.Now}");
+            }
+
+            // Save the cropped slices
+            progressForm.UpdateProgress(0, croppedDepth, "Saving cropped slices...");
+
+            // Use parallel processing for saving the images
+            await Task.Run(() => {
+                object lockObj = new object();
+                int saved = 0;
+
+                Parallel.For(minZ, maxZ + 1, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, z => {
+                    try
+                    {
+                        // Check if we have a mask for this slice
+                        if (!allSliceMasks.TryGetValue(z, out byte[,] sliceMask))
+                        {
+                            // If not, we need to create one (this should be rare)
+                            Logger.Log($"[SegmentAnythingCT] Warning: No mask for slice {z}, creating one");
+                            sliceMask = new byte[mainForm.GetWidth(), mainForm.GetHeight()];
+                        }
+
+                        // Create a new bitmap for the cropped slice
+                        using (Bitmap croppedBmp = new Bitmap(croppedWidth, croppedHeight, PixelFormat.Format8bppIndexed))
+                        {
+                            // Set up grayscale palette
+                            ColorPalette palette = croppedBmp.Palette;
+                            for (int i = 0; i < 256; i++)
+                            {
+                                palette.Entries[i] = Color.FromArgb(i, i, i);
+                            }
+                            croppedBmp.Palette = palette;
+
+                            // Lock the bitmap for writing
+                            BitmapData bmpData = croppedBmp.LockBits(
+                                new Rectangle(0, 0, croppedWidth, croppedHeight),
+                                ImageLockMode.WriteOnly,
+                                PixelFormat.Format8bppIndexed);
+
+                            // Copy the pixel data
+                            unsafe
+                            {
+                                byte* ptr = (byte*)bmpData.Scan0;
+                                int stride = bmpData.Stride;
+
+                                for (int y = 0; y < croppedHeight; y++)
+                                {
+                                    int origY = y + minY;
+                                    for (int x = 0; x < croppedWidth; x++)
+                                    {
+                                        int origX = x + minX;
+
+                                        if (origX < sliceMask.GetLength(0) && origY < sliceMask.GetLength(1) && sliceMask[origX, origY] > 0)
+                                        {
+                                            // Get the original voxel value
+                                            byte pixelValue = mainForm.volumeData[origX, origY, z];
+
+                                            // Invert if necessary for dark segmentations
+                                            if (isDarkSegmentation)
+                                            {
+                                                pixelValue = (byte)(255 - pixelValue);
+                                            }
+
+                                            // Set the pixel in the output bitmap (for 8bpp, one byte per pixel)
+                                            ptr[y * stride + x] = pixelValue;
+                                        }
+                                        else
+                                        {
+                                            // For pixels outside the mask, use black (or white for inverted)
+                                            ptr[y * stride + x] = isDarkSegmentation ? (byte)255 : (byte)0;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Unlock the bitmap
+                            croppedBmp.UnlockBits(bmpData);
+
+                            // Save the bitmap
+                            string fileName = Path.Combine(outputFolder, $"slice_{z - minZ:D5}.bmp");
+                            croppedBmp.Save(fileName, ImageFormat.Bmp);
+
+                            // Update progress (thread-safe)
+                            lock (lockObj)
+                            {
+                                saved++;
+                                int currentProgress = saved * 100 / croppedDepth;
+                                progressForm.SafeUpdateProgress(saved, croppedDepth, $"Saved {saved} of {croppedDepth} slices");
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[SegmentAnythingCT] Error saving slice {z}: {ex.Message}");
+                    }
+                });
+            });
+
+            // Show success message
+            MessageBox.Show($"Successfully exported {croppedDepth} slices to {outputFolder}.", "Export Complete",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+
+        // Apply mask to a specific slice in the volume
+        private void ApplyMaskToVolume(byte[,] mask, int sliceZ, byte materialID)
+        {
+            if (mask == null) return;
+
+            int width = mainForm.GetWidth();
+            int height = mainForm.GetHeight();
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    if (x < mask.GetLength(0) && y < mask.GetLength(1) && mask[x, y] > 0)
+                    {
+                        mainForm.volumeLabels[x, y, sliceZ] = materialID;
+                    }
+                }
+            }
+        }
+
+        // Segment a slice using the previous mask as guidance
+        private async Task<byte[,]> SegmentSliceWithMask(int sliceZ, byte[,] previousMask, List<AnnotationPoint> relevantPoints)
+        {
+            try
+            {
+                // Check if we can reuse cached features from a nearby slice
+                bool useCache = Math.Abs(sliceZ - cachedFeatureSlice) <= featureCacheRadius &&
+                                cachedImageEmbed != null &&
+                                cachedHighResFeats0 != null &&
+                                cachedHighResFeats1 != null;
+
+                DenseTensor<float> imageEmbed;
+                DenseTensor<float> highResFeats0;
+                DenseTensor<float> highResFeats1;
+
+                if (!useCache)
+                {
+                    // Need to run the encoder for this slice
+                    Tensor<float> imageInput = await Task.Run(() => PreprocessSliceImage(sliceZ));
+
+                    var encoderInputs = new List<NamedOnnxValue> {
+                NamedOnnxValue.CreateFromTensor("image", imageInput)
+            };
+
+                    var encoderOutputs = await Task.Run(() => encoderSession.Run(encoderInputs));
+
+                    try
+                    {
+                        // Extract encoder outputs
+                        var imageEmbedTensor = encoderOutputs.First(x => x.Name == "image_embed").AsTensor<float>();
+                        var highResFeats0Tensor = encoderOutputs.First(x => x.Name == "high_res_feats_0").AsTensor<float>();
+                        var highResFeats1Tensor = encoderOutputs.First(x => x.Name == "high_res_feats_1").AsTensor<float>();
+
+                        // Create new tensors to store cached values
+                        cachedImageEmbed = new DenseTensor<float>(imageEmbedTensor.Dimensions);
+                        cachedHighResFeats0 = new DenseTensor<float>(highResFeats0Tensor.Dimensions);
+                        cachedHighResFeats1 = new DenseTensor<float>(highResFeats1Tensor.Dimensions);
+
+                        // Copy tensor data - manual copy since we don't have Buffer access
+                        CopyTensorData(imageEmbedTensor, cachedImageEmbed);
+                        CopyTensorData(highResFeats0Tensor, cachedHighResFeats0);
+                        CopyTensorData(highResFeats1Tensor, cachedHighResFeats1);
+
+                        cachedFeatureSlice = sliceZ;
+
+                        // Use the cached tensors for this run
+                        imageEmbed = cachedImageEmbed;
+                        highResFeats0 = cachedHighResFeats0;
+                        highResFeats1 = cachedHighResFeats1;
+                    }
+                    finally
+                    {
+                        // Make sure to dispose of the encoder outputs
+                        foreach (var output in encoderOutputs)
+                        {
+                            output.Dispose();
+                        }
+                    }
+                }
+                else
+                {
+                    // Use cached features
+                    imageEmbed = cachedImageEmbed;
+                    highResFeats0 = cachedHighResFeats0;
+                    highResFeats1 = cachedHighResFeats1;
+                    Logger.Log($"[SegmentAnythingCT] Using cached features for slice {sliceZ} from slice {cachedFeatureSlice}");
+                }
+
+                // Prepare mask input from previous result (256x256)
+                DenseTensor<float> maskInput = new DenseTensor<float>(new[] { 1, 1, 256, 256 });
+
+                // Resize previous mask to 256x256
+                int width = mainForm.GetWidth();
+                int height = mainForm.GetHeight();
+                float scaleX = 256.0f / width;
+                float scaleY = 256.0f / height;
+
+                // Convert previous mask to proper size for mask_input
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        if (x < previousMask.GetLength(0) && y < previousMask.GetLength(1) && previousMask[x, y] > 0)
+                        {
+                            int targetX = (int)(x * scaleX);
+                            int targetY = (int)(y * scaleY);
+
+                            if (targetX < 256 && targetY < 256)
+                            {
+                                maskInput[0, 0, targetY, targetX] = 1.0f;
+                            }
+                        }
+                    }
+                }
+
+                // Set has_mask_input to 1 to indicate we're using a mask
+                DenseTensor<float> hasMaskInput = new DenseTensor<float>(new[] { 1 });
+                hasMaskInput[0] = 1.0f;
+
+                // Prepare point data
+                int numPoints = relevantPoints.Count;
+                float inputScaleX = 1024.0f / width;
+                float inputScaleY = 1024.0f / height;
+
+                DenseTensor<float> pointCoords = new DenseTensor<float>(new[] { 1, numPoints, 2 });
+                DenseTensor<float> pointLabels = new DenseTensor<float>(new[] { 1, numPoints });
+
+                for (int i = 0; i < numPoints; i++)
+                {
+                    var point = relevantPoints[i];
+                    pointCoords[0, i, 0] = point.X * inputScaleX;
+                    pointCoords[0, i, 1] = point.Y * inputScaleY;
+
+                    bool isPositive = pointTypes.ContainsKey(point.ID) && pointTypes[point.ID];
+                    pointLabels[0, i] = isPositive ? 1.0f : 0.0f;
+                }
+
+                // Image size tensor
+                DenseTensor<int> origImSize = new DenseTensor<int>(new[] { 2 });
+                origImSize[0] = height;
+                origImSize[1] = width;
+
+                // Run decoder with mask input
+                var decoderInputs = new List<NamedOnnxValue> {
+            NamedOnnxValue.CreateFromTensor("image_embed", imageEmbed),
+            NamedOnnxValue.CreateFromTensor("high_res_feats_0", highResFeats0),
+            NamedOnnxValue.CreateFromTensor("high_res_feats_1", highResFeats1),
+            NamedOnnxValue.CreateFromTensor("point_coords", pointCoords),
+            NamedOnnxValue.CreateFromTensor("point_labels", pointLabels),
+            NamedOnnxValue.CreateFromTensor("mask_input", maskInput),
+            NamedOnnxValue.CreateFromTensor("has_mask_input", hasMaskInput),
+            NamedOnnxValue.CreateFromTensor("orig_im_size", origImSize)
+        };
+
+                var decoderOutputs = await Task.Run(() => decoderSession.Run(decoderInputs));
+
+                try
+                {
+                    byte[,] resultMask = null;
+
+                    await Task.Run(() => {
+                        var masks = decoderOutputs.First(x => x.Name == "masks").AsTensor<float>();
+                        var iouPredictions = decoderOutputs.First(x => x.Name == "iou_predictions").AsTensor<float>();
+
+                        // Find best mask
+                        int bestMaskIdx = 0;
+                        float bestIoU = iouPredictions[0, 0];
+
+                        for (int i = 1; i < iouPredictions.Dimensions[1]; i++)
+                        {
+                            if (iouPredictions[0, i] > bestIoU)
+                            {
+                                bestIoU = iouPredictions[0, i];
+                                bestMaskIdx = i;
+                            }
+                        }
+
+                        // For boundary slices, reduce the IoU threshold
+                        // This helps ensure processing of the extreme slices
+                        float minIoU = 0.5f;
+
+                        // If we're at the beginning or end of the volume, use lower threshold
+                        int maxSlice = mainForm.GetDepth() - 1;
+                        if (sliceZ <= 3 || sliceZ >= maxSlice - 3)
+                        {
+                            minIoU = 0.3f;  // Lower threshold for boundary slices
+                            Logger.Log($"[SegmentAnythingCT] Using reduced IoU threshold ({minIoU}) for boundary slice {sliceZ}");
+                        }
+
+                        // If IoU is too low, stop propagation (with adjusted threshold for boundary cases)
+                        if (bestIoU < minIoU)
+                        {
+                            Logger.Log($"[SegmentAnythingCT] Stopping at slice {sliceZ} due to low IoU ({bestIoU:F3})");
+                            return;
+                        }
+
+                        Logger.Log($"[SegmentAnythingCT] Slice {sliceZ} mask IoU: {bestIoU:F3}");
+
+                        // Convert mask to byte array
+                        resultMask = new byte[width, height];
+                        for (int y = 0; y < height; y++)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                if (masks[0, bestMaskIdx, y, x] > 0.0f)
+                                {
+                                    resultMask[x, y] = selectedMaterial.ID;
+                                }
+                            }
+                        }
+                    });
+
+                    return resultMask;
+                }
+                finally
+                {
+                    // Dispose decoder outputs
+                    foreach (var output in decoderOutputs)
+                    {
+                        output.Dispose();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SegmentAnythingCT] Error segmenting slice {sliceZ}: {ex.Message}");
+                return null;
+            }
+        }
+
+        private void CopyTensorData<T>(Tensor<T> source, DenseTensor<T> destination)
+        {
+            // Get dimensions
+            int[] dimensions = source.Dimensions.ToArray();
+
+            // For simplicity, handle up to 4D tensors (which should cover our use case)
+            if (dimensions.Length == 1)
+            {
+                for (int i = 0; i < dimensions[0]; i++)
+                {
+                    destination[i] = source[i];
+                }
+            }
+            else if (dimensions.Length == 2)
+            {
+                for (int i = 0; i < dimensions[0]; i++)
+                {
+                    for (int j = 0; j < dimensions[1]; j++)
+                    {
+                        destination[i, j] = source[i, j];
+                    }
+                }
+            }
+            else if (dimensions.Length == 3)
+            {
+                for (int i = 0; i < dimensions[0]; i++)
+                {
+                    for (int j = 0; j < dimensions[1]; j++)
+                    {
+                        for (int k = 0; k < dimensions[2]; k++)
+                        {
+                            destination[i, j, k] = source[i, j, k];
+                        }
+                    }
+                }
+            }
+            else if (dimensions.Length == 4)
+            {
+                for (int i = 0; i < dimensions[0]; i++)
+                {
+                    for (int j = 0; j < dimensions[1]; j++)
+                    {
+                        for (int k = 0; k < dimensions[2]; k++)
+                        {
+                            for (int l = 0; l < dimensions[3]; l++)
+                            {
+                                destination[i, j, k, l] = source[i, j, k, l];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Preprocess a slice image for the SAM model
+        private unsafe Tensor<float> PreprocessSliceImage(int sliceZ)
+        {
+            // Create a bitmap for the specified slice
+            using (Bitmap sliceBitmap = CreateSliceBitmap(sliceZ))
+            {
+                // Create a tensor with shape [1, 3, 1024, 1024]
+                DenseTensor<float> inputTensor = new DenseTensor<float>(new[] { 1, 3, 1024, 1024 });
+
+                // Create a resized version of the slice
+                using (Bitmap resized = new Bitmap(1024, 1024))
+                {
+                    using (Graphics g = Graphics.FromImage(resized))
+                    {
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        g.DrawImage(sliceBitmap, 0, 0, 1024, 1024);
+                    }
+
+                    // Lock the bitmap and access its pixel data
+                    BitmapData bmpData = resized.LockBits(
+                        new Rectangle(0, 0, resized.Width, resized.Height),
+                        ImageLockMode.ReadOnly,
+                        PixelFormat.Format24bppRgb);
+
+                    int stride = bmpData.Stride;
+                    int bytesPerPixel = 3; // RGB
+
+                    byte* ptr = (byte*)bmpData.Scan0;
+
+                    // Process pixels and normalize to range [0.0, 1.0]
+                    for (int y = 0; y < 1024; y++)
+                    {
+                        for (int x = 0; x < 1024; x++)
+                        {
+                            int offset = y * stride + x * bytesPerPixel;
+
+                            // BGR order (standard in Bitmap)
+                            byte b = ptr[offset];
+                            byte g = ptr[offset + 1];
+                            byte r = ptr[offset + 2];
+
+                            // Normalize to range [0.0, 1.0] and convert to RGB order for the model
+                            inputTensor[0, 0, y, x] = r / 255.0f;
+                            inputTensor[0, 1, y, x] = g / 255.0f;
+                            inputTensor[0, 2, y, x] = b / 255.0f;
+                        }
+                    }
+
+                    resized.UnlockBits(bmpData);
+                    return inputTensor;
+                }
+            }
+        }
+
 
         private void ClearCaches()
         {

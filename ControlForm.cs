@@ -169,6 +169,8 @@ namespace CTSegmenter
                 CTViewer3DForm viewer3DForm = new CTViewer3DForm(mainForm);
                 viewer3DForm.Show();
             };
+            ToolStripMenuItem textureClassifierMenuItem = new ToolStripMenuItem("Texture Classifier");
+            textureClassifierMenuItem.Click += (s, e) => OpenTextureClassifier();
             editMenu = new ToolStripMenuItem("Edit");
             addMaterialMenuItem = new ToolStripMenuItem("Add Material");
             addMaterialMenuItem.Click += (s, e) => OnAddMaterial();
@@ -337,7 +339,23 @@ namespace CTSegmenter
 
                 segmentAnything.Show();
             };
+            ToolStripMenuItem filterManagerMenuItem = new ToolStripMenuItem("Filter Manager");
+            filterManagerMenuItem.Click += (s, e) =>
+            {
+                if (mainForm.volumeData == null)
+                {
+                    MessageBox.Show("Please load a dataset first.", "No Data",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                // Create and show the FilterManager form
+                FilterManager filterManager = new FilterManager(mainForm);
+                filterManager.Show();
+            };
+            toolsMenu.DropDownItems.Add(filterManagerMenuItem);
             toolsMenu.DropDownItems.Add(segmentAnythingToolMenuItem);
+            toolsMenu.DropDownItems.Add(textureClassifierMenuItem);
             dbgConsole.Click += (s, e) =>
             {
                 if (Logger.LogWindowInstance == null || Logger.LogWindowInstance.IsDisposed)
@@ -981,7 +999,7 @@ namespace CTSegmenter
             mainForm.SaveLabelsChk();
         }
 
-        private void OnRemoveMaterial()
+        private async void OnRemoveMaterial()
         {
             int idx = lstMaterials.SelectedIndex;
             // Do not allow deletion if index is 0 (Exterior) or invalid.
@@ -990,12 +1008,58 @@ namespace CTSegmenter
                 MessageBox.Show("Invalid selection. Cannot remove the Exterior material or invalid index.");
                 return;
             }
-            // Get the material using the list index, then remove it using its ID.
+
+            // Get the material using the list index
             Material mat = mainForm.Materials[idx];
-            mainForm.RemoveMaterialAndReindex(mat.ID);
-            RefreshMaterialList();
-            mainForm.RenderViews();
-            mainForm.SaveLabelsChk();
+
+            // Confirm removal
+            var result = MessageBox.Show(
+                $"Are you sure you want to remove material '{mat.Name}'?\n\nThis operation might take a while for large volumes.",
+                "Confirm Removal",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+
+            if (result != DialogResult.Yes)
+                return;
+
+            // Create and show a progress form
+            ProgressForm progressForm = new ProgressForm($"Removing material '{mat.Name}'...");
+            progressForm.Show();
+
+            // Disable UI controls during the operation
+            btnAddMaterial.Enabled = false;
+            btnRemoveMaterial.Enabled = false;
+            btnRenameMaterial.Enabled = false;
+            lstMaterials.Enabled = false;
+
+            try
+            {
+                // Perform the material removal in a background thread
+                await Task.Run(() =>
+                {
+                    // Call the material removal method
+                    mainForm.RemoveMaterialAndReindex(mat.ID);
+                });
+
+                // Update UI after successful removal
+                RefreshMaterialList();
+                mainForm.SaveLabelsChk();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error removing material: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                // Re-enable UI controls
+                btnAddMaterial.Enabled = true;
+                btnRemoveMaterial.Enabled = true;
+                btnRenameMaterial.Enabled = true;
+                lstMaterials.Enabled = true;
+
+                // Close the progress form
+                progressForm.Close();
+            }
         }
 
         private void OnRenameMaterial()
@@ -1016,6 +1080,31 @@ namespace CTSegmenter
                 RefreshMaterialList();
             }
             mainForm.SaveLabelsChk();
+        }
+        private void OpenTextureClassifier()
+        {
+            if (mainForm.volumeData == null)
+            {
+                MessageBox.Show("Please load a dataset first.", "No Data",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // Get the selected material
+            Material selectedMaterial;
+            if (lstMaterials.SelectedIndex > 0 && lstMaterials.SelectedIndex < mainForm.Materials.Count)
+            {
+                selectedMaterial = mainForm.Materials[lstMaterials.SelectedIndex];
+            }
+            else
+            {
+                // Default to the first non-exterior material
+                selectedMaterial = mainForm.Materials.Count > 1 ? mainForm.Materials[1] : mainForm.Materials[0];
+            }
+
+            Logger.Log("[ControlForm] Opening Texture Classifier tool");
+            TextureClassifier textureClassifier = new TextureClassifier(mainForm, selectedMaterial);
+            textureClassifier.Show();
         }
 
         private void UpdateThresholdSliders()

@@ -68,6 +68,12 @@
     <Reference Include="Google.Protobuf, Version=3.30.0.0, Culture=neutral, PublicKeyToken=a7d26565bac4d604, processorArchitecture=MSIL">
       <HintPath>packages\Google.Protobuf.3.30.0\lib\net45\Google.Protobuf.dll</HintPath>
     </Reference>
+    <Reference Include="ILGPU, Version=1.5.1.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>packages\ILGPU.1.5.1\lib\net471\ILGPU.dll</HintPath>
+    </Reference>
+    <Reference Include="ILGPU.Algorithms, Version=1.5.1.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>packages\ILGPU.Algorithms.1.5.1\lib\net471\ILGPU.Algorithms.dll</HintPath>
+    </Reference>
     <Reference Include="Microsoft.Bcl.AsyncInterfaces, Version=9.0.0.3, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
       <HintPath>packages\Microsoft.Bcl.AsyncInterfaces.9.0.3\lib\net462\Microsoft.Bcl.AsyncInterfaces.dll</HintPath>
     </Reference>
@@ -130,6 +136,9 @@
     <Reference Include="System.Numerics.Tensors, Version=9.0.0.2, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
       <HintPath>packages\System.Numerics.Tensors.9.0.2\lib\net462\System.Numerics.Tensors.dll</HintPath>
     </Reference>
+    <Reference Include="System.Reflection.Metadata, Version=7.0.0.2, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
+      <HintPath>packages\System.Reflection.Metadata.7.0.2\lib\net462\System.Reflection.Metadata.dll</HintPath>
+    </Reference>
     <Reference Include="System.Threading.Channels, Version=9.0.0.2, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
       <HintPath>packages\System.Threading.Channels.9.0.2\lib\net462\System.Threading.Channels.dll</HintPath>
     </Reference>
@@ -164,6 +173,7 @@
     <Content Include="MainLoop - Copy.txt" />
     <Compile Include="CTViewerNative.cs" />
     <Compile Include="CTVolumeViewer.cs" />
+    <Compile Include="FilterManager.cs" />
     <Compile Include="LRUCache.cs" />
     <Compile Include="MainLoop - Copy.Designer.cs">
       <DependentUpon>MainLoop - Copy.txt</DependentUpon>
@@ -196,6 +206,7 @@
     <Content Include="CTMemorySegmenter.txt" />
     <Content Include="SegmentationPropagator.txt" />
     <Compile Include="SegmentAnythingCT.cs" />
+    <Compile Include="TextureClassifier.cs" />
     <Compile Include="VolumeExtensions.cs" />
   </ItemGroup>
   <ItemGroup>

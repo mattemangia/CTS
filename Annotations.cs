@@ -81,7 +81,10 @@ namespace CTSegmenter
             foreach (var p in Points)
                 p.ID = counter++;
         }
-
+        public IEnumerable<AnnotationPoint> GetAllPoints()
+        {
+            return Points.ToList();
+        }
         /// <summary>
         /// Returns all annotation points for a given slice Z.
         /// </summary>

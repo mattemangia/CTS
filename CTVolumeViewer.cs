@@ -24,6 +24,7 @@ namespace CTSegmenter
         public int RenderMode { get; set; } = 0; // 0=Volume, 1=MIP, 2=Isosurface
         public bool ShowLabels { get; set; } = true;
 
+
         public CTVolumeViewer(Panel panel)
         {
             renderPanel = panel ?? throw new ArgumentNullException(nameof(panel));

@@ -28,6 +28,19 @@ namespace CTSegmenter
         private CheckBox chkAutoUpdate;
         private Label statusLabel;
 
+        private LRUCache<int, Bitmap> xySliceCache;
+        private LRUCache<int, Bitmap> xzSliceCache;
+        private LRUCache<int, Bitmap> yzSliceCache;
+        private HashSet<int> cachedXYKeys = new HashSet<int>();
+        private HashSet<int> cachedXZKeys = new HashSet<int>();
+        private HashSet<int> cachedYZKeys = new HashSet<int>();
+        private const int CACHE_SIZE = 30; // Number of slices to cache
+
+        private enum ActiveView { XY, XZ, YZ }
+        private ActiveView currentActiveView = ActiveView.XY;
+
+        
+        private Button btnXYView, btnXZView, btnYZView;
         // Slice control components 
         private Label lblSliceXY;
         private TrackBar sliderXY;
@@ -94,6 +107,11 @@ namespace CTSegmenter
             xzRow = mainForm.XzSliceY;
             yzCol = mainForm.YzSliceX;
 
+            // Initialize caches
+            xySliceCache = new LRUCache<int, Bitmap>(CACHE_SIZE);
+            xzSliceCache = new LRUCache<int, Bitmap>(CACHE_SIZE);
+            yzSliceCache = new LRUCache<int, Bitmap>(CACHE_SIZE);
+
             // Initialize form and UI
             InitializeForm();
 
@@ -132,6 +150,7 @@ namespace CTSegmenter
                 FormBorderStyle = FormBorderStyle.Sizable
             };
 
+            // Main layout with 2x2 grid
             mainLayout = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
@@ -159,7 +178,7 @@ namespace CTSegmenter
                 AutoScroll = true
             };
 
-            // Add components to control panel
+            // --------- Model Loading Section ---------
             Label lblModelPath = new Label
             {
                 Text = "Model Directory:",
@@ -183,7 +202,7 @@ namespace CTSegmenter
             };
             btnBrowse.Click += (s, e) => BrowseForModelDirectory();
 
-            // Device selection
+            // --------- Device Selection Section ---------
             Label lblDevice = new Label
             {
                 Text = "Execution Device:",
@@ -206,7 +225,6 @@ namespace CTSegmenter
                 AutoSize = true
             };
 
-            // Add action buttons
             btnLoadModel = new Button
             {
                 Text = "Load Models",
@@ -216,11 +234,18 @@ namespace CTSegmenter
             };
             btnLoadModel.Click += (s, e) => LoadONNXModels();
 
-            // Add prompt buttons
+            // --------- Prompt Mode Section ---------
+            Label lblPromptMode = new Label
+            {
+                Text = "Prompt Mode:",
+                Location = new Point(10, 150),
+                AutoSize = true
+            };
+
             btnPositivePrompt = new Button
             {
                 Text = "Positive Prompt (+)",
-                Location = new Point(10, 150),
+                Location = new Point(10, 170),
                 Width = 140,
                 Height = 30,
                 BackColor = Color.LightGreen
@@ -235,7 +260,7 @@ namespace CTSegmenter
             btnNegativePrompt = new Button
             {
                 Text = "Negative Prompt (-)",
-                Location = new Point(160, 150),
+                Location = new Point(160, 170),
                 Width = 140,
                 Height = 30
             };
@@ -246,18 +271,98 @@ namespace CTSegmenter
                 Logger.Log("[SegmentAnythingCT] Switched to negative prompt mode");
             };
 
+            // --------- Auto-Update Section ---------
             chkAutoUpdate = new CheckBox
             {
                 Text = "Auto-update when annotations change",
-                Location = new Point(10, 190),
+                Location = new Point(10, 210),
                 AutoSize = true,
                 Checked = true
             };
 
+            // --------- Active View for Segmentation Section ---------
+            Label lblActiveView = new Label
+            {
+                Text = "Active View for Segmentation:",
+                Location = new Point(10, 240),
+                AutoSize = true
+            };
+
+            btnXYView = new Button
+            {
+                Text = "XY View",
+                Location = new Point(10, 260),
+                Width = 80,
+                Height = 30,
+                BackColor = Color.LightSkyBlue
+            };
+            btnXYView.Click += (s, e) => {
+                currentActiveView = ActiveView.XY;
+                UpdateActiveViewButtons();
+                Logger.Log("[SegmentAnythingCT] Switched to XY view for segmentation");
+
+                // Check if there are points in this view and auto-update if enabled
+                if (chkAutoUpdate.Checked)
+                {
+                    var viewPoints = GetRelevantPointsForCurrentView();
+                    if (viewPoints.Count > 0)
+                    {
+                        Task.Run(() => PerformSegmentation());
+                    }
+                }
+            };
+
+            btnXZView = new Button
+            {
+                Text = "XZ View",
+                Location = new Point(100, 260),
+                Width = 80,
+                Height = 30
+            };
+            btnXZView.Click += (s, e) => {
+                currentActiveView = ActiveView.XZ;
+                UpdateActiveViewButtons();
+                Logger.Log("[SegmentAnythingCT] Switched to XZ view for segmentation");
+
+                // Check if there are points in this view and auto-update if enabled
+                if (chkAutoUpdate.Checked)
+                {
+                    var viewPoints = GetRelevantPointsForCurrentView();
+                    if (viewPoints.Count > 0)
+                    {
+                        Task.Run(() => PerformSegmentation());
+                    }
+                }
+            };
+
+            btnYZView = new Button
+            {
+                Text = "YZ View",
+                Location = new Point(190, 260),
+                Width = 80,
+                Height = 30
+            };
+            btnYZView.Click += (s, e) => {
+                currentActiveView = ActiveView.YZ;
+                UpdateActiveViewButtons();
+                Logger.Log("[SegmentAnythingCT] Switched to YZ view for segmentation");
+
+                // Check if there are points in this view and auto-update if enabled
+                if (chkAutoUpdate.Checked)
+                {
+                    var viewPoints = GetRelevantPointsForCurrentView();
+                    if (viewPoints.Count > 0)
+                    {
+                        Task.Run(() => PerformSegmentation());
+                    }
+                }
+            };
+
+            // --------- Action Buttons ---------
             btnApply = new Button
             {
                 Text = "Apply Mask",
-                Location = new Point(10, 220),
+                Location = new Point(10, 300),
                 Width = 100,
                 Height = 30
             };
@@ -266,7 +371,7 @@ namespace CTSegmenter
             btnClose = new Button
             {
                 Text = "Close",
-                Location = new Point(120, 220),
+                Location = new Point(120, 300),
                 Width = 100,
                 Height = 30
             };
@@ -275,16 +380,15 @@ namespace CTSegmenter
             statusLabel = new Label
             {
                 Text = "Ready",
-                Location = new Point(10, 260),
+                Location = new Point(10, 340),
                 AutoSize = true
             };
 
-            // Add slice controls
-            // XY Slice
+            // --------- XY Slice Controls ---------
             lblSliceXY = new Label
             {
                 Text = $"XY Slice: {xySlice} / {(mainForm.GetDepth() > 0 ? mainForm.GetDepth() - 1 : 0)}",
-                Location = new Point(10, 300),
+                Location = new Point(10, 370),
                 AutoSize = true
             };
 
@@ -293,7 +397,7 @@ namespace CTSegmenter
                 Minimum = 0,
                 Maximum = mainForm.GetDepth() > 0 ? mainForm.GetDepth() - 1 : 0,
                 Value = xySlice,
-                Location = new Point(10, 320),
+                Location = new Point(10, 390),
                 Width = 220,
                 TickStyle = TickStyle.None
             };
@@ -303,7 +407,7 @@ namespace CTSegmenter
                 Minimum = 0,
                 Maximum = sliderXY.Maximum,
                 Value = xySlice,
-                Location = new Point(240, 320),
+                Location = new Point(240, 390),
                 Width = 60
             };
 
@@ -323,11 +427,11 @@ namespace CTSegmenter
                 }
             };
 
-            // XZ Slice
+            // --------- XZ Slice Controls ---------
             lblSliceXZ = new Label
             {
                 Text = $"XZ Row: {xzRow} / {(mainForm.GetHeight() > 0 ? mainForm.GetHeight() - 1 : 0)}",
-                Location = new Point(10, 350),
+                Location = new Point(10, 420),
                 AutoSize = true
             };
 
@@ -336,7 +440,7 @@ namespace CTSegmenter
                 Minimum = 0,
                 Maximum = mainForm.GetHeight() > 0 ? mainForm.GetHeight() - 1 : 0,
                 Value = xzRow,
-                Location = new Point(10, 370),
+                Location = new Point(10, 440),
                 Width = 220,
                 TickStyle = TickStyle.None
             };
@@ -346,7 +450,7 @@ namespace CTSegmenter
                 Minimum = 0,
                 Maximum = sliderXZ.Maximum,
                 Value = xzRow,
-                Location = new Point(240, 370),
+                Location = new Point(240, 440),
                 Width = 60
             };
 
@@ -366,11 +470,11 @@ namespace CTSegmenter
                 }
             };
 
-            // YZ Slice
+            // --------- YZ Slice Controls ---------
             lblSliceYZ = new Label
             {
                 Text = $"YZ Column: {yzCol} / {(mainForm.GetWidth() > 0 ? mainForm.GetWidth() - 1 : 0)}",
-                Location = new Point(10, 400),
+                Location = new Point(10, 470),
                 AutoSize = true
             };
 
@@ -379,7 +483,7 @@ namespace CTSegmenter
                 Minimum = 0,
                 Maximum = mainForm.GetWidth() > 0 ? mainForm.GetWidth() - 1 : 0,
                 Value = yzCol,
-                Location = new Point(10, 420),
+                Location = new Point(10, 490),
                 Width = 220,
                 TickStyle = TickStyle.None
             };
@@ -389,7 +493,7 @@ namespace CTSegmenter
                 Minimum = 0,
                 Maximum = sliderYZ.Maximum,
                 Value = yzCol,
-                Location = new Point(240, 420),
+                Location = new Point(240, 490),
                 Width = 60
             };
 
@@ -409,11 +513,11 @@ namespace CTSegmenter
                 }
             };
 
-            // Add sync checkbox
+            // --------- Sync with Main View Checkbox ---------
             chkSyncWithMainView = new CheckBox
             {
                 Text = "Sync with main view",
-                Location = new Point(10, 460),
+                Location = new Point(10, 520),
                 Checked = true,
                 AutoSize = true
             };
@@ -428,7 +532,7 @@ namespace CTSegmenter
                 }
             };
 
-            // Add information about using the tool
+            // --------- Help Text ---------
             Label lblHelp = new Label
             {
                 Text = "Instructions:\n" +
@@ -436,35 +540,53 @@ namespace CTSegmenter
                       "- Use '+' for foreground, '-' for background points\n" +
                       "- Click on existing points to remove them\n" +
                       "- Use mousewheel to zoom, drag to pan\n" +
+                      "- Select which view to segment (XY/XZ/YZ)\n" +
                       "- Click 'Apply Mask' to save the segmentation",
-                Location = new Point(10, 490),
+                Location = new Point(10, 550),
                 Size = new Size(300, 130),
                 BorderStyle = BorderStyle.FixedSingle
             };
 
-            // Selected material information
+            // --------- Selected Material Information ---------
             Label lblMaterial = new Label
             {
                 Text = $"Selected Material: {selectedMaterial.Name}",
-                Location = new Point(10, 630),
+                Location = new Point(10, 690),
                 AutoSize = true,
                 ForeColor = selectedMaterial.Color
             };
 
-            // Add controls to panel
+            // Add all controls to the panel
             controlPanel.Controls.AddRange(new Control[] {
-                lblModelPath, modelPathTextBox, btnBrowse,
-                lblDevice, rbCPU, rbGPU,
-                btnLoadModel,
-                btnPositivePrompt, btnNegativePrompt,
-                chkAutoUpdate,
-                btnApply, btnClose, statusLabel,
-                lblSliceXY, sliderXY, numXY,
-                lblSliceXZ, sliderXZ, numXZ,
-                lblSliceYZ, sliderYZ, numYZ,
-                chkSyncWithMainView,
-                lblHelp, lblMaterial
-            });
+        // Model Loading
+        lblModelPath, modelPathTextBox, btnBrowse,
+        
+        // Device Selection
+        lblDevice, rbCPU, rbGPU, btnLoadModel,
+        
+        // Prompt Mode
+        lblPromptMode, btnPositivePrompt, btnNegativePrompt,
+        
+        // Auto-Update
+        chkAutoUpdate,
+        
+        // Active View Selection
+        lblActiveView, btnXYView, btnXZView, btnYZView,
+        
+        // Action Buttons
+        btnApply, btnClose, statusLabel,
+        
+        // Slice Controls
+        lblSliceXY, sliderXY, numXY,
+        lblSliceXZ, sliderXZ, numXZ,
+        lblSliceYZ, sliderYZ, numYZ,
+        
+        // Sync Checkbox
+        chkSyncWithMainView,
+        
+        // Help and Material Info
+        lblHelp, lblMaterial
+    });
 
             // Add all components to main layout
             mainLayout.Controls.Add(xyPanel, 0, 0);
@@ -479,6 +601,11 @@ namespace CTSegmenter
                 // Clean up resources
                 encoderSession?.Dispose();
                 decoderSession?.Dispose();
+
+                // Clear all bitmap caches
+                ClearCaches();
+
+                // Clean up the viewer images
                 xyViewer.Image?.Dispose();
                 xzViewer.Image?.Dispose();
                 yzViewer.Image?.Dispose();
@@ -489,10 +616,17 @@ namespace CTSegmenter
                 Logger.Log("[SegmentAnythingCT] Form closing, resources cleaned up");
             };
 
+
             // Initially load the slices
             UpdateViewers();
         }
 
+        private void UpdateActiveViewButtons()
+        {
+            btnXYView.BackColor = currentActiveView == ActiveView.XY ? Color.LightSkyBlue : SystemColors.Control;
+            btnXZView.BackColor = currentActiveView == ActiveView.XZ ? Color.LightSkyBlue : SystemColors.Control;
+            btnYZView.BackColor = currentActiveView == ActiveView.YZ ? Color.LightSkyBlue : SystemColors.Control;
+        }
         private Panel CreateViewerPanel(string title)
         {
             Panel container = new Panel
@@ -630,7 +764,23 @@ namespace CTSegmenter
                                 if (pointTypes.ContainsKey(point.ID))
                                     pointTypes.Remove(point.ID);
                                 pointDeleted = true;
-                                Logger.Log($"[SegmentAnythingCT] Deleted point at ({point.X}, {point.Y})");
+                                Logger.Log($"[SegmentAnythingCT] Deleted point at ({point.X}, {point.Y}, {point.Z})");
+
+                                // Check if we should auto-update after deleting a point
+                                if (chkAutoUpdate.Checked)
+                                {
+                                    var remainingPoints = GetRelevantPointsForCurrentView();
+                                    if (remainingPoints.Count > 0)
+                                    {
+                                        Task.Run(() => PerformSegmentation());
+                                    }
+                                    else
+                                    {
+                                        // Clear the segmentation mask if no points remain
+                                        segmentationMask = null;
+                                        UpdateViewers();
+                                    }
+                                }
                                 break;
                             }
                         }
@@ -675,6 +825,7 @@ namespace CTSegmenter
                     lastPos = e.Location;
                 }
             };
+
 
 
             xyViewer.MouseMove += (s, e) => {
@@ -767,18 +918,102 @@ namespace CTSegmenter
                 Logger.Log($"[SegmentAnythingCT] XZ zoom changed to {xzZoom:F2}");
             };
 
-            // XZ viewer mouse events for panning
+            // XZ viewer mouse events for panning and point placement
             Point lastPos = Point.Empty;
             bool isPanning = false;
 
             xzViewer.MouseDown += (s, e) => {
-                if (e.Button == MouseButtons.Right)
+                if (e.Button == MouseButtons.Left)
+                {
+                    // Convert mouse coordinates to image coordinates
+                    float pointX = (e.X - xzPan.X) / xzZoom;
+                    float pointZ = (e.Y - xzPan.Y) / xzZoom;
+
+                    // Check if within image bounds
+                    if (pointX >= 0 && pointX < mainForm.GetWidth() &&
+                        pointZ >= 0 && pointZ < mainForm.GetDepth())
+                    {
+                        bool pointDeleted = false;
+                        // Check if clicked on an existing point
+                        var points = annotationManager.GetAllPoints();
+                        foreach (var point in points.ToList())
+                        {
+                            // For XZ view, we need points with Y coordinate equal to xzRow
+                            if (Math.Abs(point.Y - xzRow) <= 1) // Allow small tolerance
+                            {
+                                float dx = point.X - pointX;
+                                float dz = point.Z - pointZ;
+                                float distSq = dx * dx + dz * dz;
+
+                                // If within 10 pixels of a point, delete it
+                                if (distSq < 100)
+                                { // 10^2
+                                    annotationManager.RemovePoint(point.ID);
+                                    // Also remove from our types dictionary
+                                    if (pointTypes.ContainsKey(point.ID))
+                                        pointTypes.Remove(point.ID);
+                                    pointDeleted = true;
+                                    Logger.Log($"[SegmentAnythingCT] Deleted point at ({point.X}, {point.Y}, {point.Z})");
+
+                                    // Check if we should auto-update after deleting a point
+                                    if (chkAutoUpdate.Checked && currentActiveView == ActiveView.XZ)
+                                    {
+                                        var remainingPoints = GetRelevantPointsForCurrentView();
+                                        if (remainingPoints.Count > 0)
+                                        {
+                                            Task.Run(() => PerformSegmentation());
+                                        }
+                                        else
+                                        {
+                                            // Clear the segmentation mask if no points remain
+                                            segmentationMask = null;
+                                            UpdateViewers();
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+
+                        // If we didn't delete a point, add a new one
+                        if (!pointDeleted)
+                        {
+                            // Store point type in a standardized way
+                            bool isPositive = (currentMode == PromptMode.Positive);
+                            string pointType = isPositive ? "Positive" : "Negative";
+                            string label = pointType + "_" + selectedMaterial.Name;
+
+                            // Add point at the current xzRow (Y coordinate)
+                            AnnotationPoint newPoint = annotationManager.AddPoint(pointX, xzRow, (int)pointZ, label);
+
+                            // Track point type
+                            pointTypes[newPoint.ID] = isPositive;
+
+                            Logger.Log($"[SegmentAnythingCT] Added {pointType.ToLower()} point at ({pointX}, {xzRow}, {pointZ})");
+
+                            // Auto-update segmentation if enabled and we're in this view
+                            if (chkAutoUpdate.Checked && currentActiveView == ActiveView.XZ)
+                            {
+                                Task.Run(() => PerformSegmentation());
+                            }
+                        }
+
+                        // Update views with new or deleted point
+                        UpdateViewers();
+                    }
+                    else
+                    {
+                        Logger.Log("[SegmentAnythingCT] Attempted to place point outside image bounds");
+                    }
+                }
+                else if (e.Button == MouseButtons.Right)
                 {
                     // Start panning with right mouse button
                     isPanning = true;
                     lastPos = e.Location;
                 }
             };
+
 
             xzViewer.MouseMove += (s, e) => {
                 if (isPanning && e.Button == MouseButtons.Right)
@@ -833,6 +1068,9 @@ namespace CTSegmenter
                     {
                         e.Graphics.DrawRectangle(borderPen, xzImageBounds);
                     }
+
+                    // Draw annotations 
+                    DrawAnnotationsOnXZ(e.Graphics);
                 }
             };
         }
@@ -867,18 +1105,102 @@ namespace CTSegmenter
                 Logger.Log($"[SegmentAnythingCT] YZ zoom changed to {yzZoom:F2}");
             };
 
-            // YZ viewer mouse events for panning
+            // YZ viewer mouse events for panning and point placement
             Point lastPos = Point.Empty;
             bool isPanning = false;
 
             yzViewer.MouseDown += (s, e) => {
-                if (e.Button == MouseButtons.Right)
+                if (e.Button == MouseButtons.Left)
+                {
+                    // Convert mouse coordinates to image coordinates
+                    float pointZ = (e.X - yzPan.X) / yzZoom;
+                    float pointY = (e.Y - yzPan.Y) / yzZoom;
+
+                    // Check if within image bounds
+                    if (pointZ >= 0 && pointZ < mainForm.GetDepth() &&
+                        pointY >= 0 && pointY < mainForm.GetHeight())
+                    {
+                        bool pointDeleted = false;
+                        // Check if clicked on an existing point
+                        var points = annotationManager.GetAllPoints();
+                        foreach (var point in points.ToList())
+                        {
+                            // For YZ view, we need points with X coordinate equal to yzCol
+                            if (Math.Abs(point.X - yzCol) <= 1) // Allow small tolerance
+                            {
+                                float dz = point.Z - pointZ;
+                                float dy = point.Y - pointY;
+                                float distSq = dz * dz + dy * dy;
+
+                                // If within 10 pixels of a point, delete it
+                                if (distSq < 100)
+                                { // 10^2
+                                    annotationManager.RemovePoint(point.ID);
+                                    // Also remove from our types dictionary
+                                    if (pointTypes.ContainsKey(point.ID))
+                                        pointTypes.Remove(point.ID);
+                                    pointDeleted = true;
+                                    Logger.Log($"[SegmentAnythingCT] Deleted point at ({point.X}, {point.Y}, {point.Z})");
+
+                                    // Check if we should auto-update after deleting a point
+                                    if (chkAutoUpdate.Checked && currentActiveView == ActiveView.YZ)
+                                    {
+                                        var remainingPoints = GetRelevantPointsForCurrentView();
+                                        if (remainingPoints.Count > 0)
+                                        {
+                                            Task.Run(() => PerformSegmentation());
+                                        }
+                                        else
+                                        {
+                                            // Clear the segmentation mask if no points remain
+                                            segmentationMask = null;
+                                            UpdateViewers();
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+
+                        // If we didn't delete a point, add a new one
+                        if (!pointDeleted)
+                        {
+                            // Store point type in a standardized way
+                            bool isPositive = (currentMode == PromptMode.Positive);
+                            string pointType = isPositive ? "Positive" : "Negative";
+                            string label = pointType + "_" + selectedMaterial.Name;
+
+                            // Add point at the current yzCol (X coordinate)
+                            AnnotationPoint newPoint = annotationManager.AddPoint(yzCol, pointY, (int)pointZ, label);
+
+                            // Track point type
+                            pointTypes[newPoint.ID] = isPositive;
+
+                            Logger.Log($"[SegmentAnythingCT] Added {pointType.ToLower()} point at ({yzCol}, {pointY}, {pointZ})");
+
+                            // Auto-update segmentation if enabled and we're in this view
+                            if (chkAutoUpdate.Checked && currentActiveView == ActiveView.YZ)
+                            {
+                                Task.Run(() => PerformSegmentation());
+                            }
+                        }
+
+                        // Update views with new or deleted point
+                        UpdateViewers();
+                    }
+                    else
+                    {
+                        Logger.Log("[SegmentAnythingCT] Attempted to place point outside image bounds");
+                    }
+                }
+                else if (e.Button == MouseButtons.Right)
                 {
                     // Start panning with right mouse button
                     isPanning = true;
                     lastPos = e.Location;
                 }
             };
+
 
             yzViewer.MouseMove += (s, e) => {
                 if (isPanning && e.Button == MouseButtons.Right)
@@ -933,8 +1255,80 @@ namespace CTSegmenter
                     {
                         e.Graphics.DrawRectangle(borderPen, yzImageBounds);
                     }
+
+                    // Draw annotations
+                    DrawAnnotationsOnYZ(e.Graphics);
                 }
             };
+        }
+        private void DrawAnnotationsOnXZ(Graphics g)
+        {
+            // Get all points
+            var allPoints = annotationManager.GetAllPoints();
+
+            // Filter points that are on or near the current XZ plane (Y = xzRow)
+            foreach (var point in allPoints)
+            {
+                // Only draw points that are on or very close to this plane
+                if (Math.Abs(point.Y - xzRow) <= 1) // Allow small tolerance
+                {
+                    // Get position with zoom and pan applied (X, Z coordinates)
+                    float x = point.X * xzZoom + xzPan.X;
+                    float z = point.Z * xzZoom + xzPan.Y; // Z is Y in the XZ view
+
+                    // Use the pointTypes dictionary to determine if positive or negative
+                    bool isPositive = pointTypes.ContainsKey(point.ID) && pointTypes[point.ID];
+
+                    // Use different colors based on point type
+                    Color pointColor = isPositive ? Color.Green : Color.Red;
+
+                    // Draw larger point circle (10 pixel radius)
+                    int radius = 10;
+                    g.FillEllipse(new SolidBrush(Color.FromArgb(128, pointColor)),
+                        x - radius, z - radius, radius * 2, radius * 2);
+                    g.DrawEllipse(new Pen(pointColor, 2),
+                        x - radius, z - radius, radius * 2, radius * 2);
+
+                    // Draw ID number with +/- indicator to make it clearer
+                    string typeIndicator = isPositive ? "+" : "-";
+                    g.DrawString($"{point.ID} {typeIndicator}", new Font("Arial", 8), Brushes.White, x + radius, z + radius);
+                }
+            }
+        }
+
+        private void DrawAnnotationsOnYZ(Graphics g)
+        {
+            // Get all points
+            var allPoints = annotationManager.GetAllPoints();
+
+            // Filter points that are on or near the current YZ plane (X = yzCol)
+            foreach (var point in allPoints)
+            {
+                // Only draw points that are on or very close to this plane
+                if (Math.Abs(point.X - yzCol) <= 1) // Allow small tolerance
+                {
+                    // Get position with zoom and pan applied (Z, Y coordinates)
+                    float z = point.Z * yzZoom + yzPan.X; // Z is X in the YZ view
+                    float y = point.Y * yzZoom + yzPan.Y;
+
+                    // Use the pointTypes dictionary to determine if positive or negative
+                    bool isPositive = pointTypes.ContainsKey(point.ID) && pointTypes[point.ID];
+
+                    // Use different colors based on point type
+                    Color pointColor = isPositive ? Color.Green : Color.Red;
+
+                    // Draw larger point circle (10 pixel radius)
+                    int radius = 10;
+                    g.FillEllipse(new SolidBrush(Color.FromArgb(128, pointColor)),
+                        z - radius, y - radius, radius * 2, radius * 2);
+                    g.DrawEllipse(new Pen(pointColor, 2),
+                        z - radius, y - radius, radius * 2, radius * 2);
+
+                    // Draw ID number with +/- indicator to make it clearer
+                    string typeIndicator = isPositive ? "+" : "-";
+                    g.DrawString($"{point.ID} {typeIndicator}", new Font("Arial", 8), Brushes.White, z + radius, y + radius);
+                }
+            }
         }
 
         private void DrawCheckerboardBackground(Graphics g, Rectangle bounds)
@@ -1185,6 +1579,9 @@ namespace CTSegmenter
                 if (xyViewer.Image != null)
                     xyViewer.Image.Dispose();
 
+                // Apply segmentation overlay if available
+                ApplySegmentationOverlay(xySliceBitmap, segmentationMask, ActiveView.XY);
+
                 xyViewer.Image = new Bitmap(xySliceBitmap);
                 UpdateXYScrollbars();
             }
@@ -1194,6 +1591,9 @@ namespace CTSegmenter
             {
                 if (xzViewer.Image != null)
                     xzViewer.Image.Dispose();
+
+                // Apply segmentation overlay if available
+                ApplySegmentationOverlay(xzSliceBitmap, segmentationMask, ActiveView.XZ);
 
                 xzViewer.Image = new Bitmap(xzSliceBitmap);
                 UpdateXZScrollbars();
@@ -1205,6 +1605,9 @@ namespace CTSegmenter
                 if (yzViewer.Image != null)
                     yzViewer.Image.Dispose();
 
+                // Apply segmentation overlay if available
+                ApplySegmentationOverlay(yzSliceBitmap, segmentationMask, ActiveView.YZ);
+
                 yzViewer.Image = new Bitmap(yzSliceBitmap);
                 UpdateYZScrollbars();
             }
@@ -1215,8 +1618,19 @@ namespace CTSegmenter
             yzViewer.Invalidate();
         }
 
+
         private unsafe Bitmap CreateSliceBitmap(int sliceZ)
         {
+            // Try to get from cache first
+            Bitmap cachedBitmap = xySliceCache.Get(sliceZ);
+            if (cachedBitmap != null)
+            {
+                // Return a copy of the cached bitmap
+                // We need a copy so the original cached version stays clean
+                return new Bitmap(cachedBitmap);
+            }
+
+            // Create a new bitmap if not in cache
             int w = mainForm.GetWidth();
             int h = mainForm.GetHeight();
 
@@ -1242,25 +1656,30 @@ namespace CTSegmenter
                     ptr[offset] = val;     // Blue
                     ptr[offset + 1] = val; // Green
                     ptr[offset + 2] = val; // Red
-
-                    // Overlay mask if available
-                    if (segmentationMask != null && x < segmentationMask.GetLength(0) && y < segmentationMask.GetLength(1) && segmentationMask[x, y] > 0)
-                    {
-                        // Simple overlay with material color at 50% opacity
-                        Color matColor = selectedMaterial.Color;
-                        ptr[offset] = (byte)((val + matColor.B) / 2);     // Blue
-                        ptr[offset + 1] = (byte)((val + matColor.G) / 2); // Green
-                        ptr[offset + 2] = (byte)((val + matColor.R) / 2); // Red
-                    }
                 }
             }
 
             bmp.UnlockBits(bmpData);
+
+            // Add to cache (store a copy so the original stays clean)
+            Bitmap cacheCopy = new Bitmap(bmp);
+            xySliceCache.Add(sliceZ, cacheCopy);
+            cachedXYKeys.Add(sliceZ); // Track key for cleanup
+
             return bmp;
         }
 
         private unsafe Bitmap CreateXZSliceBitmap(int sliceY)
         {
+            // Try to get from cache first
+            Bitmap cachedBitmap = xzSliceCache.Get(sliceY);
+            if (cachedBitmap != null)
+            {
+                // Return a copy of the cached bitmap
+                return new Bitmap(cachedBitmap);
+            }
+
+            // Create a new bitmap if not in cache
             int w = mainForm.GetWidth();
             int d = mainForm.GetDepth();
 
@@ -1305,11 +1724,26 @@ namespace CTSegmenter
             }
 
             bmp.UnlockBits(bmpData);
+
+            // Add to cache
+            Bitmap cacheCopy = new Bitmap(bmp);
+            xzSliceCache.Add(sliceY, cacheCopy);
+            cachedXZKeys.Add(sliceY);
+
             return bmp;
         }
 
         private unsafe Bitmap CreateYZSliceBitmap(int sliceX)
         {
+            // Try to get from cache first
+            Bitmap cachedBitmap = yzSliceCache.Get(sliceX);
+            if (cachedBitmap != null)
+            {
+                // Return a copy of the cached bitmap
+                return new Bitmap(cachedBitmap);
+            }
+
+            // Create a new bitmap if not in cache
             int h = mainForm.GetHeight();
             int d = mainForm.GetDepth();
 
@@ -1354,63 +1788,86 @@ namespace CTSegmenter
             }
 
             bmp.UnlockBits(bmpData);
+
+            // Add to cache
+            Bitmap cacheCopy = new Bitmap(bmp);
+            yzSliceCache.Add(sliceX, cacheCopy);
+            cachedYZKeys.Add(sliceX);
+
             return bmp;
         }
 
         private unsafe Tensor<float> PreprocessImage()
         {
-            // Create the image scaled to 1024x1024 for the encoder
-            int w = mainForm.GetWidth();
-            int h = mainForm.GetHeight();
+            // Create the image scaled to 1024x1024 for the encoder based on active view
+            Bitmap viewBitmap;
 
-            // Create a tensor with shape [1, 3, 1024, 1024]
-            DenseTensor<float> inputTensor = new DenseTensor<float>(new[] { 1, 3, 1024, 1024 });
-
-            // Create a resized version of the XY slice
-            using (Bitmap sliceBitmap = CreateSliceBitmap(xySlice))
-            using (Bitmap resized = new Bitmap(1024, 1024))
+            switch (currentActiveView)
             {
-                using (Graphics g = Graphics.FromImage(resized))
-                {
-                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                    g.DrawImage(sliceBitmap, 0, 0, 1024, 1024);
-                }
-
-                // Lock the bitmap and access its pixel data
-                BitmapData bmpData = resized.LockBits(
-                    new Rectangle(0, 0, resized.Width, resized.Height),
-                    ImageLockMode.ReadOnly,
-                    PixelFormat.Format24bppRgb);
-
-                int stride = bmpData.Stride;
-                int bytesPerPixel = 3; // RGB
-
-                byte* ptr = (byte*)bmpData.Scan0;
-
-                // Process pixels and normalize to range [0.0, 1.0]
-                for (int y = 0; y < 1024; y++)
-                {
-                    for (int x = 0; x < 1024; x++)
-                    {
-                        int offset = y * stride + x * bytesPerPixel;
-
-                        // BGR order (standard in Bitmap)
-                        byte b = ptr[offset];
-                        byte g = ptr[offset + 1];
-                        byte r = ptr[offset + 2];
-
-                        // Normalize to range [0.0, 1.0] and convert to RGB order for the model
-                        inputTensor[0, 0, y, x] = r / 255.0f;
-                        inputTensor[0, 1, y, x] = g / 255.0f;
-                        inputTensor[0, 2, y, x] = b / 255.0f;
-                    }
-                }
-
-                resized.UnlockBits(bmpData);
+                case ActiveView.XY:
+                    viewBitmap = CreateSliceBitmap(xySlice);
+                    break;
+                case ActiveView.XZ:
+                    viewBitmap = CreateXZSliceBitmap(xzRow);
+                    break;
+                case ActiveView.YZ:
+                    viewBitmap = CreateYZSliceBitmap(yzCol);
+                    break;
+                default:
+                    viewBitmap = CreateSliceBitmap(xySlice);
+                    break;
             }
 
-            return inputTensor;
+            using (viewBitmap)
+            {
+                // Create a tensor with shape [1, 3, 1024, 1024]
+                DenseTensor<float> inputTensor = new DenseTensor<float>(new[] { 1, 3, 1024, 1024 });
+
+                // Create a resized version of the slice
+                using (Bitmap resized = new Bitmap(1024, 1024))
+                {
+                    using (Graphics g = Graphics.FromImage(resized))
+                    {
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        g.DrawImage(viewBitmap, 0, 0, 1024, 1024);
+                    }
+
+                    // Lock the bitmap and access its pixel data
+                    BitmapData bmpData = resized.LockBits(
+                        new Rectangle(0, 0, resized.Width, resized.Height),
+                        ImageLockMode.ReadOnly,
+                        PixelFormat.Format24bppRgb);
+
+                    int stride = bmpData.Stride;
+                    int bytesPerPixel = 3; // RGB
+
+                    byte* ptr = (byte*)bmpData.Scan0;
+
+                    // Process pixels and normalize to range [0.0, 1.0]
+                    for (int y = 0; y < 1024; y++)
+                    {
+                        for (int x = 0; x < 1024; x++)
+                        {
+                            int offset = y * stride + x * bytesPerPixel;
+
+                            // BGR order (standard in Bitmap)
+                            byte b = ptr[offset];
+                            byte g = ptr[offset + 1];
+                            byte r = ptr[offset + 2];
+
+                            // Normalize to range [0.0, 1.0] and convert to RGB order for the model
+                            inputTensor[0, 0, y, x] = r / 255.0f;
+                            inputTensor[0, 1, y, x] = g / 255.0f;
+                            inputTensor[0, 2, y, x] = b / 255.0f;
+                        }
+                    }
+
+                    resized.UnlockBits(bmpData);
+                    return inputTensor;
+                }
+            }
         }
+
 
         private async Task PerformSegmentation()
         {
@@ -1420,10 +1877,38 @@ namespace CTSegmenter
                 return;
             }
 
-            var points = annotationManager.GetPointsForSlice(xySlice).ToList();
-            if (points.Count == 0)
+            // Get relevant points based on active view
+            var allPoints = annotationManager.GetAllPoints();
+            var relevantPoints = new List<AnnotationPoint>();
+
+            switch (currentActiveView)
             {
-                MessageBox.Show("Please add at least one annotation point.");
+                case ActiveView.XY:
+                    // Points on the current XY slice
+                    relevantPoints.AddRange(allPoints.Where(p => p.Z == xySlice));
+                    break;
+                case ActiveView.XZ:
+                    // Points on the current XZ row
+                    relevantPoints.AddRange(allPoints.Where(p => Math.Abs(p.Y - xzRow) <= 1));
+                    break;
+                case ActiveView.YZ:
+                    // Points on the current YZ column
+                    relevantPoints.AddRange(allPoints.Where(p => Math.Abs(p.X - yzCol) <= 1));
+                    break;
+            }
+
+            if (relevantPoints.Count == 0)
+            {
+                string viewName;
+                switch (currentActiveView)
+                {
+                    case ActiveView.XY: viewName = "XY"; break;
+                    case ActiveView.XZ: viewName = "XZ"; break;
+                    case ActiveView.YZ: viewName = "YZ"; break;
+                    default: viewName = "current"; break;
+                }
+
+                MessageBox.Show($"Please add at least one annotation point on the {viewName} view.");
                 return;
             }
 
@@ -1434,7 +1919,7 @@ namespace CTSegmenter
             else
                 updateStatus();
 
-            Logger.Log("[SegmentAnythingCT] Starting segmentation");
+            Logger.Log($"[SegmentAnythingCT] Starting segmentation on {currentActiveView} view");
 
             try
             {
@@ -1456,21 +1941,67 @@ namespace CTSegmenter
                     var highResFeats1 = encoderOutputs.First(x => x.Name == "high_res_feats_1").AsTensor<float>();
 
                     // Prepare point tensors
-                    int numPoints = points.Count;
-                    float scaleX = 1024.0f / mainForm.GetWidth();
-                    float scaleY = 1024.0f / mainForm.GetHeight();
+                    int numPoints = relevantPoints.Count;
+
+                    // Scale factors depend on the active view
+                    float scaleX, scaleY;
+                    switch (currentActiveView)
+                    {
+                        case ActiveView.XY:
+                            scaleX = 1024.0f / mainForm.GetWidth();
+                            scaleY = 1024.0f / mainForm.GetHeight();
+                            break;
+                        case ActiveView.XZ:
+                            scaleX = 1024.0f / mainForm.GetWidth();
+                            scaleY = 1024.0f / mainForm.GetDepth();
+                            break;
+                        case ActiveView.YZ:
+                            scaleX = 1024.0f / mainForm.GetDepth();
+                            scaleY = 1024.0f / mainForm.GetHeight();
+                            break;
+                        default:
+                            scaleX = scaleY = 1.0f;
+                            break;
+                    }
+
                     DenseTensor<float> pointCoords = new DenseTensor<float>(new[] { 1, numPoints, 2 });
                     DenseTensor<float> pointLabels = new DenseTensor<float>(new[] { 1, numPoints });
 
                     for (int i = 0; i < numPoints; i++)
                     {
-                        float x = points[i].X * scaleX;
-                        float y = points[i].Y * scaleY;
+                        var point = relevantPoints[i];
+                        float x, y;
+
+                        // Transform point coordinates based on active view
+                        switch (currentActiveView)
+                        {
+                            case ActiveView.XY:
+                                x = point.X;
+                                y = point.Y;
+                                break;
+                            case ActiveView.XZ:
+                                x = point.X;
+                                y = point.Z;
+                                break;
+                            case ActiveView.YZ:
+                                x = point.Z;
+                                y = point.Y;
+                                break;
+                            default:
+                                x = point.X;
+                                y = point.Y;
+                                break;
+                        }
+
+                        // Scale to image size
+                        x = x * scaleX;
+                        y = y * scaleY;
+
                         pointCoords[0, i, 0] = x;
                         pointCoords[0, i, 1] = y;
 
-                        // FIX: Use pointTypes dictionary to determine if point is positive
-                        bool isPositive = pointTypes.ContainsKey(points[i].ID) && pointTypes[points[i].ID];
+                        // Use pointTypes dictionary to determine if point is positive
+                        bool isPositive = pointTypes.ContainsKey(point.ID) && pointTypes[point.ID];
                         pointLabels[0, i] = isPositive ? 1.0f : 0.0f;
                     }
 
@@ -1478,9 +2009,32 @@ namespace CTSegmenter
                     DenseTensor<float> maskInput = new DenseTensor<float>(new[] { 1, 1, 256, 256 });
                     DenseTensor<float> hasMaskInput = new DenseTensor<float>(new[] { 1 });
                     hasMaskInput[0] = 0;
+
+                    // Original image size depends on active view
+                    int origWidth, origHeight;
+                    switch (currentActiveView)
+                    {
+                        case ActiveView.XY:
+                            origWidth = mainForm.GetWidth();
+                            origHeight = mainForm.GetHeight();
+                            break;
+                        case ActiveView.XZ:
+                            origWidth = mainForm.GetWidth();
+                            origHeight = mainForm.GetDepth();
+                            break;
+                        case ActiveView.YZ:
+                            origWidth = mainForm.GetDepth();
+                            origHeight = mainForm.GetHeight();
+                            break;
+                        default:
+                            origWidth = mainForm.GetWidth();
+                            origHeight = mainForm.GetHeight();
+                            break;
+                    }
+
                     DenseTensor<int> origImSize = new DenseTensor<int>(new[] { 2 });
-                    origImSize[0] = mainForm.GetHeight();
-                    origImSize[1] = mainForm.GetWidth();
+                    origImSize[0] = origHeight;
+                    origImSize[1] = origWidth;
 
                     // Run decoder on background thread
                     var decoderInputs = new List<NamedOnnxValue> {
@@ -1505,7 +2059,10 @@ namespace CTSegmenter
                         await Task.Run(() => {
                             var masks = decoderOutputs.First(x => x.Name == "masks").AsTensor<float>();
                             var iouPredictions = decoderOutputs.First(x => x.Name == "iou_predictions").AsTensor<float>();
-                            SaveAllMasks(masks, iouPredictions); //Save masks to JPEG
+
+                            // Save masks for debugging
+                            SaveAllMasks(masks, iouPredictions);
+
                             int bestMaskIdx = 0;
                             bestIoU = iouPredictions[0, 0];
 
@@ -1520,16 +2077,41 @@ namespace CTSegmenter
 
                             Logger.Log($"[SegmentAnythingCT] Best mask IoU: {bestIoU}");
 
-                            int h = mainForm.GetHeight();
-                            int w = mainForm.GetWidth();
-                            tempMask = new byte[w, h];
-
-                            for (int y = 0; y < h; y++)
+                            // Create mask with dimensions appropriate for the active view
+                            switch (currentActiveView)
                             {
-                                for (int x = 0; x < w; x++)
-                                {
-                                    tempMask[x, y] = masks[0, bestMaskIdx, y, x] > 0.0f ? selectedMaterial.ID : (byte)0;
-                                }
+                                case ActiveView.XY:
+                                    tempMask = new byte[mainForm.GetWidth(), mainForm.GetHeight()];
+                                    for (int y = 0; y < mainForm.GetHeight(); y++)
+                                    {
+                                        for (int x = 0; x < mainForm.GetWidth(); x++)
+                                        {
+                                            tempMask[x, y] = masks[0, bestMaskIdx, y, x] > 0.0f ? selectedMaterial.ID : (byte)0;
+                                        }
+                                    }
+                                    break;
+
+                                case ActiveView.XZ:
+                                    tempMask = new byte[mainForm.GetWidth(), mainForm.GetDepth()];
+                                    for (int z = 0; z < mainForm.GetDepth(); z++)
+                                    {
+                                        for (int x = 0; x < mainForm.GetWidth(); x++)
+                                        {
+                                            tempMask[x, z] = masks[0, bestMaskIdx, z, x] > 0.0f ? selectedMaterial.ID : (byte)0;
+                                        }
+                                    }
+                                    break;
+
+                                case ActiveView.YZ:
+                                    tempMask = new byte[mainForm.GetDepth(), mainForm.GetHeight()];
+                                    for (int y = 0; y < mainForm.GetHeight(); y++)
+                                    {
+                                        for (int z = 0; z < mainForm.GetDepth(); z++)
+                                        {
+                                            tempMask[z, y] = masks[0, bestMaskIdx, y, z] > 0.0f ? selectedMaterial.ID : (byte)0;
+                                        }
+                                    }
+                                    break;
                             }
                         });
 
@@ -1562,6 +2144,7 @@ namespace CTSegmenter
                 Logger.Log($"[SegmentAnythingCT] Segmentation error: {ex.Message}");
             }
         }
+
 
         private unsafe void SaveAllMasks(Tensor<float> masks, Tensor<float> iouPredictions)
         {
@@ -1704,49 +2287,141 @@ namespace CTSegmenter
 
             try
             {
-                Logger.Log("[SegmentAnythingCT] Applying segmentation mask to volume labels");
+                Logger.Log($"[SegmentAnythingCT] Applying segmentation mask from {currentActiveView} view to volume labels");
                 statusLabel.Text = "Applying mask...";
 
                 // Get dimensions with null checks
                 int width = mainForm.GetWidth();
                 int height = mainForm.GetHeight();
+                int depth = mainForm.GetDepth();
 
-                if (width <= 0 || height <= 0)
+                if (width <= 0 || height <= 0 || depth <= 0)
                 {
                     MessageBox.Show("Invalid volume dimensions.");
                     return;
                 }
 
-                // Apply the mask to the MainForm's current slice
-                for (int y = 0; y < height; y++)
+                switch (currentActiveView)
                 {
-                    for (int x = 0; x < width; x++)
-                    {
-                        if (segmentationMask[x, y] > 0)
+                    case ActiveView.XY:
+                        // Apply the mask to the current XY slice
+                        for (int y = 0; y < height; y++)
                         {
-                            mainForm.volumeLabels[x, y, xySlice] = segmentationMask[x, y];
+                            for (int x = 0; x < width; x++)
+                            {
+                                if (segmentationMask[x, y] > 0)
+                                {
+                                    mainForm.volumeLabels[x, y, xySlice] = segmentationMask[x, y];
+                                }
+                            }
                         }
-                    }
-                }
 
-                // Update the mainForm's temporary selection
-                if (mainForm.currentSelection == null ||
-                    mainForm.currentSelection.GetLength(0) != width ||
-                    mainForm.currentSelection.GetLength(1) != height)
-                {
-                    mainForm.currentSelection = new byte[width, height];
-                }
-
-                // Copy mask to current selection as well
-                for (int y = 0; y < height; y++)
-                {
-                    for (int x = 0; x < width; x++)
-                    {
-                        if (segmentationMask[x, y] > 0)
+                        // Update the mainForm's temporary selection for XY slice
+                        if (mainForm.currentSelection == null ||
+                            mainForm.currentSelection.GetLength(0) != width ||
+                            mainForm.currentSelection.GetLength(1) != height)
                         {
-                            mainForm.currentSelection[x, y] = segmentationMask[x, y];
+                            mainForm.currentSelection = new byte[width, height];
                         }
-                    }
+
+                        // Copy mask to current selection
+                        for (int y = 0; y < height; y++)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                if (segmentationMask[x, y] > 0)
+                                {
+                                    mainForm.currentSelection[x, y] = segmentationMask[x, y];
+                                }
+                            }
+                        }
+                        break;
+
+                    case ActiveView.XZ:
+                        // Apply the mask to the current XZ plane (fixed Y/row)
+                        for (int z = 0; z < depth; z++)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                if (segmentationMask[x, z] > 0)
+                                {
+                                    mainForm.volumeLabels[x, xzRow, z] = segmentationMask[x, z];
+                                }
+                            }
+                        }
+
+                        // Create a temporary selection for the current XY slice
+                        if (mainForm.currentSelection == null ||
+                            mainForm.currentSelection.GetLength(0) != width ||
+                            mainForm.currentSelection.GetLength(1) != height)
+                        {
+                            mainForm.currentSelection = new byte[width, height];
+                        }
+
+                        // Clear the current selection
+                        for (int y = 0; y < height; y++)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                mainForm.currentSelection[x, y] = 0;
+                            }
+                        }
+
+                        // Add any points where the XZ mask intersects with the current XY slice
+                        if (xySlice < depth)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                if (segmentationMask[x, xySlice] > 0)
+                                {
+                                    mainForm.currentSelection[x, xzRow] = segmentationMask[x, xySlice];
+                                }
+                            }
+                        }
+                        break;
+
+                    case ActiveView.YZ:
+                        // Apply the mask to the current YZ plane (fixed X/column)
+                        for (int z = 0; z < depth; z++)
+                        {
+                            for (int y = 0; y < height; y++)
+                            {
+                                if (segmentationMask[z, y] > 0)
+                                {
+                                    mainForm.volumeLabels[yzCol, y, z] = segmentationMask[z, y];
+                                }
+                            }
+                        }
+
+                        // Create a temporary selection for the current XY slice
+                        if (mainForm.currentSelection == null ||
+                            mainForm.currentSelection.GetLength(0) != width ||
+                            mainForm.currentSelection.GetLength(1) != height)
+                        {
+                            mainForm.currentSelection = new byte[width, height];
+                        }
+
+                        // Clear the current selection
+                        for (int y = 0; y < height; y++)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                mainForm.currentSelection[x, y] = 0;
+                            }
+                        }
+
+                        // Add any points where the YZ mask intersects with the current XY slice
+                        if (xySlice < depth)
+                        {
+                            for (int y = 0; y < height; y++)
+                            {
+                                if (segmentationMask[xySlice, y] > 0)
+                                {
+                                    mainForm.currentSelection[yzCol, y] = segmentationMask[xySlice, y];
+                                }
+                            }
+                        }
+                        break;
                 }
 
                 // Update MainForm's view
@@ -1763,6 +2438,114 @@ namespace CTSegmenter
                 Logger.Log($"[SegmentAnythingCT] Error applying mask: {ex.Message}");
             }
         }
+        private List<AnnotationPoint> GetRelevantPointsForCurrentView()
+        {
+            var allPoints = annotationManager.GetAllPoints();
+            var relevantPoints = new List<AnnotationPoint>();
+
+            switch (currentActiveView)
+            {
+                case ActiveView.XY:
+                    // Points on the current XY slice
+                    relevantPoints.AddRange(allPoints.Where(p => p.Z == xySlice));
+                    break;
+                case ActiveView.XZ:
+                    // Points on the current XZ row
+                    relevantPoints.AddRange(allPoints.Where(p => Math.Abs(p.Y - xzRow) <= 1));
+                    break;
+                case ActiveView.YZ:
+                    // Points on the current YZ column
+                    relevantPoints.AddRange(allPoints.Where(p => Math.Abs(p.X - yzCol) <= 1));
+                    break;
+            }
+
+            return relevantPoints;
+        }
+        private unsafe void ApplySegmentationOverlay(Bitmap bitmap, byte[,] mask, ActiveView viewType)
+        {
+            if (mask == null || currentActiveView != viewType)
+                return;
+
+            int w = bitmap.Width;
+            int h = bitmap.Height;
+
+            BitmapData bmpData = bitmap.LockBits(
+                new Rectangle(0, 0, w, h),
+                ImageLockMode.ReadWrite,
+                PixelFormat.Format24bppRgb);
+
+            int stride = bmpData.Stride;
+            int bytesPerPixel = 3;
+
+            byte* ptr = (byte*)bmpData.Scan0;
+
+            for (int y = 0; y < h; y++)
+            {
+                for (int x = 0; x < w; x++)
+                {
+                    // Check if this pixel is in the mask and is set
+                    bool isInMask = false;
+
+                    if (viewType == ActiveView.XY &&
+                        x < mask.GetLength(0) && y < mask.GetLength(1) && mask[x, y] > 0)
+                        isInMask = true;
+                    else if (viewType == ActiveView.XZ &&
+                        x < mask.GetLength(0) && y < mask.GetLength(1) && mask[x, y] > 0)
+                        isInMask = true;
+                    else if (viewType == ActiveView.YZ &&
+                        x < mask.GetLength(0) && y < mask.GetLength(1) && mask[x, y] > 0)
+                        isInMask = true;
+
+                    if (isInMask)
+                    {
+                        int offset = y * stride + x * bytesPerPixel;
+
+                        // Current color values
+                        byte b = ptr[offset];
+                        byte g = ptr[offset + 1];
+                        byte r = ptr[offset + 2];
+
+                        // Mix with material color (50% blend)
+                        Color matColor = selectedMaterial.Color;
+                        ptr[offset] = (byte)((b + matColor.B) / 2);
+                        ptr[offset + 1] = (byte)((g + matColor.G) / 2);
+                        ptr[offset + 2] = (byte)((r + matColor.R) / 2);
+                    }
+                }
+            }
+
+            bitmap.UnlockBits(bmpData);
+        }
+
+        private void ClearCaches()
+        {
+            // Clear XY cache
+            foreach (int key in cachedXYKeys)
+            {
+                var bitmap = xySliceCache.Get(key);
+                bitmap?.Dispose();
+            }
+            cachedXYKeys.Clear();
+
+            // Clear XZ cache
+            foreach (int key in cachedXZKeys)
+            {
+                var bitmap = xzSliceCache.Get(key);
+                bitmap?.Dispose();
+            }
+            cachedXZKeys.Clear();
+
+            // Clear YZ cache
+            foreach (int key in cachedYZKeys)
+            {
+                var bitmap = yzSliceCache.Get(key);
+                bitmap?.Dispose();
+            }
+            cachedYZKeys.Clear();
+
+            Logger.Log("[SegmentAnythingCT] All slice caches cleared");
+        }
+
 
         public void Show()
         {

@@ -20,6 +20,8 @@ namespace CTSegmenter
         [STAThread]
         static void Main(string[] args)
         {
+            
+            
             string logPath = Path.Combine(Application.StartupPath, "log.txt");
             if (File.Exists(logPath))
                 File.Delete(logPath); // Clear old logs

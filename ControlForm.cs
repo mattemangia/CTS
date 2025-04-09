@@ -384,6 +384,8 @@ namespace CTSegmenter
                     }));
                 }
             };
+            AddLabelOperationsMenu();
+
             helpMenu.DropDownItems.AddRange(new ToolStripItem[] { dbgConsole, about });
 
             menuStrip.Items.Add(helpMenu);
@@ -864,7 +866,38 @@ namespace CTSegmenter
             mainForm.SetSegmentationTool(currentTool);
         }
 
+        private void AddLabelOperationsMenu()
+        {
+            // Create Label Operations submenu
+            ToolStripMenuItem labelOperationsMenu = new ToolStripMenuItem("Label Operations");
 
+            // Create Separate Particles menu item
+            ToolStripMenuItem separateParticlesMenuItem = new ToolStripMenuItem("Separate Particles");
+            separateParticlesMenuItem.Click += (s, e) => OpenParticleSeparator();
+
+            // Add menu item to submenu
+            labelOperationsMenu.DropDownItems.Add(separateParticlesMenuItem);
+
+            // Add submenu to Tools menu
+            toolsMenu.DropDownItems.Add(labelOperationsMenu);
+        }
+        private void OpenParticleSeparator()
+        {
+            // Check if a material is selected
+            if (lstMaterials.SelectedIndex < 0 || lstMaterials.SelectedIndex >= mainForm.Materials.Count)
+            {
+                MessageBox.Show("Please select a material first.", "No Material Selected",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // Get the selected material
+            Material selectedMaterial = mainForm.Materials[lstMaterials.SelectedIndex];
+
+            // Open the particle separator form
+            ParticleSeparatorForm separatorForm = new ParticleSeparatorForm(mainForm, selectedMaterial);
+            separatorForm.Show();
+        }
         private void ToolSizeSlider_Scroll(object sender, EventArgs e)
         {
             int size = toolSizeSlider.Value;

@@ -8,6 +8,8 @@ using ILGPU;
 using ILGPU.Runtime;
 using ILGPU.Algorithms;
 using ILGPU.Runtime.CPU;
+using System.Collections.Generic;
+using System.Threading;
 
 namespace CTSegmenter
 {
@@ -46,9 +48,40 @@ namespace CTSegmenter
         private CheckBox chkOverwrite;
         private Button btnSelectFolder;
         private TextBox txtOutputFolder;
+        private CheckBox chkEdgeNormalize;
+
+        //Preview Slice navigation
+        private TrackBar sliceTrackBar;
+        private Label lblSliceNumber;
+        private System.Threading.Timer renderTimer;
+        private bool sliderDragging = false;
+        private int pendingSliceValue = -1;
+        private const int RENDER_DELAY_MS = 50; // Debounce rendering during sliding
+
+        //ROI Fields
+        private bool useRoi = false;
+        private Rectangle roi = new Rectangle(100, 100, 200, 200); // Default ROI size and position
+        private bool isDraggingRoi = false;
+        private bool isResizingRoi = false;
+        private Point lastMousePos;
+        private const int RESIZE_HANDLE_SIZE = 10; // Size of the resize handle
+        private CheckBox chkUseRoi;
+
+        private NumericUpDown numSigmaRange;
+        private NumericUpDown numSigmaSpatial;
+        private NumericUpDown numUnsharpAmount;
 
         private Label lblStatus;
         private ProgressForm progressForm;
+
+        private float zoomFactor = 1.0f;
+        private const float ZOOM_INCREMENT = 0.1f;
+        private const float MIN_ZOOM = 0.1f;
+        private const float MAX_ZOOM = 5.0f; // Reduced max zoom to avoid overflow
+        private Point zoomOrigin = Point.Empty;
+        private bool isPanning = false;
+        private Point lastPanPoint;
+        private Button btnResetZoom;
 
         /// <summary>
         /// Constructor that takes a reference to the MainForm, so we can access the loaded volume data.
@@ -201,106 +234,350 @@ namespace CTSegmenter
                 Width = 200,
                 DropDownStyle = ComboBoxStyle.DropDownList
             };
-            // Add more filters here as desired
+            // Add filters
             cmbFilterType.Items.Add("Gaussian");
             cmbFilterType.Items.Add("Smoothing");
             cmbFilterType.Items.Add("Median");
             cmbFilterType.Items.Add("Non-Local Means");
-            cmbFilterType.Items.Add("Bilateral"); // Example if you want more
+            cmbFilterType.Items.Add("Bilateral");
+            cmbFilterType.Items.Add("Unsharp Mask");
+            cmbFilterType.Items.Add("Edge Detection");
+
             cmbFilterType.SelectedIndex = 0;
             controlsPanel.Controls.Add(cmbFilterType);
             currentY += 30;
 
-            // Kernel Size
+            // Create parameter panels - one for each filter type
+            // We'll create all panels now but only show the one for the selected filter
+
+            // Common parameter for most filters - Kernel Size
+            Panel commonPanel = new Panel
+            {
+                Location = new Point(10, currentY),
+                Width = 300,
+                Height = 50,
+                Visible = true
+            };
+
             Label lblKernelSize = new Label
             {
                 Text = "Kernel Size (odd):",
                 AutoSize = true,
-                Location = new Point(10, currentY)
+                Location = new Point(0, 0)
             };
-            controlsPanel.Controls.Add(lblKernelSize);
-            currentY += 20;
+            commonPanel.Controls.Add(lblKernelSize);
 
             numKernelSize = new NumericUpDown
             {
-                Location = new Point(10, currentY),
+                Location = new Point(0, 20),
                 Width = 60,
                 Minimum = 1,
                 Maximum = 31,
                 Value = 3
             };
-            // Force it to be odd
             numKernelSize.ValueChanged += (s, e) =>
             {
                 if (numKernelSize.Value % 2 == 0)
                     numKernelSize.Value += 1;
             };
-            controlsPanel.Controls.Add(numKernelSize);
-            currentY += 30;
+            commonPanel.Controls.Add(numKernelSize);
+            controlsPanel.Controls.Add(commonPanel);
 
-            // Sigma (for Gaussian, Bilateral, etc.)
+            currentY += 60;
+
+            // 1. Gaussian Parameters Panel
+            Panel gaussianPanel = new Panel
+            {
+                Location = new Point(10, currentY),
+                Width = 300,
+                Height = 50,
+                Visible = false
+            };
+
             Label lblSigma = new Label
             {
-                Text = "Sigma (for Gaussian):",
+                Text = "Sigma:",
                 AutoSize = true,
-                Location = new Point(10, currentY)
+                Location = new Point(0, 0)
             };
-            controlsPanel.Controls.Add(lblSigma);
-            currentY += 20;
+            gaussianPanel.Controls.Add(lblSigma);
 
             numSigma = new NumericUpDown
             {
-                Location = new Point(10, currentY),
+                Location = new Point(0, 20),
                 Width = 60,
                 Minimum = 1,
                 Maximum = 100,
-                Value = 10
+                DecimalPlaces = 1,
+                Increment = 0.1m,
+                Value = 1.0m
             };
-            controlsPanel.Controls.Add(numSigma);
-            currentY += 30;
+            gaussianPanel.Controls.Add(numSigma);
+            controlsPanel.Controls.Add(gaussianPanel);
 
-            // Non-Local Means parameters (H, template window, search window)
-            Label lblNlm = new Label
+            // 2. Non-Local Means Parameters Panel
+            Panel nlmPanel = new Panel
             {
-                Text = "NLM (H, Template, Search):",
-                AutoSize = true,
-                Location = new Point(10, currentY)
+                Location = new Point(10, currentY),
+                Width = 300,
+                Height = 80,
+                Visible = false
             };
-            controlsPanel.Controls.Add(lblNlm);
-            currentY += 20;
+
+            Label lblNlmH = new Label
+            {
+                Text = "Filter Strength (h):",
+                AutoSize = true,
+                Location = new Point(0, 0)
+            };
+            nlmPanel.Controls.Add(lblNlmH);
 
             numNlmH = new NumericUpDown
             {
-                Location = new Point(10, currentY),
+                Location = new Point(0, 20),
                 Width = 60,
                 Minimum = 1,
                 Maximum = 255,
+                DecimalPlaces = 1,
+                Increment = 0.5m,
                 Value = 10
             };
-            controlsPanel.Controls.Add(numNlmH);
+            nlmPanel.Controls.Add(numNlmH);
+
+            Label lblNlmTemplate = new Label
+            {
+                Text = "Template Radius:",
+                AutoSize = true,
+                Location = new Point(100, 0)
+            };
+            nlmPanel.Controls.Add(lblNlmTemplate);
 
             numNlmTemplate = new NumericUpDown
             {
-                Location = new Point(80, currentY),
+                Location = new Point(100, 20),
                 Width = 60,
                 Minimum = 1,
                 Maximum = 15,
                 Value = 3
             };
-            controlsPanel.Controls.Add(numNlmTemplate);
+            nlmPanel.Controls.Add(numNlmTemplate);
+
+            Label lblNlmSearch = new Label
+            {
+                Text = "Search Radius:",
+                AutoSize = true,
+                Location = new Point(200, 0)
+            };
+            nlmPanel.Controls.Add(lblNlmSearch);
 
             numNlmSearch = new NumericUpDown
             {
-                Location = new Point(150, currentY),
+                Location = new Point(200, 20),
                 Width = 60,
                 Minimum = 1,
                 Maximum = 21,
                 Value = 7
             };
-            controlsPanel.Controls.Add(numNlmSearch);
+            nlmPanel.Controls.Add(numNlmSearch);
 
+            controlsPanel.Controls.Add(nlmPanel);
+
+            // 3. Bilateral Parameters Panel
+            Panel bilateralPanel = new Panel
+            {
+                Location = new Point(10, currentY),
+                Width = 300,
+                Height = 80,
+                Visible = false
+            };
+
+            Label lblSigmaSpatial = new Label
+            {
+                Text = "Spatial Sigma:",
+                AutoSize = true,
+                Location = new Point(0, 0)
+            };
+            bilateralPanel.Controls.Add(lblSigmaSpatial);
+            NumericUpDown numSigmaSpatial = new NumericUpDown
+            {
+                Location = new Point(0, 20),
+                Width = 60,
+                Minimum = 0.1m,
+                Maximum = 100,
+                DecimalPlaces = 1,
+                Increment = 0.1m,
+                Value = 3.0m  // Default value that works well for spatial sigma
+            };
+            bilateralPanel.Controls.Add(numSigmaSpatial);
+
+            numSigma.DecimalPlaces = 1;
+            numSigma.Increment = 0.1m;
+
+            // We'll reuse numSigma for spatial sigma and add a new one for range
+
+            Label lblSigmaRange = new Label
+            {
+                Text = "Range Sigma:",
+                AutoSize = true,
+                Location = new Point(100, 0)
+            };
+            bilateralPanel.Controls.Add(lblSigmaRange);
+
+            numSigmaRange = new NumericUpDown
+            {
+                Location = new Point(100, 20),
+                Width = 60,
+                Minimum = 1,
+                Maximum = 100,
+                DecimalPlaces = 1,
+                Increment = 0.1m,
+                Value = 25.0m
+            };
+            bilateralPanel.Controls.Add(numSigmaRange);
+
+            controlsPanel.Controls.Add(bilateralPanel);
+
+            // 4. Unsharp Mask Parameters Panel
+            Panel unsharpPanel = new Panel
+            {
+                Location = new Point(10, currentY),
+                Width = 300,
+                Height = 80,
+                Visible = false
+            };
+
+            Label lblUnsharpAmount = new Label
+            {
+                Text = "Sharpening Amount:",
+                AutoSize = true,
+                Location = new Point(0, 0)
+            };
+            unsharpPanel.Controls.Add(lblUnsharpAmount);
+
+            numUnsharpAmount = new NumericUpDown
+            {
+                Location = new Point(0, 20),
+                Width = 60,
+                Minimum = 0.1m,
+                Maximum = 10.0m,
+                DecimalPlaces = 2,
+                Increment = 0.1m,
+                Value = 1.5m
+            };
+            unsharpPanel.Controls.Add(numUnsharpAmount);
+
+            Label lblUnsharpSigma = new Label
+            {
+                Text = "Blur Sigma:",
+                AutoSize = true,
+                Location = new Point(100, 0)
+            };
+            unsharpPanel.Controls.Add(lblUnsharpSigma);
+
+            // We'll reuse numSigma for Gaussian/blur sigma
+
+            controlsPanel.Controls.Add(unsharpPanel);
+
+            Panel edgePanel = new Panel
+            {
+                Location = new Point(10, currentY),
+                Width = 300,
+                Height = 50,
+                Visible = false
+            };
+
+            Label lblEdgeNormalize = new Label
+            {
+                Text = "Normalize Result:",
+                AutoSize = true,
+                Location = new Point(0, 0)
+            };
+            edgePanel.Controls.Add(lblEdgeNormalize);
+
+            chkEdgeNormalize = new CheckBox
+            {
+                Text = "Enable",
+                Location = new Point(0, 20),
+                Checked = true
+            };
+            edgePanel.Controls.Add(chkEdgeNormalize);
+
+            controlsPanel.Controls.Add(edgePanel);
+
+
+            currentY += 100; // Allow space for the tallest parameter panel
+
+            // Dictionary to map filter names to their parameter panels
+            var filterPanels = new Dictionary<string, Panel>
+    {
+        { "Gaussian", gaussianPanel },
+        { "Non-Local Means", nlmPanel },
+        { "Bilateral", bilateralPanel },
+        { "Unsharp Mask", unsharpPanel }
+        // Smoothing and Median just use the kernel size
+    };
+            filterPanels.Add("Edge Detection", edgePanel);
+            // Handler to show/hide parameter panels based on selection
+            cmbFilterType.SelectedIndexChanged += (s, e) =>
+            {
+                string selectedFilter = cmbFilterType.SelectedItem.ToString();
+
+                // Hide all parameter panels
+                foreach (var panel in filterPanels.Values)
+                {
+                    panel.Visible = false;
+                }
+
+                // Show the panel for the selected filter
+                if (filterPanels.ContainsKey(selectedFilter))
+                {
+                    filterPanels[selectedFilter].Visible = true;
+                }
+            };
+
+            // Show panel for initially selected filter
+            if (filterPanels.ContainsKey(cmbFilterType.SelectedItem.ToString()))
+            {
+                filterPanels[cmbFilterType.SelectedItem.ToString()].Visible = true;
+            }
+            // Region of Interest controls
+            Label lblRoiInfo = new Label
+            {
+                Text = "Define a region to preview filters more quickly:",
+                Location = new Point(10, currentY),
+                AutoSize = true
+            };
+            controlsPanel.Controls.Add(lblRoiInfo);
+            currentY += 20;
+
+            chkUseRoi = new CheckBox
+            {
+                Text = "Use Region of Interest for Preview",
+                Location = new Point(10, currentY),
+                AutoSize = true,
+                Checked = useRoi
+            };
+            chkUseRoi.CheckedChanged += (s, e) =>
+            {
+                useRoi = chkUseRoi.Checked;
+
+                // Initialize ROI if needed
+                if (useRoi && (roi.Width <= 0 || roi.Height <= 0))
+                {
+                    InitializeRoi();
+                }
+
+                // Force repaint to show/hide ROI
+                xyPreview.Invalidate();
+            };
+            controlsPanel.Controls.Add(chkUseRoi);
             currentY += 30;
 
+            // Add mouse and paint event handlers to xyPreview
+            xyPreview.MouseDown += XyPreview_MouseDown;
+            xyPreview.MouseMove += XyPreview_MouseMove;
+            xyPreview.MouseUp += XyPreview_MouseUp;
+            xyPreview.Paint += XyPreview_Paint;
             // 2D vs 3D
             Label lblDim = new Label
             {
@@ -422,6 +699,15 @@ namespace CTSegmenter
 
             // Set up the main layout
             filterForm.Controls.Add(mainLayout);
+
+            // Initialize with the correct panel visible
+            if (filterPanels.ContainsKey(cmbFilterType.SelectedItem.ToString()))
+            {
+                filterPanels[cmbFilterType.SelectedItem.ToString()].Visible = true;
+            }
+
+            AddSliceNavigationControls();
+            SetupZoomFunctionality();
             // Render an initial preview
             RenderPreviewSlice();
 
@@ -444,6 +730,7 @@ namespace CTSegmenter
             int width = mainForm.GetWidth();
             int height = mainForm.GetHeight();
             int z = mainForm.CurrentSlice;
+
             // If no slice data provided, read it from the volume:
             if (sliceData == null)
             {
@@ -457,20 +744,20 @@ namespace CTSegmenter
                 }
             }
 
-            // Convert to a 8bpp grayscale Bitmap
-            using (Bitmap bmp = new Bitmap(width, height, PixelFormat.Format8bppIndexed))
+            // Create a TEMPORARY 8bpp bitmap for processing
+            using (Bitmap tempBmp = new Bitmap(width, height, PixelFormat.Format8bppIndexed))
             {
                 // Set a grayscale palette
-                ColorPalette pal = bmp.Palette;
+                ColorPalette pal = tempBmp.Palette;
                 for (int i = 0; i < 256; i++)
                 {
                     pal.Entries[i] = Color.FromArgb(i, i, i);
                 }
-                bmp.Palette = pal;
+                tempBmp.Palette = pal;
 
                 // Lock bits and copy
                 Rectangle rect = new Rectangle(0, 0, width, height);
-                BitmapData bd = bmp.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format8bppIndexed);
+                BitmapData bd = tempBmp.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format8bppIndexed);
                 int stride = bd.Stride;
                 unsafe
                 {
@@ -480,7 +767,6 @@ namespace CTSegmenter
                         {
                             byte* dstRow = (byte*)bd.Scan0 + y * stride;
                             byte* srcRow = srcPtr + y * width;
-                            System.Buffer.BlockCopy(sliceData, y * width, new byte[width], 0, width);
                             for (int x = 0; x < width; x++)
                             {
                                 dstRow[x] = srcRow[x];
@@ -488,12 +774,16 @@ namespace CTSegmenter
                         }
                     }
                 }
-                bmp.UnlockBits(bd);
+                tempBmp.UnlockBits(bd);
 
-                // If isFiltered, we might overlay a label or something in corner
-                if (isFiltered)
+                // Create a 32bpp bitmap for display (we can use Graphics with this format)
+                Bitmap displayBmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+                using (Graphics g = Graphics.FromImage(displayBmp))
                 {
-                    using (Graphics g = Graphics.FromImage(bmp))
+                    g.DrawImage(tempBmp, 0, 0);
+
+                    // If isFiltered, add the text overlay
+                    if (isFiltered)
                     {
                         g.DrawString("Previewed Filter", new Font("Arial", 12), Brushes.Red, new PointF(5, 5));
                     }
@@ -501,10 +791,35 @@ namespace CTSegmenter
 
                 // Dispose old image if any
                 if (xyPreview.Image != null) xyPreview.Image.Dispose();
-                xyPreview.Image = (Bitmap)bmp.Clone();
+                xyPreview.Image = displayBmp;
+            }
+
+            // Initialize ROI if needed
+            if (roi.Width <= 0 || roi.Height <= 0)
+            {
+                InitializeRoi();
+            }
+
+            // Make sure the ROI gets drawn if it's active
+            if (useRoi)
+            {
+                xyPreview.Invalidate();
             }
         }
 
+
+        private ProgressForm GetPreviewProgressForm(string filterName)
+        {
+            // Only create progress indicator for expensive filters
+            if (filterName == "Non-Local Means" ||
+                (filterName == "Bilateral" && mainForm.GetWidth() * mainForm.GetHeight() > 500000))
+            {
+                var pForm = new ProgressForm($"Previewing {filterName}...");
+                pForm.Show();
+                return pForm;
+            }
+            return null;
+        }
         /// <summary>
         /// Called when the user presses "Preview Filter" – applies the chosen filter just to the currently displayed XY slice,
         /// so they can see how it would look, without altering the rest of the volume.
@@ -515,6 +830,28 @@ namespace CTSegmenter
 
             lblStatus.Text = "Filtering preview slice...";
             filterForm.Cursor = Cursors.WaitCursor;
+
+            // Get all filter parameters up front
+            string filterName = cmbFilterType.SelectedItem.ToString();
+            int kernelSize = (int)numKernelSize.Value;
+            float sigma = 1.0f;
+            float sigmaSpatial = 3.0f;
+            float sigmaRange = 25.0f;
+            float h = 10.0f;
+            int templateSize = 3;
+            int searchSize = 7;
+            float unsharpAmount = 1.5f;
+            bool normalizeEdges = true;
+
+            // Get values from UI controls if they exist and are visible
+            if (numSigma != null && numSigma.Visible) sigma = (float)numSigma.Value;
+            if (numSigmaSpatial != null && numSigmaSpatial.Visible) sigmaSpatial = (float)numSigmaSpatial.Value;
+            if (numSigmaRange != null && numSigmaRange.Visible) sigmaRange = (float)numSigmaRange.Value;
+            if (numNlmH != null && numNlmH.Visible) h = (float)numNlmH.Value;
+            if (numNlmTemplate != null && numNlmTemplate.Visible) templateSize = (int)numNlmTemplate.Value;
+            if (numNlmSearch != null && numNlmSearch.Visible) searchSize = (int)numNlmSearch.Value;
+            if (numUnsharpAmount != null && numUnsharpAmount.Visible) unsharpAmount = (float)numUnsharpAmount.Value;
+            if (chkEdgeNormalize != null && chkEdgeNormalize.Visible) normalizeEdges = chkEdgeNormalize.Checked;
 
             int width = mainForm.GetWidth();
             int height = mainForm.GetHeight();
@@ -530,28 +867,84 @@ namespace CTSegmenter
                 }
             }
 
-            string filterName = cmbFilterType.SelectedItem.ToString();
-            int kernelSize = (int)numKernelSize.Value;
-            float sigma = (float)numSigma.Value;
+            // Create a copy of original slice for later
+            byte[] originalSlice = new byte[sliceData.Length];
+            Array.Copy(sliceData, originalSlice, sliceData.Length);
+            byte[] filteredSlice;
 
-            // For non-local means specifically
-            float h = (float)numNlmH.Value;
-            int templateSize = (int)numNlmTemplate.Value;
-            int searchSize = (int)numNlmSearch.Value;
+            
 
-            byte[] filteredSlice = await Task.Run(() =>
+            if (useRoi)
             {
-                return ApplyFilter2D(sliceData, width, height, filterName,
+                // Process only the ROI
+                // Ensure ROI is within bounds
+                Rectangle validRoi = new Rectangle(
+                    Math.Max(0, Math.Min(width - 1, roi.X)),
+                    Math.Max(0, Math.Min(height - 1, roi.Y)),
+                    Math.Min(width - roi.X, roi.Width),
+                    Math.Min(height - roi.Y, roi.Height)
+                );
+
+                // Extract ROI data
+                byte[] roiData = new byte[validRoi.Width * validRoi.Height];
+                int idx = 0;
+                for (int y = validRoi.Y; y < validRoi.Y + validRoi.Height; y++)
+                {
+                    for (int x = validRoi.X; x < validRoi.X + validRoi.Width; x++)
+                    {
+                        roiData[idx++] = sliceData[y * width + x];
+                    }
+                }
+
+                // Filter just the ROI data
+                byte[] filteredRoi = await Task.Run(() =>
+                {
+                    return ApplyFilter2D(roiData, validRoi.Width, validRoi.Height, filterName,
                                      kernelSize, sigma, h, templateSize, searchSize,
                                      useGPU);
-            });
+                });
 
+                // Merge back into full slice
+                filteredSlice = new byte[width * height];
+                Array.Copy(originalSlice, filteredSlice, originalSlice.Length);
+
+                idx = 0;
+                for (int y = validRoi.Y; y < validRoi.Y + validRoi.Height; y++)
+                {
+                    for (int x = validRoi.X; x < validRoi.X + validRoi.Width; x++)
+                    {
+                        filteredSlice[y * width + x] = filteredRoi[idx++];
+                    }
+                }
+            }
+            else
+            {
+                ProgressForm previewProgress = null;
+                try
+                {
+                    previewProgress = GetPreviewProgressForm(filterName);
+
+                    // Then in the filter application code:
+                    filteredSlice = await Task.Run(() =>
+                    {
+                        return ApplyFilter2D(sliceData, width, height, filterName,
+                                         kernelSize, sigma, h, templateSize, searchSize,
+                                         useGPU);
+                    });
+                }
+                finally
+                {
+                    previewProgress?.Close();
+                }
+            }
+            lastFilteredSlice = filteredSlice;
             // Render the result
             RenderPreviewSlice(filteredSlice, true);
 
             lblStatus.Text = "Preview done.";
             filterForm.Cursor = Cursors.Default;
         }
+
 
         #endregion
 
@@ -742,6 +1135,10 @@ namespace CTSegmenter
             int searchSize,
             bool useGPUFlag)
         {
+            float sigmaSpatial = (numSigmaSpatial != null) ? (float)numSigmaSpatial.Value : 3.0f;
+            float sigmaRange = (numSigmaRange != null) ? (float)numSigmaRange.Value : 25.0f;
+            float unsharpAmount = (numUnsharpAmount != null) ? (float)numUnsharpAmount.Value : 1.5f;
+            bool normalizeEdges = (chkEdgeNormalize != null) ? chkEdgeNormalize.Checked : true;
             switch (filterName)
             {
                 case "Gaussian":
@@ -764,13 +1161,27 @@ namespace CTSegmenter
                         return MedianFilter2D_CPU(sliceData, width, height, kernelSize);
 
                 case "Non-Local Means":
-                    
-                    return NonLocalMeans2D_CPU(sliceData, width, height, kernelSize, h, templateSize, searchSize);
+                    if (useGPUFlag && gpuInitialized)
+                        return NonLocalMeans2D_GPU(sliceData, width, height, h, templateSize, searchSize);
+                    else
+                        return NonLocalMeans2D_CPU(sliceData, width, height, kernelSize, h, templateSize, searchSize);
 
                 case "Bilateral":
-                    
-                    return BilateralFilter2D_CPU(sliceData, width, height, kernelSize, sigma);
+                    if (useGPUFlag && gpuInitialized)
+                        return BilateralFilter2D_GPU(sliceData, width, height, kernelSize, sigmaSpatial, sigmaRange);
+                    else
+                        return BilateralFilter2D_CPU(sliceData, width, height, kernelSize, sigmaSpatial, sigmaRange);
 
+                case "Unsharp Mask":
+                    if (useGPUFlag && gpuInitialized)
+                        return UnsharpMask2D_GPU(sliceData, width, height, unsharpAmount, kernelSize / 2, sigma);
+                    else
+                        return UnsharpMask2D_CPU(sliceData, width, height, unsharpAmount, kernelSize / 2, sigma);
+                case "Edge Detection":
+                    if (useGPUFlag && gpuInitialized)
+                        return EdgeDetection2D_GPU(sliceData, width, height, normalizeEdges);
+                    else
+                        return EdgeDetection2D_CPU(sliceData, width, height, normalizeEdges);
                 default:
                     return sliceData; // unfiltered
             }
@@ -837,6 +1248,74 @@ namespace CTSegmenter
                     dstVolume = MedianFilter3D_CPU_Full(srcVolume, width, height, depth, kernelSize, pForm);
                 }
             }
+            else if (filterName == "Non-Local Means")
+            {
+                // Use the specialized NLM3DFilter class that handles both CPU and GPU cases
+                using (var nlmFilter = new NLM3DFilter(useGPUFlag))
+                {
+                    string modeText = useGPUFlag ? "GPU" : "CPU";
+                    pForm.SafeUpdateProgress(0, 1, $"Running 3D Non-Local Means on {modeText}...");
+
+                    // The NLM3DFilter.RunNLM3D method handles both CPU and GPU 
+                    // implementation selection internally, now with progress updates
+                    dstVolume = nlmFilter.RunNLM3D(
+                        srcVolume,
+                        width,
+                        height,
+                        depth,
+                        templateSize,
+                        searchSize,
+                        h,
+                        useGPUFlag,
+                        pForm);
+                }
+            }
+            else if (filterName == "Bilateral")
+            {
+                float sigmaSpatial = (numSigmaSpatial != null) ? (float)numSigmaSpatial.Value : 3.0f;
+                float sigmaRange = (numSigmaRange != null) ? (float)numSigmaRange.Value : 25.0f;
+
+                if (useGPUFlag && gpuInitialized)
+                {
+                    pForm.SafeUpdateProgress(0, 1, "Running 3D Bilateral filter on GPU...");
+                    dstVolume = BilateralFilter3D_GPU(srcVolume, width, height, depth, kernelSize, sigmaSpatial, sigmaRange);
+                }
+                else
+                {
+                    pForm.SafeUpdateProgress(0, 1, "Running 3D Bilateral filter on CPU...");
+                    dstVolume = BilateralFilter3D_CPU(srcVolume, width, height, depth, kernelSize, sigmaSpatial, sigmaRange, pForm);
+                }
+            }
+            else if (filterName == "Unsharp Mask")
+            {
+                float unsharpAmount = (float)numUnsharpAmount.Value;
+
+                if (useGPUFlag && gpuInitialized)
+                {
+                    pForm.SafeUpdateProgress(0, 1, "Running 3D Unsharp Mask on GPU...");
+                    dstVolume = UnsharpMask3D_GPU(srcVolume, width, height, depth, unsharpAmount, kernelSize / 2, sigma);
+                }
+                else
+                {
+                    pForm.SafeUpdateProgress(0, 1, "Running 3D Unsharp Mask on CPU...");
+                    dstVolume = UnsharpMask3D_CPU(srcVolume, width, height, depth, unsharpAmount, kernelSize / 2, sigma, pForm);
+                }
+            }
+            else if (filterName == "Edge Detection")
+            {
+                bool normalizeEdges = chkEdgeNormalize.Checked;
+
+                if (useGPUFlag && gpuInitialized)
+                {
+                    pForm.SafeUpdateProgress(0, 1, "Running 3D Edge Detection on GPU...");
+                    dstVolume = EdgeDetection3D_GPU(srcVolume, width, height, depth, normalizeEdges);
+                }
+                else
+                {
+                    pForm.SafeUpdateProgress(0, 1, "Running 3D Edge Detection on CPU...");
+                    dstVolume = EdgeDetection3D_CPU(srcVolume, width, height, depth, normalizeEdges, pForm);
+                }
+            }
             else
             {
                 // For demonstration, do nothing or fallback CPU if not recognized
@@ -882,7 +1361,723 @@ namespace CTSegmenter
 
         #endregion
 
-        #region 2D CPU Methods (Examples)
+        #region 3D Bilateral Filter
+
+        /// <summary>
+        /// 3D bilateral filter for the entire volume (CPU implementation)
+        /// </summary>
+        private byte[] BilateralFilter3D_CPU(byte[] src, int width, int height, int depth,
+                                            int kSize, float sigmaSpatial, float sigmaRange,
+                                            ProgressForm pForm)
+        {
+            byte[] dst = new byte[src.Length];
+            int radius = kSize / 2;
+            int sliceSize = width * height;
+
+            // Pre-compute spatial weights (3D Gaussian based on distance)
+            float[] spatialKernel = new float[kSize * kSize * kSize];
+            float spatialFactor = -0.5f / (sigmaSpatial * sigmaSpatial);
+
+            int kidx = 0;
+            for (int dz = -radius; dz <= radius; dz++)
+            {
+                for (int dy = -radius; dy <= radius; dy++)
+                {
+                    for (int dx = -radius; dx <= radius; dx++)
+                    {
+                        float dist2 = dx * dx + dy * dy + dz * dz;
+                        spatialKernel[kidx++] = (float)Math.Exp(dist2 * spatialFactor);
+                    }
+                }
+            }
+
+            // Range factor for intensity differences
+            float rangeFactor = -0.5f / (sigmaRange * sigmaRange);
+
+            // Process each voxel
+            for (int z = 0; z < depth; z++)
+            {
+                pForm.SafeUpdateProgress(z, depth, $"3D Bilateral filter on slice {z + 1}/{depth}");
+
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        int centerIdx = z * sliceSize + y * width + x;
+                        int centerVal = src[centerIdx];
+                        float sum = 0;
+                        float weightSum = 0;
+
+                        kidx = 0;
+                        for (int dz = -radius; dz <= radius; dz++)
+                        {
+                            int nz = z + dz;
+                            if (nz < 0) nz = 0;
+                            if (nz >= depth) nz = depth - 1;
+
+                            for (int dy = -radius; dy <= radius; dy++)
+                            {
+                                int ny = y + dy;
+                                if (ny < 0) ny = 0;
+                                if (ny >= height) ny = height - 1;
+
+                                for (int dx = -radius; dx <= radius; dx++)
+                                {
+                                    int nx = x + dx;
+                                    if (nx < 0) nx = 0;
+                                    if (nx >= width) nx = width - 1;
+
+                                    int neighborIdx = nz * sliceSize + ny * width + nx;
+                                    int neighborVal = src[neighborIdx];
+
+                                    // Spatial weight
+                                    float spatialWeight = spatialKernel[kidx++];
+
+                                    // Range weight
+                                    float intensityDiff = centerVal - neighborVal;
+                                    float rangeWeight = (float)Math.Exp(intensityDiff * intensityDiff * rangeFactor);
+
+                                    // Combined weight
+                                    float weight = spatialWeight * rangeWeight;
+
+                                    weightSum += weight;
+                                    sum += weight * neighborVal;
+                                }
+                            }
+                        }
+
+                        if (weightSum > 0.0f)
+                        {
+                            dst[centerIdx] = (byte)Math.Min(255, Math.Max(0, Math.Round(sum / weightSum)));
+                        }
+                        else
+                        {
+                            dst[centerIdx] = src[centerIdx]; // Fallback to original
+                        }
+                    }
+                }
+            }
+
+            return dst;
+        }
+
+        /// <summary>
+        /// 3D bilateral filter using GPU acceleration
+        /// </summary>
+        private byte[] BilateralFilter3D_GPU(byte[] src, int width, int height, int depth,
+                                    int kSize, float sigmaSpatial, float sigmaRange)
+        {
+            byte[] dst = new byte[src.Length];
+            int radius = kSize / 2;
+
+            // Show progress before GPU kernel - can't show during GPU processing
+            if (progressForm != null)
+                progressForm.SafeUpdateProgress(0, 1, "Running 3D Bilateral filter on GPU...");
+
+            using (var bufferSrc = accelerator.Allocate1D<byte>(src.Length))
+            using (var bufferDst = accelerator.Allocate1D<byte>(dst.Length))
+            {
+                bufferSrc.CopyFromCPU(src);
+
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index1D,
+                    ArrayView<byte>,
+                    ArrayView<byte>,
+                    int, int, int, int,
+                    float, float>(BilateralFilter3D_Kernel);
+
+                kernel(
+                    src.Length,
+                    bufferSrc.View,
+                    bufferDst.View,
+                    radius,
+                    width,
+                    height,
+                    depth,
+                    sigmaSpatial,
+                    sigmaRange);
+
+                accelerator.Synchronize();
+                bufferDst.CopyToCPU(dst);
+            }
+
+            return dst;
+        }
+
+        /// <summary>
+        /// ILGPU kernel for 3D bilateral filtering
+        /// </summary>
+        static void BilateralFilter3D_Kernel(
+            Index1D idx,
+            ArrayView<byte> src,
+            ArrayView<byte> dst,
+            int radius,
+            int width,
+            int height,
+            int depth,
+            float sigmaSpatial,
+            float sigmaRange)
+        {
+            if (idx >= src.Length)
+                return;
+
+            int sliceSize = width * height;
+
+            // Convert 1D index to 3D coordinates
+            int z = (int)(idx / sliceSize);
+            int remainder = (int)(idx % sliceSize);
+            int y = remainder / width;
+            int x = remainder % width;
+
+            float spatialFactor = -0.5f / (sigmaSpatial * sigmaSpatial);
+            float rangeFactor = -0.5f / (sigmaRange * sigmaRange);
+
+            int centerVal = src[idx];
+            float sum = 0.0f;
+            float weightSum = 0.0f;
+
+            for (int dz = -radius; dz <= radius; dz++)
+            {
+                int nz = z + dz;
+                if (nz < 0) nz = 0;
+                if (nz >= depth) nz = depth - 1;
+
+                for (int dy = -radius; dy <= radius; dy++)
+                {
+                    int ny = y + dy;
+                    if (ny < 0) ny = 0;
+                    if (ny >= height) ny = height - 1;
+
+                    for (int dx = -radius; dx <= radius; dx++)
+                    {
+                        int nx = x + dx;
+                        if (nx < 0) nx = 0;
+                        if (nx >= width) nx = width - 1;
+
+                        // Spatial weight (based on distance)
+                        float dist2 = dx * dx + dy * dy + dz * dz;
+                        float spatialWeight = XMath.Exp(dist2 * spatialFactor);
+
+                        // Range weight (based on intensity difference)
+                        int neighborIdx = nz * sliceSize + ny * width + nx;
+                        int neighborVal = src[neighborIdx];
+                        float intensityDiff = centerVal - neighborVal;
+                        float rangeWeight = XMath.Exp(intensityDiff * intensityDiff * rangeFactor);
+
+                        // Combined weight
+                        float weight = spatialWeight * rangeWeight;
+
+                        weightSum += weight;
+                        sum += weight * neighborVal;
+                    }
+                }
+            }
+
+            if (weightSum > 0.0f)
+            {
+                int result = (int)(sum / weightSum + 0.5f);
+                if (result < 0) result = 0;
+                if (result > 255) result = 255;
+                dst[idx] = (byte)result;
+            }
+            else
+            {
+                dst[idx] = src[idx]; // Fallback to original
+            }
+        }
+        #endregion
+
+        #region 3D Unsharp Masking
+
+        /// <summary>
+        /// CPU implementation of 3D unsharp masking
+        /// </summary>
+        private byte[] UnsharpMask3D_CPU(byte[] src, int width, int height, int depth,
+                                        float amount, int gaussianRadius, float gaussianSigma,
+                                        ProgressForm pForm)
+        {
+            // First apply 3D Gaussian blur to get the low-pass version
+            pForm.SafeUpdateProgress(0, 1, "Calculating 3D Gaussian blur for unsharp mask...");
+            byte[] blurred = GaussianFilter3D_CPU_Full(src, width, height, depth,
+                                                     2 * gaussianRadius + 1, gaussianSigma, pForm);
+
+            // Create the output and add the high-pass (original - blurred) scaled by amount
+            byte[] dst = new byte[src.Length];
+
+            pForm.SafeUpdateProgress(0, 1, "Applying unsharp mask to volume...");
+            for (int i = 0; i < src.Length; i++)
+            {
+                // Show progress periodically
+                if (i % (src.Length / 100) == 0)
+                {
+                    int percent = (i * 100) / src.Length;
+                    pForm.SafeUpdateProgress(percent, 100, $"Unsharp masking: {percent}%");
+                }
+
+                // Calculate the high-pass component (original - blurred)
+                int highPass = src[i] - blurred[i];
+
+                // Add scaled high-pass to original
+                int result = (int)(src[i] + amount * highPass);
+
+                // Clamp to valid range
+                if (result > 255) result = 255;
+                if (result < 0) result = 0;
+
+                dst[i] = (byte)result;
+            }
+
+            return dst;
+        }
+
+        /// <summary>
+        /// GPU implementation of 3D unsharp masking
+        /// </summary>
+        private byte[] UnsharpMask3D_GPU(byte[] src, int width, int height, int depth,
+                                        float amount, int gaussianRadius, float gaussianSigma)
+        {
+            byte[] dst = new byte[src.Length];
+
+            // First get the blurred version using our existing 3D Gaussian GPU filter
+            byte[] blurred = GaussianFilter3D_GPU(src, width, height, depth, 2 * gaussianRadius + 1, gaussianSigma);
+
+            using (var bufferSrc = accelerator.Allocate1D<byte>(src.Length))
+            using (var bufferBlurred = accelerator.Allocate1D<byte>(blurred.Length))
+            using (var bufferDst = accelerator.Allocate1D<byte>(dst.Length))
+            {
+                bufferSrc.CopyFromCPU(src);
+                bufferBlurred.CopyFromCPU(blurred);
+
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index1D,
+                    ArrayView<byte>,
+                    ArrayView<byte>,
+                    ArrayView<byte>,
+                    float>(UnsharpMask3D_Kernel); // Reuse the same kernel as 2D - it's identical
+
+                kernel(
+                    src.Length,
+                    bufferSrc.View,
+                    bufferBlurred.View,
+                    bufferDst.View,
+                    amount);
+
+                accelerator.Synchronize();
+                bufferDst.CopyToCPU(dst);
+            }
+
+            return dst;
+        }
+
+        /// <summary>
+        /// ILGPU kernel for 3D unsharp masking (same as 2D version)
+        /// </summary>
+        static void UnsharpMask3D_Kernel(
+            Index1D idx,
+            ArrayView<byte> src,
+            ArrayView<byte> blurred,
+            ArrayView<byte> dst,
+            float amount)
+        {
+            // This is identical to the 2D version since we're just operating on 1D arrays
+            if (idx >= src.Length)
+                return;
+
+            // Calculate high-pass component
+            int highPass = src[idx] - blurred[idx];
+
+            // Add scaled high-pass to original
+            int result = (int)(src[idx] + amount * highPass);
+
+            // Clamp result
+            if (result > 255) result = 255;
+            if (result < 0) result = 0;
+
+            dst[idx] = (byte)result;
+        }
+        #endregion
+
+        #region ROI Implementation
+
+
+
+
+        /// <summary>
+        /// Initializes the ROI to a reasonable default size and position based on the current image
+        /// </summary>
+        private void InitializeRoi()
+        {
+            if (xyPreview.Image == null) return;
+
+            int roiWidth = xyPreview.Image.Width / 3;
+            int roiHeight = xyPreview.Image.Height / 3;
+            int roiX = (xyPreview.Image.Width - roiWidth) / 2;
+            int roiY = (xyPreview.Image.Height - roiHeight) / 2;
+
+            roi = new Rectangle(roiX, roiY, roiWidth, roiHeight);
+        }
+
+        /// <summary>
+        /// Converts a point from screen (PictureBox) coordinates to image coordinates
+        /// </summary>
+        private Point ConvertToImageCoordinates(Point screenPoint)
+        {
+            if (xyPreview.Image == null) return screenPoint;
+
+            if (xyPreview.SizeMode == PictureBoxSizeMode.Normal)
+            {
+                // For manual zoom mode
+                int imageX = (int)((screenPoint.X - zoomOrigin.X) / zoomFactor);
+                int imageY = (int)((screenPoint.Y - zoomOrigin.Y) / zoomFactor);
+                return new Point(imageX, imageY);
+            }
+            else
+            {
+                // For PictureBox's automatic zoom mode
+                float scaleX = (float)xyPreview.Image.Width / xyPreview.ClientSize.Width;
+                float scaleY = (float)xyPreview.Image.Height / xyPreview.ClientSize.Height;
+
+                if (xyPreview.SizeMode == PictureBoxSizeMode.Zoom)
+                {
+                    // Calculate actual image area within the PictureBox
+                    float imageRatio = (float)xyPreview.Image.Width / xyPreview.Image.Height;
+                    float controlRatio = (float)xyPreview.Width / xyPreview.Height;
+
+                    if (imageRatio > controlRatio)
+                    {
+                        // Image is wider than control (relative to height)
+                        float scaledHeight = xyPreview.Width / imageRatio;
+                        float yOffset = (xyPreview.Height - scaledHeight) / 2;
+
+                        if (screenPoint.Y < yOffset || screenPoint.Y > yOffset + scaledHeight)
+                            return new Point(-1, -1); // Outside image area
+
+                        return new Point(
+                            (int)(screenPoint.X * xyPreview.Image.Width / xyPreview.Width),
+                            (int)((screenPoint.Y - yOffset) * xyPreview.Image.Height / scaledHeight)
+                        );
+                    }
+                    else
+                    {
+                        // Image is taller than control (relative to width)
+                        float scaledWidth = xyPreview.Height * imageRatio;
+                        float xOffset = (xyPreview.Width - scaledWidth) / 2;
+
+                        if (screenPoint.X < xOffset || screenPoint.X > xOffset + scaledWidth)
+                            return new Point(-1, -1); // Outside image area
+
+                        return new Point(
+                            (int)((screenPoint.X - xOffset) * xyPreview.Image.Width / scaledWidth),
+                            (int)(screenPoint.Y * xyPreview.Image.Height / xyPreview.Height)
+                        );
+                    }
+                }
+                else
+                {
+                    // For other modes (which we shouldn't be using)
+                    return new Point(
+                        (int)(screenPoint.X * scaleX),
+                        (int)(screenPoint.Y * scaleY)
+                    );
+                }
+            }
+        }
+
+        /// <summary>
+        /// Converts a rectangle from image coordinates to screen (PictureBox) coordinates
+        /// </summary>
+        private Rectangle ConvertToScreenRectangle(Rectangle imageRect)
+        {
+            if (xyPreview.Image == null) return imageRect;
+
+            if (xyPreview.SizeMode == PictureBoxSizeMode.Normal)
+            {
+                // For manual zoom mode
+                return new Rectangle(
+                    (int)(imageRect.X * zoomFactor) + zoomOrigin.X,
+                    (int)(imageRect.Y * zoomFactor) + zoomOrigin.Y,
+                    (int)(imageRect.Width * zoomFactor),
+                    (int)(imageRect.Height * zoomFactor)
+                );
+            }
+            else
+            {
+                // For PictureBox's automatic zoom mode
+                return GetDisplayRectangle(imageRect);
+            }
+        }
+
+
+
+        /// <summary>
+        /// Converts image coordinates to display coordinates for rendering the ROI
+        /// </summary>
+        private Rectangle GetDisplayRectangle(Rectangle imageRect)
+        {
+            if (xyPreview.Image == null) return imageRect;
+
+            // Calculate scaling factor and position based on PictureBox's SizeMode
+            float imageAspect = (float)xyPreview.Image.Width / xyPreview.Image.Height;
+            float controlAspect = (float)xyPreview.Width / xyPreview.Height;
+
+            Rectangle fitRect;
+            float scale;
+
+            if (imageAspect > controlAspect)
+            {
+                // Image is wider than control (relative to height)
+                scale = (float)xyPreview.Width / xyPreview.Image.Width;
+                int scaledHeight = (int)(xyPreview.Image.Height * scale);
+                int yOffset = (xyPreview.Height - scaledHeight) / 2;
+                fitRect = new Rectangle(0, yOffset, xyPreview.Width, scaledHeight);
+            }
+            else
+            {
+                // Image is taller than control (relative to width)
+                scale = (float)xyPreview.Height / xyPreview.Image.Height;
+                int scaledWidth = (int)(xyPreview.Image.Width * scale);
+                int xOffset = (xyPreview.Width - scaledWidth) / 2;
+                fitRect = new Rectangle(xOffset, 0, scaledWidth, xyPreview.Height);
+            }
+
+            // Convert image coordinates to display coordinates
+            return new Rectangle(
+                fitRect.X + (int)(imageRect.X * scale),
+                fitRect.Y + (int)(imageRect.Y * scale),
+                (int)(imageRect.Width * scale),
+                (int)(imageRect.Height * scale)
+            );
+        }
+
+        /// <summary>
+        /// Modified paint handler for both zooming and ROI
+        /// </summary>
+        private void XyPreview_Paint(object sender, PaintEventArgs e)
+        {
+            // Skip custom drawing if we're using the built-in zoom
+            if (xyPreview.SizeMode != PictureBoxSizeMode.Normal)
+            {
+                // Still draw ROI if needed
+                if (useRoi) DrawROIOnDefaultMode(e);
+                return;
+            }
+
+            if (xyPreview.Image == null) return;
+
+            try
+            {
+                // Calculate safe dimensions to avoid overflow
+                int safeWidth = (int)Math.Min(int.MaxValue / 2, xyPreview.Image.Width * zoomFactor);
+                int safeHeight = (int)Math.Min(int.MaxValue / 2, xyPreview.Image.Height * zoomFactor);
+
+                // Enable high quality rendering
+                e.Graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+
+                // Source rectangle (entire image)
+                Rectangle srcRect = new Rectangle(0, 0, xyPreview.Image.Width, xyPreview.Image.Height);
+
+                // Destination rectangle with current zoom and pan
+                Rectangle destRect = new Rectangle(
+                    zoomOrigin.X,
+                    zoomOrigin.Y,
+                    safeWidth,
+                    safeHeight);
+
+                // Draw the image
+                e.Graphics.DrawImage(xyPreview.Image, destRect, srcRect, GraphicsUnit.Pixel);
+
+                // Draw ROI if enabled
+                if (useRoi) DrawZoomedROI(e);
+            }
+            catch (Exception ex)
+            {
+                // Log error and draw a message
+                Logger.Log($"[FilterManager] Error drawing zoomed image: {ex.Message}");
+                e.Graphics.Clear(Color.Black);
+                e.Graphics.DrawString("Error drawing zoomed image. Resetting zoom.",
+                    new Font("Arial", 12), Brushes.Red, new Point(10, 10));
+
+                // Reset zoom on next cycle to recover
+                filterForm.BeginInvoke(new Action(() => ResetZoom()));
+            }
+        }
+
+        /// <summary>
+        /// Draws the ROI when in manual zoom mode
+        /// </summary>
+        private void DrawZoomedROI(PaintEventArgs e)
+        {
+            if (!useRoi) return;
+
+            // Get ROI rectangle in screen coordinates
+            Rectangle screenRoi = ConvertToScreenRectangle(roi);
+
+            // Draw ROI rectangle
+            using (Pen pen = new Pen(Color.Yellow, 2))
+            {
+                e.Graphics.DrawRectangle(pen, screenRoi);
+            }
+
+            // Draw resize handle
+            using (Brush brush = new SolidBrush(Color.Yellow))
+            {
+                e.Graphics.FillRectangle(brush,
+                    screenRoi.Right - RESIZE_HANDLE_SIZE,
+                    screenRoi.Bottom - RESIZE_HANDLE_SIZE,
+                    RESIZE_HANDLE_SIZE,
+                    RESIZE_HANDLE_SIZE);
+            }
+        }
+        /// <summary>
+        /// Draws the ROI when in automatic zoom mode
+        /// </summary>
+        private void DrawROIOnDefaultMode(PaintEventArgs e)
+        {
+            if (!useRoi || xyPreview.Image == null) return;
+
+            // Get ROI rectangle in screen coordinates
+            Rectangle screenRoi = ConvertToScreenRectangle(roi);
+
+            // Draw ROI rectangle
+            using (Pen pen = new Pen(Color.Yellow, 2))
+            {
+                e.Graphics.DrawRectangle(pen, screenRoi);
+            }
+
+            // Draw resize handle
+            using (Brush brush = new SolidBrush(Color.Yellow))
+            {
+                e.Graphics.FillRectangle(brush,
+                    screenRoi.Right - RESIZE_HANDLE_SIZE,
+                    screenRoi.Bottom - RESIZE_HANDLE_SIZE,
+                    RESIZE_HANDLE_SIZE,
+                    RESIZE_HANDLE_SIZE);
+            }
+        }
+
+
+
+        /// <summary>
+        /// Mouse down handler for ROI interaction
+        /// </summary>
+        private void XyPreview_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (!useRoi || xyPreview.Image == null) return;
+
+            // Convert click coordinates to image coordinates
+            Point imagePoint = ConvertToImageCoordinates(e.Location);
+            if (imagePoint.X < 0) return; // Outside of image area
+
+            // Convert ROI to screen coordinates
+            Rectangle screenRoi = ConvertToScreenRectangle(roi);
+
+            // Check if clicking on resize handle
+            Rectangle resizeHandle = new Rectangle(
+                screenRoi.Right - RESIZE_HANDLE_SIZE,
+                screenRoi.Bottom - RESIZE_HANDLE_SIZE,
+                RESIZE_HANDLE_SIZE,
+                RESIZE_HANDLE_SIZE);
+
+            if (resizeHandle.Contains(e.Location))
+            {
+                isResizingRoi = true;
+                isDraggingRoi = false;
+            }
+            // Check if clicking inside ROI (for dragging)
+            else if (screenRoi.Contains(e.Location))
+            {
+                isDraggingRoi = true;
+                isResizingRoi = false;
+            }
+            else
+            {
+                isDraggingRoi = false;
+                isResizingRoi = false;
+            }
+
+            lastMousePos = e.Location;
+        }
+
+        /// <summary>
+        /// Mouse move handler for ROI interaction
+        /// </summary>
+        private void XyPreview_MouseMove(object sender, MouseEventArgs e)
+        {
+            if (!useRoi || xyPreview.Image == null) return;
+
+            if (isDraggingRoi || isResizingRoi)
+            {
+                // Convert current and last mouse positions to image coordinates
+                Point currentImagePoint = ConvertToImageCoordinates(e.Location);
+                Point lastImagePoint = ConvertToImageCoordinates(lastMousePos);
+
+                // Calculate the delta in image coordinates
+                int deltaX = currentImagePoint.X - lastImagePoint.X;
+                int deltaY = currentImagePoint.Y - lastImagePoint.Y;
+
+                if (isDraggingRoi)
+                {
+                    // Move the ROI, ensuring it stays within the image bounds
+                    roi.X = Math.Max(0, Math.Min(xyPreview.Image.Width - roi.Width, roi.X + deltaX));
+                    roi.Y = Math.Max(0, Math.Min(xyPreview.Image.Height - roi.Height, roi.Y + deltaY));
+                }
+                else if (isResizingRoi)
+                {
+                    // Resize the ROI, ensuring it stays within bounds and maintains minimum size
+                    int minSize = 20; // Minimum ROI size in image coordinates
+                    int newWidth = Math.Max(minSize, Math.Min(xyPreview.Image.Width - roi.X, roi.Width + deltaX));
+                    int newHeight = Math.Max(minSize, Math.Min(xyPreview.Image.Height - roi.Y, roi.Height + deltaY));
+
+                    roi.Width = newWidth;
+                    roi.Height = newHeight;
+                }
+
+                // Update last mouse position
+                lastMousePos = e.Location;
+
+                // Redraw
+                xyPreview.Invalidate();
+            }
+        }
+
+        /// <summary>
+        /// Mouse up handler for ROI interaction
+        /// </summary>
+        private void XyPreview_MouseUp(object sender, MouseEventArgs e)
+        {
+            isDraggingRoi = false;
+            isResizingRoi = false;
+        }
+
+        /// <summary>
+        /// Updates the mouse handlers to ensure ROI and zooming work together
+        /// </summary>
+        private void UpdateMouseHandlers()
+        {
+            // First remove any existing handlers to avoid duplicates
+            xyPreview.MouseDown -= XyPreview_MouseDown;
+            xyPreview.MouseMove -= XyPreview_MouseMove;
+            xyPreview.MouseUp -= XyPreview_MouseUp;
+            xyPreview.MouseDown -= XyPreview_MouseDownForPan;
+            xyPreview.MouseMove -= XyPreview_MouseMoveForPan;
+            xyPreview.MouseUp -= XyPreview_MouseUpForPan;
+
+            // Add handlers for ROI directly
+            xyPreview.MouseDown += XyPreview_MouseDown;
+            xyPreview.MouseMove += XyPreview_MouseMove;
+            xyPreview.MouseUp += XyPreview_MouseUp;
+
+            // Add handlers for panning/zooming
+            xyPreview.MouseDown += XyPreview_MouseDownForPan;
+            xyPreview.MouseMove += XyPreview_MouseMoveForPan;
+            xyPreview.MouseUp += XyPreview_MouseUpForPan;
+        }
+
+        #endregion
+
+
+        #region 2D CPU Methods 
 
         private byte[] GaussianFilter2D_CPU(byte[] src, int width, int height, int kSize, float sigma)
         {
@@ -1235,6 +2430,40 @@ namespace CTSegmenter
             kernelSum = 1f; // after normalization
             return kernel;
         }
+        private byte[] NonLocalMeans2D_GPU(byte[] src, int width, int height,
+                                  float h, int templateSize, int searchSize)
+        {
+            byte[] dst = new byte[src.Length];
+
+            using (var bufferSrc = accelerator.Allocate1D<byte>(src.Length))
+            using (var bufferDst = accelerator.Allocate1D<byte>(dst.Length))
+            {
+                bufferSrc.CopyFromCPU(src);
+
+                // Load and launch the NLM 2D kernel
+                var nlmKernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index1D,
+                    ArrayView<byte>,
+                    ArrayView<byte>,
+                    int, int,
+                    int, int, float>(NLM2D_Kernel);
+
+                nlmKernel(
+                    src.Length,
+                    bufferSrc.View,
+                    bufferDst.View,
+                    width,
+                    height,
+                    templateSize,
+                    searchSize,
+                    h);
+
+                accelerator.Synchronize();
+                bufferDst.CopyToCPU(dst);
+            }
+
+            return dst;
+        }
         private byte[] GaussianFilter2D_GPU(byte[] src, int width, int height, int kSize, float sigma)
         {
             int radius = kSize / 2;
@@ -1277,6 +2506,91 @@ namespace CTSegmenter
             }
 
             return dst;
+        }
+
+        static void NLM2D_Kernel(
+    Index1D idx,
+    ArrayView<byte> src,
+    ArrayView<byte> dst,
+    int width,
+    int height,
+    int templateSize,
+    int searchSize,
+    float h)
+        {
+            if (idx >= src.Length)
+                return;
+
+            int x = idx % width;
+            int y = idx / width;
+
+            float sumWeights = 0f;
+            float sumVals = 0f;
+            byte centerValue = src[y * width + x];
+
+            for (int dy = -searchSize; dy <= searchSize; dy++)
+            {
+                for (int dx = -searchSize; dx <= searchSize; dx++)
+                {
+                    int nx = x + dx;
+                    int ny = y + dy;
+
+                    if (nx < 0) nx = 0;
+                    if (nx >= width) nx = width - 1;
+                    if (ny < 0) ny = 0;
+                    if (ny >= height) ny = height - 1;
+
+                    // Calculate patch distance
+                    float dist2 = 0f;
+                    int patchCount = 0;
+                    for (int ty = -templateSize; ty <= templateSize; ty++)
+                    {
+                        for (int tx = -templateSize; tx <= templateSize; tx++)
+                        {
+                            int px1 = x + tx;
+                            int py1 = y + ty;
+                            int px2 = nx + tx;
+                            int py2 = ny + ty;
+
+                            if (px1 < 0) px1 = 0;
+                            if (px1 >= width) px1 = width - 1;
+                            if (py1 < 0) py1 = 0;
+                            if (py1 >= height) py1 = height - 1;
+
+                            if (px2 < 0) px2 = 0;
+                            if (px2 >= width) px2 = width - 1;
+                            if (py2 < 0) py2 = 0;
+                            if (py2 >= height) py2 = height - 1;
+
+                            float diff = src[py1 * width + px1] - src[py2 * width + px2];
+                            dist2 += diff * diff;
+                            patchCount++;
+                        }
+                    }
+
+                    // Normalize by patch size
+                    if (patchCount > 0)
+                        dist2 /= patchCount;
+
+                    // Weight calculation
+                    float w = XMath.Exp(-dist2 / (h * h));
+                    sumWeights += w;
+                    sumVals += w * src[ny * width + nx];
+                }
+            }
+
+            if (sumWeights > 0)
+            {
+                float result = sumVals / sumWeights;
+                int val = (int)(result + 0.5f);
+                if (val < 0) val = 0;
+                if (val > 255) val = 255;
+                dst[idx] = (byte)val;
+            }
+            else
+            {
+                dst[idx] = centerValue;
+            }
         }
 
         /// <summary>
@@ -1387,6 +2701,840 @@ namespace CTSegmenter
         }
 
         #endregion
+
+        #region Edge Detection Filter
+
+        /// <summary>
+        /// Edge detection using Sobel operator (2D CPU implementation)
+        /// </summary>
+        private byte[] EdgeDetection2D_CPU(byte[] src, int width, int height, bool normalize = true)
+        {
+            byte[] dst = new byte[src.Length];
+
+            // Define Sobel operators
+            int[,] sobelX = new int[,] { { -1, 0, 1 }, { -2, 0, 2 }, { -1, 0, 1 } };
+            int[,] sobelY = new int[,] { { -1, -2, -1 }, { 0, 0, 0 }, { 1, 2, 1 } };
+
+            // Find max gradient value for normalization (if requested)
+            int maxGradient = 0;
+
+            // Compute gradients
+            int[] gradients = new int[src.Length];
+            for (int y = 1; y < height - 1; y++)
+            {
+                for (int x = 1; x < width - 1; x++)
+                {
+                    int pixelX = 0, pixelY = 0;
+
+                    // Apply sobel operator
+                    for (int ky = -1; ky <= 1; ky++)
+                    {
+                        for (int kx = -1; kx <= 1; kx++)
+                        {
+                            int pixel = src[(y + ky) * width + (x + kx)];
+                            pixelX += pixel * sobelX[ky + 1, kx + 1];
+                            pixelY += pixel * sobelY[ky + 1, kx + 1];
+                        }
+                    }
+
+                    // Calculate gradient magnitude
+                    int gradient = (int)Math.Sqrt(pixelX * pixelX + pixelY * pixelY);
+                    gradients[y * width + x] = gradient;
+
+                    // Track max for normalization
+                    if (gradient > maxGradient)
+                        maxGradient = gradient;
+                }
+            }
+
+            // Normalize and copy to output
+            if (normalize && maxGradient > 0)
+            {
+                // Normalize to 0-255 range
+                float scale = 255.0f / maxGradient;
+                for (int i = 0; i < gradients.Length; i++)
+                {
+                    dst[i] = (byte)Math.Min(255, Math.Max(0, gradients[i] * scale));
+                }
+            }
+            else
+            {
+                // Just clamp to 0-255
+                for (int i = 0; i < gradients.Length; i++)
+                {
+                    dst[i] = (byte)Math.Min(255, Math.Max(0, gradients[i]));
+                }
+            }
+
+            return dst;
+        }
+
+        /// <summary>
+        /// Edge detection using Sobel operator (2D GPU implementation)
+        /// </summary>
+        private byte[] EdgeDetection2D_GPU(byte[] src, int width, int height, bool normalize = true)
+        {
+            byte[] dst = new byte[src.Length];
+
+            using (var bufferSrc = accelerator.Allocate1D<byte>(src.Length))
+            using (var bufferDst = accelerator.Allocate1D<byte>(dst.Length))
+            {
+                bufferSrc.CopyFromCPU(src);
+
+                // First pass: calculate gradients
+                var gradientKernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index1D,
+                    ArrayView<byte>,
+                    ArrayView<int>,
+                    int, int>(EdgeDetection2D_GradientKernel);
+
+                using (var bufferGradients = accelerator.Allocate1D<int>(src.Length))
+                {
+                    // Clear gradients buffer
+                    accelerator.Synchronize();
+
+                    // Calculate gradients
+                    gradientKernel(
+                        src.Length,
+                        bufferSrc.View,
+                        bufferGradients.View,
+                        width,
+                        height);
+
+                    accelerator.Synchronize();
+
+                    // Now normalize and convert to byte
+                    if (normalize)
+                    {
+                        // Find max gradient (reduction)
+                        int[] gradients = new int[src.Length];
+                        bufferGradients.CopyToCPU(gradients);
+                        int maxGradient = 0;
+
+                        for (int i = 0; i < gradients.Length; i++)
+                        {
+                            if (gradients[i] > maxGradient)
+                                maxGradient = gradients[i];
+                        }
+
+                        // Normalize
+                        if (maxGradient > 0)
+                        {
+                            var normalizeKernel = accelerator.LoadAutoGroupedStreamKernel<
+                                Index1D,
+                                ArrayView<int>,
+                                ArrayView<byte>,
+                                int>(NormalizeKernel);
+
+                            normalizeKernel(
+                                src.Length,
+                                bufferGradients.View,
+                                bufferDst.View,
+                                maxGradient);
+                        }
+                        else
+                        {
+                            // Clear output if no edges
+                            var clearKernel = accelerator.LoadAutoGroupedStreamKernel<
+                                Index1D,
+                                ArrayView<byte>>(ClearKernel);
+
+                            clearKernel(
+                                src.Length,
+                                bufferDst.View);
+                        }
+                    }
+                    else
+                    {
+                        // Just clamp
+                        var clampKernel = accelerator.LoadAutoGroupedStreamKernel<
+                            Index1D,
+                            ArrayView<int>,
+                            ArrayView<byte>>(ClampKernel);
+
+                        clampKernel(
+                            src.Length,
+                            bufferGradients.View,
+                            bufferDst.View);
+                    }
+                }
+
+                accelerator.Synchronize();
+                bufferDst.CopyToCPU(dst);
+            }
+
+            return dst;
+        }
+
+        /// <summary>
+        /// ILGPU kernel for calculating Sobel gradients in 2D
+        /// </summary>
+        static void EdgeDetection2D_GradientKernel(
+            Index1D idx,
+            ArrayView<byte> src,
+            ArrayView<int> gradients,
+            int width,
+            int height)
+        {
+            if (idx >= src.Length)
+                return;
+
+            int x = idx % width;
+            int y = idx / width;
+
+            // Skip border pixels
+            if (x == 0 || x == width - 1 || y == 0 || y == height - 1)
+            {
+                gradients[idx] = 0;
+                return;
+            }
+
+            // Sobel kernels
+            int pixelX = 0, pixelY = 0;
+
+            // Top row
+            pixelX += -1 * src[(y - 1) * width + (x - 1)];
+            pixelX += 0 * src[(y - 1) * width + (x)];
+            pixelX += 1 * src[(y - 1) * width + (x + 1)];
+
+            pixelY += -1 * src[(y - 1) * width + (x - 1)];
+            pixelY += -2 * src[(y - 1) * width + (x)];
+            pixelY += -1 * src[(y - 1) * width + (x + 1)];
+
+            // Middle row
+            pixelX += -2 * src[(y) * width + (x - 1)];
+            pixelX += 0 * src[(y) * width + (x)];
+            pixelX += 2 * src[(y) * width + (x + 1)];
+
+            pixelY += 0 * src[(y) * width + (x - 1)];
+            pixelY += 0 * src[(y) * width + (x)];
+            pixelY += 0 * src[(y) * width + (x + 1)];
+
+            // Bottom row
+            pixelX += -1 * src[(y + 1) * width + (x - 1)];
+            pixelX += 0 * src[(y + 1) * width + (x)];
+            pixelX += 1 * src[(y + 1) * width + (x + 1)];
+
+            pixelY += 1 * src[(y + 1) * width + (x - 1)];
+            pixelY += 2 * src[(y + 1) * width + (x)];
+            pixelY += 1 * src[(y + 1) * width + (x + 1)];
+
+            // Calculate gradient magnitude
+            gradients[idx] = (int)XMath.Sqrt((float)(pixelX * pixelX + pixelY * pixelY));
+        }
+
+        /// <summary>
+        /// Edge detection using Sobel operator in 3D (CPU implementation)
+        /// </summary>
+        private byte[] EdgeDetection3D_CPU(byte[] src, int width, int height, int depth,
+                                          bool normalize = true, ProgressForm pForm = null)
+        {
+            byte[] dst = new byte[src.Length];
+            int sliceSize = width * height;
+
+            // Define 3D Sobel operators (applied independently in 3 directions)
+            int[,,] sobelX = new int[3, 3, 3];
+            int[,,] sobelY = new int[3, 3, 3];
+            int[,,] sobelZ = new int[3, 3, 3];
+
+            // Initialize 3D Sobel operators
+            for (int z = 0; z < 3; z++)
+            {
+                for (int y = 0; y < 3; y++)
+                {
+                    for (int x = 0; x < 3; x++)
+                    {
+                        // X gradient (similar to 2D but extended to 3D)
+                        sobelX[z, y, x] = 0;
+                        if (x == 0) sobelX[z, y, x] = -1;
+                        if (x == 2) sobelX[z, y, x] = 1;
+                        if (y == 1) sobelX[z, y, x] *= 2;
+
+                        // Y gradient
+                        sobelY[z, y, x] = 0;
+                        if (y == 0) sobelY[z, y, x] = -1;
+                        if (y == 2) sobelY[z, y, x] = 1;
+                        if (x == 1) sobelY[z, y, x] *= 2;
+
+                        // Z gradient
+                        sobelZ[z, y, x] = 0;
+                        if (z == 0) sobelZ[z, y, x] = -1;
+                        if (z == 2) sobelZ[z, y, x] = 1;
+                        if (x == 1 && y == 1) sobelZ[z, y, x] *= 2;
+                    }
+                }
+            }
+
+            // Find max gradient value for normalization
+            int maxGradient = 0;
+            int[] gradients = new int[src.Length];
+
+            // Update progress
+            if (pForm != null)
+                pForm.SafeUpdateProgress(0, depth, "Calculating 3D edges...");
+
+            // Apply 3D Sobel operator
+            for (int z = 1; z < depth - 1; z++)
+            {
+                if (pForm != null)
+                    pForm.SafeUpdateProgress(z, depth, $"Processing slice {z}/{depth}");
+
+                for (int y = 1; y < height - 1; y++)
+                {
+                    for (int x = 1; x < width - 1; x++)
+                    {
+                        int pixelX = 0, pixelY = 0, pixelZ = 0;
+
+                        // Apply 3D convolution
+                        for (int kz = -1; kz <= 1; kz++)
+                        {
+                            for (int ky = -1; ky <= 1; ky++)
+                            {
+                                for (int kx = -1; kx <= 1; kx++)
+                                {
+                                    int pixel = src[(z + kz) * sliceSize + (y + ky) * width + (x + kx)];
+
+                                    pixelX += pixel * sobelX[kz + 1, ky + 1, kx + 1];
+                                    pixelY += pixel * sobelY[kz + 1, ky + 1, kx + 1];
+                                    pixelZ += pixel * sobelZ[kz + 1, ky + 1, kx + 1];
+                                }
+                            }
+                        }
+
+                        // Calculate gradient magnitude (3D)
+                        int gradient = (int)Math.Sqrt(pixelX * pixelX + pixelY * pixelY + pixelZ * pixelZ);
+                        int idx = z * sliceSize + y * width + x;
+                        gradients[idx] = gradient;
+
+                        if (gradient > maxGradient)
+                            maxGradient = gradient;
+                    }
+                }
+            }
+
+            // Normalize and copy to output
+            if (pForm != null)
+                pForm.SafeUpdateProgress(0, 1, "Normalizing edge data...");
+
+            if (normalize && maxGradient > 0)
+            {
+                // Normalize to 0-255 range
+                float scale = 255.0f / maxGradient;
+                for (int i = 0; i < gradients.Length; i++)
+                {
+                    dst[i] = (byte)Math.Min(255, Math.Max(0, gradients[i] * scale));
+                }
+            }
+            else
+            {
+                // Just clamp to 0-255
+                for (int i = 0; i < gradients.Length; i++)
+                {
+                    dst[i] = (byte)Math.Min(255, Math.Max(0, gradients[i]));
+                }
+            }
+
+            return dst;
+        }
+
+        /// <summary>
+        /// Edge detection using Sobel operator in 3D (GPU implementation)
+        /// </summary>
+        private byte[] EdgeDetection3D_GPU(byte[] src, int width, int height, int depth, bool normalize = true)
+        {
+            byte[] dst = new byte[src.Length];
+
+            using (var bufferSrc = accelerator.Allocate1D<byte>(src.Length))
+            using (var bufferDst = accelerator.Allocate1D<byte>(dst.Length))
+            {
+                bufferSrc.CopyFromCPU(src);
+
+                // First pass: calculate gradients
+                var gradientKernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index1D,
+                    ArrayView<byte>,
+                    ArrayView<int>,
+                    int, int, int>(EdgeDetection3D_GradientKernel);
+
+                using (var bufferGradients = accelerator.Allocate1D<int>(src.Length))
+                {
+                    // Calculate gradients
+                    gradientKernel(
+                        src.Length,
+                        bufferSrc.View,
+                        bufferGradients.View,
+                        width,
+                        height,
+                        depth);
+
+                    accelerator.Synchronize();
+
+                    // Now normalize and convert to byte
+                    if (normalize)
+                    {
+                        // Find max gradient (reduction)
+                        int[] gradients = new int[src.Length];
+                        bufferGradients.CopyToCPU(gradients);
+                        int maxGradient = 0;
+
+                        for (int i = 0; i < gradients.Length; i++)
+                        {
+                            if (gradients[i] > maxGradient)
+                                maxGradient = gradients[i];
+                        }
+
+                        // Normalize
+                        if (maxGradient > 0)
+                        {
+                            var normalizeKernel = accelerator.LoadAutoGroupedStreamKernel<
+                                Index1D,
+                                ArrayView<int>,
+                                ArrayView<byte>,
+                                int>(NormalizeKernel);
+
+                            normalizeKernel(
+                                src.Length,
+                                bufferGradients.View,
+                                bufferDst.View,
+                                maxGradient);
+                        }
+                        else
+                        {
+                            // Clear output if no edges
+                            var clearKernel = accelerator.LoadAutoGroupedStreamKernel<
+                                Index1D,
+                                ArrayView<byte>>(ClearKernel);
+
+                            clearKernel(
+                                src.Length,
+                                bufferDst.View);
+                        }
+                    }
+                    else
+                    {
+                        // Just clamp
+                        var clampKernel = accelerator.LoadAutoGroupedStreamKernel<
+                            Index1D,
+                            ArrayView<int>,
+                            ArrayView<byte>>(ClampKernel);
+
+                        clampKernel(
+                            src.Length,
+                            bufferGradients.View,
+                            bufferDst.View);
+                    }
+                }
+
+                accelerator.Synchronize();
+                bufferDst.CopyToCPU(dst);
+            }
+
+            return dst;
+        }
+
+        /// <summary>
+        /// ILGPU kernel for calculating Sobel gradients in 3D
+        /// </summary>
+        static void EdgeDetection3D_GradientKernel(
+            Index1D idx,
+            ArrayView<byte> src,
+            ArrayView<int> gradients,
+            int width,
+            int height,
+            int depth)
+        {
+            if (idx >= src.Length)
+                return;
+
+            int sliceSize = width * height;
+            int z = (int)(idx / sliceSize);
+            int remainder = (int)(idx % sliceSize);
+            int y = remainder / width;
+            int x = remainder % width;
+
+            // Skip border voxels
+            if (x == 0 || x == width - 1 || y == 0 || y == height - 1 || z == 0 || z == depth - 1)
+            {
+                gradients[idx] = 0;
+                return;
+            }
+
+            // 3D Sobel
+            int pixelX = 0, pixelY = 0, pixelZ = 0;
+
+            // Apply the operator - this is a simple 3D version
+            // We can use the same logic as 2D but extend to 3 dimensions
+
+            // Apply X gradient
+            pixelX += -1 * src[(z) * sliceSize + (y - 1) * width + (x - 1)];
+            pixelX += -2 * src[(z) * sliceSize + (y) * width + (x - 1)];
+            pixelX += -1 * src[(z) * sliceSize + (y + 1) * width + (x - 1)];
+
+            pixelX += 1 * src[(z) * sliceSize + (y - 1) * width + (x + 1)];
+            pixelX += 2 * src[(z) * sliceSize + (y) * width + (x + 1)];
+            pixelX += 1 * src[(z) * sliceSize + (y + 1) * width + (x + 1)];
+
+            // Apply Y gradient
+            pixelY += -1 * src[(z) * sliceSize + (y - 1) * width + (x - 1)];
+            pixelY += -2 * src[(z) * sliceSize + (y - 1) * width + (x)];
+            pixelY += -1 * src[(z) * sliceSize + (y - 1) * width + (x + 1)];
+
+            pixelY += 1 * src[(z) * sliceSize + (y + 1) * width + (x - 1)];
+            pixelY += 2 * src[(z) * sliceSize + (y + 1) * width + (x)];
+            pixelY += 1 * src[(z) * sliceSize + (y + 1) * width + (x + 1)];
+
+            // Apply Z gradient (using adjacent slices)
+            pixelZ += -1 * src[(z - 1) * sliceSize + (y - 1) * width + (x)];
+            pixelZ += -1 * src[(z - 1) * sliceSize + (y) * width + (x - 1)];
+            pixelZ += -2 * src[(z - 1) * sliceSize + (y) * width + (x)];
+            pixelZ += -1 * src[(z - 1) * sliceSize + (y) * width + (x + 1)];
+            pixelZ += -1 * src[(z - 1) * sliceSize + (y + 1) * width + (x)];
+
+            pixelZ += 1 * src[(z + 1) * sliceSize + (y - 1) * width + (x)];
+            pixelZ += 1 * src[(z + 1) * sliceSize + (y) * width + (x - 1)];
+            pixelZ += 2 * src[(z + 1) * sliceSize + (y) * width + (x)];
+            pixelZ += 1 * src[(z + 1) * sliceSize + (y) * width + (x + 1)];
+            pixelZ += 1 * src[(z + 1) * sliceSize + (y + 1) * width + (x)];
+
+            // Calculate gradient magnitude (3D)
+            gradients[idx] = (int)XMath.Sqrt((float)(pixelX * pixelX + pixelY * pixelY + pixelZ * pixelZ));
+        }
+
+        /// <summary>
+        /// ILGPU kernel for normalizing gradient values to 0-255 range
+        /// </summary>
+        static void NormalizeKernel(
+            Index1D idx,
+            ArrayView<int> gradients,
+            ArrayView<byte> dst,
+            int maxGradient)
+        {
+            if (idx >= gradients.Length)
+                return;
+
+            float normalizedValue = (float)gradients[idx] * 255.0f / maxGradient;
+            int result = (int)(normalizedValue + 0.5f);
+
+            if (result < 0) result = 0;
+            if (result > 255) result = 255;
+
+            dst[idx] = (byte)result;
+        }
+
+        /// <summary>
+        /// ILGPU kernel for clamping gradient values to 0-255 range
+        /// </summary>
+        static void ClampKernel(
+            Index1D idx,
+            ArrayView<int> gradients,
+            ArrayView<byte> dst)
+        {
+            if (idx >= gradients.Length)
+                return;
+
+            int value = gradients[idx];
+            if (value < 0) value = 0;
+            if (value > 255) value = 255;
+
+            dst[idx] = (byte)value;
+        }
+
+        /// <summary>
+        /// ILGPU kernel for clearing an array (setting to zero)
+        /// </summary>
+        static void ClearKernel(
+            Index1D idx,
+            ArrayView<byte> dst)
+        {
+            if (idx < dst.Length)
+                dst[idx] = 0;
+        }
+
+        #endregion
+
+
+        #region Bilateral Filter
+
+        /// <summary>
+        /// CPU implementation of the bilateral filter - preserves edges while removing noise
+        /// </summary>
+        private byte[] BilateralFilter2D_CPU(byte[] src, int width, int height, int kSize, float sigmaSpatial, float sigmaRange)
+        {
+            byte[] dst = new byte[src.Length];
+            int radius = kSize / 2;
+
+            // Pre-compute spatial weights (Gaussian based on distance)
+            float[] spatialKernel = new float[kSize * kSize];
+            float spatialFactor = -0.5f / (sigmaSpatial * sigmaSpatial);
+
+            for (int dy = -radius; dy <= radius; dy++)
+            {
+                for (int dx = -radius; dx <= radius; dx++)
+                {
+                    float dist2 = dx * dx + dy * dy;
+                    int idx = (dy + radius) * kSize + (dx + radius);
+                    spatialKernel[idx] = (float)Math.Exp(dist2 * spatialFactor);
+                }
+            }
+
+            // Range factor for intensity differences
+            float rangeFactor = -0.5f / (sigmaRange * sigmaRange);
+
+            // Process each pixel
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    int centerVal = src[y * width + x];
+                    float sum = 0;
+                    float weightSum = 0;
+
+                    for (int dy = -radius; dy <= radius; dy++)
+                    {
+                        int ny = y + dy;
+                        if (ny < 0) ny = 0;
+                        if (ny >= height) ny = height - 1;
+
+                        for (int dx = -radius; dx <= radius; dx++)
+                        {
+                            int nx = x + dx;
+                            if (nx < 0) nx = 0;
+                            if (nx >= width) nx = width - 1;
+
+                            int neighborVal = src[ny * width + nx];
+
+                            // Spatial weight
+                            int kidx = (dy + radius) * kSize + (dx + radius);
+                            float spatialWeight = spatialKernel[kidx];
+
+                            // Range weight
+                            float intensityDiff = centerVal - neighborVal;
+                            float rangeWeight = (float)Math.Exp(intensityDiff * intensityDiff * rangeFactor);
+
+                            // Combined weight
+                            float weight = spatialWeight * rangeWeight;
+
+                            weightSum += weight;
+                            sum += weight * neighborVal;
+                        }
+                    }
+
+                    if (weightSum > 0.0f)
+                    {
+                        dst[y * width + x] = (byte)Math.Min(255, Math.Max(0, Math.Round(sum / weightSum)));
+                    }
+                    else
+                    {
+                        dst[y * width + x] = src[y * width + x]; // Fallback to original
+                    }
+                }
+            }
+
+            return dst;
+        }
+
+        /// <summary>
+        /// GPU implementation of the bilateral filter
+        /// </summary>
+        private byte[] BilateralFilter2D_GPU(byte[] src, int width, int height, int kSize, float sigmaSpatial, float sigmaRange)
+        {
+            byte[] dst = new byte[src.Length];
+            int radius = kSize / 2;
+
+            using (var bufferSrc = accelerator.Allocate1D<byte>(src.Length))
+            using (var bufferDst = accelerator.Allocate1D<byte>(dst.Length))
+            {
+                bufferSrc.CopyFromCPU(src);
+
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index1D,
+                    ArrayView<byte>,
+                    ArrayView<byte>,
+                    int, int, int,
+                    float, float>(BilateralFilter2D_Kernel);
+
+                kernel(
+                    src.Length,
+                    bufferSrc.View,
+                    bufferDst.View,
+                    radius,
+                    width,
+                    height,
+                    sigmaSpatial,
+                    sigmaRange);
+
+                accelerator.Synchronize();
+                bufferDst.CopyToCPU(dst);
+            }
+
+            return dst;
+        }
+
+        /// <summary>
+        /// ILGPU kernel for bilateral filtering
+        /// </summary>
+        static void BilateralFilter2D_Kernel(
+            Index1D idx,
+            ArrayView<byte> src,
+            ArrayView<byte> dst,
+            int radius,
+            int width,
+            int height,
+            float sigmaSpatial,
+            float sigmaRange)
+        {
+            if (idx >= src.Length)
+                return;
+
+            int x = idx % width;
+            int y = idx / width;
+
+            float spatialFactor = -0.5f / (sigmaSpatial * sigmaSpatial);
+            float rangeFactor = -0.5f / (sigmaRange * sigmaRange);
+
+            int centerVal = src[y * width + x];
+            float sum = 0.0f;
+            float weightSum = 0.0f;
+
+            for (int dy = -radius; dy <= radius; dy++)
+            {
+                int ny = y + dy;
+                if (ny < 0) ny = 0;
+                if (ny >= height) ny = height - 1;
+
+                for (int dx = -radius; dx <= radius; dx++)
+                {
+                    int nx = x + dx;
+                    if (nx < 0) nx = 0;
+                    if (nx >= width) nx = width - 1;
+
+                    // Spatial weight (based on distance)
+                    float dist2 = dx * dx + dy * dy;
+                    float spatialWeight = XMath.Exp(dist2 * spatialFactor);
+
+                    // Range weight (based on intensity difference)
+                    int neighborVal = src[ny * width + nx];
+                    float intensityDiff = centerVal - neighborVal;
+                    float rangeWeight = XMath.Exp(intensityDiff * intensityDiff * rangeFactor);
+
+                    // Combined weight
+                    float weight = spatialWeight * rangeWeight;
+
+                    weightSum += weight;
+                    sum += weight * neighborVal;
+                }
+            }
+
+            if (weightSum > 0.0f)
+            {
+                int result = (int)(sum / weightSum + 0.5f);
+                if (result < 0) result = 0;
+                if (result > 255) result = 255;
+                dst[idx] = (byte)result;
+            }
+            else
+            {
+                dst[idx] = src[idx]; // Fallback to original
+            }
+        }
+        #endregion
+
+        #region Unsharp Masking
+
+        /// <summary>
+        /// CPU implementation of unsharp masking - enhances edges by adding high-frequency components
+        /// </summary>
+        private byte[] UnsharpMask2D_CPU(byte[] src, int width, int height, float amount, int gaussianRadius, float gaussianSigma)
+        {
+            // First apply Gaussian blur to get the low-pass version
+            byte[] blurred = GaussianFilter2D_CPU(src, width, height, 2 * gaussianRadius + 1, gaussianSigma);
+
+            // Create the output and add the high-pass (original - blurred) scaled by amount
+            byte[] dst = new byte[src.Length];
+
+            for (int i = 0; i < src.Length; i++)
+            {
+                // Calculate the high-pass component (original - blurred)
+                int highPass = src[i] - blurred[i];
+
+                // Add scaled high-pass to original
+                int result = (int)(src[i] + amount * highPass);
+
+                // Clamp to valid range
+                if (result > 255) result = 255;
+                if (result < 0) result = 0;
+
+                dst[i] = (byte)result;
+            }
+
+            return dst;
+        }
+
+        /// <summary>
+        /// GPU implementation of unsharp masking
+        /// </summary>
+        private byte[] UnsharpMask2D_GPU(byte[] src, int width, int height, float amount, int gaussianRadius, float gaussianSigma)
+        {
+            byte[] dst = new byte[src.Length];
+
+            // First get the blurred version using our existing Gaussian GPU filter
+            byte[] blurred = GaussianFilter2D_GPU(src, width, height, 2 * gaussianRadius + 1, gaussianSigma);
+
+            using (var bufferSrc = accelerator.Allocate1D<byte>(src.Length))
+            using (var bufferBlurred = accelerator.Allocate1D<byte>(blurred.Length))
+            using (var bufferDst = accelerator.Allocate1D<byte>(dst.Length))
+            {
+                bufferSrc.CopyFromCPU(src);
+                bufferBlurred.CopyFromCPU(blurred);
+
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index1D,
+                    ArrayView<byte>,
+                    ArrayView<byte>,
+                    ArrayView<byte>,
+                    float>(UnsharpMask2D_Kernel);
+
+                kernel(
+                    src.Length,
+                    bufferSrc.View,
+                    bufferBlurred.View,
+                    bufferDst.View,
+                    amount);
+
+                accelerator.Synchronize();
+                bufferDst.CopyToCPU(dst);
+            }
+
+            return dst;
+        }
+
+        /// <summary>
+        /// ILGPU kernel for unsharp masking
+        /// </summary>
+        static void UnsharpMask2D_Kernel(
+            Index1D idx,
+            ArrayView<byte> src,
+            ArrayView<byte> blurred,
+            ArrayView<byte> dst,
+            float amount)
+        {
+            if (idx >= src.Length)
+                return;
+
+            // Calculate high-pass component
+            int highPass = src[idx] - blurred[idx];
+
+            // Add scaled high-pass to original
+            int result = (int)(src[idx] + amount * highPass);
+
+            // Clamp result
+            if (result > 255) result = 255;
+            if (result < 0) result = 0;
+
+            dst[idx] = (byte)result;
+        }
+        #endregion
+
 
         #region Helpers
 
@@ -1834,5 +3982,564 @@ namespace CTSegmenter
         }
 
         #endregion
+        /// <summary>
+        /// Optimized version of slice rendering to minimize UI thread work
+        /// </summary>
+        private void AddSliceNavigationControls()
+        {
+            // Add a panel for the slice navigation controls at the top of the preview panel
+            Panel sliceNavPanel = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 50,
+                BackColor = Color.FromArgb(50, 50, 50)
+            };
+            previewPanel.Controls.Add(sliceNavPanel);
+
+            // Reposition the XY preview to fit below the navigation panel
+            xyPreview.Dock = DockStyle.Fill;
+
+            // Label for "Slice:"
+            Label lblSlice = new Label
+            {
+                Text = "Slice:",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, 17)
+            };
+            sliceNavPanel.Controls.Add(lblSlice);
+
+            // Trackbar for slice selection
+            sliceTrackBar = new TrackBar
+            {
+                Location = new Point(60, 10),
+                Width = sliceNavPanel.Width - 160,
+                Minimum = 0,
+                Maximum = Math.Max(0, mainForm.GetDepth() - 1),
+                Value = mainForm.CurrentSlice,
+                TickFrequency = Math.Max(1, mainForm.GetDepth() / 20),
+                SmallChange = 1,
+                LargeChange = 10,
+                Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top
+            };
+
+            // Current slice number label
+            lblSliceNumber = new Label
+            {
+                Text = $"{mainForm.CurrentSlice + 1}/{mainForm.GetDepth()}",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Anchor = AnchorStyles.Right | AnchorStyles.Top,
+                Location = new Point(sliceNavPanel.Width - 90, 17)
+            };
+
+            // Setup the timer for deferred rendering (10ms to ensure responsive UI but quick updates)
+            renderTimer = new System.Threading.Timer(RenderPendingSlice, null, Timeout.Infinite, Timeout.Infinite);
+
+            // Keyboard navigation for slices
+            filterForm.KeyDown += (s, e) => {
+                if (e.KeyCode == Keys.Left || e.KeyCode == Keys.Down)
+                {
+                    if (sliceTrackBar.Value > sliceTrackBar.Minimum)
+                        sliceTrackBar.Value--;
+                    e.Handled = true;
+                }
+                else if (e.KeyCode == Keys.Right || e.KeyCode == Keys.Up)
+                {
+                    if (sliceTrackBar.Value < sliceTrackBar.Maximum)
+                        sliceTrackBar.Value++;
+                    e.Handled = true;
+                }
+                else if (e.KeyCode == Keys.PageDown)
+                {
+                    sliceTrackBar.Value = Math.Max(sliceTrackBar.Minimum, sliceTrackBar.Value - 10);
+                    e.Handled = true;
+                }
+                else if (e.KeyCode == Keys.PageUp)
+                {
+                    sliceTrackBar.Value = Math.Min(sliceTrackBar.Maximum, sliceTrackBar.Value + 10);
+                    e.Handled = true;
+                }
+                else if (e.KeyCode == Keys.Home)
+                {
+                    sliceTrackBar.Value = sliceTrackBar.Minimum;
+                    e.Handled = true;
+                }
+                else if (e.KeyCode == Keys.End)
+                {
+                    sliceTrackBar.Value = sliceTrackBar.Maximum;
+                    e.Handled = true;
+                }
+            };
+
+            // Configure events with performance in mind
+            sliceTrackBar.ValueChanged += (s, e) => {
+                // Update the slice number immediately for better responsiveness feel
+                lblSliceNumber.Text = $"{sliceTrackBar.Value + 1}/{mainForm.GetDepth()}";
+
+                // Save the value to render shortly
+                pendingSliceValue = sliceTrackBar.Value;
+
+                // Schedule rendering with a very short delay to batch rapid changes
+                renderTimer.Change(10, Timeout.Infinite);
+            };
+
+            // Add controls
+            sliceNavPanel.Controls.Add(sliceTrackBar);
+            sliceNavPanel.Controls.Add(lblSliceNumber);
+
+            // Make form focusable to enable keyboard navigation
+            filterForm.KeyPreview = true;
+        }
+        /// <summary>
+        /// Optimized slice rendering that minimizes memory allocations and UI thread work
+        /// </summary>
+        private void RenderPendingSlice(object state)
+        {
+            if (pendingSliceValue == -1 || filterForm == null || filterForm.IsDisposed) return;
+
+            int sliceToRender = pendingSliceValue;
+            pendingSliceValue = -1;
+
+            try
+            {
+                // Create the bitmap on a background thread
+                Bitmap newBitmap = CreateBitmapDirectlyFromVolume(sliceToRender);
+
+                // Update UI on the UI thread but keep it minimal
+                filterForm.BeginInvoke(new Action(() => {
+                    try
+                    {
+                        if (filterForm == null || filterForm.IsDisposed) return;
+
+                        // Update the MainForm's current slice 
+                        mainForm.CurrentSlice = sliceToRender;
+
+                        // Swap the image
+                        Image oldImage = xyPreview.Image;
+                        xyPreview.Image = newBitmap;
+
+                        // Clean up the old image *after* setting the new one
+                        if (oldImage != null) oldImage.Dispose();
+
+                        // Redraw with proper zoom
+                        xyPreview.Invalidate();
+
+                        // Update label to reflect the current slice
+                        lblSliceNumber.Text = $"{sliceToRender + 1}/{mainForm.GetDepth()}";
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[FilterManager] Error updating UI after slice load: {ex.Message}");
+                    }
+                }));
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[FilterManager] Error in RenderPendingSlice: {ex.Message}");
+            }
+        }
+        /// <summary>
+        /// Creates a bitmap directly from the volume data without intermediate copies
+        /// </summary>
+        private Bitmap CreateBitmapDirectlyFromVolume(int sliceIndex)
+        {
+            int width = mainForm.GetWidth();
+            int height = mainForm.GetHeight();
+
+            // Create bitmap directly as 32-bit for faster rendering
+            Bitmap bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+
+            // Lock bits and copy - access pixels directly for speed
+            BitmapData bmpData = bmp.LockBits(
+                new Rectangle(0, 0, width, height),
+                ImageLockMode.WriteOnly,
+                PixelFormat.Format32bppArgb);
+
+            unsafe
+            {
+                byte* bmpPtr = (byte*)bmpData.Scan0;
+                int stride = bmpData.Stride;
+
+                // Optimized loop for 32-bit pixels - direct access to volume data
+                for (int y = 0; y < height; y++)
+                {
+                    byte* row = bmpPtr + (y * stride);
+
+                    for (int x = 0; x < width; x++)
+                    {
+                        // Get pixel directly from volume - only a single lookup per pixel
+                        byte pixelValue = mainForm.volumeData[x, y, sliceIndex];
+
+                        // Set BGRA values (Format32bppArgb is actually BGRA in memory)
+                        row[x * 4 + 0] = pixelValue; // B
+                        row[x * 4 + 1] = pixelValue; // G
+                        row[x * 4 + 2] = pixelValue; // R
+                        row[x * 4 + 3] = 255;        // A (always fully opaque)
+                    }
+                }
+            }
+
+            bmp.UnlockBits(bmpData);
+            return bmp;
+        }
+
+        /// <summary>
+        /// Loads slice data from the volume faster by accessing the array directly
+        /// </summary>
+        private byte[] LoadSliceData(int sliceIndex)
+        {
+            int width = mainForm.GetWidth();
+            int height = mainForm.GetHeight();
+            byte[] sliceData = new byte[width * height];
+
+            // Copy data directly from the volume
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    sliceData[y * width + x] = mainForm.volumeData[x, y, sliceIndex];
+                }
+            }
+
+            return sliceData;
+        }
+
+        /// <summary>
+        /// Creates a bitmap from slice data with minimal processing
+        /// </summary>
+        private Bitmap CreateBitmapFromSliceData(byte[] sliceData, int width, int height)
+        {
+            // Create bitmap directly as 32-bit for faster rendering
+            Bitmap bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+
+            // Lock bits and copy - access pixels directly for speed
+            BitmapData bmpData = bmp.LockBits(
+                new Rectangle(0, 0, width, height),
+                ImageLockMode.WriteOnly,
+                PixelFormat.Format32bppArgb);
+
+            unsafe
+            {
+                byte* bmpPtr = (byte*)bmpData.Scan0;
+                int stride = bmpData.Stride;
+
+                // Optimized loop for 32-bit pixels
+                for (int y = 0; y < height; y++)
+                {
+                    byte* row = bmpPtr + (y * stride);
+
+                    for (int x = 0; x < width; x++)
+                    {
+                        int pixelIndex = y * width + x;
+                        byte pixelValue = sliceData[pixelIndex];
+
+                        // Set BGRA values (Format32bppArgb is actually BGRA in memory)
+                        row[x * 4 + 0] = pixelValue; // B
+                        row[x * 4 + 1] = pixelValue; // G
+                        row[x * 4 + 2] = pixelValue; // R
+                        row[x * 4 + 3] = 255;        // A (always fully opaque)
+                    }
+                }
+            }
+
+            bmp.UnlockBits(bmpData);
+            return bmp;
+        }
+
+        // Add field to track if we have a filtered slice displayed
+        private byte[] lastFilteredSlice = null;
+        private void UpdateForNewVolumeData()
+        {
+            if (sliceTrackBar != null)
+            {
+                sliceTrackBar.Minimum = 0;
+                sliceTrackBar.Maximum = Math.Max(0, mainForm.GetDepth() - 1);
+                sliceTrackBar.Value = mainForm.CurrentSlice;
+                lblSliceNumber.Text = $"{mainForm.CurrentSlice + 1}/{mainForm.GetDepth()}";
+            }
+
+            lastFilteredSlice = null;
+            RenderPreviewSlice();
+        }
+        public void UpdateVolumeData()
+        {
+            UpdateForNewVolumeData();
+        }
+
+        /// <summary>
+        /// Resets the zoom factor and position to default
+        /// </summary>
+        private void ResetZoom()
+        {
+            // Reset zoom state
+            zoomFactor = 1.0f;
+            zoomOrigin = Point.Empty;
+
+            // Switch back to built-in Zoom mode
+            xyPreview.SizeMode = PictureBoxSizeMode.Zoom;
+            xyPreview.Invalidate();
+        }
+
+        /// <summary>
+        /// Handles mouse wheel events for zooming
+        /// </summary>
+        private void XyPreview_MouseWheel(object sender, MouseEventArgs e)
+        {
+            if (xyPreview.Image == null) return;
+
+            // When first zooming, switch from automatic sizing to manual rendering
+            if (xyPreview.SizeMode != PictureBoxSizeMode.Normal)
+            {
+                xyPreview.SizeMode = PictureBoxSizeMode.Normal;
+                FitImageToPictureBox();
+            }
+
+            // Store the mouse position relative to the image
+            Point mousePos = e.Location;
+
+            // Calculate new zoom factor
+            float oldZoom = zoomFactor;
+            if (e.Delta > 0)
+            {
+                // Zoom in
+                zoomFactor = Math.Min(MAX_ZOOM, zoomFactor * 1.1f);
+            }
+            else
+            {
+                // Zoom out
+                zoomFactor = Math.Max(MIN_ZOOM, zoomFactor / 1.1f);
+            }
+
+            // Apply the zoom with the mouse position as focus
+            ApplyZoomWithFocus(mousePos, oldZoom);
+        }
+        /// <summary>
+        /// Calculates the initial zoom to fit the image to the PictureBox
+        /// </summary>
+        private void FitImageToPictureBox()
+        {
+            if (xyPreview.Image == null) return;
+
+            // Calculate the scale to fit the image fully in the control
+            float scaleX = (float)xyPreview.ClientSize.Width / xyPreview.Image.Width;
+            float scaleY = (float)xyPreview.ClientSize.Height / xyPreview.Image.Height;
+            zoomFactor = Math.Min(scaleX, scaleY);
+
+            // Center the image
+            int xOffset = (int)((xyPreview.ClientSize.Width - (xyPreview.Image.Width * zoomFactor)) / 2);
+            int yOffset = (int)((xyPreview.ClientSize.Height - (xyPreview.Image.Height * zoomFactor)) / 2);
+
+            // Store the inverse of the offset in zoomOrigin (since we apply negative origin)
+            zoomOrigin = new Point(-xOffset, -yOffset);
+
+            xyPreview.Invalidate();
+        }
+
+        /// <summary>
+        /// Handles mouse down for panning with middle button only
+        /// </summary>
+        private void XyPreview_MouseDownForPan(object sender, MouseEventArgs e)
+        {
+            // Only enable panning with middle mouse button, leaving left button for ROI
+            if (e.Button == MouseButtons.Middle)
+            {
+                isPanning = true;
+                lastPanPoint = e.Location;
+                xyPreview.Cursor = Cursors.Hand;
+            }
+        }
+
+        /// <summary>
+        /// Handles mouse move for panning with middle button only
+        /// </summary>
+        private void XyPreview_MouseMoveForPan(object sender, MouseEventArgs e)
+        {
+            // Only process panning with middle button, leaving left button for ROI
+            if (isPanning && e.Button == MouseButtons.Middle)
+            {
+                // Calculate the delta and update the zoom origin
+                int deltaX = e.X - lastPanPoint.X;
+                int deltaY = e.Y - lastPanPoint.Y;
+
+                // Adjust the zoom origin (add delta to make dragging feel natural)
+                zoomOrigin.X += deltaX;
+                zoomOrigin.Y += deltaY;
+
+                // Update last pan point
+                lastPanPoint = e.Location;
+
+                // Redraw
+                xyPreview.Invalidate();
+            }
+        }
+
+        /// <summary>
+        /// Converts a mouse event from zoomed coordinates to original image coordinates
+        /// </summary>
+        private MouseEventArgs ConvertZoomedToOriginalMouseEvent(MouseEventArgs e)
+        {
+            if (zoomFactor <= 0) return e;
+
+            int originalX = (int)((e.X - zoomOrigin.X) / zoomFactor);
+            int originalY = (int)((e.Y - zoomOrigin.Y) / zoomFactor);
+
+            return new MouseEventArgs(
+                e.Button, e.Clicks, originalX, originalY, e.Delta);
+        }
+
+        /// <summary>
+        /// Handles mouse up for panning
+        /// </summary>
+        private void XyPreview_MouseUpForPan(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Middle)
+            {
+                isPanning = false;
+                xyPreview.Cursor = Cursors.Default;
+            }
+            else if (useRoi && e.Button == MouseButtons.Left) // Handle ROI dragging with left button
+            {
+                XyPreview_MouseUp(sender, ConvertZoomedToOriginalMouseEvent(e));
+            }
+        }
+
+        /// <summary>
+        /// Applies the current zoom factor with the given focus point
+        /// </summary>
+        private void ApplyZoomWithFocus(Point focusPoint, float oldZoom)
+        {
+            if (xyPreview.Image == null) return;
+
+            try
+            {
+                // Calculate the image point under the cursor
+                float imageX = (focusPoint.X - zoomOrigin.X) / oldZoom;
+                float imageY = (focusPoint.Y - zoomOrigin.Y) / oldZoom;
+
+                // Calculate new origin to keep the cursor over the same image point
+                zoomOrigin.X = (int)(focusPoint.X - imageX * zoomFactor);
+                zoomOrigin.Y = (int)(focusPoint.Y - imageY * zoomFactor);
+
+                // Redraw
+                xyPreview.Invalidate();
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[FilterManager] Error in ApplyZoomWithFocus: {ex.Message}");
+                ResetZoom(); // Reset on error
+            }
+        }
+
+        /// <summary>
+        /// Applies the current zoom factor with the given focus point
+        /// </summary>
+        private void ApplyZoomWithFocus(Point focusPoint)
+        {
+            if (xyPreview.Image == null) return;
+
+            // Calculate where the focus point should be after zoom (in image coordinates)
+            float focusRatioX = (focusPoint.X + zoomOrigin.X) / (xyPreview.Width * zoomFactor);
+            float focusRatioY = (focusPoint.Y + zoomOrigin.Y) / (xyPreview.Height * zoomFactor);
+
+            // Calculate the new image size
+            int newWidth = (int)(xyPreview.Image.Width * zoomFactor);
+            int newHeight = (int)(xyPreview.Image.Height * zoomFactor);
+
+            // Calculate the new origin to keep the focus point at the same position
+            zoomOrigin.X = (int)(focusRatioX * newWidth - focusPoint.X);
+            zoomOrigin.Y = (int)(focusRatioY * newHeight - focusPoint.Y);
+
+            // Repaint
+            xyPreview.Invalidate();
+        }
+
+        /// <summary>
+        /// Applies the current zoom factor
+        /// </summary>
+        private void ApplyZoom()
+        {
+            xyPreview.Invalidate();
+        }
+
+        /// <summary>
+        /// Enhanced paint handler that supports zooming and ROI
+        /// </summary>
+        private void XyPreview_PaintWithZoom(object sender, PaintEventArgs e)
+        {
+            if (xyPreview.Image == null) return;
+
+            // Enable high quality rendering
+            e.Graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            e.Graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+
+            // Calculate the zoom rectangle (where to draw the image)
+            Rectangle srcRect = new Rectangle(0, 0, xyPreview.Image.Width, xyPreview.Image.Height);
+
+            int zoomedWidth = (int)(xyPreview.Image.Width * zoomFactor);
+            int zoomedHeight = (int)(xyPreview.Image.Height * zoomFactor);
+
+            // Calculate the destination rectangle with zoom origin
+            Rectangle destRect = new Rectangle(
+                -zoomOrigin.X,
+                -zoomOrigin.Y,
+                zoomedWidth,
+                zoomedHeight);
+
+            // Draw the image with zooming
+            e.Graphics.DrawImage(xyPreview.Image, destRect, srcRect, GraphicsUnit.Pixel);
+
+            // If ROI is active, draw it with zoom accounted for
+            if (useRoi)
+            {
+                // Calculate ROI rectangle in zoomed coordinates
+                Rectangle zoomedRoi = new Rectangle(
+                    (int)(roi.X * zoomFactor) - zoomOrigin.X,
+                    (int)(roi.Y * zoomFactor) - zoomOrigin.Y,
+                    (int)(roi.Width * zoomFactor),
+                    (int)(roi.Height * zoomFactor));
+
+                // Draw ROI rectangle
+                using (Pen pen = new Pen(Color.Yellow, 2))
+                {
+                    e.Graphics.DrawRectangle(pen, zoomedRoi);
+                }
+
+                // Draw resize handle
+                using (Brush brush = new SolidBrush(Color.Yellow))
+                {
+                    e.Graphics.FillRectangle(brush,
+                        zoomedRoi.Right - RESIZE_HANDLE_SIZE,
+                        zoomedRoi.Bottom - RESIZE_HANDLE_SIZE,
+                        RESIZE_HANDLE_SIZE,
+                        RESIZE_HANDLE_SIZE);
+                }
+            }
+        }
+        /// <summary>
+        /// Sets up the mouse wheel zoom and pan functionality
+        /// </summary>
+        private void SetupZoomFunctionality()
+        {
+            // Set PictureBox to Zoom mode initially
+            xyPreview.SizeMode = PictureBoxSizeMode.Zoom;
+
+            // Add mouse wheel handler for zooming
+            xyPreview.MouseWheel += XyPreview_MouseWheel;
+
+            // Update all mouse handlers to ensure compatibility
+            UpdateMouseHandlers();
+
+            // Add a reset zoom button to the preview panel
+            btnResetZoom = new Button
+            {
+                Text = "Reset Zoom",
+                Size = new Size(80, 23),
+                Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
+                Location = new Point(previewPanel.Width - 90, previewPanel.Height - 30)
+            };
+            btnResetZoom.Click += (s, e) => ResetZoom();
+            previewPanel.Controls.Add(btnResetZoom);
+        }
     }
 }

@@ -82,6 +82,7 @@ namespace CTSegmenter
         private bool isPanning = false;
         private Point lastPanPoint;
         private Button btnResetZoom;
+        
 
         /// <summary>
         /// Constructor that takes a reference to the MainForm, so we can access the loaded volume data.
@@ -379,7 +380,7 @@ namespace CTSegmenter
             filterPanels.Add("Median", medianPanel);
 
             // 4. Non-Local Means Parameters Panel
-            Panel nlmPanel = CreateFilterPanel("Non-Local Means Filter", ref currentY, 180); // Taller panel
+            Panel nlmPanel = CreateFilterPanel("Non-Local Means Filter", ref currentY, 220);
             Label nlmDescription = new Label
             {
                 Text = "Advanced noise reduction that compares small patches of the image. " +
@@ -460,15 +461,17 @@ namespace CTSegmenter
 
             Label lblPerformanceWarning = new Label
             {
-                Text = "Note: This filter is computationally intensive. Use Region of Interest for faster preview.",
+                Text = "⚠️ WARNING: This filter is computationally intensive. Use Region of Interest for faster preview.",
                 AutoSize = true,
-                ForeColor = Color.DarkRed,
-                Font = new Font("Arial", 8, FontStyle.Italic),
+                ForeColor = Color.Red,
+                BackColor = Color.LightYellow,
+                Font = new Font("Arial", 9, FontStyle.Bold),
                 Location = new Point(10, 160),
-                MaximumSize = new Size(330, 0)
+                MaximumSize = new Size(330, 0),
+                BorderStyle = BorderStyle.FixedSingle,
+                Padding = new Padding(5)
             };
             nlmPanel.Controls.Add(lblPerformanceWarning);
-
             controlsPanel.Controls.Add(nlmPanel);
             filterPanels.Add("Non-Local Means", nlmPanel);
 
@@ -1300,17 +1303,30 @@ namespace CTSegmenter
         /// If using GPU is true, tries GPU acceleration. Otherwise uses CPU fallback.
         /// </summary>
         private byte[] ApplyFilter2D(
-            byte[] sliceData,
-            int width,
-            int height,
-            string filterName,
-            int kernelSize,
-            float sigma,
-            float h,
-            int templateSize,
-            int searchSize,
-            bool useGPUFlag)
+    byte[] sliceData,
+    int width,
+    int height,
+    string filterName,
+    int kernelSize,
+    float sigma,
+    float h,
+    int templateSize,
+    int searchSize,
+    bool useGPUFlag)
         {
+            // Add specific parameter validation for NLM
+            if (filterName == "Non-Local Means")
+            {
+                // Make h more reasonable if it's too extreme
+                if (h < 1.0f) h = 1.0f;
+
+                // Make template and search sizes reasonable
+                templateSize = Math.Max(1, templateSize);
+                searchSize = Math.Max(2, searchSize);
+
+                Logger.Log($"[FilterManager] Running NLM with h={h}, template={templateSize}, search={searchSize}");
+            }
+
             float sigmaSpatial = (numSigmaSpatial != null) ? (float)numSigmaSpatial.Value : 3.0f;
             float sigmaRange = (numSigmaRange != null) ? (float)numSigmaRange.Value : 25.0f;
             float unsharpAmount = (numUnsharpAmount != null) ? (float)numUnsharpAmount.Value : 1.5f;
@@ -1338,9 +1354,55 @@ namespace CTSegmenter
 
                 case "Non-Local Means":
                     if (useGPUFlag && gpuInitialized)
-                        return NonLocalMeans2D_GPU(sliceData, width, height, h, templateSize, searchSize);
+                    {
+                        // Try the direct 2D GPU implementation first
+                        byte[] resultGPU = NonLocalMeans2D_GPU(sliceData, width, height, h, templateSize, searchSize);
+
+                        // Check if the filter had a visible effect
+                        int changedPixelsGPU = 0;
+                        for (int i = 0; i < sliceData.Length; i++)
+                        {
+                            if (Math.Abs(sliceData[i] - resultGPU[i]) > 1)
+                                changedPixelsGPU++;
+                        }
+
+                        if (changedPixelsGPU > 0)
+                        {
+                            Logger.Log($"[FilterManager] GPU NLM changed {changedPixelsGPU} pixels");
+                            return resultGPU;
+                        }
+                        else
+                        {
+                            // If no visible effect, try with the 3D filter class instead
+                            Logger.Log("[FilterManager] GPU NLM had no effect, trying 3D filter approach");
+                            return NonLocalMeansWithNLM3DFilterClass(sliceData, width, height, h, templateSize, searchSize, true);
+                        }
+                    }
                     else
-                        return NonLocalMeans2D_CPU(sliceData, width, height, kernelSize, h, templateSize, searchSize);
+                    {
+                        // Try the direct 2D CPU implementation first 
+                        byte[] resultCPU = NonLocalMeans2D_CPU(sliceData, width, height, kernelSize, h, templateSize, searchSize);
+
+                        // Check if the filter had a visible effect
+                        int changedPixelsCPU = 0;
+                        for (int i = 0; i < sliceData.Length; i++)
+                        {
+                            if (Math.Abs(sliceData[i] - resultCPU[i]) > 1)
+                                changedPixelsCPU++;
+                        }
+
+                        if (changedPixelsCPU > 0)
+                        {
+                            Logger.Log($"[FilterManager] CPU NLM changed {changedPixelsCPU} pixels");
+                            return resultCPU;
+                        }
+                        else
+                        {
+                            // If no visible effect, try with the 3D filter class instead
+                            Logger.Log("[FilterManager] CPU NLM had no effect, trying 3D filter approach");
+                            return NonLocalMeansWithNLM3DFilterClass(sliceData, width, height, h, templateSize, searchSize, false);
+                        }
+                    }
 
                 case "Bilateral":
                     if (useGPUFlag && gpuInitialized)
@@ -2371,45 +2433,142 @@ namespace CTSegmenter
         }
 
         private byte[] NonLocalMeans2D_CPU(byte[] src, int width, int height,
-            int kSize, float h, int templateSize, int searchSize)
+    int kSize, float h, int templateSize, int searchSize)
         {
-            // This is a simplified / naive CPU version for demonstration.
-            // Real NLM is quite expensive. We'll do a smaller approach for demonstration.
-
             byte[] dst = new byte[src.Length];
-            Array.Copy(src, dst, src.Length);
 
-            int radiusTemplate = templateSize / 2;
-            int radiusSearch = searchSize / 2;
+            // More effective parameter settings
+            h = Math.Max(1.0f, h); // Ensure reasonable minimum
+            int radiusTemplate = templateSize;
+            int radiusSearch = searchSize;
 
+            // Add debug info
+            Logger.Log($"[FilterManager] NLM with h={h}, template={templateSize}, search={searchSize}");
+
+            // Process each pixel
             for (int y = 0; y < height; y++)
             {
                 for (int x = 0; x < width; x++)
                 {
                     float sumWeights = 0f;
                     float sumVals = 0f;
-                    // Center patch
+                    byte centerValue = src[y * width + x];
+
+                    // Search window
                     for (int yy = -radiusSearch; yy <= radiusSearch; yy++)
                     {
                         for (int xx = -radiusSearch; xx <= radiusSearch; xx++)
                         {
                             int ny = y + yy;
                             int nx = x + xx;
+
+                            // Bounds check
                             if (nx < 0) nx = 0;
                             if (nx >= width) nx = width - 1;
                             if (ny < 0) ny = 0;
                             if (ny >= height) ny = height - 1;
 
-                            float dist2 = PatchDistance(src, width, height, x, y, nx, ny, radiusTemplate);
+                            // Get patch distance (properly normalized)
+                            float dist2 = 0;
+                            int count = 0;
+
+                            // Compare patches
+                            for (int ty = -radiusTemplate; ty <= radiusTemplate; ty++)
+                            {
+                                for (int tx = -radiusTemplate; tx <= radiusTemplate; tx++)
+                                {
+                                    int px1 = x + tx;
+                                    int py1 = y + ty;
+                                    int px2 = nx + tx;
+                                    int py2 = ny + ty;
+
+                                    // Bounds check for patch pixels
+                                    if (px1 < 0) px1 = 0;
+                                    if (px1 >= width) px1 = width - 1;
+                                    if (py1 < 0) py1 = 0;
+                                    if (py1 >= height) py1 = height - 1;
+
+                                    if (px2 < 0) px2 = 0;
+                                    if (px2 >= width) px2 = width - 1;
+                                    if (py2 < 0) py2 = 0;
+                                    if (py2 >= height) py2 = height - 1;
+
+                                    // Calculate squared difference
+                                    float diff = src[py1 * width + px1] - src[py2 * width + px2];
+                                    dist2 += diff * diff;
+                                    count++;
+                                }
+                            }
+
+                            // Normalize by patch size
+                            if (count > 0)
+                                dist2 /= count;
+
+                            // Weight calculation with proper normalization
                             float w = (float)Math.Exp(-dist2 / (h * h));
+
+                            // Accumulate weighted value
                             sumWeights += w;
                             sumVals += w * src[ny * width + nx];
                         }
                     }
-                    dst[y * width + x] = (byte)Math.Min(255, Math.Max(0, sumVals / sumWeights));
+
+                    // Calculate final value
+                    if (sumWeights > 0)
+                    {
+                        float result = sumVals / sumWeights;
+                        int val = (int)(result + 0.5f);
+                        if (val < 0) val = 0;
+                        if (val > 255) val = 255;
+                        dst[y * width + x] = (byte)val;
+                    }
+                    else
+                    {
+                        dst[y * width + x] = centerValue;
+                    }
                 }
             }
+
+            // Add debug info to verify filter is working
+            int changedPixels = 0;
+            for (int i = 0; i < src.Length; i++)
+            {
+                if (Math.Abs(src[i] - dst[i]) > 1)
+                    changedPixels++;
+            }
+
+            Logger.Log($"[FilterManager] NLM changed {changedPixels} pixels out of {src.Length} ({(float)changedPixels / src.Length * 100:F1}%)");
+
             return dst;
+        }
+
+        // Normalized patch distance calculation
+        private float PatchDistanceNormalized(byte[] src, int width, int height,
+            int x1, int y1, int x2, int y2, int radius)
+        {
+            float dist2 = 0f;
+            int patchCount = 0;
+
+            for (int dy = -radius; dy <= radius; dy++)
+            {
+                for (int dx = -radius; dx <= radius; dx++)
+                {
+                    int nx1 = x1 + dx; if (nx1 < 0) nx1 = 0; if (nx1 >= width) nx1 = width - 1;
+                    int ny1 = y1 + dy; if (ny1 < 0) ny1 = 0; if (ny1 >= height) ny1 = height - 1;
+                    int nx2 = x2 + dx; if (nx2 < 0) nx2 = 0; if (nx2 >= width) nx2 = width - 1;
+                    int ny2 = y2 + dy; if (ny2 < 0) ny2 = 0; if (ny2 >= height) ny2 = height - 1;
+
+                    float diff = src[ny1 * width + nx1] - src[ny2 * width + nx2];
+                    dist2 += diff * diff;
+                    patchCount++;
+                }
+            }
+
+            // Normalize by patch size
+            if (patchCount > 0)
+                dist2 /= patchCount;
+
+            return dist2;
         }
 
         /// <summary>
@@ -2704,6 +2863,9 @@ namespace CTSegmenter
             float sumVals = 0f;
             byte centerValue = src[y * width + x];
 
+            // Increase h slightly to make effect more visible in preview
+            float effectiveH = h * 1.2f;
+
             for (int dy = -searchSize; dy <= searchSize; dy++)
             {
                 for (int dx = -searchSize; dx <= searchSize; dx++)
@@ -2719,6 +2881,7 @@ namespace CTSegmenter
                     // Calculate patch distance
                     float dist2 = 0f;
                     int patchCount = 0;
+
                     for (int ty = -templateSize; ty <= templateSize; ty++)
                     {
                         for (int tx = -templateSize; tx <= templateSize; tx++)
@@ -2749,7 +2912,7 @@ namespace CTSegmenter
                         dist2 /= patchCount;
 
                     // Weight calculation
-                    float w = XMath.Exp(-dist2 / (h * h));
+                    float w = XMath.Exp(-dist2 / (effectiveH * effectiveH));
                     sumWeights += w;
                     sumVals += w * src[ny * width + nx];
                 }
@@ -2836,19 +2999,64 @@ namespace CTSegmenter
         private byte[] SmoothingFilter2D_GPU(byte[] src, int width, int height, int kSize)
         {
             byte[] dst = new byte[src.Length];
-            // In a real scenario, you write a smoothing kernel here.
+            int radius = kSize / 2;
+
             using (var bufferSrc = accelerator.Allocate1D<byte>(src.Length))
             using (var bufferDst = accelerator.Allocate1D<byte>(dst.Length))
             {
                 bufferSrc.CopyFromCPU(src);
-                // For demonstration, let's do the same copy approach:
-                var copyKernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<byte>, ArrayView<byte>>(CopyKernel);
-                copyKernel(src.Length, bufferSrc.View, bufferDst.View);
+
+                // Use a proper smoothing/box filter kernel
+                var smoothingKernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index1D,
+                    ArrayView<byte>,
+                    ArrayView<byte>,
+                    int, int, int>(BoxFilterKernel);
+
+                smoothingKernel(src.Length, bufferSrc.View, bufferDst.View, radius, width, height);
 
                 accelerator.Synchronize();
                 bufferDst.CopyToCPU(dst);
             }
             return dst;
+        }
+
+        // Box filter kernel implementation
+        static void BoxFilterKernel(
+            Index1D idx,
+            ArrayView<byte> src,
+            ArrayView<byte> dst,
+            int radius,
+            int width,
+            int height)
+        {
+            if (idx >= src.Length)
+                return;
+
+            int x = idx % width;
+            int y = idx / width;
+
+            int sum = 0;
+            int count = 0;
+
+            for (int dy = -radius; dy <= radius; dy++)
+            {
+                int ny = y + dy;
+                if (ny < 0) ny = 0;
+                if (ny >= height) ny = height - 1;
+
+                for (int dx = -radius; dx <= radius; dx++)
+                {
+                    int nx = x + dx;
+                    if (nx < 0) nx = 0;
+                    if (nx >= width) nx = width - 1;
+
+                    sum += src[ny * width + nx];
+                    count++;
+                }
+            }
+
+            dst[idx] = (byte)(sum / count);
         }
 
         private byte[] MedianFilter2D_GPU(byte[] src, int width, int height, int kSize)
@@ -4525,7 +4733,60 @@ namespace CTSegmenter
                 xyPreview.Cursor = Cursors.Hand;
             }
         }
+        private byte[] NonLocalMeansWithNLM3DFilterClass(byte[] src, int width, int height,
+    float h, int templateSize, int searchSize, bool useGPU)
+        {
+            // For preview, we'll use a simpler approach:
+            // Create a small "fake" 3D volume of size width × height × 3
+            // to simulate a slice with minimal Z context
 
+            // Create 3D volume with 3 slices (for minimal Z context)
+            byte[] miniVolume = new byte[width * height * 3];
+
+            // Fill with current slice data
+            for (int z = 0; z < 3; z++)
+            {
+                for (int i = 0; i < src.Length; i++)
+                {
+                    miniVolume[z * src.Length + i] = src[i];
+                }
+            }
+
+            // Log info
+            Logger.Log($"[FilterManager] Using NLM3DFilter for 2D preview with h={h}, template={templateSize}, search={searchSize}");
+
+            // Apply NLM3D filter to the mini volume
+            byte[] result;
+            using (var nlmFilter = new NLM3DFilter(useGPU))
+            {
+                result = nlmFilter.RunNLM3D(
+                    miniVolume,
+                    width,
+                    height,
+                    3,                   // Just 3 slices
+                    Math.Min(1, templateSize),  // Keep template small for preview
+                    Math.Min(3, searchSize),    // Keep search small for preview 
+                    h,
+                    useGPU,
+                    null);             // No progress form for preview
+            }
+
+            // Extract middle slice
+            byte[] centerSlice = new byte[width * height];
+            Array.Copy(result, width * height, centerSlice, 0, width * height);
+
+            // Compare with original for debugging
+            int changedPixels = 0;
+            for (int i = 0; i < src.Length; i++)
+            {
+                if (Math.Abs(src[i] - centerSlice[i]) > 1)
+                    changedPixels++;
+            }
+
+            Logger.Log($"[FilterManager] NLM3D changed {changedPixels} pixels out of {src.Length} ({(float)changedPixels / src.Length * 100:F1}%)");
+
+            return centerSlice;
+        }
         /// <summary>
         /// Handles mouse move for panning with middle button only
         /// </summary>

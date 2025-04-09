@@ -11,6 +11,8 @@ using System.Runtime.InteropServices;
 using ILGPU;
 using ILGPU.Runtime;
 using ILGPU.Algorithms;
+using System.Drawing.Imaging;
+using System.IO;
 
 namespace CTSegmenter
 {
@@ -34,6 +36,17 @@ namespace CTSegmenter
         private ProgressBar progressBar;
         private Label lblStatus;
         private Label lblInstructions;
+        private GroupBox grpOutputOptions;
+        private RadioButton radOverwrite;
+        private RadioButton radNewVolume;
+        private CheckBox chkExportBMP;
+        private Button btnBrowseExport;
+        private Label lblExportPath;
+
+        // Properties for export options
+        public bool OverwriteExisting { get; private set; } = true;
+        public bool ExportAsBMP { get; private set; } = false;
+        public string ExportPath { get; private set; } = "";
 
         public float ResampleFactor { get; private set; } = 1.0f;
         public bool Success { get; private set; } = false;
@@ -56,21 +69,29 @@ namespace CTSegmenter
             this.lblDevices = new Label();
             this.progressBar = new ProgressBar();
             this.lblStatus = new Label();
-            this.lblInstructions = new Label(); // Add this line for the instructions label
+            this.lblInstructions = new Label();
+            this.grpOutputOptions = new GroupBox();
+            this.radOverwrite = new RadioButton();
+            this.radNewVolume = new RadioButton();
+            this.chkExportBMP = new CheckBox();
+            this.btnBrowseExport = new Button();
+            this.lblExportPath = new Label();
             ((ISupportInitialize)this.numResampleFactor).BeginInit();
+            this.grpOutputOptions.SuspendLayout();
             this.SuspendLayout();
 
             // Add the instructions label
             this.lblInstructions = new Label();
             this.lblInstructions.AutoSize = false;
-            this.lblInstructions.Location = new Point(12, 120);
-            this.lblInstructions.Size = new Size(180, 50);
+            this.lblInstructions.Location = new Point(12, 180);
+            this.lblInstructions.Size = new Size(350, 40);
             this.lblInstructions.TextAlign = ContentAlignment.MiddleLeft;
             this.lblInstructions.Text = "Enter resample factor (>1 to increase resolution, <1 to decrease), " +
-                                     "select a device, then click OK.";
+                                     "select a device, choose output options, then click OK.";
             this.lblInstructions.BorderStyle = BorderStyle.FixedSingle;
             this.lblInstructions.BackColor = Color.LightYellow;
             this.lblInstructions.Font = new Font(this.Font, FontStyle.Regular);
+
             // lblResampleFactor
             this.lblResampleFactor.AutoSize = true;
             this.lblResampleFactor.Location = new Point(12, 15);
@@ -118,8 +139,62 @@ namespace CTSegmenter
             this.chkUseGPU.UseVisualStyleBackColor = true;
             this.chkUseGPU.CheckedChanged += new EventHandler(this.ChkUseGPU_CheckedChanged);
 
+            // Group box for output options
+            this.grpOutputOptions = new GroupBox();
+            this.grpOutputOptions.Text = "Output Options";
+            this.grpOutputOptions.Location = new Point(12, 91);
+            this.grpOutputOptions.Size = new Size(350, 85);
+            this.grpOutputOptions.TabIndex = 10;
+
+            // Radio button for overwriting existing data
+            this.radOverwrite = new RadioButton();
+            this.radOverwrite.Text = "Overwrite existing volume";
+            this.radOverwrite.Location = new Point(10, 20);
+            this.radOverwrite.Size = new Size(160, 20);
+            this.radOverwrite.Checked = true;
+            this.radOverwrite.TabIndex = 11;
+
+            // Radio button for creating new volume
+            this.radNewVolume = new RadioButton();
+            this.radNewVolume.Text = "Create new volume";
+            this.radNewVolume.Location = new Point(180, 20);
+            this.radNewVolume.Size = new Size(160, 20);
+            this.radNewVolume.TabIndex = 12;
+
+            // Checkbox for BMP export
+            this.chkExportBMP = new CheckBox();
+            this.chkExportBMP.Text = "Export as 8-bit BMP stack";
+            this.chkExportBMP.Location = new Point(10, 45);
+            this.chkExportBMP.Size = new Size(160, 20);
+            this.chkExportBMP.TabIndex = 13;
+            this.chkExportBMP.CheckedChanged += new EventHandler(this.ChkExportBMP_CheckedChanged);
+
+            // Button for browsing export location
+            this.btnBrowseExport = new Button();
+            this.btnBrowseExport.Text = "Browse...";
+            this.btnBrowseExport.Location = new Point(260, 45);
+            this.btnBrowseExport.Size = new Size(80, 20);
+            this.btnBrowseExport.TabIndex = 14;
+            this.btnBrowseExport.Enabled = false;
+            this.btnBrowseExport.Click += new EventHandler(this.BtnBrowseExport_Click);
+
+            // Label for export path
+            this.lblExportPath = new Label();
+            this.lblExportPath.Text = "No export path selected";
+            this.lblExportPath.Location = new Point(10, 65);
+            this.lblExportPath.Size = new Size(330, 15);
+            this.lblExportPath.Font = new Font(this.Font.FontFamily, 7);
+            this.lblExportPath.TabIndex = 15;
+
+            // Add controls to the group box
+            this.grpOutputOptions.Controls.Add(this.radOverwrite);
+            this.grpOutputOptions.Controls.Add(this.radNewVolume);
+            this.grpOutputOptions.Controls.Add(this.chkExportBMP);
+            this.grpOutputOptions.Controls.Add(this.btnBrowseExport);
+            this.grpOutputOptions.Controls.Add(this.lblExportPath);
+
             // progressBar
-            this.progressBar.Location = new Point(115, 91);
+            this.progressBar.Location = new Point(115, 230);
             this.progressBar.Name = "progressBar";
             this.progressBar.Size = new Size(248, 23);
             this.progressBar.TabIndex = 6;
@@ -127,7 +202,7 @@ namespace CTSegmenter
 
             // lblStatus
             this.lblStatus.AutoSize = true;
-            this.lblStatus.Location = new Point(12, 96);
+            this.lblStatus.Location = new Point(12, 235);
             this.lblStatus.Name = "lblStatus";
             this.lblStatus.Size = new Size(40, 13);
             this.lblStatus.TabIndex = 7;
@@ -135,7 +210,7 @@ namespace CTSegmenter
             this.lblStatus.Visible = false;
 
             // btnOK
-            this.btnOK.Location = new Point(206, 150); // Moved down to accommodate instructions
+            this.btnOK.Location = new Point(206, 265);
             this.btnOK.Name = "btnOK";
             this.btnOK.Size = new Size(75, 23);
             this.btnOK.TabIndex = 8;
@@ -145,7 +220,7 @@ namespace CTSegmenter
 
             // btnCancel
             this.btnCancel.DialogResult = DialogResult.Cancel;
-            this.btnCancel.Location = new Point(287, 150); // Moved down to accommodate instructions
+            this.btnCancel.Location = new Point(287, 265);
             this.btnCancel.Name = "btnCancel";
             this.btnCancel.Size = new Size(75, 23);
             this.btnCancel.TabIndex = 9;
@@ -158,7 +233,8 @@ namespace CTSegmenter
             this.AutoScaleDimensions = new SizeF(6F, 13F);
             this.AutoScaleMode = AutoScaleMode.Font;
             this.CancelButton = this.btnCancel;
-            this.ClientSize = new Size(375, 185); // Increased height for instructions
+            this.ClientSize = new Size(375, 300); // Increased height for new controls
+            this.Controls.Add(this.grpOutputOptions);
             this.Controls.Add(this.btnCancel);
             this.Controls.Add(this.btnOK);
             this.Controls.Add(this.lblStatus);
@@ -168,7 +244,7 @@ namespace CTSegmenter
             this.Controls.Add(this.lblDevices);
             this.Controls.Add(this.numResampleFactor);
             this.Controls.Add(this.lblResampleFactor);
-            this.Controls.Add(this.lblInstructions); // Add instructions to Controls
+            this.Controls.Add(this.lblInstructions);
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.MinimizeBox = false;
@@ -178,9 +254,11 @@ namespace CTSegmenter
             this.Text = "Integrate and Resample";
             this.FormClosing += new FormClosingEventHandler(this.IntegrateResampleForm_FormClosing);
             ((ISupportInitialize)this.numResampleFactor).EndInit();
+            this.grpOutputOptions.ResumeLayout(false);
             this.ResumeLayout(false);
             this.PerformLayout();
         }
+
 
 
         private void InitializeAccelerators()
@@ -255,7 +333,10 @@ namespace CTSegmenter
             {
                 ResampleFactor = (float)numResampleFactor.Value;
                 Logger.Log($"[IntegrateResampleForm] Starting resampling with factor {ResampleFactor}");
+                OverwriteExisting = radOverwrite.Checked;
 
+                Logger.Log($"[IntegrateResampleForm] Starting resampling with factor {ResampleFactor}, " +
+                          $"Overwrite={OverwriteExisting}, ExportBMP={ExportAsBMP}");
                 // Disable UI during processing
                 EnableControls(false);
                 progressBar.Visible = true;
@@ -682,7 +763,97 @@ namespace CTSegmenter
                         }
                     });
                 }
+                if (ExportAsBMP && !string.IsNullOrEmpty(ExportPath))
+                {
+                    this.Invoke((MethodInvoker)delegate
+                    {
+                        if (!this.IsDisposed)
+                        {
+                            lblStatus.Text = "Status: Exporting BMP stack...";
+                            progressBar.Value = 95;
+                        }
+                    });
 
+                    try
+                    {
+                        // Create directory if it doesn't exist
+                        if (!Directory.Exists(ExportPath))
+                        {
+                            Directory.CreateDirectory(ExportPath);
+                        }
+
+                        // Get volume dimensions from mainForm.volumeData (already updated)
+                        int exportWidth = mainForm.volumeData.Width;
+                        int exportHeight = mainForm.volumeData.Height;
+                        int exportDepth = mainForm.volumeData.Depth;
+
+                        // Export each slice as a BMP
+                        Parallel.For(0, exportDepth, z =>
+                        {
+                            if (processingCancelled)
+                                return;
+
+                            // Create a bitmap for this slice
+                            using (Bitmap sliceBmp = new Bitmap(exportWidth, exportHeight, PixelFormat.Format8bppIndexed))
+                            {
+                                // Set up a grayscale palette
+                                ColorPalette palette = sliceBmp.Palette;
+                                for (int i = 0; i < 256; i++)
+                                {
+                                    palette.Entries[i] = Color.FromArgb(255, i, i, i);
+                                }
+                                sliceBmp.Palette = palette;
+
+                                // Lock the bitmap for fast access
+                                BitmapData bmpData = sliceBmp.LockBits(
+                                    new Rectangle(0, 0, exportWidth, exportHeight),
+                                    ImageLockMode.WriteOnly,
+                                    PixelFormat.Format8bppIndexed);
+
+                                // Copy data from our volume to the bitmap
+                                unsafe
+                                {
+                                    byte* scanLine = (byte*)bmpData.Scan0;
+                                    for (int y = 0; y < exportHeight; y++)
+                                    {
+                                        for (int x = 0; x < exportWidth; x++)
+                                        {
+                                            scanLine[x + y * bmpData.Stride] = mainForm.volumeData[x, y, z];
+                                        }
+                                    }
+                                }
+
+                                // Unlock and save the bitmap
+                                sliceBmp.UnlockBits(bmpData);
+
+                                // Generate a zero-padded filename
+                                string filename = Path.Combine(ExportPath, $"slice_{z:D5}.bmp");
+                                sliceBmp.Save(filename, ImageFormat.Bmp);
+                            }
+                        });
+
+                        this.Invoke((MethodInvoker)delegate
+                        {
+                            if (!this.IsDisposed)
+                            {
+                                MessageBox.Show($"BMP stack exported to: {ExportPath}",
+                                    "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            }
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[IntegrateResampleForm] Error exporting BMP stack: {ex.Message}");
+                        this.Invoke((MethodInvoker)delegate
+                        {
+                            if (!this.IsDisposed)
+                            {
+                                MessageBox.Show($"Error exporting BMP stack: {ex.Message}",
+                                    "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            }
+                        });
+                    }
+                }
                 return true;
             }
             catch (Exception ex)
@@ -853,7 +1024,92 @@ namespace CTSegmenter
                         throw;
                     }
                 });
+                if (ExportAsBMP && !string.IsNullOrEmpty(ExportPath))
+                {
+                    this.Invoke((MethodInvoker)delegate
+                    {
+                        if (!this.IsDisposed)
+                        {
+                            lblStatus.Text = "Status: Exporting BMP stack...";
+                            progressBar.Value = 95;
+                        }
+                    });
 
+                    try
+                    {
+                        // Create directory if it doesn't exist
+                        if (!Directory.Exists(ExportPath))
+                        {
+                            Directory.CreateDirectory(ExportPath);
+                        }
+
+                        // Export each slice as a BMP
+                        Parallel.For(0, newDepth, z =>
+                        {
+                            if (processingCancelled)
+                                return;
+
+                            // Create a bitmap for this slice
+                            using (Bitmap sliceBmp = new Bitmap(newWidth, newHeight, PixelFormat.Format8bppIndexed))
+                            {
+                                // Set up a grayscale palette
+                                ColorPalette palette = sliceBmp.Palette;
+                                for (int i = 0; i < 256; i++)
+                                {
+                                    palette.Entries[i] = Color.FromArgb(255, i, i, i);
+                                }
+                                sliceBmp.Palette = palette;
+
+                                // Lock the bitmap for fast access
+                                BitmapData bmpData = sliceBmp.LockBits(
+                                    new Rectangle(0, 0, newWidth, newHeight),
+                                    ImageLockMode.WriteOnly,
+                                    PixelFormat.Format8bppIndexed);
+
+                                // Copy data from our volume to the bitmap
+                                unsafe
+                                {
+                                    byte* scanLine = (byte*)bmpData.Scan0;
+                                    for (int y = 0; y < newHeight; y++)
+                                    {
+                                        for (int x = 0; x < newWidth; x++)
+                                        {
+                                            scanLine[x + y * bmpData.Stride] = newVolume[x, y, z];
+                                        }
+                                    }
+                                }
+
+                                // Unlock and save the bitmap
+                                sliceBmp.UnlockBits(bmpData);
+
+                                // Generate a zero-padded filename
+                                string filename = Path.Combine(ExportPath, $"slice_{z:D5}.bmp");
+                                sliceBmp.Save(filename, ImageFormat.Bmp);
+                            }
+                        });
+
+                        this.Invoke((MethodInvoker)delegate
+                        {
+                            if (!this.IsDisposed)
+                            {
+                                MessageBox.Show($"BMP stack exported to: {ExportPath}",
+                                    "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            }
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[IntegrateResampleForm] Error exporting BMP stack: {ex.Message}");
+                        this.Invoke((MethodInvoker)delegate
+                        {
+                            if (!this.IsDisposed)
+                            {
+                                MessageBox.Show($"Error exporting BMP stack: {ex.Message}",
+                                    "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            }
+                        });
+                    }
+                }
                 return true;
             }
             catch (Exception ex)
@@ -901,5 +1157,38 @@ namespace CTSegmenter
             Logger.Log("[IntegrateResampleForm] Form closed");
             base.OnFormClosed(e);
         }
+        private void ChkExportBMP_CheckedChanged(object sender, EventArgs e)
+        {
+            ExportAsBMP = chkExportBMP.Checked;
+            btnBrowseExport.Enabled = ExportAsBMP;
+
+            if (ExportAsBMP && string.IsNullOrEmpty(ExportPath))
+            {
+                BtnBrowseExport_Click(sender, e);
+            }
+
+            Logger.Log($"[IntegrateResampleForm] Export BMP option changed to: {ExportAsBMP}");
+        }
+
+        private void BtnBrowseExport_Click(object sender, EventArgs e)
+        {
+            using (var folderDialog = new FolderBrowserDialog())
+            {
+                folderDialog.Description = "Select folder to save BMP stack";
+                folderDialog.ShowNewFolderButton = true;
+
+                if (folderDialog.ShowDialog() == DialogResult.OK)
+                {
+                    ExportPath = folderDialog.SelectedPath;
+                    lblExportPath.Text = ExportPath;
+                    Logger.Log($"[IntegrateResampleForm] Export path set to: {ExportPath}");
+                }
+                else if (string.IsNullOrEmpty(ExportPath))
+                {
+                    chkExportBMP.Checked = false;
+                }
+            }
+        }
+
     }
 }

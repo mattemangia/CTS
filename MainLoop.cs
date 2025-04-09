@@ -4139,7 +4139,34 @@ public Bitmap GetSliceBitmap(int z)
             return bmp;
         }
 
+        public void UpdateVolumeData(ChunkedVolume newVolumeData)
+        {
+            if (newVolumeData == null)
+                throw new ArgumentNullException(nameof(newVolumeData));
 
+            // Get the new dimensions
+            int newWidth = newVolumeData.Width;
+            int newHeight = newVolumeData.Height;
+            int newDepth = newVolumeData.Depth;
+
+            Logger.Log($"[MainForm] Updating volume data to {newWidth}x{newHeight}x{newDepth}");
+
+            // Replace the existing volume data with the new one
+            volumeData = newVolumeData;
+
+           
+
+            // Refresh the views
+            CurrentSlice = Math.Min(CurrentSlice, newDepth - 1);
+            XzSliceY = Math.Min(XzSliceY, newHeight - 1);
+            YzSliceX = Math.Min(YzSliceX, newWidth - 1);
+
+            // Render the updated volume
+            RenderViews();
+            RenderOrthoViewsAsync().ConfigureAwait(false);
+
+            Logger.Log("[MainForm] Volume data successfully updated");
+        }
 
 
 

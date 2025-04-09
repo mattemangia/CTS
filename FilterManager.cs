@@ -156,7 +156,7 @@ namespace CTSegmenter
             filterForm = new Form
             {
                 Text = "Filter Manager",
-                Size = new Size(1000, 820),
+                Size = new Size(1000, 840),
                 StartPosition = FormStartPosition.CenterScreen
             };
             try
@@ -193,7 +193,7 @@ namespace CTSegmenter
             {
                 Dock = DockStyle.Fill,
                 AutoScroll = true,
-                Padding = new Padding(10)
+                BackColor = SystemColors.Control
             };
             mainLayout.Controls.Add(controlsPanel, 1, 0);
 
@@ -220,7 +220,7 @@ namespace CTSegmenter
                 Location = new Point(10, currentY)
             };
             controlsPanel.Controls.Add(lblIntro);
-            currentY += 40;
+            currentY += 30;
 
             // GPU usage checkbox
             chkUseGPU = new CheckBox
@@ -241,13 +241,13 @@ namespace CTSegmenter
             controlsPanel.Controls.Add(chkUseGPU);
             currentY += 30;
 
-            // Filter type selector section
-            AddSectionHeader("Select Filter Type", ref currentY);
+            // ===== FILTER SELECTION SECTION =====
+            AddSectionDivider("Select Filter Type", ref currentY);
 
             cmbFilterType = new ComboBox
             {
                 Location = new Point(10, currentY),
-                Width = 200,
+                Width = 300,
                 DropDownStyle = ComboBoxStyle.DropDownList
             };
 
@@ -264,26 +264,19 @@ namespace CTSegmenter
             controlsPanel.Controls.Add(cmbFilterType);
             currentY += 30;
 
-            // Common parameter panel for Kernel Size (used by most filters)
-            Panel commonPanel = new Panel
-            {
-                Location = new Point(10, currentY),
-                Width = 350,
-                Height = 70,
-                Visible = true
-            };
-
+            // ===== COMMON PARAMETERS SECTION =====
             Label lblKernelSize = new Label
             {
                 Text = "Kernel Size (odd value):",
                 AutoSize = true,
-                Location = new Point(0, 0)
+                Location = new Point(10, currentY)
             };
-            commonPanel.Controls.Add(lblKernelSize);
+            controlsPanel.Controls.Add(lblKernelSize);
+            currentY += 20;
 
             numKernelSize = new NumericUpDown
             {
-                Location = new Point(0, 20),
+                Location = new Point(10, currentY),
                 Width = 60,
                 Minimum = 1,
                 Maximum = 31,
@@ -294,43 +287,46 @@ namespace CTSegmenter
                 if (numKernelSize.Value % 2 == 0)
                     numKernelSize.Value += 1;
             };
-            commonPanel.Controls.Add(numKernelSize);
+            controlsPanel.Controls.Add(numKernelSize);
 
             Label lblKernelExplanation = new Label
             {
                 Text = "Controls the size of the neighborhood considered in filtering.",
                 AutoSize = true,
-                Location = new Point(70, 22),
+                Location = new Point(80, currentY + 2),
                 ForeColor = Color.DarkSlateGray,
                 Font = new Font("Arial", 8),
-                MaximumSize = new Size(250, 0)
+                MaximumSize = new Size(220, 0)
             };
-            commonPanel.Controls.Add(lblKernelExplanation);
+            controlsPanel.Controls.Add(lblKernelExplanation);
+            currentY += 30;
 
-            controlsPanel.Controls.Add(commonPanel);
-            currentY += 80;
-
-            // Dictionary to hold all filter-specific parameter panels
+            // ===== FILTER-SPECIFIC PARAMETER PANELS =====
             var filterPanels = new Dictionary<string, Panel>();
 
             // 1. Gaussian Parameters Panel
-            Panel gaussianPanel = CreateFilterPanel(
-                "Gaussian Filter",
-                "Smooths the image by replacing each pixel with a weighted average of its neighbors. " +
-                "Excellent for reducing random noise while preserving edges better than simple averaging.",
-                ref currentY);
+            Panel gaussianPanel = CreateFilterPanel("Gaussian Filter", ref currentY);
+            Label gaussianDescription = new Label
+            {
+                Text = "Smooths the image by replacing each pixel with a weighted average of its neighbors. " +
+                      "Excellent for reducing random noise while preserving edges better than simple averaging.",
+                Location = new Point(10, 5),
+                Size = new Size(330, 40),
+                Font = new Font("Arial", 8)
+            };
+            gaussianPanel.Controls.Add(gaussianDescription);
 
             Label lblSigma = new Label
             {
                 Text = "Sigma:",
                 AutoSize = true,
-                Location = new Point(0, 70)
+                Location = new Point(10, 50)
             };
             gaussianPanel.Controls.Add(lblSigma);
 
             numSigma = new NumericUpDown
             {
-                Location = new Point(0, 90),
+                Location = new Point(10, 70),
                 Width = 60,
                 Minimum = 0.1m,
                 Maximum = 100,
@@ -344,7 +340,7 @@ namespace CTSegmenter
             {
                 Text = "Controls the spread of the Gaussian. Higher values create more blurring.",
                 AutoSize = true,
-                Location = new Point(70, 92),
+                Location = new Point(80, 72),
                 ForeColor = Color.DarkSlateGray,
                 Font = new Font("Arial", 8),
                 MaximumSize = new Size(250, 0)
@@ -354,48 +350,58 @@ namespace CTSegmenter
             controlsPanel.Controls.Add(gaussianPanel);
             filterPanels.Add("Gaussian", gaussianPanel);
 
-            // 2. Smoothing Parameters Panel
-            Panel smoothingPanel = CreateFilterPanel(
-                "Smoothing Filter (Box Filter)",
-                "A simple averaging filter that replaces each pixel with the average of all pixels in the neighborhood. " +
-                "Effectively reduces noise but can blur edges significantly.",
-                ref currentY);
-
+            // 2. Smoothing Parameters Panel (Box Filter)
+            Panel smoothingPanel = CreateFilterPanel("Smoothing Filter (Box Filter)", ref currentY);
+            Label smoothingDescription = new Label
+            {
+                Text = "A simple averaging filter that replaces each pixel with the average of all pixels in the neighborhood. " +
+                      "Effectively reduces noise but can blur edges significantly.",
+                Location = new Point(10, 5),
+                Size = new Size(330, 40),
+                Font = new Font("Arial", 8)
+            };
+            smoothingPanel.Controls.Add(smoothingDescription);
             controlsPanel.Controls.Add(smoothingPanel);
             filterPanels.Add("Smoothing", smoothingPanel);
 
             // 3. Median Parameters Panel
-            Panel medianPanel = CreateFilterPanel(
-                "Median Filter",
-                "Replaces each pixel with the median value from its neighborhood. " +
-                "Excellent for removing 'salt and pepper' noise while preserving edges better than Gaussian.",
-                ref currentY);
-
+            Panel medianPanel = CreateFilterPanel("Median Filter", ref currentY);
+            Label medianDescription = new Label
+            {
+                Text = "Replaces each pixel with the median value from its neighborhood. " +
+                      "Excellent for removing 'salt and pepper' noise while preserving edges better than Gaussian.",
+                Location = new Point(10, 5),
+                Size = new Size(330, 40),
+                Font = new Font("Arial", 8)
+            };
+            medianPanel.Controls.Add(medianDescription);
             controlsPanel.Controls.Add(medianPanel);
             filterPanels.Add("Median", medianPanel);
 
             // 4. Non-Local Means Parameters Panel
-            Panel nlmPanel = CreateFilterPanel(
-                "Non-Local Means Filter",
-                "Advanced noise reduction that compares small patches of the image. " +
-                "Instead of just using nearby pixels, it finds similar patterns throughout the image. " +
-                "Excellent at preserving details while removing noise.",
-                ref currentY);
-
-            // Increase the panel height to fit all controls
-            nlmPanel.Height = 270; // Increased height to prevent overlapping
+            Panel nlmPanel = CreateFilterPanel("Non-Local Means Filter", ref currentY, 180); // Taller panel
+            Label nlmDescription = new Label
+            {
+                Text = "Advanced noise reduction that compares small patches of the image. " +
+                      "Instead of just using nearby pixels, it finds similar patterns throughout the image. " +
+                      "Excellent at preserving details while removing noise.",
+                Location = new Point(10, 5),
+                Size = new Size(330, 50),
+                Font = new Font("Arial", 8)
+            };
+            nlmPanel.Controls.Add(nlmDescription);
 
             Label lblNlmH = new Label
             {
                 Text = "Filter Strength (h):",
                 AutoSize = true,
-                Location = new Point(0, 70)
+                Location = new Point(10, 60)
             };
             nlmPanel.Controls.Add(lblNlmH);
 
             numNlmH = new NumericUpDown
             {
-                Location = new Point(0, 90),
+                Location = new Point(10, 80),
                 Width = 60,
                 Minimum = 1,
                 Maximum = 255,
@@ -409,7 +415,7 @@ namespace CTSegmenter
             {
                 Text = "Filtering strength - higher values smooth more but may lose details.",
                 AutoSize = true,
-                Location = new Point(70, 92),
+                Location = new Point(80, 82),
                 ForeColor = Color.DarkSlateGray,
                 Font = new Font("Arial", 8),
                 MaximumSize = new Size(250, 0)
@@ -420,13 +426,13 @@ namespace CTSegmenter
             {
                 Text = "Template Radius:",
                 AutoSize = true,
-                Location = new Point(0, 120)
+                Location = new Point(10, 110)
             };
             nlmPanel.Controls.Add(lblNlmTemplate);
 
             numNlmTemplate = new NumericUpDown
             {
-                Location = new Point(0, 140),
+                Location = new Point(10, 130),
                 Width = 60,
                 Minimum = 1,
                 Maximum = 15,
@@ -434,28 +440,17 @@ namespace CTSegmenter
             };
             nlmPanel.Controls.Add(numNlmTemplate);
 
-            Label lblTemplateExplanation = new Label
-            {
-                Text = "Size of patches to compare. Larger values can capture more structure but are slower.",
-                AutoSize = true,
-                Location = new Point(70, 142),
-                ForeColor = Color.DarkSlateGray,
-                Font = new Font("Arial", 8),
-                MaximumSize = new Size(250, 0)
-            };
-            nlmPanel.Controls.Add(lblTemplateExplanation);
-
             Label lblNlmSearch = new Label
             {
                 Text = "Search Radius:",
                 AutoSize = true,
-                Location = new Point(0, 170)
+                Location = new Point(180, 110)
             };
             nlmPanel.Controls.Add(lblNlmSearch);
 
             numNlmSearch = new NumericUpDown
             {
-                Location = new Point(0, 190),
+                Location = new Point(180, 130),
                 Width = 60,
                 Minimum = 1,
                 Maximum = 21,
@@ -463,26 +458,14 @@ namespace CTSegmenter
             };
             nlmPanel.Controls.Add(numNlmSearch);
 
-            Label lblSearchExplanation = new Label
-            {
-                Text = "Area to search for similar patches. Larger values can find better matches but are significantly slower.",
-                AutoSize = true,
-                Location = new Point(70, 190),
-                ForeColor = Color.DarkSlateGray,
-                Font = new Font("Arial", 8),
-                MaximumSize = new Size(250, 0)
-            };
-            nlmPanel.Controls.Add(lblSearchExplanation);
-
-            // Move the performance warning further down to avoid overlap
             Label lblPerformanceWarning = new Label
             {
-                Text = "Note: This filter is computationally intensive. Use a smaller ROI for preview.",
+                Text = "Note: This filter is computationally intensive. Use Region of Interest for faster preview.",
                 AutoSize = true,
                 ForeColor = Color.DarkRed,
                 Font = new Font("Arial", 8, FontStyle.Italic),
-                Location = new Point(0, 230), // Increased Y position
-                MaximumSize = new Size(350, 0)
+                Location = new Point(10, 160),
+                MaximumSize = new Size(330, 0)
             };
             nlmPanel.Controls.Add(lblPerformanceWarning);
 
@@ -490,23 +473,28 @@ namespace CTSegmenter
             filterPanels.Add("Non-Local Means", nlmPanel);
 
             // 5. Bilateral Parameters Panel
-            Panel bilateralPanel = CreateFilterPanel(
-                "Bilateral Filter",
-                "Edge-preserving smoothing filter that combines spatial closeness and intensity similarity. " +
-                "Effectively reduces noise while preserving strong edges, making it ideal for CT data.",
-                ref currentY);
+            Panel bilateralPanel = CreateFilterPanel("Bilateral Filter", ref currentY, 150);
+            Label bilateralDescription = new Label
+            {
+                Text = "Edge-preserving smoothing filter that combines spatial closeness and intensity similarity. " +
+                      "Effectively reduces noise while preserving strong edges, making it ideal for CT data.",
+                Location = new Point(10, 5),
+                Size = new Size(330, 40),
+                Font = new Font("Arial", 8)
+            };
+            bilateralPanel.Controls.Add(bilateralDescription);
 
             Label lblSigmaSpatial = new Label
             {
                 Text = "Spatial Sigma:",
                 AutoSize = true,
-                Location = new Point(0, 70)
+                Location = new Point(10, 50)
             };
             bilateralPanel.Controls.Add(lblSigmaSpatial);
 
             numSigmaSpatial = new NumericUpDown
             {
-                Location = new Point(0, 90),
+                Location = new Point(10, 70),
                 Width = 60,
                 Minimum = 0.1m,
                 Maximum = 100,
@@ -520,7 +508,7 @@ namespace CTSegmenter
             {
                 Text = "Controls the spatial extent of the filter (how far to look).",
                 AutoSize = true,
-                Location = new Point(70, 92),
+                Location = new Point(80, 72),
                 ForeColor = Color.DarkSlateGray,
                 Font = new Font("Arial", 8),
                 MaximumSize = new Size(250, 0)
@@ -531,13 +519,13 @@ namespace CTSegmenter
             {
                 Text = "Range Sigma:",
                 AutoSize = true,
-                Location = new Point(0, 120)
+                Location = new Point(10, 100)
             };
             bilateralPanel.Controls.Add(lblSigmaRange);
 
             numSigmaRange = new NumericUpDown
             {
-                Location = new Point(0, 140),
+                Location = new Point(10, 120),
                 Width = 60,
                 Minimum = 0.1m,
                 Maximum = 100,
@@ -549,10 +537,9 @@ namespace CTSegmenter
 
             Label lblRangeExplanation = new Label
             {
-                Text = "Controls how different intensity values are filtered. " +
-                      "Higher values blend across stronger edges.",
+                Text = "Controls how different intensity values are filtered. Higher values blend across stronger edges.",
                 AutoSize = true,
-                Location = new Point(70, 142),
+                Location = new Point(80, 122),
                 ForeColor = Color.DarkSlateGray,
                 Font = new Font("Arial", 8),
                 MaximumSize = new Size(250, 0)
@@ -563,23 +550,28 @@ namespace CTSegmenter
             filterPanels.Add("Bilateral", bilateralPanel);
 
             // 6. Unsharp Mask Parameters Panel
-            Panel unsharpPanel = CreateFilterPanel(
-                "Unsharp Mask",
-                "Sharpening filter that enhances edges by subtracting a blurred version of the image. " +
-                "Useful for enhancing fine details in CT data, but can amplify noise.",
-                ref currentY);
+            Panel unsharpPanel = CreateFilterPanel("Unsharp Mask", ref currentY, 120);
+            Label unsharpDescription = new Label
+            {
+                Text = "Sharpening filter that enhances edges by subtracting a blurred version of the image. " +
+                      "Useful for enhancing fine details in CT data, but can amplify noise.",
+                Location = new Point(10, 5),
+                Size = new Size(330, 40),
+                Font = new Font("Arial", 8)
+            };
+            unsharpPanel.Controls.Add(unsharpDescription);
 
             Label lblUnsharpAmount = new Label
             {
                 Text = "Sharpening Amount:",
                 AutoSize = true,
-                Location = new Point(0, 70)
+                Location = new Point(10, 50)
             };
             unsharpPanel.Controls.Add(lblUnsharpAmount);
 
             numUnsharpAmount = new NumericUpDown
             {
-                Location = new Point(0, 90),
+                Location = new Point(10, 70),
                 Width = 60,
                 Minimum = 0.1m,
                 Maximum = 10.0m,
@@ -593,7 +585,7 @@ namespace CTSegmenter
             {
                 Text = "Strength of sharpening effect. Higher values create stronger enhancement but may introduce artifacts.",
                 AutoSize = true,
-                Location = new Point(70, 92),
+                Location = new Point(80, 72),
                 ForeColor = Color.DarkSlateGray,
                 Font = new Font("Arial", 8),
                 MaximumSize = new Size(250, 0)
@@ -602,46 +594,33 @@ namespace CTSegmenter
 
             Label lblUnsharpSigma = new Label
             {
-                Text = "Blur Sigma:",
+                Text = "Uses the Kernel Size and Sigma parameters for blurring.",
                 AutoSize = true,
-                Location = new Point(0, 120)
+                Location = new Point(10, 100),
+                Font = new Font("Arial", 8, FontStyle.Italic)
             };
             unsharpPanel.Controls.Add(lblUnsharpSigma);
-
-            // Reuse numSigma for unsharp mask blur sigma
-            Label lblBlurExplanation = new Label
-            {
-                Text = "Controls the size of features to enhance. Higher values enhance larger features.",
-                AutoSize = true,
-                Location = new Point(70, 120),
-                ForeColor = Color.DarkSlateGray,
-                Font = new Font("Arial", 8),
-                MaximumSize = new Size(250, 0)
-            };
-            unsharpPanel.Controls.Add(lblBlurExplanation);
 
             controlsPanel.Controls.Add(unsharpPanel);
             filterPanels.Add("Unsharp Mask", unsharpPanel);
 
             // 7. Edge Detection Parameters Panel
-            Panel edgePanel = CreateFilterPanel(
-                "Edge Detection (Sobel)",
-                "Detects edges in the image by calculating intensity gradients. " +
-                "Useful for highlighting boundaries between different tissues or structures in CT data.",
-                ref currentY);
-
-            Label lblEdgeNormalize = new Label
+            Panel edgePanel = CreateFilterPanel("Edge Detection (Sobel)", ref currentY);
+            Label edgeDescription = new Label
             {
-                Text = "Normalize Result:",
-                AutoSize = true,
-                Location = new Point(0, 70)
+                Text = "Detects edges in the image by calculating intensity gradients. " +
+                      "Useful for highlighting boundaries between different tissues or structures in CT data.",
+                Location = new Point(10, 5),
+                Size = new Size(330, 40),
+                Font = new Font("Arial", 8)
             };
-            edgePanel.Controls.Add(lblEdgeNormalize);
+            edgePanel.Controls.Add(edgeDescription);
 
             chkEdgeNormalize = new CheckBox
             {
-                Text = "Enable",
-                Location = new Point(0, 90),
+                Text = "Normalize Result",
+                Location = new Point(10, 50),
+                AutoSize = true,
                 Checked = true
             };
             edgePanel.Controls.Add(chkEdgeNormalize);
@@ -650,10 +629,10 @@ namespace CTSegmenter
             {
                 Text = "When enabled, stretches the output to use the full intensity range, improving visibility of edges.",
                 AutoSize = true,
-                Location = new Point(70, 90),
+                Location = new Point(10, 70),
                 ForeColor = Color.DarkSlateGray,
                 Font = new Font("Arial", 8),
-                MaximumSize = new Size(250, 0)
+                MaximumSize = new Size(330, 0)
             };
             edgePanel.Controls.Add(lblNormalizeExplanation);
 
@@ -690,19 +669,19 @@ namespace CTSegmenter
                 }
             };
 
-            // Add processing options section (ROI, dimensions, output, etc.)
-            AddSectionHeader("Processing Options", ref currentY);
-
-            // Region of Interest controls
-            Label lblRoiInfo = new Label
+            // Update the current Y position based on tallest visible panel
+            int tallestPanelHeight = 0;
+            foreach (var panel in filterPanels.Values)
             {
-                Text = "Define a region to preview filters more quickly:",
-                Location = new Point(10, currentY),
-                AutoSize = true
-            };
-            controlsPanel.Controls.Add(lblRoiInfo);
-            currentY += 25;
+                if (panel.Height > tallestPanelHeight)
+                    tallestPanelHeight = panel.Height;
+            }
+            currentY += tallestPanelHeight + 10;
 
+            // ===== PROCESSING OPTIONS SECTION =====
+            AddSectionDivider("Processing Options", ref currentY);
+
+            // Region of Interest
             chkUseRoi = new CheckBox
             {
                 Text = "Use Region of Interest for Preview",
@@ -724,12 +703,24 @@ namespace CTSegmenter
                 xyPreview.Invalidate();
             };
             controlsPanel.Controls.Add(chkUseRoi);
+            currentY += 25;
+
+            Label lblRoiHelp = new Label
+            {
+                Text = "Draw a region on the image to preview filters more quickly",
+                Location = new Point(30, currentY),
+                AutoSize = true,
+                ForeColor = Color.DarkSlateGray,
+                Font = new Font("Arial", 8)
+            };
+            controlsPanel.Controls.Add(lblRoiHelp);
             currentY += 30;
 
-            // 2D vs 3D
+            // Filter Dimension
             Label lblDim = new Label
             {
                 Text = "Filter Dimension:",
+                Font = new Font("Arial", 8, FontStyle.Bold),
                 Location = new Point(10, currentY),
                 AutoSize = true
             };
@@ -753,12 +744,12 @@ namespace CTSegmenter
                 AutoSize = true
             };
             controlsPanel.Controls.Add(rb3D);
-            currentY += 30;
+            currentY += 35;
 
-            // Output options section
-            AddSectionHeader("Output Options", ref currentY);
+            // ===== OUTPUT OPTIONS SECTION =====
+            AddSectionDivider("Output Options", ref currentY);
 
-            // Overwrite vs output
+            // Overwrite checkbox
             chkOverwrite = new CheckBox
             {
                 Text = "Overwrite Original Dataset",
@@ -782,15 +773,16 @@ namespace CTSegmenter
             txtOutputFolder = new TextBox
             {
                 Location = new Point(10, currentY),
-                Width = 280
+                Width = 270
             };
             controlsPanel.Controls.Add(txtOutputFolder);
 
             btnSelectFolder = new Button
             {
                 Text = "...",
-                Location = new Point(300, currentY),
-                Width = 30
+                Location = new Point(290, currentY),
+                Width = 30,
+                Height = txtOutputFolder.Height
             };
             btnSelectFolder.Click += (s, e) =>
             {
@@ -805,10 +797,10 @@ namespace CTSegmenter
             controlsPanel.Controls.Add(btnSelectFolder);
             currentY += 40;
 
-            // Actions section
-            AddSectionHeader("Actions", ref currentY);
+            // ===== ACTIONS SECTION =====
+            AddSectionDivider("Actions", ref currentY);
 
-            // Preview and Apply buttons
+            // Action buttons
             btnPreview = new Button
             {
                 Text = "Preview Filter",
@@ -828,7 +820,6 @@ namespace CTSegmenter
             };
             btnApplyAll.Click += async (s, e) => await ApplyToAllSlices();
             controlsPanel.Controls.Add(btnApplyAll);
-
             currentY += 40;
 
             // Status label
@@ -846,7 +837,8 @@ namespace CTSegmenter
             {
                 Text = "Close",
                 Location = new Point(10, currentY),
-                Width = 80
+                Width = 80,
+                Height = 25
             };
             btnClose.Click += (s, e) => filterForm.Close();
             controlsPanel.Controls.Add(btnClose);
@@ -869,6 +861,34 @@ namespace CTSegmenter
 
             // Show form
             filterForm.Show();
+        }
+
+        private void AddSectionDivider(string title, ref int currentY)
+        {
+            currentY += 10;
+
+            // Add section title
+            Label lblSection = new Label
+            {
+                Text = title,
+                Font = new Font("Arial", 9, FontStyle.Bold),
+                ForeColor = Color.DarkBlue,
+                Location = new Point(10, currentY),
+                AutoSize = true
+            };
+            controlsPanel.Controls.Add(lblSection);
+
+            // Add separator line
+            Panel separator = new Panel
+            {
+                Location = new Point(10, currentY + 20),
+                Width = 330,
+                Height = 1,
+                BackColor = Color.LightGray
+            };
+            controlsPanel.Controls.Add(separator);
+
+            currentY += 30;
         }
 
         #endregion
@@ -4698,42 +4718,23 @@ namespace CTSegmenter
             previewPanel.Controls.Add(btnResetZoom);
         }
 
-        private Panel CreateFilterPanel(string title, string description, ref int currentY)
+        private Panel CreateFilterPanel(string title, ref int currentY, int height = 100)
         {
             Panel panel = new Panel
             {
                 Location = new Point(10, currentY),
-                Width = 350,
-                Height = 250, // Default height, can be adjusted by each filter
+                Width = 340,
+                Height = height,
+                BorderStyle = BorderStyle.None,
                 Visible = false
             };
-
-            // Filter title
-            Label lblTitle = new Label
-            {
-                Text = title,
-                Font = new Font("Arial", 9, FontStyle.Bold),
-                Location = new Point(0, 0),
-                AutoSize = true
-            };
-            panel.Controls.Add(lblTitle);
-
-            // Filter description
-            Label lblDescription = new Label
-            {
-                Text = description,
-                Location = new Point(0, 25),
-                MaximumSize = new Size(350, 0),
-                AutoSize = true
-            };
-            panel.Controls.Add(lblDescription);
 
             return panel;
         }
 
         private void AddSectionHeader(string title, ref int currentY)
         {
-            // Add some space before each section
+            // Add spacing before header
             currentY += 10;
 
             // Add separator line
@@ -4751,13 +4752,13 @@ namespace CTSegmenter
             Label lblSection = new Label
             {
                 Text = title,
-                Font = new Font("Arial", 10, FontStyle.Bold),
+                Font = new Font("Arial", 9, FontStyle.Bold),
                 ForeColor = Color.DarkBlue,
                 Location = new Point(10, currentY),
                 AutoSize = true
             };
             controlsPanel.Controls.Add(lblSection);
-            currentY += 30;
+            currentY += 25;
         }
 
 

@@ -339,6 +339,20 @@ namespace CTSegmenter
 
                 segmentAnything.Show();
             };
+            ToolStripMenuItem integrateResampleMenuItem = new ToolStripMenuItem("Integrate / Resample");
+            integrateResampleMenuItem.Click += (s, e) =>
+            {
+                if (mainForm.volumeData == null)
+                {
+                    MessageBox.Show("Please load a dataset first.", "No Data",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                IntegrateResampleForm integrateForm = new IntegrateResampleForm(mainForm);
+                integrateForm.Show();
+            };
+            toolsMenu.DropDownItems.Add(integrateResampleMenuItem);
             ToolStripMenuItem filterManagerMenuItem = new ToolStripMenuItem("Filter Manager");
             filterManagerMenuItem.Click += (s, e) =>
             {

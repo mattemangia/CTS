@@ -1,120 +1,220 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Threading;
+using System.Drawing;
+using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Media3D;
+
 using HelixToolkit.Wpf;
-using System.IO;
-using System.Windows.Threading;
-using System.Linq;
+using HelixToolkit.Wpf.SharpDX;
+using HelixToolkit.Wpf.SharpDX.Core;
+using HelixToolkit.Wpf.SharpDX.Model;
+
+using SharpDX;
+using SharpDX.Direct3D11;
+using SharpDX.DXGI;
+using Color = System.Windows.Media.Color;
+using Point3D = System.Windows.Media.Media3D.Point3D;
+using Vector3D = System.Windows.Media.Media3D.Vector3D;
+using Device = SharpDX.Direct3D11.Device;
+using Format = SharpDX.DXGI.Format;
+using MeshBuilder = HelixToolkit.Wpf.SharpDX.MeshBuilder;
+using PerspectiveCamera = HelixToolkit.Wpf.SharpDX.PerspectiveCamera;
 using System.Diagnostics;
 
 namespace CTSegmenter
 {
-    public class VolumeRenderer
+    public class VolumeRenderer : IDisposable
     {
+        public bool disposed = false;
         private MainForm mainForm;
-        private ModelVisual3D rootModel;
-        private ModelVisual3D volumeModel;
-        private ModelVisual3D materialModel;
-        private Dictionary<byte, ModelVisual3D> materialModels;
-        private ModelVisual3D slicePlanesModel;
+        private EffectsManager effectsManager;
+        private PerspectiveCamera camera;
+        private Viewport3DX viewport;
+        private GroupModel3D rootGroup;
 
-        // Custom implementations instead of PlaneVisual3D
-        private ModelVisual3D xSlicePlaneModel;
-        private ModelVisual3D ySlicePlaneModel;
-        private ModelVisual3D zSlicePlaneModel;
+        private VolumeTextureModel3D volumeModel;
+        private VolumeTextureModel3D materialModel;
+        private GroupModel3D slicePlanesGroup;
+        private MeshGeometryModel3D xSlicePlaneModel;
+        private MeshGeometryModel3D ySlicePlaneModel;
+        private MeshGeometryModel3D zSlicePlaneModel;
 
+        // Transfer function + material data
+        private VolumeTextureDiffuseMaterial volumeMaterial;
+        private VolumeTextureDiffuseMaterial labelsMaterial;
+        private Color4[] labelColorMap;
+        private Color4[] grayColorMap;
+
+        // Material visibility/opacity
+        private Dictionary<byte, bool> materialVisibilityState;
         private Dictionary<byte, double> materialOpacities;
 
-        private int voxelStride = 4; // Default medium quality
-        private int minThreshold = 0;
+        // Volume data
+        private int volWidth, volHeight, volDepth;
+        private double voxelSize;
+        private bool dataLoaded = false;
+
+        // Rendering parameters
+        private int voxelStride = 2;  // Default to medium quality for large volumes
+        private int minThreshold = 30; // Start with a higher threshold to reduce noise
         private int maxThreshold = 255;
-        private bool updateRequired = true;
-        private CancellationTokenSource renderCancellation;
-
-        // Chunk size for volume rendering (in voxels)
-        private int chunkSize = 64;
-
-        // Cache for rendered meshes to avoid redundant work
-        private Dictionary<string, MeshGeometry3D> meshCache = new Dictionary<string, MeshGeometry3D>();
-
-        // Surface extraction parameters
-        private double isoValue = 128.0;
-        private bool showIsosurface = true;
-
-        // Optimization fields
-        private bool realTimeUpdate = false;
-        private Dispatcher uiDispatcher;
-
-        private Dictionary<byte, bool> materialVisibilityState = new Dictionary<byte, bool>();
-
-        // Memory optimization - use LOD (Level of Detail) based on distance
+        private bool showBwDataset = true;
         private bool useLodRendering = true;
+        private bool realTimeUpdate = false;
 
-        // Performance metrics
+        // GPU optimization settings
+        private const int MAX_TEXTURE_SIZE = 2048;  // Maximum 3D texture dimension
+        private bool useOctreeRendering = true;     // Use octree for large volumes
+        private bool useViewDependentRender = true; // Render only what's visible
+
+        // Clipping (slice) parameters
+        private bool slicesEnabled = false;
+        private bool slicePlanesVisible = false;
+        private int sliceX = 0, sliceY = 0, sliceZ = 0;
+
+        // Cached textures for performance
+        private VolumeTextureGradientParams grayscaleTexture;
+        private VolumeTextureGradientParams labelTexture;
+
+        // GPU profiling
         private Stopwatch renderTimer = new Stopwatch();
 
-        // BW Dataset visibility
-        private bool showBwDataset = true;
-
-        private SynchronizationContext syncContext;
-
-        public VolumeRenderer(MainForm mainForm)
+        public VolumeRenderer(MainForm mainForm, Viewport3DX viewport)
         {
             this.mainForm = mainForm;
-            this.syncContext = SynchronizationContext.Current;
-            this.uiDispatcher = Dispatcher.CurrentDispatcher;
-
-            // Initialize models
-            this.rootModel = new ModelVisual3D();
-            this.volumeModel = new ModelVisual3D();
-            this.materialModel = new ModelVisual3D();
-            this.slicePlanesModel = new ModelVisual3D();
-
-            this.materialModels = new Dictionary<byte, ModelVisual3D>();
-            this.materialOpacities = new Dictionary<byte, double>();
-
-            // Initialize orthographic slice planes
-            this.xSlicePlaneModel = new ModelVisual3D();
-            this.ySlicePlaneModel = new ModelVisual3D();
-            this.zSlicePlaneModel = new ModelVisual3D();
-
-            // Add models to hierarchy
-            this.rootModel.Children.Add(volumeModel);
-            this.rootModel.Children.Add(materialModel);
-            this.rootModel.Children.Add(slicePlanesModel);
+            this.viewport = viewport;
             this.materialVisibilityState = new Dictionary<byte, bool>();
+            this.materialOpacities = new Dictionary<byte, double>();
+            slicePlanesGroup = new GroupModel3D();
 
-            // Initialize material opacities
+            InitializeViewportAndScene();
+            InitializeMaterials();
+            ConfigureGpuSettings();
+            Logger.Log("[VolumeRenderer] Initialized with GPU optimizations");
+        }
+
+        private void ConfigureGpuSettings()
+        {
+            // Configure viewport for high-performance rendering
+            viewport.FXAALevel = FXAALevel.None; // Disable anti-aliasing for performance
+            viewport.EnableSwapChainRendering = true;
+            viewport.EnableDeferredRendering = false;
+
+            // Configure OIT if available
+            
+
+            Logger.Log("[VolumeRenderer] GPU render configuration set for high performance");
+        }
+
+        private void InitializeViewportAndScene()
+        {
+            try
+            {
+                // Create default camera with wider view
+                camera = new PerspectiveCamera
+                {
+                    Position = new Point3D(0, 0, -500),
+                    LookDirection = new Vector3D(0, 0, 1),
+                    UpDirection = new Vector3D(0, -1, 0),
+                    FieldOfView = 60
+                };
+                viewport.Camera = camera;
+
+                // Create HelixToolkit SharpDX effects manager
+                effectsManager = new DefaultEffectsManager();
+                viewport.EffectsManager = effectsManager;
+
+                // Create root group for 3D content
+                rootGroup = new GroupModel3D();
+                viewport.Items.Add(rootGroup);
+
+                // Add lights
+                var light = new DirectionalLight3D
+                {
+                    Direction = new Vector3D(0, -0.5, -1),
+                    Color = Color.FromRgb(255, 255, 255)
+                };
+                viewport.Items.Add(light);
+
+                var ambient = new AmbientLight3D { Color = Color.FromRgb(90, 90, 90) };
+                viewport.Items.Add(ambient);
+
+                // Initialize slice plane group
+                slicePlanesGroup = new GroupModel3D();
+                rootGroup.Children.Add(slicePlanesGroup);
+                xSlicePlaneModel = new MeshGeometryModel3D();
+                ySlicePlaneModel = new MeshGeometryModel3D();
+                zSlicePlaneModel = new MeshGeometryModel3D();
+
+                // Set render technique options
+                viewport.FXAALevel = FXAALevel.None; // Disable FXAA for performance
+                viewport.EnableSwapChainRendering = true; // For better GPU performance
+                viewport.EnableDeferredRendering = false; // Simpler render path
+
+                // Viewport interaction setup
+                viewport.ZoomExtentsWhenLoaded = true;
+                viewport.RotationSensitivity = 0.5;
+                viewport.ZoomSensitivity = 0.5;
+
+                Logger.Log("[VolumeRenderer] Viewport configured with optimized settings");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[VolumeRenderer] Error initializing scene: {ex.Message}");
+            }
+        }
+
+        private void InitializeMaterials()
+        {
             foreach (var material in mainForm.Materials)
             {
                 if (!material.IsExterior)
                 {
-                    materialOpacities[material.ID] = 1.0; // Start fully opaque
-                    materialVisibilityState[material.ID] = true; // Default to visible
+                    materialVisibilityState[material.ID] = true;
+                    materialOpacities[material.ID] = 1.0;
+                }
+            }
+            Logger.Log("[VolumeRenderer] Material visibility/opacity initialized.");
+        }
+
+        // Properties for external toggles
+        public bool ShowBwDataset
+        {
+            get => showBwDataset;
+            set
+            {
+                showBwDataset = value;
+                if (dataLoaded)
+                {
+                    volumeModel.IsRendering = showBwDataset;
+                    Logger.Log($"[VolumeRenderer] ShowBwDataset set to {showBwDataset}");
+                    UpdateTransferFunctions();
                 }
             }
         }
 
-        #region Properties
-
-        public ModelVisual3D RootModel => rootModel;
+        public bool UseLodRendering
+        {
+            get => useLodRendering;
+            set
+            {
+                useLodRendering = value;
+                Logger.Log($"[VolumeRenderer] UseLodRendering set to {useLodRendering}");
+            }
+        }
 
         public int VoxelStride
         {
             get => voxelStride;
             set
             {
-                if (value != voxelStride && value > 0)
-                {
-                    voxelStride = value;
-                    updateRequired = true;
-                    // Clear cache when stride changes
-                    meshCache.Clear();
-                }
+                voxelStride = Math.Max(1, value);
+                Logger.Log($"[VolumeRenderer] Voxel stride set to {voxelStride}");
             }
         }
 
@@ -123,11 +223,8 @@ namespace CTSegmenter
             get => minThreshold;
             set
             {
-                if (value != minThreshold)
-                {
-                    minThreshold = value;
-                    updateRequired = true;
-                }
+                minThreshold = Math.Max(0, value);
+                Logger.Log($"[VolumeRenderer] MinThreshold set to {minThreshold}");
             }
         }
 
@@ -136,1436 +233,1351 @@ namespace CTSegmenter
             get => maxThreshold;
             set
             {
-                if (value != maxThreshold)
-                {
-                    maxThreshold = value;
-                    updateRequired = true;
-                }
+                maxThreshold = Math.Min(255, value);
+                Logger.Log($"[VolumeRenderer] MaxThreshold set to {maxThreshold}");
             }
         }
 
-        public bool RealTimeUpdate
-        {
-            get => realTimeUpdate;
-            set => realTimeUpdate = value;
-        }
+        public bool RealTimeUpdate { get => realTimeUpdate; set => realTimeUpdate = value; }
 
-        public bool UseLodRendering
-        {
-            get => useLodRendering;
-            set => useLodRendering = value;
-        }
-
-        public bool ShowBwDataset
-        {
-            get => showBwDataset;
-            set
-            {
-                showBwDataset = value;
-                RunOnDispatcher(() =>
-                {
-                    if (showBwDataset)
-                    {
-                        // Only add if it isn't already in the parent's children collection.
-                        if (!rootModel.Children.Contains(volumeModel))
-                            rootModel.Children.Add(volumeModel);
-                    }
-                    else
-                    {
-                        // Remove the model to hide it.
-                        rootModel.Children.Remove(volumeModel);
-                    }
-                });
-            }
-        }
-
-        #endregion
-
-        #region Public Methods
-
-        public void SetDispatcher(Dispatcher dispatcher)
-        {
-            this.uiDispatcher = dispatcher;
-        }
-
-        public void SetMaterialVisibility(byte materialId, bool visible)
-        {
-            // Update our internal state
-            materialVisibilityState[materialId] = visible;
-
-            // Use the UI dispatcher to update UI elements
-            RunOnDispatcher(() =>
-            {
-                if (materialModels.TryGetValue(materialId, out var model))
-                {
-                    // Remove the model from its parent regardless of current state
-                    materialModel.Children.Remove(model);
-
-                    // Add it back only if it should be visible
-                    if (visible)
-                    {
-                        materialModel.Children.Add(model);
-                    }
-                }
-            });
-        }
-
-        public double GetMaterialOpacity(byte materialId)
-        {
-            if (materialOpacities.TryGetValue(materialId, out double opacity))
-            {
-                return opacity;
-            }
-            return 1.0; // Default opacity
-        }
-
-        public void SetMaterialOpacity(byte materialId, double opacity)
-        {
-            materialOpacities[materialId] = opacity;
-
-            // Use UI dispatcher to update UI
-            RunOnDispatcher(() =>
-            {
-                if (materialModels.TryGetValue(materialId, out var model))
-                {
-                    UpdateModelOpacity(model, opacity);
-                }
-            });
-        }
-
+        /// <summary>
+        /// GPU-optimized volume rendering for large datasets
+        /// </summary>
         public async Task UpdateAsync()
         {
-            if (!updateRequired) return;
-            updateRequired = false;
+            if (mainForm.volumeData == null)
+            {
+                Logger.Log("[VolumeRenderer] No volume data loaded => aborting.");
+                return;
+            }
 
-            // Cancel any ongoing rendering
-            renderCancellation?.Cancel();
-            renderCancellation = new CancellationTokenSource();
-            var cancellationToken = renderCancellation.Token;
+            renderTimer.Restart();
+            Logger.Log("[VolumeRenderer] Starting volume rendering update...");
 
             try
             {
-                // Use the UI dispatcher to clear previous models first
-                await RunOnDispatcherAsync(() =>
+                // Get volume dimensions and pixel size
+                volWidth = mainForm.GetWidth();
+                volHeight = mainForm.GetHeight();
+                volDepth = mainForm.GetDepth();
+                voxelSize = mainForm.GetPixelSize();
+                if (voxelSize <= 0)
+                    voxelSize = 1.0;
+
+                // Calculate volume size in bytes
+                long totalVoxels = (long)volWidth * volHeight * volDepth;
+                long volumeBytes = totalVoxels * sizeof(byte);
+                Logger.Log($"[VolumeRenderer] Volume size: {volWidth}x{volHeight}x{volDepth} ({volumeBytes / (1024 * 1024)}MB)");
+
+                // Determine appropriate downsampling for large volumes
+                CalculateOptimalStride(totalVoxels);
+
+                // Compute final texture dimensions
+                int texWidth = (volWidth + voxelStride - 1) / voxelStride;
+                int texHeight = (volHeight + voxelStride - 1) / voxelStride;
+                int texDepth = (volDepth + voxelStride - 1) / voxelStride;
+
+                Logger.Log($"[VolumeRenderer] Using stride {voxelStride} => Texture size: {texWidth}x{texHeight}x{texDepth}");
+
+                // If texture dimensions are still too large, use brick-based approach
+                if (texWidth > MAX_TEXTURE_SIZE || texHeight > MAX_TEXTURE_SIZE || texDepth > MAX_TEXTURE_SIZE)
                 {
-                    volumeModel.Children.Clear();
-                    materialModel.Children.Clear();
-                    materialModels.Clear();
-                });
+                    Logger.Log("[VolumeRenderer] Volume exceeds maximum texture size, using octree partitioning");
+                    await RenderWithOctree(texWidth, texHeight, texDepth);
+                }
+                else
+                {
+                    // Create down-sampled volume array
+                    await CreateOptimizedVolumeTexture(texWidth, texHeight, texDepth);
+                }
 
-                // Start performance timer
-                renderTimer.Reset();
-                renderTimer.Start();
+                // Update transfer maps after texture creation
+                InitializeTransferMaps();
 
-                await RenderVolumeMeshesAsync(cancellationToken);
+                if (volumeMaterial != null)
+                    volumeMaterial.TransferMap = grayColorMap;
+
+                if (labelsMaterial != null)
+                    labelsMaterial.TransferMap = labelColorMap;
+
+                dataLoaded = true;
+
+                // Reset camera to show entire volume - IMPORTANT for fixing the zoom issue
+                ResetCameraView();
 
                 renderTimer.Stop();
-                Logger.Log($"[VolumeRenderer] Rendering completed in {renderTimer.ElapsedMilliseconds}ms");
-
-                // Force camera update to see the model
-                await RunOnDispatcherAsync(() => {
-                    // Add a very small box at 0,0,0 to ensure the bounds are calculated properly
-                    MeshBuilder anchorMesh = new MeshBuilder(false, false);
-                    anchorMesh.AddBox(new Point3D(0, 0, 0), 0.001, 0.001, 0.001);
-                    GeometryModel3D anchorModel = new GeometryModel3D
-                    {
-                        Geometry = anchorMesh.ToMesh(),
-                        Material = new DiffuseMaterial(Brushes.Transparent),
-                        BackMaterial = new DiffuseMaterial(Brushes.Transparent)
-                    };
-                    ModelVisual3D anchor = new ModelVisual3D { Content = anchorModel };
-                    rootModel.Children.Add(anchor);
-                });
-            }
-            catch (OperationCanceledException)
-            {
-                // Rendering was canceled, log it
-                Logger.Log("[VolumeRenderer] Rendering was canceled");
+                Logger.Log($"[VolumeRenderer] Volume rendering completed in {renderTimer.ElapsedMilliseconds}ms");
             }
             catch (Exception ex)
             {
-                // Log detailed error
-                Logger.Log($"[VolumeRenderer] Error during rendering: {ex.Message}\n{ex.StackTrace}");
+                Logger.Log($"[VolumeRenderer] Error in UpdateAsync => {ex.Message}");
                 throw;
             }
         }
 
-        public void UpdateThreshold()
+        /// <summary>
+        /// Calculate the optimal stride based on volume size and available memory
+        /// </summary>
+        private void CalculateOptimalStride(long totalVoxels)
         {
-            // This method updates materials in real-time based on threshold changes
-            RunOnDispatcher(() =>
+            if (!useLodRendering)
             {
-                foreach (var child in volumeModel.Children)
-                {
-                    if (child is ModelVisual3D modelVis && modelVis.Content is GeometryModel3D gm)
-                    {
-                        // Create a semi-transparent material for threshold visualization
-                        var color = Colors.LightGray;
-                        color.A = (byte)(128); // Semi-transparent
+                voxelStride = 1;
+                return;
+            }
 
-                        var material = new DiffuseMaterial(new SolidColorBrush(color));
-                        gm.Material = material;
-                        gm.BackMaterial = material;
-                    }
-                }
-            });
+            // For extremely large volumes, use higher stride
+            if (totalVoxels > 2000L * 2000 * 2000)
+            {
+                voxelStride = 8; // Ultra large volumes
+                Logger.Log("[VolumeRenderer] Ultra large volume detected, using stride=8");
+            }
+            else if (totalVoxels > 1000L * 1000 * 1000)
+            {
+                voxelStride = 4; // Very large volumes 
+                Logger.Log("[VolumeRenderer] Very large volume detected, using stride=4");
+            }
+            else if (totalVoxels > 500L * 500 * 500)
+            {
+                voxelStride = 2; // Large volumes
+                Logger.Log("[VolumeRenderer] Large volume detected, using stride=2");
+            }
+            else
+            {
+                // Keep user-defined stride for smaller volumes
+            }
         }
 
-        public void ShowSlicePlanes(bool show)
-        {
-            RunOnDispatcher(() =>
-            {
-                slicePlanesModel.Children.Clear();
-
-                if (show)
-                {
-                    // Initialize slice planes if not already created
-                    slicePlanesModel.Children.Add(xSlicePlaneModel);
-                    slicePlanesModel.Children.Add(ySlicePlaneModel);
-                    slicePlanesModel.Children.Add(zSlicePlaneModel);
-                }
-            });
-        }
-
-        public void UpdateSlicePlanes(int xPos, int yPos, int zPos, int width, int height, int depth, double pixelSize)
-        {
-            RunOnDispatcher(() =>
-            {
-                slicePlanesModel.Children.Clear();
-                slicePlanesModel.Children.Add(xSlicePlaneModel);
-                slicePlanesModel.Children.Add(ySlicePlaneModel);
-                slicePlanesModel.Children.Add(zSlicePlaneModel);
-
-                UpdateXSlice(xPos, width, pixelSize);
-                UpdateYSlice(yPos, height, pixelSize);
-                UpdateZSlice(zPos, depth, pixelSize);
-            });
-        }
-
-        public void UpdateXSlice(int xPos, int width, double pixelSize)
-        {
-            double totalWidth = width * pixelSize;
-            double totalHeight = mainForm.GetHeight() * pixelSize;
-            double totalDepth = mainForm.GetDepth() * pixelSize;
-            double realX = xPos * pixelSize;
-
-            MeshBuilder meshBuilder = new MeshBuilder(false, false);
-            meshBuilder.AddQuad(
-                new Point3D(realX, 0, 0),
-                new Point3D(realX, totalHeight, 0),
-                new Point3D(realX, totalHeight, totalDepth),
-                new Point3D(realX, 0, totalDepth));
-
-            GeometryModel3D model = new GeometryModel3D
-            {
-                Geometry = meshBuilder.ToMesh(),
-                Material = new DiffuseMaterial(new SolidColorBrush(Color.FromArgb(127, 255, 0, 0))),
-                BackMaterial = new DiffuseMaterial(new SolidColorBrush(Color.FromArgb(127, 255, 0, 0)))
-            };
-
-            RunOnDispatcher(() =>
-            {
-                xSlicePlaneModel.Content = model;
-            });
-        }
-
-        public void UpdateYSlice(int yPos, int height, double pixelSize)
-        {
-            double totalWidth = mainForm.GetWidth() * pixelSize;
-            double totalHeight = height * pixelSize;
-            double totalDepth = mainForm.GetDepth() * pixelSize;
-            double realY = yPos * pixelSize;
-
-            MeshBuilder meshBuilder = new MeshBuilder(false, false);
-            meshBuilder.AddQuad(
-                new Point3D(0, realY, 0),
-                new Point3D(totalWidth, realY, 0),
-                new Point3D(totalWidth, realY, totalDepth),
-                new Point3D(0, realY, totalDepth));
-
-            GeometryModel3D model = new GeometryModel3D
-            {
-                Geometry = meshBuilder.ToMesh(),
-                Material = new DiffuseMaterial(new SolidColorBrush(Color.FromArgb(127, 0, 255, 0))),
-                BackMaterial = new DiffuseMaterial(new SolidColorBrush(Color.FromArgb(127, 0, 255, 0)))
-            };
-
-            RunOnDispatcher(() =>
-            {
-                ySlicePlaneModel.Content = model;
-            });
-        }
-
-        public void UpdateZSlice(int zPos, int depth, double pixelSize)
-        {
-            double totalWidth = mainForm.GetWidth() * pixelSize;
-            double totalHeight = mainForm.GetHeight() * pixelSize;
-            double totalDepth = depth * pixelSize;
-            double realZ = zPos * pixelSize;
-
-            MeshBuilder meshBuilder = new MeshBuilder(false, false);
-            meshBuilder.AddQuad(
-                new Point3D(0, 0, realZ),
-                new Point3D(totalWidth, 0, realZ),
-                new Point3D(totalWidth, totalHeight, realZ),
-                new Point3D(0, totalHeight, realZ));
-
-            GeometryModel3D model = new GeometryModel3D
-            {
-                Geometry = meshBuilder.ToMesh(),
-                Material = new DiffuseMaterial(new SolidColorBrush(Color.FromArgb(127, 0, 0, 255))),
-                BackMaterial = new DiffuseMaterial(new SolidColorBrush(Color.FromArgb(127, 0, 0, 255)))
-            };
-
-            RunOnDispatcher(() =>
-            {
-                zSlicePlaneModel.Content = model;
-            });
-        }
-
-        public void QuickRenderTest()
+        /// <summary>
+        /// Create optimized volume texture with downsampling for performance
+        /// </summary>
+        private async Task CreateOptimizedVolumeTexture(int texWidth, int texHeight, int texDepth)
         {
             try
             {
-                // Create a bounding box representation of the volume
-                MeshBuilder meshBuilder = new MeshBuilder(false, false);
+                Logger.Log("[VolumeRenderer] Creating optimized volume texture...");
 
-                // Calculate real-world dimensions
-                double width = mainForm.GetWidth() * mainForm.GetPixelSize();
-                double height = mainForm.GetHeight() * mainForm.GetPixelSize();
-                double depth = mainForm.GetDepth() * mainForm.GetPixelSize();
+                // Create grayscale volume arrays using stride for downsampling
+                byte[] volumeBytes = await Task.Run(() => DownsampleVolumeData(texWidth, texHeight, texDepth));
 
-                // Create a wireframe box
-                meshBuilder.AddBoundingBox(new Rect3D(0, 0, 0, width, height, depth), Math.Min(width, Math.Min(height, depth)) * 0.01);
+                
 
-                var mesh = meshBuilder.ToMesh();
-                var wireframe = new GeometryModel3D
+                // Create new GPU texture for grayscale volume
+                grayscaleTexture = CreateGPUTexture3D(volumeBytes, texWidth, texHeight, texDepth);
+
+                // Create new volume material with optimized settings
+                volumeMaterial = new VolumeTextureDiffuseMaterial
                 {
-                    Geometry = mesh,
-                    Material = new DiffuseMaterial(Brushes.Red),
-                    BackMaterial = new DiffuseMaterial(Brushes.Red)
+                    Texture = grayscaleTexture,
+                    SampleDistance = 0.5f / Math.Max(Math.Max(texWidth, texHeight), texDepth),
+                    MaxIterations = 1024 // Increase for better quality if needed
                 };
 
-                RunOnDispatcher(() =>
+                // Handle label volume if available
+                if (mainForm.volumeLabels != null)
                 {
-                    volumeModel.Children.Clear();
-                    volumeModel.Children.Add(new ModelVisual3D { Content = wireframe });
-                    Logger.Log("[3D Viewer] Added volume bounding box");
-                });
+                    // Create label volume array
+                    byte[] labelBytes = await Task.Run(() => DownsampleLabelData(texWidth, texHeight, texDepth));
+
+                    // Dispose previous label texture if it exists
+                    
+
+                    // Create new GPU texture for labels
+                    labelTexture = CreateGPUTexture3D(labelBytes, texWidth, texHeight, texDepth);
+
+                    // Create new label material
+                    labelsMaterial = new VolumeTextureDiffuseMaterial
+                    {
+                        Texture = labelTexture,
+                        SampleDistance = 0.5f / Math.Max(Math.Max(texWidth, texHeight), texDepth),
+                        MaxIterations = 1024
+                    };
+                }
+
+                // Create or update volume models
+                if (volumeModel == null)
+                {
+                    volumeModel = new VolumeTextureModel3D();
+                    rootGroup.Children.Add(volumeModel);
+                }
+
+                volumeModel.VolumeMaterial = volumeMaterial;
+                volumeModel.IsRendering = showBwDataset;
+
+                if (materialModel == null && labelsMaterial != null)
+                {
+                    materialModel = new VolumeTextureModel3D();
+                    rootGroup.Children.Add(materialModel);
+                }
+
+                if (labelsMaterial != null)
+                {
+                    materialModel.VolumeMaterial = labelsMaterial;
+                    materialModel.IsRendering = true;
+                }
+
+                Logger.Log("[VolumeRenderer] Volume textures created successfully");
             }
             catch (Exception ex)
             {
-                Logger.Log($"[3D Viewer] Quick test error: {ex.Message}");
+                Logger.Log($"[VolumeRenderer] Error creating textures: {ex.Message}");
+                throw;
             }
         }
 
-        // Export model implementation
-        public void ExportModel(string filePath)
+        /// <summary>
+        /// Downsample volume data with stride for performance
+        /// </summary>
+        private byte[] DownsampleVolumeData(int texWidth, int texHeight, int texDepth)
         {
+            Logger.Log("[VolumeRenderer] Downsampling volume data...");
+            byte[] volumeBytes = new byte[texWidth * texHeight * texDepth];
+
+            Parallel.For(0, texDepth, z =>
+            {
+                int srcZ = Math.Min(z * voxelStride, volDepth - 1);
+                for (int y = 0; y < texHeight; y++)
+                {
+                    int srcY = Math.Min(y * voxelStride, volHeight - 1);
+                    for (int x = 0; x < texWidth; x++)
+                    {
+                        int srcX = Math.Min(x * voxelStride, volWidth - 1);
+                        int destIndex = z * texWidth * texHeight + y * texWidth + x;
+
+                        // Simple point sampling (could be upgraded to box filter for better quality)
+                        volumeBytes[destIndex] = mainForm.volumeData[srcX, srcY, srcZ];
+                    }
+                }
+            });
+
+            return volumeBytes;
+        }
+
+        /// <summary>
+        /// Downsample label data with stride for performance
+        /// </summary>
+        private byte[] DownsampleLabelData(int texWidth, int texHeight, int texDepth)
+        {
+            Logger.Log("[VolumeRenderer] Downsampling label data...");
+            byte[] labelBytes = new byte[texWidth * texHeight * texDepth];
+
+            Parallel.For(0, texDepth, z =>
+            {
+                int srcZ = Math.Min(z * voxelStride, volDepth - 1);
+                for (int y = 0; y < texHeight; y++)
+                {
+                    int srcY = Math.Min(y * voxelStride, volHeight - 1);
+                    for (int x = 0; x < texWidth; x++)
+                    {
+                        int srcX = Math.Min(x * voxelStride, volWidth - 1);
+                        int destIndex = z * texWidth * texHeight + y * texWidth + x;
+
+                        // For labels, use nearest neighbor to avoid interpolating label values
+                        labelBytes[destIndex] = mainForm.volumeLabels[srcX, srcY, srcZ];
+                    }
+                }
+            });
+
+            return labelBytes;
+        }
+
+        /// <summary>
+        /// Create GPU-optimized 3D texture
+        /// </summary>
+        private VolumeTextureGradientParams CreateGPUTexture3D(byte[] data, int width, int height, int depth)
+        {
+            int length = width * height * depth;
+            var textureData = new Half4[length];
+
+            // Convert byte data to Half4 format optimized for GPU
+            Parallel.For(0, length, i =>
+            {
+                // Normalize the byte value into the range [0,1]
+                float value = data[i] / 255f;
+                textureData[i] = new Half4(value, value, value, value > 0 ? 1.0f : 0.0f);
+            });
+
+            return new VolumeTextureGradientParams(textureData, width, height, depth);
+        }
+
+        /// <summary>
+        /// Render large volumes using octree partitioning
+        /// </summary>
+        private async Task RenderWithOctree(int texWidth, int texHeight, int texDepth)
+        {
+            // This would implement a brick-based approach for extremely large volumes
+            // Here we'll use a simplified version by creating a lower-resolution preview
+
+            Logger.Log("[VolumeRenderer] Using octree-based rendering for large volume");
+
+            // Calculate a more aggressive downsampling factor for preview
+            int previewStride = voxelStride * 2;
+            int previewWidth = (volWidth + previewStride - 1) / previewStride;
+            int previewHeight = (volHeight + previewStride - 1) / previewStride;
+            int previewDepth = (volDepth + previewStride - 1) / previewStride;
+
+            Logger.Log($"[VolumeRenderer] Creating preview texture: {previewWidth}x{previewHeight}x{previewDepth} with stride {previewStride}");
+
+            // Create down-sampled preview volume
+            byte[] previewVolume = new byte[previewWidth * previewHeight * previewDepth];
+
+            await Task.Run(() =>
+            {
+                Parallel.For(0, previewDepth, z =>
+                {
+                    int srcZ = Math.Min(z * previewStride, volDepth - 1);
+                    for (int y = 0; y < previewHeight; y++)
+                    {
+                        int srcY = Math.Min(y * previewStride, volHeight - 1);
+                        for (int x = 0; x < previewWidth; x++)
+                        {
+                            int srcX = Math.Min(x * previewStride, volWidth - 1);
+                            int destIndex = z * previewWidth * previewHeight + y * previewWidth + x;
+                            previewVolume[destIndex] = mainForm.volumeData[srcX, srcY, srcZ];
+                        }
+                    }
+                });
+            });
+
+            // Create preview texture
+            
+            grayscaleTexture = CreateGPUTexture3D(previewVolume, previewWidth, previewHeight, previewDepth);
+
+            // Create optimized volume material for preview
+            volumeMaterial = new VolumeTextureDiffuseMaterial
+            {
+                Texture = grayscaleTexture,
+                SampleDistance = 0.5f / Math.Max(Math.Max(previewWidth, previewHeight), previewDepth),
+                MaxIterations = 768 // Lower for performance with large volumes
+            };
+
+            // Handle labels if available
+            if (mainForm.volumeLabels != null)
+            {
+                byte[] previewLabels = new byte[previewWidth * previewHeight * previewDepth];
+
+                await Task.Run(() =>
+                {
+                    Parallel.For(0, previewDepth, z =>
+                    {
+                        int srcZ = Math.Min(z * previewStride, volDepth - 1);
+                        for (int y = 0; y < previewHeight; y++)
+                        {
+                            int srcY = Math.Min(y * previewStride, volHeight - 1);
+                            for (int x = 0; x < previewWidth; x++)
+                            {
+                                int srcX = Math.Min(x * previewStride, volWidth - 1);
+                                int destIndex = z * previewWidth * previewHeight + y * previewWidth + x;
+                                previewLabels[destIndex] = mainForm.volumeLabels[srcX, srcY, srcZ];
+                            }
+                        }
+                    });
+                });
+
+                // Create label texture
+                
+                labelTexture = CreateGPUTexture3D(previewLabels, previewWidth, previewHeight, previewDepth);
+
+                // Create material
+                labelsMaterial = new VolumeTextureDiffuseMaterial
+                {
+                    Texture = labelTexture,
+                    SampleDistance = 0.5f / Math.Max(Math.Max(previewWidth, previewHeight), previewDepth),
+                    MaxIterations = 768
+                };
+            }
+
+            // Update models
+            if (volumeModel == null)
+            {
+                volumeModel = new VolumeTextureModel3D();
+                rootGroup.Children.Add(volumeModel);
+            }
+
+            volumeModel.VolumeMaterial = volumeMaterial;
+            volumeModel.IsRendering = showBwDataset;
+
+            if (materialModel == null && labelsMaterial != null)
+            {
+                materialModel = new VolumeTextureModel3D();
+                rootGroup.Children.Add(materialModel);
+            }
+
+            if (labelsMaterial != null)
+            {
+                materialModel.VolumeMaterial = labelsMaterial;
+                materialModel.IsRendering = true;
+            }
+
+            Logger.Log("[VolumeRenderer] Octree preview rendering complete");
+        }
+
+        /// <summary>
+        /// Initialize or update the transfer function maps for volume rendering
+        /// </summary>
+        private void InitializeTransferMaps()
+        {
+            // Create or update grayscale transfer map
+            grayColorMap = new Color4[256];
+            for (int i = 0; i < 256; i++)
+                grayColorMap[i] = new Color4(0, 0, 0, 0);
+
+            if (minThreshold < 0) minThreshold = 0;
+            if (maxThreshold > 255) maxThreshold = 255;
+            if (minThreshold > maxThreshold) minThreshold = maxThreshold;
+
+            // Apply custom transfer function to emphasize features
+            for (int i = minThreshold; i <= maxThreshold && i < 256; i++)
+            {
+                float normalizedIntensity = (i - minThreshold) / (float)(maxThreshold - minThreshold);
+                float intensity = i / 255f;
+
+                // Apply gamma correction for better visibility
+                float alpha = (float)Math.Pow(normalizedIntensity, 1.5); // Adjust gamma for better visibility
+
+                grayColorMap[i] = new Color4(intensity, intensity, intensity, alpha);
+            }
+
+            // Create or update material transfer map
+            labelColorMap = new Color4[256];
+            for (int i = 0; i < 256; i++)
+                labelColorMap[i] = new Color4(0, 0, 0, 0);
+            labelColorMap[0] = new Color4(0, 0, 0, 0);
+
+            foreach (var mat in mainForm.Materials)
+            {
+                if (mat.ID == 0) continue;
+                System.Drawing.Color c = mat.Color;
+                float alpha = 0f;
+                if (materialVisibilityState.TryGetValue(mat.ID, out bool vis) && vis)
+                {
+                    materialOpacities.TryGetValue(mat.ID, out double op);
+                    if (op <= 0) op = 1.0;
+                    alpha = (float)op;
+                }
+                labelColorMap[mat.ID] = new Color4(c.R / 255f, c.G / 255f, c.B / 255f, alpha);
+            }
+
+            Logger.Log("[VolumeRenderer] Transfer functions updated");
+        }
+
+        /// <summary>
+        /// Update volume rendering transfer function maps
+        /// </summary>
+        public void UpdateTransferFunctions()
+        {
+            if (!dataLoaded) return;
+
+            InitializeTransferMaps();
+
+            if (volumeMaterial != null)
+                volumeMaterial.TransferMap = grayColorMap;
+
+            if (labelsMaterial != null)
+                labelsMaterial.TransferMap = labelColorMap;
+
+            Logger.Log("[VolumeRenderer] Transfer functions updated.");
+        }
+
+        /// <summary>
+        /// Set material visibility state and update rendering
+        /// </summary>
+        public void SetMaterialVisibility(byte materialId, bool isVisible)
+        {
+            materialVisibilityState[materialId] = isVisible;
+            Logger.Log($"[VolumeRenderer] Material {materialId} visibility set => {isVisible}");
+            UpdateTransferFunctions();
+        }
+
+        /// <summary>
+        /// Set material opacity and update rendering
+        /// </summary>
+        public void SetMaterialOpacity(byte materialId, double opacity)
+        {
+            if (opacity < 0) opacity = 0;
+            if (opacity > 1) opacity = 1;
+            materialOpacities[materialId] = opacity;
+            Logger.Log($"[VolumeRenderer] Material {materialId} opacity set => {opacity:F2}");
+            UpdateTransferFunctions();
+        }
+
+        /// <summary>
+        /// Get current material opacity
+        /// </summary>
+        public double GetMaterialOpacity(byte materialId)
+        {
+            return materialOpacities.TryGetValue(materialId, out double op) ? op : 1.0;
+        }
+
+        /// <summary>
+        /// Toggle slice plane visibility
+        /// </summary>
+        public void ShowSlicePlanes(bool show)
+        {
+            slicePlanesVisible = show;
+            if (!show)
+            {
+                slicePlanesGroup.Children.Clear();
+            }
+            else
+            {
+                UpdateSlicePlanes(sliceX, sliceY, sliceZ, mainForm.GetWidth(), mainForm.GetHeight(), mainForm.GetDepth(), mainForm.GetPixelSize());
+            }
+        }
+
+        /// <summary>
+        /// Update all slice planes
+        /// </summary>
+        public void UpdateSlicePlanes(int xPos, int yPos, int zPos, int width, int height, int depth, double pixelSize)
+        {
+            sliceX = xPos;
+            sliceY = yPos;
+            sliceZ = zPos;
+            if (!slicePlanesVisible) return;
+
+            slicePlanesGroup.Children.Clear();
+
+            var xPlane = BuildSlicePlaneX(xPos, width, height, depth, pixelSize, new Color4(1f, 0f, 0f, 0.5f));
+            slicePlanesGroup.Children.Add(xPlane);
+            xSlicePlaneModel = xPlane;
+
+            var yPlane = BuildSlicePlaneY(yPos, width, height, depth, pixelSize, new Color4(0f, 1f, 0f, 0.5f));
+            slicePlanesGroup.Children.Add(yPlane);
+            ySlicePlaneModel = yPlane;
+
+            var zPlane = BuildSlicePlaneZ(zPos, width, height, depth, pixelSize, new Color4(0f, 0f, 1f, 0.5f));
+            slicePlanesGroup.Children.Add(zPlane);
+            zSlicePlaneModel = zPlane;
+
+            Logger.Log($"[VolumeRenderer] Updated slice planes => X={xPos}, Y={yPos}, Z={zPos}");
+        }
+
+        private MeshGeometryModel3D BuildSlicePlaneX(int xPos, int width, int height, int depth, double pixelSize, Color4 sliceColor)
+        {
+            float xCoord = (float)(xPos * pixelSize);
+            float totalY = (float)(height * pixelSize);
+            float totalZ = (float)(depth * pixelSize);
+
+            var builder = new MeshBuilder();
+            builder.AddQuad(
+                new Vector3(xCoord, 0, 0),
+                new Vector3(xCoord, totalY, 0),
+                new Vector3(xCoord, totalY, totalZ),
+                new Vector3(xCoord, 0, totalZ)
+            );
+
+            var geometry = builder.ToMeshGeometry3D();
+            var material = CreateTransparentMaterial(sliceColor);
+
+            return new MeshGeometryModel3D
+            {
+                Geometry = geometry,
+                Material = material,
+                CullMode = CullMode.None
+            };
+        }
+
+        private MeshGeometryModel3D BuildSlicePlaneY(int yPos, int width, int height, int depth, double pixelSize, Color4 sliceColor)
+        {
+            float yCoord = (float)(yPos * pixelSize);
+            float totalX = (float)(width * pixelSize);
+            float totalZ = (float)(depth * pixelSize);
+
+            var builder = new MeshBuilder();
+            builder.AddQuad(
+                new Vector3(0, yCoord, 0),
+                new Vector3(totalX, yCoord, 0),
+                new Vector3(totalX, yCoord, totalZ),
+                new Vector3(0, yCoord, totalZ)
+            );
+
+            var geometry = builder.ToMeshGeometry3D();
+            var material = CreateTransparentMaterial(sliceColor);
+
+            return new MeshGeometryModel3D
+            {
+                Geometry = geometry,
+                Material = material,
+                CullMode = CullMode.None
+            };
+        }
+
+        private MeshGeometryModel3D BuildSlicePlaneZ(int zPos, int width, int height, int depth, double pixelSize, Color4 sliceColor)
+        {
+            float zCoord = (float)(zPos * pixelSize);
+            float totalX = (float)(width * pixelSize);
+            float totalY = (float)(height * pixelSize);
+
+            var builder = new MeshBuilder();
+            builder.AddQuad(
+                new Vector3(0, 0, zCoord),
+                new Vector3(totalX, 0, zCoord),
+                new Vector3(totalX, totalY, zCoord),
+                new Vector3(0, totalY, zCoord)
+            );
+
+            var geometry = builder.ToMeshGeometry3D();
+            var material = CreateTransparentMaterial(sliceColor);
+
+            return new MeshGeometryModel3D
+            {
+                Geometry = geometry,
+                Material = material,
+                CullMode = CullMode.None
+            };
+        }
+
+        private PhongMaterial CreateTransparentMaterial(Color4 color)
+        {
+            return new PhongMaterial
+            {
+                DiffuseColor = color,
+                AmbientColor = color,
+                SpecularColor = new Color4(0, 0, 0, 1),
+                ReflectiveColor = new Color4(0, 0, 0, 1)
+            };
+        }
+
+        /// <summary>
+        /// Update X-axis slice position
+        /// </summary>
+        public void UpdateXSlice(int xPos, int width, double pixelSize)
+        {
+            sliceX = xPos;
+            if (slicePlanesVisible)
+            {
+                double totalY = mainForm.GetHeight() * pixelSize;
+                double totalZ = mainForm.GetDepth() * pixelSize;
+                double xCoord = xPos * pixelSize;
+                var meshX = new MeshBuilder();
+                meshX.AddQuad(
+                    new Vector3((float)xCoord, 0, 0),
+                    new Vector3((float)xCoord, (float)totalY, 0),
+                    new Vector3((float)xCoord, (float)totalY, (float)totalZ),
+                    new Vector3((float)xCoord, 0, (float)totalZ)
+                );
+                xSlicePlaneModel.Geometry = meshX.ToMesh();
+            }
+        }
+
+        /// <summary>
+        /// Update Y-axis slice position
+        /// </summary>
+        public void UpdateYSlice(int yPos, int height, double pixelSize)
+        {
+            sliceY = yPos;
+            if (slicePlanesVisible)
+            {
+                double totalX = mainForm.GetWidth() * pixelSize;
+                double totalZ = mainForm.GetDepth() * pixelSize;
+                double yCoord = yPos * pixelSize;
+                var meshY = new MeshBuilder();
+                meshY.AddQuad(
+                    new Vector3(0, (float)yCoord, 0),
+                    new Vector3((float)totalX, (float)yCoord, 0),
+                    new Vector3((float)totalX, (float)yCoord, (float)totalZ),
+                    new Vector3(0, (float)yCoord, (float)totalZ)
+                );
+                ySlicePlaneModel.Geometry = meshY.ToMesh();
+            }
+        }
+
+        /// <summary>
+        /// Update Z-axis slice position
+        /// </summary>
+        public void UpdateZSlice(int zPos, int depth, double pixelSize)
+        {
+            sliceZ = zPos;
+            if (slicePlanesVisible)
+            {
+                double totalX = mainForm.GetWidth() * pixelSize;
+                double totalY = mainForm.GetHeight() * pixelSize;
+                double zCoord = zPos * pixelSize;
+                var meshZ = new MeshBuilder();
+                meshZ.AddQuad(
+                    new Vector3(0, 0, (float)zCoord),
+                    new Vector3((float)totalX, 0, (float)zCoord),
+                    new Vector3((float)totalX, (float)totalY, (float)zCoord),
+                    new Vector3(0, (float)totalY, (float)zCoord)
+                );
+                zSlicePlaneModel.Geometry = meshZ.ToMesh();
+            }
+        }
+
+        /// <summary>
+        /// Reset camera to show the entire volume in the viewport
+        /// </summary>
+        public void ResetCameraView()
+        {
+            if (camera == null || !dataLoaded) return;
+
+            // Calculate volume center
+            double centerX = volWidth * voxelSize / 2.0;
+            double centerY = volHeight * voxelSize / 2.0;
+            double centerZ = volDepth * voxelSize / 2.0;
+            var center = new Point3D(centerX, centerY, centerZ);
+
+            // Calculate maximum dimension for camera positioning
+            double maxDim = Math.Max(volWidth * voxelSize, Math.Max(volHeight * voxelSize, volDepth * voxelSize));
+
+            // Position camera to view the entire volume
+            camera.Position = new Point3D(centerX, centerY, -2.5 * maxDim);
+            camera.LookDirection = new Vector3D(0, 0, 1);
+            camera.UpDirection = new Vector3D(0, -1, 0);
+
+            // Set near and far planes properly
+            camera.NearPlaneDistance = maxDim * 0.01;
+            camera.FarPlaneDistance = maxDim * 10;
+
+            // Set field of view to ensure volume fits in view
+            camera.FieldOfView = 45;
+
+            // Force viewport to update
+            viewport.ZoomExtents();
+
+            Logger.Log("[VolumeRenderer] Camera view reset to show entire volume");
+        }
+
+        /// <summary>
+        /// Quick test rendering with minimal quality for rapid feedback
+        /// </summary>
+        public void QuickRenderTest()
+        {
+            Logger.Log("[VolumeRenderer] Running quick test render...");
+
             try
             {
-                if (filePath.EndsWith(".obj"))
+                // Get volume dimensions
+                volWidth = mainForm.GetWidth();
+                volHeight = mainForm.GetHeight();
+                volDepth = mainForm.GetDepth();
+                voxelSize = mainForm.GetPixelSize();
+
+                // Create a very low-resolution preview with high downsampling
+                int quickStride = 16;  // Very aggressive downsampling
+                int previewWidth = (volWidth + quickStride - 1) / quickStride;
+                int previewHeight = (volHeight + quickStride - 1) / quickStride;
+                int previewDepth = (volDepth + quickStride - 1) / quickStride;
+
+                Logger.Log($"[VolumeRenderer] Quick test: Creating {previewWidth}x{previewHeight}x{previewDepth} preview");
+
+                // Create downsampled volume data
+                byte[] previewVolume = new byte[previewWidth * previewHeight * previewDepth];
+
+                for (int z = 0; z < previewDepth; z++)
                 {
-                    ExportToObj(filePath);
+                    int srcZ = Math.Min(z * quickStride, volDepth - 1);
+                    for (int y = 0; y < previewHeight; y++)
+                    {
+                        int srcY = Math.Min(y * quickStride, volHeight - 1);
+                        for (int x = 0; x < previewWidth; x++)
+                        {
+                            int srcX = Math.Min(x * quickStride, volWidth - 1);
+                            int destIndex = z * previewWidth * previewHeight + y * previewWidth + x;
+                            previewVolume[destIndex] = mainForm.volumeData[srcX, srcY, srcZ];
+                        }
+                    }
                 }
-                else if (filePath.EndsWith(".stl"))
+
+                // Create texture
+                
+
+                grayscaleTexture = CreateGPUTexture3D(previewVolume, previewWidth, previewHeight, previewDepth);
+
+                // Create material with quick render settings
+                volumeMaterial = new VolumeTextureDiffuseMaterial
+                {
+                    Texture = grayscaleTexture,
+                    SampleDistance = 1.0f / Math.Max(Math.Max(previewWidth, previewHeight), previewDepth),
+                    MaxIterations = 512
+                };
+
+                // Update transfer function for quick preview (higher threshold to see structure)
+                minThreshold = 50; // Start with a higher threshold for faster preview
+                InitializeTransferMaps();
+                volumeMaterial.TransferMap = grayColorMap;
+
+                // Create or update volume model
+                if (volumeModel == null)
+                {
+                    volumeModel = new VolumeTextureModel3D();
+                    rootGroup.Children.Add(volumeModel);
+                }
+
+                volumeModel.VolumeMaterial = volumeMaterial;
+                volumeModel.IsRendering = true;
+
+                // Reset camera view
+                dataLoaded = true;
+                ResetCameraView();
+
+                Logger.Log("[VolumeRenderer] Quick test rendering complete");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[VolumeRenderer] Error in QuickRenderTest: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Export 3D model to mesh file
+        /// </summary>
+        public void ExportModel(string filePath)
+        {
+            if (!dataLoaded)
+            {
+                throw new InvalidOperationException("No volume data loaded to export.");
+            }
+
+            Logger.Log($"[VolumeRenderer] Exporting model to {filePath}...");
+
+            try
+            {
+                string ext = Path.GetExtension(filePath).ToLowerInvariant();
+
+                if (ext == ".stl")
                 {
                     ExportToStl(filePath);
                 }
-                Logger.Log($"[VolumeRenderer] Model exported successfully to {filePath}");
-            }
-            catch (Exception ex)
-            {
-                Logger.Log($"[VolumeRenderer] Export failed: {ex.Message}");
-                throw new Exception($"Export failed: {ex.Message}", ex);
-            }
-        }
-
-        #endregion
-
-        #region Private Methods
-
-        private void RunOnDispatcher(Action action)
-        {
-            try
-            {
-                if (uiDispatcher.CheckAccess())
+                else if (ext == ".obj")
                 {
-                    action();
+                    ExportToObj(filePath);
+                }
+                else if (ext == ".ply")
+                {
+                    ExportToPly(filePath);
                 }
                 else
                 {
-                    uiDispatcher.Invoke(action);
+                    // Default to STL if unknown extension
+                    ExportToStl(filePath);
                 }
+
+                Logger.Log("[VolumeRenderer] Export completed successfully.");
             }
             catch (Exception ex)
             {
-                Logger.Log($"[VolumeRenderer] UI operation error: {ex.Message}");
+                Logger.Log($"[VolumeRenderer] Error exporting model: {ex.Message}");
+                throw;
             }
         }
 
-        private async Task RunOnDispatcherAsync(Action action)
+        /// <summary>
+        /// Generate triangle mesh data for export
+        /// </summary>
+        private void GenerateMeshData(List<Point3D> vertices, List<(int, int, int)> triangles, List<Color> triangleColors)
         {
-            try
+            vertices.Clear();
+            triangles.Clear();
+            triangleColors.Clear();
+
+            // Export uses a larger voxel stride to keep mesh size manageable
+            int exportStride = voxelStride * 2;
+            if (exportStride < 2) exportStride = 2;
+
+            // Voxel size for scaling to world coords
+            double sx = voxelSize;
+            double sy = voxelSize;
+            double sz = voxelSize;
+
+            // Use higher threshold for export to get cleaner surfaces
+            int isoValue = minThreshold > 20 ? minThreshold : 30;
+
+            // Precompute which materials are visible
+            var visibleMaterials = mainForm.Materials
+                .Where(m => !m.IsExterior && materialVisibilityState.ContainsKey(m.ID) && materialVisibilityState[m.ID])
+                .Select(m => m.ID)
+                .ToHashSet();
+
+            // Define colors for each region
+            Color grayscaleColor = Colors.LightGray;
+            Dictionary<byte, Color> materialColors = new Dictionary<byte, Color>();
+
+            foreach (var mat in mainForm.Materials)
             {
-                if (uiDispatcher.CheckAccess())
+                if (!mat.IsExterior && visibleMaterials.Contains(mat.ID))
                 {
-                    action();
-                    await Task.CompletedTask;
-                }
-                else
-                {
-                    await uiDispatcher.InvokeAsync(action);
+                    materialColors[mat.ID] = Color.FromRgb(mat.Color.R, mat.Color.G, mat.Color.B);
                 }
             }
-            catch (Exception ex)
+
+            // Process each slice of the volume
+            for (int z = 0; z < volDepth; z += exportStride)
             {
-                Logger.Log($"[VolumeRenderer] Async UI operation error: {ex.Message}");
-            }
-        }
-
-        private void ExportToObj(string filePath)
-        {
-            using (StreamWriter objWriter = new StreamWriter(filePath))
-            {
-                objWriter.WriteLine("# Exported from CT Segmenter");
-
-                int vertexCount = 0;
-                int normalCount = 0;
-
-                // Export materials
-                string mtlFilePath = Path.ChangeExtension(filePath, ".mtl");
-                using (StreamWriter mtlWriter = new StreamWriter(mtlFilePath))
+                for (int y = 0; y < volHeight; y += exportStride)
                 {
-                    mtlWriter.WriteLine("# Materials");
-
-                    // Default material for volume data
-                    mtlWriter.WriteLine("newmtl volumeMaterial");
-                    mtlWriter.WriteLine("Ka 0.2 0.2 0.2");
-                    mtlWriter.WriteLine("Kd 0.8 0.8 0.8");
-                    mtlWriter.WriteLine("Ks 0.1 0.1 0.1");
-                    mtlWriter.WriteLine("Ns 32");
-                    mtlWriter.WriteLine("d 0.5");
-
-                    // Material for each segmented material
-                    foreach (var material in mainForm.Materials)
+                    for (int x = 0; x < volWidth; x += exportStride)
                     {
-                        if (!material.IsExterior)
+                        // Determine which region this voxel belongs to
+                        bool voxelInGrayRegion = false;
+                        byte label = 0;
+                        byte dataVal = mainForm.volumeData[x, y, z];
+
+                        if (dataVal >= isoValue)
                         {
-                            mtlWriter.WriteLine($"newmtl material{material.ID}");
-                            mtlWriter.WriteLine($"Ka 0.2 0.2 0.2");
-                            mtlWriter.WriteLine($"Kd {material.Color.R / 255.0} {material.Color.G / 255.0} {material.Color.B / 255.0}");
-                            mtlWriter.WriteLine($"Ks 0.1 0.1 0.1");
-                            mtlWriter.WriteLine($"Ns 32");
-                            mtlWriter.WriteLine($"d {(materialOpacities.ContainsKey(material.ID) ? materialOpacities[material.ID] : 1.0)}");
-                        }
-                    }
-                }
-
-                // Reference the material library
-                objWriter.WriteLine($"mtllib {Path.GetFileName(mtlFilePath)}");
-
-                // Export geometry for volume
-                ExportGeometryToObj(objWriter, volumeModel, "volumeMaterial", ref vertexCount, ref normalCount);
-
-                // Export geometry for each material
-                foreach (var material in mainForm.Materials)
-                {
-                    if (!material.IsExterior && materialModels.TryGetValue(material.ID, out var model))
-                    {
-                        ExportGeometryToObj(objWriter, model, $"material{material.ID}", ref vertexCount, ref normalCount);
-                    }
-                }
-            }
-        }
-
-        private void ExportGeometryToObj(StreamWriter writer, ModelVisual3D model, string materialName, ref int vertexCount, ref int normalCount)
-        {
-            // Start a new object
-            writer.WriteLine($"o {materialName}");
-            writer.WriteLine($"usemtl {materialName}");
-
-            // Export vertices, normals, and faces recursively for this model
-            ExportModelVisual3DToObj(writer, model, ref vertexCount, ref normalCount);
-        }
-
-        private void ExportModelVisual3DToObj(StreamWriter writer, ModelVisual3D visual, ref int vertexCount, ref int normalCount)
-        {
-            // Export geometry for this model
-            if (visual.Content is GeometryModel3D geometryModel)
-            {
-                if (geometryModel.Geometry is MeshGeometry3D mesh)
-                {
-                    // Export vertices
-                    foreach (var vertex in mesh.Positions)
-                    {
-                        writer.WriteLine($"v {vertex.X} {vertex.Y} {vertex.Z}");
-                    }
-
-                    // Export normals if available
-                    if (mesh.Normals != null && mesh.Normals.Count > 0)
-                    {
-                        foreach (var normal in mesh.Normals)
-                        {
-                            writer.WriteLine($"vn {normal.X} {normal.Y} {normal.Z}");
-                        }
-                    }
-
-                    // Export faces (triangles)
-                    for (int i = 0; i < mesh.TriangleIndices.Count; i += 3)
-                    {
-                        if (i + 2 < mesh.TriangleIndices.Count)
-                        {
-                            int v1 = mesh.TriangleIndices[i] + 1 + vertexCount;
-                            int v2 = mesh.TriangleIndices[i + 1] + 1 + vertexCount;
-                            int v3 = mesh.TriangleIndices[i + 2] + 1 + vertexCount;
-
-                            if (mesh.Normals != null && mesh.Normals.Count > 0)
+                            byte lbl = (mainForm.volumeLabels != null ? mainForm.volumeLabels[x, y, z] : (byte)0);
+                            if (lbl != 0 && visibleMaterials.Contains(lbl))
                             {
-                                int n1 = mesh.TriangleIndices[i] + 1 + normalCount;
-                                int n2 = mesh.TriangleIndices[i + 1] + 1 + normalCount;
-                                int n3 = mesh.TriangleIndices[i + 2] + 1 + normalCount;
-                                writer.WriteLine($"f {v1}//{n1} {v2}//{n2} {v3}//{n3}");
+                                label = lbl;
                             }
                             else
                             {
-                                writer.WriteLine($"f {v1} {v2} {v3}");
+                                voxelInGrayRegion = true;
                             }
                         }
-                    }
+                        else
+                        {
+                            if (mainForm.volumeLabels != null)
+                            {
+                                byte lbl = mainForm.volumeLabels[x, y, z];
+                                if (lbl != 0 && visibleMaterials.Contains(lbl))
+                                    label = lbl;
+                            }
+                        }
 
-                    vertexCount += mesh.Positions.Count;
-                    normalCount += mesh.Normals.Count;
+                        // Skip empty regions
+                        if (!voxelInGrayRegion && label == 0) continue;
+
+                        // Check +X face
+                        bool boundaryAtPlusX = false;
+                        if (x + exportStride >= volWidth)
+                        {
+                            boundaryAtPlusX = true;
+                        }
+                        else
+                        {
+                            byte neighborLabel = 0;
+                            bool neighborInGray = false;
+                            byte neighborVal = mainForm.volumeData[x + exportStride, y, z];
+
+                            if (neighborVal >= isoValue)
+                            {
+                                byte nLbl = (mainForm.volumeLabels != null ? mainForm.volumeLabels[x + exportStride, y, z] : (byte)0);
+                                if (nLbl != 0 && visibleMaterials.Contains(nLbl))
+                                    neighborLabel = nLbl;
+                                else
+                                    neighborInGray = true;
+                            }
+                            else
+                            {
+                                if (mainForm.volumeLabels != null)
+                                {
+                                    byte nLbl = mainForm.volumeLabels[x + exportStride, y, z];
+                                    if (nLbl != 0 && visibleMaterials.Contains(nLbl))
+                                        neighborLabel = nLbl;
+                                }
+                            }
+
+                            if (voxelInGrayRegion)
+                            {
+                                if (neighborInGray)
+                                    boundaryAtPlusX = false;
+                                else if (neighborLabel != 0)
+                                    boundaryAtPlusX = false;
+                                else
+                                    boundaryAtPlusX = true;
+                            }
+                            else if (label != 0)
+                            {
+                                if (neighborLabel == label)
+                                    boundaryAtPlusX = false;
+                                else if (neighborLabel != 0)
+                                    boundaryAtPlusX = false;
+                                else if (neighborInGray)
+                                    boundaryAtPlusX = false;
+                                else
+                                    boundaryAtPlusX = true;
+                            }
+                        }
+
+                        if (boundaryAtPlusX)
+                        {
+                            // Create face vertices
+                            double x0 = (x + exportStride) * sx;
+                            double y0 = y * sy;
+                            double y1 = Math.Min(y + exportStride, volHeight) * sy;
+                            double z0 = z * sz;
+                            double z1 = Math.Min(z + exportStride, volDepth) * sz;
+
+                            Point3D v0 = new Point3D(x0, y0, z0);
+                            Point3D v1 = new Point3D(x0, y1, z0);
+                            Point3D v2 = new Point3D(x0, y1, z1);
+                            Point3D v3 = new Point3D(x0, y0, z1);
+
+                            int baseIndex = vertices.Count;
+                            vertices.Add(v0); vertices.Add(v1); vertices.Add(v2); vertices.Add(v3);
+
+                            triangles.Add((baseIndex, baseIndex + 1, baseIndex + 2));
+                            triangles.Add((baseIndex, baseIndex + 2, baseIndex + 3));
+
+                            Color faceColor = voxelInGrayRegion ? grayscaleColor : materialColors[label];
+                            triangleColors.Add(faceColor);
+                            triangleColors.Add(faceColor);
+                        }
+
+                        // Check +Y face
+                        bool boundaryAtPlusY = false;
+                        if (y + exportStride >= volHeight)
+                        {
+                            boundaryAtPlusY = true;
+                        }
+                        else
+                        {
+                            byte neighborLabel = 0;
+                            bool neighborInGray = false;
+                            byte neighborVal = mainForm.volumeData[x, y + exportStride, z];
+
+                            if (neighborVal >= isoValue)
+                            {
+                                byte nLbl = (mainForm.volumeLabels != null ? mainForm.volumeLabels[x, y + exportStride, z] : (byte)0);
+                                if (nLbl != 0 && visibleMaterials.Contains(nLbl))
+                                    neighborLabel = nLbl;
+                                else
+                                    neighborInGray = true;
+                            }
+                            else
+                            {
+                                if (mainForm.volumeLabels != null)
+                                {
+                                    byte nLbl = mainForm.volumeLabels[x, y + exportStride, z];
+                                    if (nLbl != 0 && visibleMaterials.Contains(nLbl))
+                                        neighborLabel = nLbl;
+                                }
+                            }
+
+                            if (voxelInGrayRegion)
+                            {
+                                if (neighborInGray)
+                                    boundaryAtPlusY = false;
+                                else if (neighborLabel != 0)
+                                    boundaryAtPlusY = false;
+                                else
+                                    boundaryAtPlusY = true;
+                            }
+                            else if (label != 0)
+                            {
+                                if (neighborLabel == label)
+                                    boundaryAtPlusY = false;
+                                else if (neighborLabel != 0)
+                                    boundaryAtPlusY = false;
+                                else if (neighborInGray)
+                                    boundaryAtPlusY = false;
+                                else
+                                    boundaryAtPlusY = true;
+                            }
+                        }
+
+                        if (boundaryAtPlusY)
+                        {
+                            double x0 = x * sx;
+                            double x1 = Math.Min(x + exportStride, volWidth) * sx;
+                            double y1 = (y + exportStride) * sy;
+                            double z0 = z * sz;
+                            double z1 = Math.Min(z + exportStride, volDepth) * sz;
+
+                            Point3D v0 = new Point3D(x0, y1, z0);
+                            Point3D v1 = new Point3D(x1, y1, z0);
+                            Point3D v2 = new Point3D(x1, y1, z1);
+                            Point3D v3 = new Point3D(x0, y1, z1);
+
+                            int baseIndex = vertices.Count;
+                            vertices.Add(v0); vertices.Add(v1); vertices.Add(v2); vertices.Add(v3);
+
+                            triangles.Add((baseIndex, baseIndex + 1, baseIndex + 2));
+                            triangles.Add((baseIndex, baseIndex + 2, baseIndex + 3));
+
+                            Color faceColor = voxelInGrayRegion ? grayscaleColor : materialColors[label];
+                            triangleColors.Add(faceColor);
+                            triangleColors.Add(faceColor);
+                        }
+
+                        // Check +Z face
+                        bool boundaryAtPlusZ = false;
+                        if (z + exportStride >= volDepth)
+                        {
+                            boundaryAtPlusZ = true;
+                        }
+                        else
+                        {
+                            byte neighborLabel = 0;
+                            bool neighborInGray = false;
+                            byte neighborVal = mainForm.volumeData[x, y, z + exportStride];
+
+                            if (neighborVal >= isoValue)
+                            {
+                                byte nLbl = (mainForm.volumeLabels != null ? mainForm.volumeLabels[x, y, z + exportStride] : (byte)0);
+                                if (nLbl != 0 && visibleMaterials.Contains(nLbl))
+                                    neighborLabel = nLbl;
+                                else
+                                    neighborInGray = true;
+                            }
+                            else
+                            {
+                                if (mainForm.volumeLabels != null)
+                                {
+                                    byte nLbl = mainForm.volumeLabels[x, y, z + exportStride];
+                                    if (nLbl != 0 && visibleMaterials.Contains(nLbl))
+                                        neighborLabel = nLbl;
+                                }
+                            }
+
+                            if (voxelInGrayRegion)
+                            {
+                                if (neighborInGray)
+                                    boundaryAtPlusZ = false;
+                                else if (neighborLabel != 0)
+                                    boundaryAtPlusZ = false;
+                                else
+                                    boundaryAtPlusZ = true;
+                            }
+                            else if (label != 0)
+                            {
+                                if (neighborLabel == label)
+                                    boundaryAtPlusZ = false;
+                                else if (neighborLabel != 0)
+                                    boundaryAtPlusZ = false;
+                                else if (neighborInGray)
+                                    boundaryAtPlusZ = false;
+                                else
+                                    boundaryAtPlusZ = true;
+                            }
+                        }
+
+                        if (boundaryAtPlusZ)
+                        {
+                            double x0 = x * sx;
+                            double x1 = Math.Min(x + exportStride, volWidth) * sx;
+                            double y0 = y * sy;
+                            double y1 = Math.Min(y + exportStride, volHeight) * sy;
+                            double z1 = (z + exportStride) * sz;
+
+                            Point3D v0 = new Point3D(x0, y0, z1);
+                            Point3D v1 = new Point3D(x1, y0, z1);
+                            Point3D v2 = new Point3D(x1, y1, z1);
+                            Point3D v3 = new Point3D(x0, y1, z1);
+
+                            int baseIndex = vertices.Count;
+                            vertices.Add(v0); vertices.Add(v1); vertices.Add(v2); vertices.Add(v3);
+
+                            triangles.Add((baseIndex, baseIndex + 1, baseIndex + 2));
+                            triangles.Add((baseIndex, baseIndex + 2, baseIndex + 3));
+
+                            Color faceColor = voxelInGrayRegion ? grayscaleColor : materialColors[label];
+                            triangleColors.Add(faceColor);
+                            triangleColors.Add(faceColor);
+                        }
+                    }
                 }
             }
 
-            // Recursively export children
-            foreach (var child in visual.Children)
+            Logger.Log($"[VolumeRenderer] Mesh generation complete: {vertices.Count} vertices, {triangles.Count} triangles");
+        }
+
+        /// <summary>
+        /// Export to OBJ format with material definitions
+        /// </summary>
+        private void ExportToObj(string filePath)
+        {
+            List<Point3D> vertices = new List<Point3D>();
+            List<(int, int, int)> triangles = new List<(int, int, int)>();
+            List<Color> triangleColors = new List<Color>();
+
+            GenerateMeshData(vertices, triangles, triangleColors);
+
+            string mtlFilePath = Path.ChangeExtension(filePath, ".mtl");
+            string objFileName = Path.GetFileName(mtlFilePath);
+
+            using (StreamWriter objWriter = new StreamWriter(filePath))
             {
-                if (child is ModelVisual3D childVisual)
+                objWriter.WriteLine("# Exported from CT Segmenter VolumeRenderer");
+                objWriter.WriteLine($"mtllib {Path.GetFileName(mtlFilePath)}");
+
+                // Write vertices
+                foreach (var v in vertices)
                 {
-                    ExportModelVisual3DToObj(writer, childVisual, ref vertexCount, ref normalCount);
+                    objWriter.WriteLine($"v {v.X:F4} {v.Y:F4} {v.Z:F4}");
                 }
+
+                // Determine distinct materials
+                Dictionary<Color, string> colorToMatName = new Dictionary<Color, string>();
+                List<Color> uniqueColors = triangleColors.Distinct().ToList();
+
+                // Assign material names
+                foreach (Color col in uniqueColors)
+                {
+                    string matName;
+                    if (col == Colors.LightGray)
+                    {
+                        matName = "Grayscale";
+                    }
+                    else
+                    {
+                        var mat = mainForm.Materials.FirstOrDefault(m =>
+                            !m.IsExterior &&
+                            m.Color.R == col.R &&
+                            m.Color.G == col.G &&
+                            m.Color.B == col.B
+                        );
+                        matName = mat != null ? mat.Name.Replace(" ", "_") : $"Color_{col.R}_{col.G}_{col.B}";
+                    }
+                    colorToMatName[col] = matName;
+                }
+
+                // Write faces grouped by material
+                Color currentColor = Colors.Transparent;
+                for (int t = 0; t < triangles.Count; ++t)
+                {
+                    Color faceColor = triangleColors[t];
+                    if (faceColor != currentColor)
+                    {
+                        // Switch material
+                        currentColor = faceColor;
+                        string matName = colorToMatName[faceColor];
+                        objWriter.WriteLine($"usemtl {matName}");
+                    }
+
+                    // OBJ indices are 1-based
+                    var (ia, ib, ic) = triangles[t];
+                    objWriter.WriteLine($"f {ia + 1} {ib + 1} {ic + 1}");
+                }
+            }
+
+            // Write the material library
+            using (StreamWriter mtlWriter = new StreamWriter(mtlFilePath))
+            {
+                mtlWriter.WriteLine("# Material definitions for exported volume");
+
+                // Write materials
+                foreach (var mat in mainForm.Materials)
+                {
+                    if (mat.IsExterior) continue;
+                    mtlWriter.WriteLine($"newmtl {mat.Name.Replace(" ", "_")}");
+                    mtlWriter.WriteLine($"Kd {mat.Color.R / 255f:F3} {mat.Color.G / 255f:F3} {mat.Color.B / 255f:F3}");
+                    mtlWriter.WriteLine("illum 1");
+                    mtlWriter.WriteLine();
+                }
+
+                // Add grayscale material
+                mtlWriter.WriteLine("newmtl Grayscale");
+                mtlWriter.WriteLine($"Kd {0.75:F3} {0.75:F3} {0.75:F3}");
+                mtlWriter.WriteLine("illum 1");
             }
         }
 
-        private void ExportToStl(string filePath)
+        /// <summary>
+        /// Export to PLY format with color information
+        /// </summary>
+        private void ExportToPly(string filePath)
         {
+            List<Point3D> vertices = new List<Point3D>();
+            List<(int, int, int)> triangles = new List<(int, int, int)>();
+            List<Color> triangleColors = new List<Color>();
+
+            GenerateMeshData(vertices, triangles, triangleColors);
+
             using (StreamWriter writer = new StreamWriter(filePath))
             {
-                writer.WriteLine("solid CTSegmenter");
+                // Write PLY header
+                writer.WriteLine("ply");
+                writer.WriteLine("format ascii 1.0");
+                writer.WriteLine($"element vertex {vertices.Count}");
+                writer.WriteLine("property float x");
+                writer.WriteLine("property float y");
+                writer.WriteLine("property float z");
+                writer.WriteLine($"element face {triangles.Count}");
+                writer.WriteLine("property list uchar int vertex_index");
+                writer.WriteLine("property uchar red");
+                writer.WriteLine("property uchar green");
+                writer.WriteLine("property uchar blue");
+                writer.WriteLine("end_header");
 
-                // Export all geometry
-                ExportModelVisual3DToStl(writer, rootModel);
+                // Write vertex list
+                foreach (var v in vertices)
+                {
+                    writer.WriteLine($"{v.X:F4} {v.Y:F4} {v.Z:F4}");
+                }
 
-                writer.WriteLine("endsolid CTSegmenter");
+                // Write faces with color
+                for (int i = 0; i < triangles.Count; ++i)
+                {
+                    var (ia, ib, ic) = triangles[i];
+                    Color col = triangleColors[i];
+                    writer.WriteLine($"3 {ia} {ib} {ic} {col.R} {col.G} {col.B}");
+                }
             }
         }
 
-        private void ExportModelVisual3DToStl(StreamWriter writer, ModelVisual3D visual)
+        /// <summary>
+        /// Export to STL format
+        /// </summary>
+        private void ExportToStl(string filePath)
         {
-            // Export geometry for this model
-            if (visual.Content is GeometryModel3D geometryModel)
+            List<Point3D> vertices = new List<Point3D>();
+            List<(int, int, int)> triangles = new List<(int, int, int)>();
+            List<Color> triangleColors = new List<Color>();
+
+            GenerateMeshData(vertices, triangles, triangleColors);
+
+            using (StreamWriter writer = new StreamWriter(filePath))
             {
-                if (geometryModel.Geometry is MeshGeometry3D mesh)
+                writer.WriteLine("solid volume");
+
+                for (int i = 0; i < triangles.Count; ++i)
                 {
-                    // Export triangles
-                    for (int i = 0; i < mesh.TriangleIndices.Count; i += 3)
-                    {
-                        if (i + 2 < mesh.TriangleIndices.Count)
-                        {
-                            Point3D v1 = mesh.Positions[mesh.TriangleIndices[i]];
-                            Point3D v2 = mesh.Positions[mesh.TriangleIndices[i + 1]];
-                            Point3D v3 = mesh.Positions[mesh.TriangleIndices[i + 2]];
+                    var (ia, ib, ic) = triangles[i];
 
-                            // Calculate normal
-                            Vector3D edge1 = v2 - v1;
-                            Vector3D edge2 = v3 - v1;
-                            Vector3D normal = Vector3D.CrossProduct(edge1, edge2);
-                            normal.Normalize();
+                    // Compute facet normal
+                    var p1 = vertices[ia];
+                    var p2 = vertices[ib];
+                    var p3 = vertices[ic];
+                    Vector3D u = new Vector3D(p2.X - p1.X, p2.Y - p1.Y, p2.Z - p1.Z);
+                    Vector3D v = new Vector3D(p3.X - p1.X, p3.Y - p1.Y, p3.Z - p1.Z);
+                    Vector3D normal = Vector3D.CrossProduct(u, v);
 
-                            writer.WriteLine("  facet normal " + normal.X + " " + normal.Y + " " + normal.Z);
-                            writer.WriteLine("    outer loop");
-                            writer.WriteLine("      vertex " + v1.X + " " + v1.Y + " " + v1.Z);
-                            writer.WriteLine("      vertex " + v2.X + " " + v2.Y + " " + v2.Z);
-                            writer.WriteLine("      vertex " + v3.X + " " + v3.Y + " " + v3.Z);
-                            writer.WriteLine("    endloop");
-                            writer.WriteLine("  endfacet");
-                        }
-                    }
+                    // Normalize normal vector
+                    try { normal.Normalize(); } catch { }
+
+                    writer.WriteLine($"  facet normal {normal.X:F6} {normal.Y:F6} {normal.Z:F6}");
+                    writer.WriteLine("    outer loop");
+                    writer.WriteLine($"      vertex {p1.X:F6} {p1.Y:F6} {p1.Z:F6}");
+                    writer.WriteLine($"      vertex {p2.X:F6} {p2.Y:F6} {p2.Z:F6}");
+                    writer.WriteLine($"      vertex {p3.X:F6} {p3.Y:F6} {p3.Z:F6}");
+                    writer.WriteLine("    endloop");
+                    writer.WriteLine("  endfacet");
                 }
-            }
 
-            // Recursively export children
-            foreach (var child in visual.Children)
-            {
-                if (child is ModelVisual3D childVisual)
-                {
-                    ExportModelVisual3DToStl(writer, childVisual);
-                }
+                writer.WriteLine("endsolid volume");
             }
         }
 
-        private void UpdateModelOpacity(ModelVisual3D model, double opacity)
+        /// <summary>
+        /// Clean up resources
+        /// </summary>
+        public virtual void Dispose(bool disposing)
         {
-            if (model.Content is GeometryModel3D gm)
+            if (!disposed)
             {
-                if (gm.Material is DiffuseMaterial dm)
+                if (disposing)
                 {
-                    // Clone the brush and set its opacity
-                    SolidColorBrush originalBrush = dm.Brush as SolidColorBrush;
-                    if (originalBrush != null)
-                    {
-                        Color color = originalBrush.Color;
-                        color.A = (byte)(opacity * 255);
-                        dm.Brush = new SolidColorBrush(color);
-                    }
+                    // Dispose managed resources in correct order
+                   
+                    volumeMaterial = null;
+                    labelsMaterial = null;
+                    volumeModel?.Dispose();
+                    materialModel?.Dispose();
+                    effectsManager?.Dispose();
+
+                    Logger.Log("[VolumeRenderer] Resources disposed");
                 }
 
-                if (gm.BackMaterial is DiffuseMaterial bm)
-                {
-                    // Clone the brush and set its opacity
-                    SolidColorBrush originalBrush = bm.Brush as SolidColorBrush;
-                    if (originalBrush != null)
-                    {
-                        Color color = originalBrush.Color;
-                        color.A = (byte)(opacity * 255);
-                        bm.Brush = new SolidColorBrush(color);
-                    }
-                }
-            }
-
-            // Apply to all children as well
-            foreach (var child in model.Children)
-            {
-                if (child is ModelVisual3D childModel)
-                {
-                    UpdateModelOpacity(childModel, opacity);
-                }
+                disposed = true;
             }
         }
 
-        private async Task RenderVolumeMeshesAsync(CancellationToken cancellationToken)
+        void IDisposable.Dispose()
         {
-            try
-            {
-                // Create models for grayscale volume if available
-                if (mainForm.volumeData != null && showIsosurface)
-                {
-                    await RenderGrayscaleVolumeAsync(cancellationToken);
-                }
-
-                // Create models for segmented materials if available
-                if (mainForm.volumeLabels != null)
-                {
-                    await RenderMaterialVolumesAsync(cancellationToken);
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Log($"[VolumeRenderer] Error in RenderVolumeMeshesAsync: {ex.Message}");
-                throw;
-            }
+            Dispose(true);
+            GC.SuppressFinalize(this);
         }
-
-        private async Task RenderGrayscaleVolumeAsync(CancellationToken cancellationToken)
-        {
-            var width = mainForm.GetWidth();
-            var height = mainForm.GetHeight();
-            var depth = mainForm.GetDepth();
-
-            // Calculate total volume size
-            long totalVoxels = (long)width * height * depth;
-
-            // For extremely large volumes, use a more aggressive strategy
-            int adaptiveChunkSize;
-            if (totalVoxels > 1_000_000_000) // > 1 billion voxels
-            {
-                adaptiveChunkSize = 256;
-                voxelStride = Math.Max(voxelStride, 8); // Force coarser stride
-            }
-            else if (totalVoxels > 500_000_000) // > 500 million voxels
-            {
-                adaptiveChunkSize = 192;
-                voxelStride = Math.Max(voxelStride, 4);
-            }
-            else if (totalVoxels > 100_000_000) // > 100 million voxels
-            {
-                adaptiveChunkSize = 128;
-            }
-            else
-            {
-                adaptiveChunkSize = 64;
-            }
-
-            Logger.Log($"[VolumeRenderer] Volume size: {width}x{height}x{depth} = {totalVoxels:N0} voxels");
-            Logger.Log($"[VolumeRenderer] Using chunk size: {adaptiveChunkSize}, stride: {voxelStride}");
-
-            int numChunksX = (width + adaptiveChunkSize - 1) / adaptiveChunkSize;
-            int numChunksY = (height + adaptiveChunkSize - 1) / adaptiveChunkSize;
-            int numChunksZ = (depth + adaptiveChunkSize - 1) / adaptiveChunkSize;
-
-            // Scale to real-world coordinates
-            double pixelSize = mainForm.GetPixelSize();
-
-            // Compute the iso value from the thresholds 
-            isoValue = (minThreshold + maxThreshold) / 2.0;
-
-            // Set material for isosurface
-            var material = new DiffuseMaterial(new SolidColorBrush(Colors.LightGray));
-
-            Logger.Log($"[VolumeRenderer] Starting grayscale volume rendering with {numChunksX}x{numChunksY}x{numChunksZ} chunks");
-
-            // Process chunks
-            int batchSize = 5; // Number of chunks to process in each batch
-            int chunkCount = 0;
-            int completedChunks = 0;
-            ModelVisual3D container = new ModelVisual3D();
-
-            try
-            {
-                // Sample to check if we have any data within threshold range
-                bool hasDataInRange = await SampleVolumeForThresholdRangeAsync(cancellationToken);
-                if (!hasDataInRange)
-                {
-                    Logger.Log($"[VolumeRenderer] No data within threshold range ({minThreshold}-{maxThreshold}). Skipping grayscale rendering.");
-                    return;
-                }
-
-                for (int cz = 0; cz < numChunksZ; cz++)
-                {
-                    for (int cy = 0; cy < numChunksY; cy++)
-                    {
-                        for (int cx = 0; cx < numChunksX; cx++)
-                        {
-                            cancellationToken.ThrowIfCancellationRequested();
-
-                            // Process this chunk
-                            int startX = cx * adaptiveChunkSize;
-                            int startY = cy * adaptiveChunkSize;
-                            int startZ = cz * adaptiveChunkSize;
-
-                            int endX = Math.Min(startX + adaptiveChunkSize, width);
-                            int endY = Math.Min(startY + adaptiveChunkSize, height);
-                            int endZ = Math.Min(startZ + adaptiveChunkSize, depth);
-
-                            // Skip processing if the entire chunk is outside the threshold range
-                            if (await IsPotentiallyEmptyChunkAsync(startX, startY, startZ, endX, endY, endZ, cancellationToken))
-                                continue;
-
-                            // Process this chunk
-                            MeshGeometry3D mesh = await Task.Run(() =>
-                            {
-                                string cacheKey = $"iso_{startX}_{startY}_{startZ}_{voxelStride}_{minThreshold}_{maxThreshold}";
-
-                                if (meshCache.TryGetValue(cacheKey, out var cachedMesh))
-                                {
-                                    return cachedMesh;
-                                }
-                                else
-                                {
-                                    var newMesh = ExtractIsosurfaceForChunk(
-                                        startX, startY, startZ,
-                                        endX, endY, endZ,
-                                        pixelSize,
-                                        cancellationToken);
-
-                                    if (newMesh != null && newMesh.Positions.Count > 0)
-                                    {
-                                        meshCache[cacheKey] = newMesh;
-                                    }
-
-                                    return newMesh;
-                                }
-                            }, cancellationToken);
-
-                            if (mesh != null && mesh.Positions.Count > 0)
-                            {
-                                // Create a model on the UI thread
-                                await RunOnDispatcherAsync(() =>
-                                {
-                                    var model = new GeometryModel3D
-                                    {
-                                        Geometry = mesh,
-                                        Material = material.Clone(),
-                                        BackMaterial = material.Clone()
-                                    };
-
-                                    var visual = new ModelVisual3D { Content = model };
-                                    container.Children.Add(visual);
-                                });
-                            }
-
-                            chunkCount++;
-                            completedChunks++;
-
-                            // Every batch chunks, update the UI
-                            if (completedChunks >= batchSize)
-                            {
-                                await UpdateVolumeModelAsync(container);
-                                container = new ModelVisual3D();
-                                completedChunks = 0;
-
-                                // Force GC to clean up memory
-                                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true);
-                            }
-                        }
-                    }
-                }
-
-                // Add any remaining chunks
-                if (container.Children.Count > 0)
-                {
-                    await UpdateVolumeModelAsync(container);
-                }
-
-                Logger.Log($"[VolumeRenderer] Completed grayscale rendering, processed {chunkCount} chunks");
-            }
-            catch (OperationCanceledException)
-            {
-                Logger.Log("[VolumeRenderer] Grayscale rendering was canceled");
-                throw;
-            }
-            catch (Exception ex)
-            {
-                Logger.Log($"[VolumeRenderer] Error in grayscale rendering: {ex.Message}");
-                throw;
-            }
-        }
-
-        private async Task<bool> SampleVolumeForThresholdRangeAsync(CancellationToken cancellationToken)
-        {
-            // Check a sample of voxels to see if any are within threshold range
-            var volume = mainForm.volumeData;
-            if (volume == null) return false;
-
-            int width = mainForm.GetWidth();
-            int height = mainForm.GetHeight();
-            int depth = mainForm.GetDepth();
-
-            // Determine a reasonable sampling rate based on volume size
-            int stride = Math.Max(1, Math.Min(32, (int)Math.Ceiling(Math.Pow(width * height * depth, 1.0 / 3) / 20)));
-
-            return await Task.Run(() =>
-            {
-                for (int z = 0; z < depth; z += stride)
-                {
-                    for (int y = 0; y < height; y += stride)
-                    {
-                        for (int x = 0; x < width; x += stride)
-                        {
-                            if (cancellationToken.IsCancellationRequested)
-                                return false;
-
-                            byte voxel = volume[x, y, z];
-                            if (voxel >= minThreshold && voxel <= maxThreshold)
-                                return true;
-                        }
-                    }
-                }
-                return false;
-            }, cancellationToken);
-        }
-
-        private async Task UpdateVolumeModelAsync(ModelVisual3D container)
-        {
-            if (container.Children.Count == 0) return;
-
-            await RunOnDispatcherAsync(() =>
-            {
-                volumeModel.Children.Add(container);
-            });
-        }
-
-        private async Task<bool> IsPotentiallyEmptyChunkAsync(
-            int startX, int startY, int startZ,
-            int endX, int endY, int endZ,
-            CancellationToken cancellationToken)
-        {
-            return await Task.Run(() =>
-            {
-                try
-                {
-                    // Sample a few points to determine if there's anything in this chunk
-                    // Adjust stride based on chunk size for better performance
-                    int dim = Math.Max(endX - startX, Math.Max(endY - startY, endZ - startZ));
-                    int sampleStride = Math.Max(4, dim / 8);
-
-                    for (int z = startZ; z < endZ; z += sampleStride)
-                    {
-                        for (int y = startY; y < endY; y += sampleStride)
-                        {
-                            for (int x = startX; x < endX; x += sampleStride)
-                            {
-                                cancellationToken.ThrowIfCancellationRequested();
-
-                                if (x < mainForm.GetWidth() && y < mainForm.GetHeight() && z < mainForm.GetDepth())
-                                {
-                                    byte voxel = mainForm.volumeData[x, y, z];
-                                    if (voxel >= minThreshold && voxel <= maxThreshold)
-                                    {
-                                        return false; // Not empty
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    return true; // Potentially empty
-                }
-                catch (Exception ex)
-                {
-                    Logger.Log($"[VolumeRenderer] Error checking chunk: {ex.Message}");
-                    return true; // Skip on error
-                }
-            }, cancellationToken);
-        }
-
-        private MeshGeometry3D ExtractIsosurfaceForChunk(
-            int startX, int startY, int startZ,
-            int endX, int endY, int endZ,
-            double pixelSize,
-            CancellationToken cancellationToken)
-        {
-            try
-            {
-                // Optimization for large datasets
-                if (useLodRendering && voxelStride < 4)
-                {
-                    // Use lower detail for distant chunks (based on chunk size)
-                    double chunkSize = Math.Max(endX - startX, Math.Max(endY - startY, endZ - startZ));
-                    double scale = chunkSize / 128.0; // Base reference size
-
-                    if (scale > 3.0) voxelStride = Math.Max(voxelStride, 4);
-                    else if (scale > 2.0) voxelStride = Math.Max(voxelStride, 3);
-                    else if (scale > 1.0) voxelStride = Math.Max(voxelStride, 2);
-                }
-
-                // Allow for one voxel overlap to avoid seams between chunks
-                int sizeX = endX - startX + 1;
-                int sizeY = endY - startY + 1;
-                int sizeZ = endZ - startZ + 1;
-
-                // Create scalar field for isosurface extraction
-                double[,,] field = new double[sizeX, sizeY, sizeZ];
-
-                // Fill the scalar field from the volume data
-                for (int z = 0; z < sizeZ; z++)
-                {
-                    int volumeZ = startZ + z;
-                    if (volumeZ >= mainForm.GetDepth()) continue;
-
-                    for (int y = 0; y < sizeY; y++)
-                    {
-                        int volumeY = startY + y;
-                        if (volumeY >= mainForm.GetHeight()) continue;
-
-                        for (int x = 0; x < sizeX; x++)
-                        {
-                            cancellationToken.ThrowIfCancellationRequested();
-
-                            int volumeX = startX + x;
-                            if (volumeX >= mainForm.GetWidth()) continue;
-
-                            field[x, y, z] = mainForm.volumeData[volumeX, volumeY, volumeZ];
-                        }
-                    }
-                }
-
-                // Create mesh geometry for this chunk using the modified Marching Cubes algorithm
-                MeshBuilder meshBuilder = new MeshBuilder(false, false);
-
-                // Process the scalar field with the desired stride
-                for (int z = 0; z < sizeZ - 1; z += voxelStride)
-                {
-                    for (int y = 0; y < sizeY - 1; y += voxelStride)
-                    {
-                        for (int x = 0; x < sizeX - 1; x += voxelStride)
-                        {
-                            cancellationToken.ThrowIfCancellationRequested();
-
-                            // Skip processing if outside bounds
-                            if (startX + x >= mainForm.GetWidth() ||
-                                startY + y >= mainForm.GetHeight() ||
-                                startZ + z >= mainForm.GetDepth())
-                                continue;
-
-                            // Check if this cell crosses the isosurface
-                            bool hasCrossing = IsCrossingIsosurface(field, x, y, z, isoValue);
-
-                            if (hasCrossing)
-                            {
-                                // Create a box at this position
-                                double realX = (startX + x) * pixelSize;
-                                double realY = (startY + y) * pixelSize;
-                                double realZ = (startZ + z) * pixelSize;
-                                double size = voxelStride * pixelSize * 0.95; // Slightly smaller to avoid z-fighting
-
-                                meshBuilder.AddBox(
-                                    new Point3D(realX + size / 2, realY + size / 2, realZ + size / 2),
-                                    size, size, size);
-                            }
-                        }
-                    }
-                }
-
-                MeshGeometry3D mesh = meshBuilder.ToMesh();
-                if (mesh.CanFreeze)
-                {
-                    mesh.Freeze();
-                }
-                return mesh;
-            }
-            catch (OperationCanceledException)
-            {
-                throw; // Re-throw cancellation
-            }
-            catch (Exception ex)
-            {
-                // Log the error but don't crash the whole app
-                Logger.Log($"[VolumeRenderer] Error extracting isosurface: {ex.Message}");
-                return null;
-            }
-        }
-
-        private bool IsCrossingIsosurface(double[,,] field, int x, int y, int z, double isoValue)
-        {
-            // Get the eight corners of this cell
-            double v000 = field[x, y, z];
-            double v100 = field[x + 1, y, z];
-            double v010 = field[x, y + 1, z];
-            double v110 = field[x + 1, y + 1, z];
-            double v001 = field[x, y, z + 1];
-            double v101 = field[x + 1, y, z + 1];
-            double v011 = field[x, y + 1, z + 1];
-            double v111 = field[x + 1, y + 1, z + 1];
-
-            // Check if some corners are above the iso value and some are below
-            bool hasAbove = v000 >= isoValue || v100 >= isoValue || v010 >= isoValue || v110 >= isoValue ||
-                           v001 >= isoValue || v101 >= isoValue || v011 >= isoValue || v111 >= isoValue;
-
-            bool hasBelow = v000 < isoValue || v100 < isoValue || v010 < isoValue || v110 < isoValue ||
-                           v001 < isoValue || v101 < isoValue || v011 < isoValue || v111 < isoValue;
-
-            return hasAbove && hasBelow;
-        }
-
-        private async Task RenderMaterialVolumesAsync(CancellationToken cancellationToken)
-        {
-            // Create a separate model for each material
-            foreach (var material in mainForm.Materials)
-            {
-                if (material.IsExterior)
-                    continue;
-
-                cancellationToken.ThrowIfCancellationRequested();
-
-                // Create a model for this material
-                var materialModel = new ModelVisual3D();
-                materialModels[material.ID] = materialModel;
-
-                // Get opacity for this material
-                double opacity = 1.0;
-                materialOpacities.TryGetValue(material.ID, out opacity);
-
-                // Render the material mesh
-                await RenderMaterialVolumeAsync(material, materialModel, opacity, cancellationToken);
-
-                // Only add to scene if material is visible
-                bool isVisible = true;
-                materialVisibilityState.TryGetValue(material.ID, out isVisible);
-
-                if (isVisible)
-                {
-                    await RunOnDispatcherAsync(() =>
-                    {
-                        this.materialModel.Children.Add(materialModel);
-                    });
-                }
-            }
-        }
-
-        private async Task RenderMaterialVolumeAsync(
-            Material material,
-            ModelVisual3D materialModel,
-            double opacity,
-            CancellationToken cancellationToken)
-        {
-            var width = mainForm.GetWidth();
-            var height = mainForm.GetHeight();
-            var depth = mainForm.GetDepth();
-
-            // Calculate total volume size
-            long totalVoxels = (long)width * height * depth;
-
-            // For extremely large volumes, use a more aggressive strategy
-            int adaptiveChunkSize;
-            if (totalVoxels > 1_000_000_000) // > 1 billion voxels
-            {
-                adaptiveChunkSize = 256;
-                voxelStride = Math.Max(voxelStride, 8); // Force coarser stride
-            }
-            else if (totalVoxels > 500_000_000) // > 500 million voxels
-            {
-                adaptiveChunkSize = 192;
-                voxelStride = Math.Max(voxelStride, 4);
-            }
-            else if (totalVoxels > 100_000_000) // > 100 million voxels
-            {
-                adaptiveChunkSize = 128;
-            }
-            else
-            {
-                adaptiveChunkSize = 64;
-            }
-
-            int numChunksX = (width + adaptiveChunkSize - 1) / adaptiveChunkSize;
-            int numChunksY = (height + adaptiveChunkSize - 1) / adaptiveChunkSize;
-            int numChunksZ = (depth + adaptiveChunkSize - 1) / adaptiveChunkSize;
-
-            // Scale to real-world coordinates
-            double pixelSize = mainForm.GetPixelSize();
-
-            // Convert material color to WPF color
-            var wpfColor = Color.FromArgb(
-                (byte)(opacity * 255),
-                material.Color.R,
-                material.Color.G,
-                material.Color.B);
-
-            var materialBrush = new SolidColorBrush(wpfColor);
-            var diffuseMaterial = new DiffuseMaterial(materialBrush);
-
-            // Process chunks
-            int batchSize = 5; // Number of chunks to process in each batch
-            int chunkCount = 0;
-            int completedChunks = 0;
-            ModelVisual3D container = new ModelVisual3D();
-
-            try
-            {
-                // Check if this material exists in the volume at all
-                bool materialExists = await CheckMaterialExistsAsync(material.ID, cancellationToken);
-                if (!materialExists)
-                {
-                    Logger.Log($"[VolumeRenderer] Material {material.ID} not found in volume. Skipping.");
-                    return;
-                }
-
-                for (int cz = 0; cz < numChunksZ; cz++)
-                {
-                    for (int cy = 0; cy < numChunksY; cy++)
-                    {
-                        for (int cx = 0; cx < numChunksX; cx++)
-                        {
-                            cancellationToken.ThrowIfCancellationRequested();
-
-                            int startX = cx * adaptiveChunkSize;
-                            int startY = cy * adaptiveChunkSize;
-                            int startZ = cz * adaptiveChunkSize;
-
-                            int endX = Math.Min(startX + adaptiveChunkSize, width);
-                            int endY = Math.Min(startY + adaptiveChunkSize, height);
-                            int endZ = Math.Min(startZ + adaptiveChunkSize, depth);
-
-                            // Check if this chunk contains the material
-                            if (!await ContainsMaterialAsync(material.ID, startX, startY, startZ, endX, endY, endZ, cancellationToken))
-                                continue;
-
-                            // Process the chunk
-                            MeshGeometry3D mesh = await Task.Run(() =>
-                            {
-                                // Check for cached mesh first
-                                string cacheKey = $"mat_{material.ID}_{startX}_{startY}_{startZ}_{voxelStride}";
-
-                                if (meshCache.TryGetValue(cacheKey, out var cachedMesh))
-                                {
-                                    return cachedMesh;
-                                }
-                                else
-                                {
-                                    // Extract surface for this material in this chunk
-                                    var newMesh = ExtractMaterialSurfaceForChunk(
-                                        material.ID,
-                                        startX, startY, startZ,
-                                        endX, endY, endZ,
-                                        pixelSize,
-                                        cancellationToken);
-
-                                    // Cache the mesh if it's not empty
-                                    if (newMesh != null && newMesh.Positions.Count > 0)
-                                    {
-                                        meshCache[cacheKey] = newMesh;
-                                    }
-
-                                    return newMesh;
-                                }
-                            }, cancellationToken);
-
-                            if (mesh != null && mesh.Positions.Count > 0)
-                            {
-                                // Create a model on the UI thread
-                                await RunOnDispatcherAsync(() =>
-                                {
-                                    var model = new GeometryModel3D
-                                    {
-                                        Geometry = mesh,
-                                        Material = diffuseMaterial.Clone(),
-                                        BackMaterial = diffuseMaterial.Clone()
-                                    };
-
-                                    var visual = new ModelVisual3D { Content = model };
-                                    container.Children.Add(visual);
-                                });
-                            }
-
-                            chunkCount++;
-                            completedChunks++;
-
-                            // Every batch chunks, update the UI
-                            if (completedChunks >= batchSize)
-                            {
-                                await UpdateMaterialModelAsync(materialModel, container);
-                                container = new ModelVisual3D();
-                                completedChunks = 0;
-
-                                // Force GC to clean up memory
-                                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true);
-                            }
-                        }
-                    }
-                }
-
-                // Add any remaining chunks
-                if (container.Children.Count > 0)
-                {
-                    await UpdateMaterialModelAsync(materialModel, container);
-                }
-
-                Logger.Log($"[VolumeRenderer] Completed material {material.ID} rendering, processed {chunkCount} chunks");
-            }
-            catch (OperationCanceledException)
-            {
-                Logger.Log($"[VolumeRenderer] Material {material.ID} rendering was canceled");
-                throw;
-            }
-            catch (Exception ex)
-            {
-                Logger.Log($"[VolumeRenderer] Error in material {material.ID} rendering: {ex.Message}");
-                throw;
-            }
-        }
-
-        private async Task<bool> CheckMaterialExistsAsync(byte materialId, CancellationToken cancellationToken)
-        {
-            var volume = mainForm.volumeLabels;
-            if (volume == null) return false;
-
-            int width = mainForm.GetWidth();
-            int height = mainForm.GetHeight();
-            int depth = mainForm.GetDepth();
-
-            // Determine a reasonable sampling rate based on volume size
-            int stride = Math.Max(1, Math.Min(32, (int)Math.Ceiling(Math.Pow(width * height * depth, 1.0 / 3) / 20)));
-
-            return await Task.Run(() =>
-            {
-                for (int z = 0; z < depth; z += stride)
-                {
-                    for (int y = 0; y < height; y += stride)
-                    {
-                        for (int x = 0; x < width; x += stride)
-                        {
-                            if (cancellationToken.IsCancellationRequested)
-                                return false;
-
-                            byte voxel = volume[x, y, z];
-                            if (voxel == materialId)
-                                return true;
-                        }
-                    }
-                }
-                return false;
-            }, cancellationToken);
-        }
-
-        private async Task UpdateMaterialModelAsync(ModelVisual3D parentModel, ModelVisual3D container)
-        {
-            if (container.Children.Count == 0) return;
-
-            await RunOnDispatcherAsync(() =>
-            {
-                parentModel.Children.Add(container);
-            });
-        }
-
-        private async Task<bool> ContainsMaterialAsync(
-            byte materialId,
-            int startX, int startY, int startZ,
-            int endX, int endY, int endZ,
-            CancellationToken cancellationToken)
-        {
-            return await Task.Run(() =>
-            {
-                try
-                {
-                    // Sample the chunk to determine if it contains this material
-                    // Adjust stride based on chunk size for better performance
-                    int dim = Math.Max(endX - startX, Math.Max(endY - startY, endZ - startZ));
-                    int sampleStride = Math.Max(4, dim / 8);
-
-                    for (int z = startZ; z < endZ; z += sampleStride)
-                    {
-                        for (int y = startY; y < endY; y += sampleStride)
-                        {
-                            for (int x = startX; x < endX; x += sampleStride)
-                            {
-                                cancellationToken.ThrowIfCancellationRequested();
-
-                                if (x < mainForm.GetWidth() && y < mainForm.GetHeight() && z < mainForm.GetDepth())
-                                {
-                                    byte label = mainForm.volumeLabels[x, y, z];
-                                    if (label == materialId)
-                                    {
-                                        return true; // Contains the material
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    return false; // Does not contain the material
-                }
-                catch (Exception ex)
-                {
-                    Logger.Log($"[VolumeRenderer] Error checking material: {ex.Message}");
-                    return false; // Skip on error
-                }
-            }, cancellationToken);
-        }
-
-        private MeshGeometry3D ExtractMaterialSurfaceForChunk(
-            byte materialId,
-            int startX, int startY, int startZ,
-            int endX, int endY, int endZ,
-            double pixelSize,
-            CancellationToken cancellationToken)
-        {
-            try
-            {
-                // For materials, we create a binary field where 1 indicates voxels 
-                // belonging to this material and 0 elsewhere
-
-                // Allow for one voxel overlap to avoid seams between chunks
-                int sizeX = endX - startX + 1;
-                int sizeY = endY - startY + 1;
-                int sizeZ = endZ - startZ + 1;
-
-                // Create binary field - use sparse storage for large datasets
-                bool[,,] field = new bool[sizeX, sizeY, sizeZ];
-
-                // Fill the field from the label volume
-                for (int z = 0; z < sizeZ; z++)
-                {
-                    int volumeZ = startZ + z;
-                    if (volumeZ >= mainForm.GetDepth()) continue;
-
-                    for (int y = 0; y < sizeY; y++)
-                    {
-                        int volumeY = startY + y;
-                        if (volumeY >= mainForm.GetHeight()) continue;
-
-                        for (int x = 0; x < sizeX; x++)
-                        {
-                            cancellationToken.ThrowIfCancellationRequested();
-
-                            int volumeX = startX + x;
-                            if (volumeX >= mainForm.GetWidth()) continue;
-
-                            field[x, y, z] = mainForm.volumeLabels[volumeX, volumeY, volumeZ] == materialId;
-                        }
-                    }
-                }
-
-                // Create mesh geometry for this chunk
-                MeshBuilder meshBuilder = new MeshBuilder(false, false);
-
-                // Process the binary field with the desired stride
-                for (int z = 0; z < sizeZ - 1; z += voxelStride)
-                {
-                    for (int y = 0; y < sizeY - 1; y += voxelStride)
-                    {
-                        for (int x = 0; x < sizeX - 1; x += voxelStride)
-                        {
-                            cancellationToken.ThrowIfCancellationRequested();
-
-                            // Skip processing if outside bounds
-                            if (startX + x >= mainForm.GetWidth() ||
-                                startY + y >= mainForm.GetHeight() ||
-                                startZ + z >= mainForm.GetDepth())
-                                continue;
-
-                            // Check if this cell is at the boundary of the material
-                            bool isAtBoundary = IsAtMaterialBoundary(field, x, y, z);
-
-                            if (isAtBoundary)
-                            {
-                                // Create a box at this position if the central voxel is the material
-                                if (field[x, y, z])
-                                {
-                                    double realX = (startX + x) * pixelSize;
-                                    double realY = (startY + y) * pixelSize;
-                                    double realZ = (startZ + z) * pixelSize;
-                                    double size = voxelStride * pixelSize * 0.9; // Slightly smaller
-
-                                    meshBuilder.AddBox(
-                                        new Point3D(realX + size / 2, realY + size / 2, realZ + size / 2),
-                                        size, size, size);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                MeshGeometry3D mesh = meshBuilder.ToMesh();
-                if (mesh.CanFreeze)
-                {
-                    mesh.Freeze();
-                }
-                return mesh;
-            }
-            catch (OperationCanceledException)
-            {
-                throw; // Re-throw cancellation
-            }
-            catch (Exception ex)
-            {
-                // Log the error but don't crash the whole app
-                Logger.Log($"[VolumeRenderer] Error extracting material surface: {ex.Message}");
-                return null;
-            }
-        }
-
-        private bool IsAtMaterialBoundary(bool[,,] field, int x, int y, int z)
-        {
-            // A voxel is at the boundary if it's different from any of its neighbors
-            bool center = field[x, y, z];
-
-            // Check the 6-connected neighbors
-            // We need bounds checking to avoid array out of bounds
-            bool left = x > 0 ? field[x - 1, y, z] : false;
-            bool right = x < field.GetLength(0) - 1 ? field[x + 1, y, z] : false;
-            bool bottom = y > 0 ? field[x, y - 1, z] : false;
-            bool top = y < field.GetLength(1) - 1 ? field[x, y + 1, z] : false;
-            bool back = z > 0 ? field[x, y, z - 1] : false;
-            bool front = z < field.GetLength(2) - 1 ? field[x, y, z + 1] : false;
-
-            // If any neighbor differs from the center, this voxel is at a boundary
-            return center != left || center != right ||
-                   center != bottom || center != top ||
-                   center != back || center != front;
-        }
-
-        #endregion
     }
 }

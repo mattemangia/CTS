@@ -257,6 +257,7 @@
     <Compile Include="CTViewerControlPanel.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="MinimalRenderer.cs" />
     <Compile Include="VolumeRenderer.cs" />
     <Compile Include="VolumeRendererSharpDX.cs" />
     <Compile Include="VoxelMeshExporter.cs" />

@@ -1,1240 +1,2856 @@
 ﻿using System;
-using System.Threading;
-using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using SharpDX;
-using System.Drawing;
-using System.Drawing.Imaging;
 using SharpDX.Direct3D;
 using SharpDX.Direct3D11;
 using SharpDX.DXGI;
-using System.IO;
+using System.Runtime.InteropServices;
+using System.Collections.Generic;
+using System.Linq;
+
 using Buffer = SharpDX.Direct3D11.Buffer;
 using Device = SharpDX.Direct3D11.Device;
-using Color = SharpDX.Color;
-using SharpDX.Direct3D9;
-using SwapChain = SharpDX.DXGI.SwapChain;
-using SamplerState = SharpDX.Direct3D11.SamplerState;
-using VertexShader = SharpDX.Direct3D11.VertexShader;
-using PixelShader = SharpDX.Direct3D11.PixelShader;
 using Format = SharpDX.DXGI.Format;
-using Usage = SharpDX.DXGI.Usage;
-using SwapEffect = SharpDX.DXGI.SwapEffect;
-using Filter = SharpDX.Direct3D11.Filter;
-using BlendOperation = SharpDX.Direct3D11.BlendOperation;
-using FillMode = SharpDX.Direct3D11.FillMode;
-using PresentFlags = SharpDX.DXGI.PresentFlags;
 
-namespace CTSegmenter.SharpDXIntegration
+namespace CTSegmenter
 {
     public class SharpDXVolumeRenderer : IDisposable
     {
+        #region Fields
+        private bool debugMode = false;
         private MainForm mainForm;
         private Panel renderPanel;
+
+        // Core DirectX objects
         private Device device;
         private DeviceContext context;
         private SwapChain swapChain;
         private RenderTargetView renderTargetView;
         private Texture2D depthBuffer;
         private DepthStencilView depthView;
-        private Texture2D exitTexture;
-        private RenderTargetView exitRTV;
-        private ShaderResourceView exitSRV;
-
-        // 3D textures for grayscale + label
-        private Texture3D grayVolumeTex;
-        private ShaderResourceView grayVolumeSRV;
-        private Texture3D labelVolumeTex;
-        private ShaderResourceView labelVolumeSRV;
-
-        // States
-        private SamplerState samplerLinear;
-        private SamplerState samplerPoint;
-        private BlendState blendState;
-        private RasterizerState rStateCullFront;
-        private RasterizerState rStateCullBack;
-
-        private Buffer constantBuffer;
-        private VertexShader rayVs;
-        private PixelShader rayFrontPs;
-        private PixelShader rayBackPs;
-        private PixelShader rayCompositePs;
-        private VertexShader sliceVs;
-        private PixelShader slicePs;
-        private InputLayout inputLayout;
-
-        private Buffer cubeVb;
-        private Buffer cubeIb;
-        private int cubeIndexCount = 36;
-
-        private Buffer quadVb;
-        private Buffer quadIb;
 
         // Volume dimensions
         private int volW, volH, volD;
-        // For threshold
-        private float minThresholdNorm = 30 / 255f;
+
+        // Volume data textures
+        private Texture3D volumeTexture;
+        private ShaderResourceView volumeSRV;
+        private Texture3D labelTexture;
+        private ShaderResourceView labelSRV;
+
+        // Cube geometry
+        private Buffer cubeVertexBuffer;
+        private Buffer cubeIndexBuffer;
+        private int cubeIndexCount = 36;
+
+        // Rendering states
+        private RasterizerState solidRasterState;
+        private RasterizerState wireframeRasterState;
+        private BlendState alphaBlendState;
+        private SamplerState linearSampler;
+        private SamplerState pointSampler;
+        public bool NeedsRender { get; set; } = true;
+
+        // Camera parameters
+        private float cameraYaw = 0.8f;
+        private float cameraPitch = 0.6f;
+        private float cameraDistance = 500.0f;
+        private Vector3 panOffset = Vector3.Zero;
+
+        // Shaders for volume rendering
+        private VertexShader volumeVertexShader;
+        private PixelShader volumePixelShader;
+        private InputLayout inputLayout;
+        private Buffer constantBuffer;
+
+        // Mouse interaction
+        private bool isDragging = false;
+        private System.Drawing.Point lastMousePosition;
+        private bool isPanning = false;
+
+        // Label properties
+        private const int MAX_LABELS = 256;
+        private bool[] labelVisible = new bool[MAX_LABELS];
+        private float[] labelOpacity = new float[MAX_LABELS];
+        private Texture1D labelVisibilityTexture;
+        private ShaderResourceView labelVisibilitySRV;
+        private Texture1D labelOpacityTexture;
+        private ShaderResourceView labelOpacitySRV;
+        private Texture1D materialColorTexture;
+        private ShaderResourceView materialColorSRV;
+        private Texture1D colorMapTexture;
+        private ShaderResourceView colorMapSRV;
+
+        //RenderTimer
+        private bool isRendering = false;
+        private DateTime lastRenderTime = DateTime.MinValue;
+        private int renderFailCount = 0;
+        private const int MAX_FAILURES = 3;
+        private Timer renderTimer;
+
+        // Volume rendering parameters
+        private float minThresholdNorm = 0.1f;
         private float maxThresholdNorm = 1.0f;
-        // For step size in raymarch
         private float stepSize = 1.0f;
+        private bool showGrayscale = true;
+        private int colorMapIndex = 0;
+        private float sliceBorderThickness = 0.02f;
 
         // Slices
-        private bool showSlices = false;
         private int sliceX, sliceY, sliceZ;
+        private bool showSlices = false;
 
-        // Label material visibility and opacity
-        private const int MaxLabels = 256;
-        private bool[] labelVisible = new bool[MaxLabels];
-        private float[] labelOpacity = new float[MaxLabels];
+        // Cutting planes
+        private bool cutXEnabled = false;
+        private bool cutYEnabled = false;
+        private bool cutZEnabled = false;
+        private float cutXPosition = 0.5f;
+        private float cutYPosition = 0.5f;
+        private float cutZPosition = 0.5f;
+        private float cutXDirection = 1.0f;  // 1.0 = forward, -1.0 = backward
+        private float cutYDirection = 1.0f;
+        private float cutZDirection = 1.0f;
 
-        // Whether to show grayscale
-        private bool showGray = true;
+        // Frame counter for logging
+        private int frameCount = 0;
 
-        // For synergy in the shader
-        private struct ConstantData
+        private PictureBox scaleBarPictureBox;
+
+        // LOD system for large datasets
+        private bool useLodSystem = true;
+        private int currentLodLevel = 0;
+        private const int MAX_LOD_LEVELS = 3;
+        private float[] lodStepSizes = new float[] { 0.5f, 1.0f, 2.0f, 4.0f }; // Different step sizes for each LOD level
+        private Texture3D[] lodVolumeTextures = new Texture3D[MAX_LOD_LEVELS + 1];
+        private ShaderResourceView[] lodVolumeSRVs = new ShaderResourceView[MAX_LOD_LEVELS + 1];
+
+        // Constant buffer structure - matches shader layout exactly
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ConstantBufferData
         {
-            public Matrix worldViewProj;
-            public Matrix invView;
-            public Vector4 thresholds; // (minT, maxT, stepSize, showGray? 1 or 0)
-            public Vector4 dims;       // (volW, volH, volD, #labels?)
-            public Vector4 sliceCoords; // (xSliceN, ySliceN, zSliceN, showSlices? 1 or 0)
-            // We'll store label visibility in a 256-bit mask or partial table...
-            // But for simplicity, let's store it in a float array we bind as a separate buffer or a Texture1D
+            public Matrix WorldViewProj;
+            public Matrix InvViewMatrix;
+            public Vector4 Thresholds;  // x=min, y=max, z=stepSize, w=showGrayscale
+            public Vector4 Dimensions;  // xyz=volume dimensions, w=unused
+            public Vector4 SliceCoords; // xyz=slice positions, w=showSlices
+            public Vector4 CameraPosition; // Camera position for ray origin calculation
+            public Vector4 ColorMapParams; // x=colorMapIndex, y=slice border thickness, z,w=unused
+            public Vector4 CutPlaneX; // x=enabled, y=direction, z=position, w=unused
+            public Vector4 CutPlaneY; // x=enabled, y=direction, z=position, w=unused
+            public Vector4 CutPlaneZ; // x=enabled, y=direction, z=position, w=unused
         }
+        #endregion
 
-        // We also need a structured buffer or texture for label alpha and vis.
-        private Texture1D labelVisTex;
-        private ShaderResourceView labelVisSrv;
-        private Texture1D labelOpacTex;
-        private ShaderResourceView labelOpacSrv;
-
-        public SharpDXVolumeRenderer(MainForm mainForm, Panel panel)
+        #region Properties
+        public bool DebugMode
         {
-            this.mainForm = mainForm;
-            this.renderPanel = panel;
-
-            // volume dims
-            volW = mainForm.GetWidth();
-            volH = mainForm.GetHeight();
-            volD = mainForm.GetDepth();
-
-            // Initialize label arrays
-            for (int i = 0; i < MaxLabels; i++)
+            get { return debugMode; }
+            set
             {
-                labelVisible[i] = false; // default off
-                labelOpacity[i] = 1.0f;
-            }
-
-            // By default, label 0 is “background” so also invisible
-            // If you want material 1..N visible, user must check them in the UI
-
-            CreateDeviceAndSwapchain();
-            CreateDynamicSliceVertexBuffer();
-            CreateRenderTargets();
-            CreateStates();
-            CreateVolumeTextures();
-            CreateShadersAndLayouts();
-            CreateCubeGeometry();
-            CreateQuadGeometry();
-        }
-
-        public void Dispose()
-        {
-            // Dispose GPU resources
-            labelVisSrv?.Dispose();
-            labelVisTex?.Dispose();
-            labelOpacSrv?.Dispose();
-            labelOpacTex?.Dispose();
-
-            quadIb?.Dispose();
-            quadVb?.Dispose();
-            cubeIb?.Dispose();
-            cubeVb?.Dispose();
-            inputLayout?.Dispose();
-            slicePs?.Dispose();
-            sliceVs?.Dispose();
-            rayCompositePs?.Dispose();
-            rayBackPs?.Dispose();
-            rayFrontPs?.Dispose();
-            rayVs?.Dispose();
-            constantBuffer?.Dispose();
-            rStateCullFront?.Dispose();
-            rStateCullBack?.Dispose();
-            blendState?.Dispose();
-            samplerLinear?.Dispose();
-            samplerPoint?.Dispose();
-            grayVolumeSRV?.Dispose();
-            grayVolumeTex?.Dispose();
-            labelVolumeSRV?.Dispose();
-            labelVolumeTex?.Dispose();
-            exitSRV?.Dispose();
-            exitRTV?.Dispose();
-            exitTexture?.Dispose();
-            depthView?.Dispose();
-            depthBuffer?.Dispose();
-            renderTargetView?.Dispose();
-            swapChain?.Dispose();
-            device?.Dispose();
-            context?.Dispose();
-        }
-        public bool GetMaterialVisibility(byte matId)
-        {
-            if (matId >= 0 && matId < MaxLabels)
-                return labelVisible[matId];
-            return false;
-        }
-
-        public float GetMaterialOpacity(byte matId)
-        {
-            if (matId >= 0 && matId < MaxLabels)
-                return labelOpacity[matId];
-            return 1.0f;
-        }
-        private void CreateDeviceAndSwapchain()
-        {
-            var scd = new SwapChainDescription()
-            {
-                BufferCount = 1,
-                ModeDescription = new ModeDescription(
-                    renderPanel.ClientSize.Width,
-                    renderPanel.ClientSize.Height,
-                    new Rational(60, 1),
-                    Format.R8G8B8A8_UNorm),
-                Usage = Usage.RenderTargetOutput,
-                OutputHandle = renderPanel.Handle,
-                SampleDescription = new SampleDescription(1, 0),
-                IsWindowed = true,
-                SwapEffect = SwapEffect.Discard,
-            };
-            Device.CreateWithSwapChain(DriverType.Hardware, DeviceCreationFlags.BgraSupport, scd, out device, out swapChain);
-            context = device.ImmediateContext;
-
-            // Prevent alt+enter
-            using (var factory = swapChain.GetParent<Factory>())
-            {
-                factory.MakeWindowAssociation(renderPanel.Handle, WindowAssociationFlags.IgnoreAltEnter);
+                debugMode = value;
+                NeedsRender = true; // Mark that rendering is needed
             }
         }
 
-        private void CreateRenderTargets()
+        public int MinThreshold
         {
-            using (var backBuffer = Texture2D.FromSwapChain<Texture2D>(swapChain, 0))
+            get { return (int)(minThresholdNorm * 255f); }
+            set
             {
-                renderTargetView = new RenderTargetView(device, backBuffer);
+                minThresholdNorm = Math.Max(0.0f, Math.Min(1.0f, value / 255f));
+                NeedsRender = true; // Mark that rendering is needed 
             }
-
-            var depthDesc = new Texture2DDescription
-            {
-                Format = Format.D24_UNorm_S8_UInt,
-                Width = renderPanel.ClientSize.Width,
-                Height = renderPanel.ClientSize.Height,
-                MipLevels = 1,
-                ArraySize = 1,
-                SampleDescription = new SampleDescription(1, 0),
-                Usage = ResourceUsage.Default,
-                BindFlags = BindFlags.DepthStencil,
-                CpuAccessFlags = CpuAccessFlags.None,
-                OptionFlags = ResourceOptionFlags.None
-            };
-            depthBuffer = new Texture2D(device, depthDesc);
-            depthView = new DepthStencilView(device, depthBuffer);
-
-            var exitDesc = new Texture2DDescription
-            {
-                Format = Format.R32G32B32A32_Float,
-                Width = renderPanel.ClientSize.Width,
-                Height = renderPanel.ClientSize.Height,
-                MipLevels = 1,
-                ArraySize = 1,
-                SampleDescription = new SampleDescription(1, 0),
-                Usage = ResourceUsage.Default,
-                BindFlags = BindFlags.RenderTarget | BindFlags.ShaderResource,
-                CpuAccessFlags = CpuAccessFlags.None,
-                OptionFlags = ResourceOptionFlags.None
-            };
-            exitTexture = new Texture2D(device, exitDesc);
-            exitRTV = new RenderTargetView(device, exitTexture);
-            exitSRV = new ShaderResourceView(device, exitTexture);
         }
 
-        private void CreateStates()
+        public int MaxThreshold
         {
-            // Samplers
-            var sampDesc = new SamplerStateDescription()
+            get { return (int)(maxThresholdNorm * 255f); }
+            set
             {
-                Filter = Filter.MinMagMipLinear,
-                AddressU = TextureAddressMode.Clamp,
-                AddressV = TextureAddressMode.Clamp,
-                AddressW = TextureAddressMode.Clamp,
-            };
-            samplerLinear = new SamplerState(device, sampDesc);
-
-            sampDesc.Filter = Filter.MinMagMipPoint;
-            samplerPoint = new SamplerState(device, sampDesc);
-
-            // Blend
-            var blendDesc = new BlendStateDescription();
-            blendDesc.RenderTarget[0].IsBlendEnabled = true;
-            blendDesc.RenderTarget[0].SourceBlend = BlendOption.SourceAlpha;
-            blendDesc.RenderTarget[0].DestinationBlend = BlendOption.InverseSourceAlpha;
-            blendDesc.RenderTarget[0].BlendOperation = BlendOperation.Add;
-            blendDesc.RenderTarget[0].SourceAlphaBlend = BlendOption.One;
-            blendDesc.RenderTarget[0].DestinationAlphaBlend = BlendOption.Zero;
-            blendDesc.RenderTarget[0].AlphaBlendOperation = BlendOperation.Add;
-            blendDesc.RenderTarget[0].RenderTargetWriteMask = ColorWriteMaskFlags.All;
-            blendState = new BlendState(device, blendDesc);
-
-            // Rasterizer (cull front/back)
-            var rsFront = new RasterizerStateDescription()
-            {
-                CullMode = CullMode.Front,
-                FillMode = FillMode.Solid,
-                IsDepthClipEnabled = true
-            };
-            rStateCullFront = new RasterizerState(device, rsFront);
-
-            var rsBack = new RasterizerStateDescription()
-            {
-                CullMode = CullMode.Back,
-                FillMode = FillMode.Solid,
-                IsDepthClipEnabled = true
-            };
-            rStateCullBack = new RasterizerState(device, rsBack);
-        }
-
-        private void CreateVolumeTextures()
-        {
-            // Load grayscale volume
-            grayVolumeTex = VolumeLoader.CreateTexture3DFromChunked(device, mainForm.volumeData, Format.R8_UNorm);
-            grayVolumeSRV = new ShaderResourceView(device, grayVolumeTex);
-
-            // Load label volume if available
-            if (mainForm.volumeLabels != null)
-            {
-                labelVolumeTex = VolumeLoader.CreateTexture3DFromChunked(device, mainForm.volumeLabels, Format.R8_UInt);
-                labelVolumeSRV = new ShaderResourceView(device, labelVolumeTex);
+                maxThresholdNorm = Math.Max(0.0f, Math.Min(1.0f, value / 255f));
+                NeedsRender = true; // Mark that rendering is needed
             }
-
-            // Also create label-visibility textures
-            // We'll re-upload them as needed
-            UpdateLabelVisAndOpacityTextures();
         }
 
-        private void UpdateLabelVisAndOpacityTextures()
+        public bool ShowGrayscale
         {
-            // Create a 256-element array of floats, 1=visible, 0=invisible
-            // Then we do same for alpha
-            float[] visData = new float[MaxLabels];
-            float[] opacData = new float[MaxLabels];
-            for (int i = 0; i < MaxLabels; i++)
+            get { return showGrayscale; }
+            set
             {
-                visData[i] = labelVisible[i] ? 1.0f : 0.0f;
-                opacData[i] = labelOpacity[i];
+                showGrayscale = value;
+                NeedsRender = true; // Mark that rendering is needed
             }
+        }
 
-            // Each as Texture1D
-            // Recreate from scratch
-            labelVisTex?.Dispose();
-            labelVisSrv?.Dispose();
-            labelOpacTex?.Dispose();
-            labelOpacSrv?.Dispose();
-
-            var texDesc = new Texture1DDescription()
+        public bool ShowOrthoslices
+        {
+            get { return showSlices; }
+            set
             {
-                ArraySize = 1,
-                MipLevels = 1,
-                Width = MaxLabels,
-                Format = Format.R32_Float,
-                BindFlags = BindFlags.ShaderResource,
-                Usage = ResourceUsage.Immutable,
-                CpuAccessFlags = CpuAccessFlags.None,
-                OptionFlags = ResourceOptionFlags.None
-            };
-
-            // vis
-            GCHandle handleV = GCHandle.Alloc(visData, GCHandleType.Pinned);
-            try
-            {
-                var box = new DataBox(handleV.AddrOfPinnedObject(), 4 * MaxLabels, 0);
-                labelVisTex = new Texture1D(device, texDesc, new DataBox[] { box });
+                showSlices = value;
+                NeedsRender = true; // Mark that rendering is needed
             }
-            finally
+        }
+
+        public int ColorMapIndex
+        {
+            get { return colorMapIndex; }
+            set
             {
-                handleV.Free();
+                colorMapIndex = value;
+                NeedsRender = true;
             }
-            labelVisSrv = new ShaderResourceView(device, labelVisTex);
-
-            // opac
-            GCHandle handleO = GCHandle.Alloc(opacData, GCHandleType.Pinned);
-            try
-            {
-                var box = new DataBox(handleO.AddrOfPinnedObject(), 4 * MaxLabels, 0);
-                labelOpacTex = new Texture1D(device, texDesc, new DataBox[] { box });
-            }
-            finally
-            {
-                handleO.Free();
-            }
-            labelOpacSrv = new ShaderResourceView(device, labelOpacTex);
-        }
-
-        private void CreateShadersAndLayouts()
-        {
-            
-            var shaderSource = ShaderStrings.VolumeRaymarchHlsl; // See below "ShaderStrings" class
-
-            var vsByte = SharpDX.D3DCompiler.ShaderBytecode.Compile(shaderSource, "VSMain", "vs_5_0");
-            var psFrontByte = SharpDX.D3DCompiler.ShaderBytecode.Compile(shaderSource, "PSBackface", "ps_5_0");
-            var psBackByte = SharpDX.D3DCompiler.ShaderBytecode.Compile(shaderSource, "PSRaymarch", "ps_5_0");
-            var psSliceByte = SharpDX.D3DCompiler.ShaderBytecode.Compile(shaderSource, "PSSlice", "ps_5_0");
-
-            rayVs = new VertexShader(device, vsByte);
-            rayFrontPs = new PixelShader(device, psFrontByte);
-            rayBackPs = new PixelShader(device, psBackByte);
-            rayCompositePs = rayBackPs; // naming difference
-            sliceVs = new VertexShader(device, vsByte);
-            slicePs = new PixelShader(device, psSliceByte);
-
-            // Input layout
-            var layoutElems = new[] {
-                new SharpDX.Direct3D11.InputElement("POSITION", 0, Format.R32G32B32_Float, 0, 0)
-            };
-            inputLayout = new InputLayout(device, vsByte, layoutElems);
-
-            constantBuffer = new Buffer(device, Utilities.SizeOf<ConstantData>(), ResourceUsage.Default,
-                BindFlags.ConstantBuffer, CpuAccessFlags.None, ResourceOptionFlags.None, 0);
-        }
-
-        private void CreateCubeGeometry()
-        {
-            // A unit cube in [0,volW] x [0, volH] x [0, volD], then we scale in the shader if needed
-            // Actually let's store the corners explicitly:
-            var verts = new Vector3[8];
-            verts[0] = new Vector3(0, 0, 0);
-            verts[1] = new Vector3(volW, 0, 0);
-            verts[2] = new Vector3(volW, volH, 0);
-            verts[3] = new Vector3(0, volH, 0);
-            verts[4] = new Vector3(0, 0, volD);
-            verts[5] = new Vector3(volW, 0, volD);
-            verts[6] = new Vector3(volW, volH, volD);
-            verts[7] = new Vector3(0, volH, volD);
-
-            var inds = new int[]
-            {
-                0,2,1, 0,3,2,  // front
-                4,5,6, 4,6,7,  // back
-                0,4,7, 0,7,3,  // left
-                1,2,6, 1,6,5,  // right
-                0,1,5, 0,5,4,  // bottom
-                2,3,7, 2,7,6   // top
-            };
-            cubeIndexCount = inds.Length;
-
-            cubeVb = Buffer.Create(device, BindFlags.VertexBuffer, verts);
-            cubeIb = Buffer.Create(device, BindFlags.IndexBuffer, inds);
-        }
-
-        private void CreateQuadGeometry()
-        {
-            // For slices we reuse a single quad VB, then update it
-            var quadVerts = new Vector3[]
-            {
-                new Vector3(0,0,0),
-                new Vector3(0,1,0),
-                new Vector3(1,1,0),
-                new Vector3(1,0,0)
-            };
-            var quadInds = new int[] { 0, 1, 2, 0, 2, 3 };
-
-            quadVb = Buffer.Create(device, BindFlags.VertexBuffer, quadVerts);
-            quadIb = Buffer.Create(device, BindFlags.IndexBuffer, quadInds);
-        }
-
-        public void Render()
-        {
-            if (device == null || swapChain == null) return;
-
-            // Update label visibility textures if needed
-            UpdateLabelVisAndOpacityTextures();
-
-            // Clear
-            context.OutputMerger.SetRenderTargets(depthView, renderTargetView);
-            context.ClearRenderTargetView(renderTargetView, new Color4(0, 0, 0, 1));
-            context.ClearDepthStencilView(depthView, DepthStencilClearFlags.Depth, 1.0f, 0);
-
-            // PASS 1: draw back faces to exitTexture
-            context.OutputMerger.SetRenderTargets(null as DepthStencilView, exitRTV);
-            context.ClearRenderTargetView(exitRTV, new Color4(0, 0, 0, 0));
-            context.Rasterizer.State = rStateCullFront;
-
-            context.InputAssembler.InputLayout = inputLayout;
-            context.InputAssembler.PrimitiveTopology = PrimitiveTopology.TriangleList;
-            context.InputAssembler.SetVertexBuffers(0, new VertexBufferBinding(cubeVb, Utilities.SizeOf<Vector3>(), 0));
-            context.InputAssembler.SetIndexBuffer(cubeIb, Format.R32_UInt, 0);
-
-            context.VertexShader.Set(rayVs);
-            context.PixelShader.Set(rayFrontPs);
-            UpdateConstantBufferAndSet(0);
-            context.DrawIndexed(cubeIndexCount, 0, 0);
-
-            // PASS 2: draw front faces with raymarch
-            context.OutputMerger.SetRenderTargets(depthView, renderTargetView);
-            context.Rasterizer.State = rStateCullBack;
-
-            context.InputAssembler.SetVertexBuffers(0, new VertexBufferBinding(cubeVb, Utilities.SizeOf<Vector3>(), 0));
-            context.InputAssembler.SetIndexBuffer(cubeIb, Format.R32_UInt, 0);
-
-            context.VertexShader.Set(rayVs);
-            context.PixelShader.Set(rayBackPs);
-            UpdateConstantBufferAndSet(0);
-
-            // Set resources
-            context.PixelShader.SetShaderResource(0, exitSRV);
-            context.PixelShader.SetShaderResource(1, grayVolumeSRV);
-            context.PixelShader.SetShaderResource(2, labelVolumeSRV);
-            context.PixelShader.SetShaderResource(3, labelVisSrv);
-            context.PixelShader.SetShaderResource(4, labelOpacSrv);
-            context.PixelShader.SetSampler(0, samplerLinear);
-            context.PixelShader.SetSampler(1, samplerPoint);
-
-            context.DrawIndexed(cubeIndexCount, 0, 0);
-
-            // Optionally draw slices if showSlices
-            if (showSlices)
-            {
-                DrawSlicePlanes();
-            }
-
-            swapChain.Present(0, PresentFlags.None);
-        }
-        private Buffer dynamicSliceVb;
-        private const int NumSliceVertices = 4; // only need 4 per plane
-        private const int MaxSlices = 3;       // x-plane, y-plane, z-plane
-
-        private void CreateDynamicSliceVertexBuffer()
-        {
-            var vbDesc = new BufferDescription()
-            {
-                SizeInBytes = Utilities.SizeOf<Vector3>() * NumSliceVertices * MaxSlices,
-                Usage = ResourceUsage.Dynamic,
-                BindFlags = BindFlags.VertexBuffer,
-                CpuAccessFlags = CpuAccessFlags.Write,
-                OptionFlags = ResourceOptionFlags.None,
-                StructureByteStride = 0
-            };
-            dynamicSliceVb = new Buffer(device, vbDesc);
-        }
-        private void DrawSlicePlanes()
-        {
-            // Set the correct render targets
-            context.OutputMerger.SetRenderTargets(depthView,renderTargetView);
-            // Use whichever rasterizer state
-            // e.g., context.Rasterizer.State = null (no culling) or a custom RasterizerState
-            context.Rasterizer.State = null;
-
-            // Set pipeline states
-            context.InputAssembler.PrimitiveTopology = PrimitiveTopology.TriangleList;
-            context.InputAssembler.InputLayout = inputLayout;
-
-            // Use our slice vertex and pixel shaders
-            context.VertexShader.Set(sliceVs);
-            context.PixelShader.Set(slicePs);
-
-            // We already have an index buffer for a single quad (two triangles):
-            context.InputAssembler.SetIndexBuffer(quadIb, Format.R32_UInt, 0);
-
-            // Make sure our constant buffer is up to date
-            UpdateConstantBufferAndSet(0);
-
-            // Bind the grayscale 3D volume to slot t1 in the pixel shader
-            // (Check your code - if you're also using t0 for something else, adjust accordingly.)
-            context.PixelShader.SetShaderResource(1, grayVolumeSRV);
-
-            // We'll do three calls, one for each orthogonal slice: X, Y, Z
-            // For each slice, we update the dynamic vertex buffer with that plane's corners in local volume coords.
-            // Then we draw using the same index buffer.
-
-            // -------------------------
-            // 1) X-plane
-            // -------------------------
-            float xVal = sliceX; // A local volume coordinate in [0, volW]
-            var xVerts = new Vector3[]
-            {
-        new Vector3(xVal,    0,    0),
-        new Vector3(xVal, volH,    0),
-        new Vector3(xVal, volH, volD),
-        new Vector3(xVal,    0, volD),
-            };
-            UploadPlaneVerticesToDynamicVb(xVerts);
-            // Bind the dynamic VB
-            context.InputAssembler.SetVertexBuffers(0, new VertexBufferBinding(dynamicSliceVb, Utilities.SizeOf<Vector3>(), 0));
-            // Draw
-            context.DrawIndexed(6, 0, 0);
-
-            // -------------------------
-            // 2) Y-plane
-            // -------------------------
-            float yVal = sliceY; // A local volume coordinate in [0, volH]
-            var yVerts = new Vector3[]
-            {
-        new Vector3(   0, yVal,    0),
-        new Vector3(   0, yVal, volD),
-        new Vector3(volW, yVal, volD),
-        new Vector3(volW, yVal,    0)
-            };
-            UploadPlaneVerticesToDynamicVb(yVerts);
-            context.InputAssembler.SetVertexBuffers(0, new VertexBufferBinding(dynamicSliceVb, Utilities.SizeOf<Vector3>(), 0));
-            context.DrawIndexed(6, 0, 0);
-
-            // -------------------------
-            // 3) Z-plane
-            // -------------------------
-            float zVal = sliceZ; // A local volume coordinate in [0, volD]
-            var zVerts = new Vector3[]
-            {
-        new Vector3(   0,    0, zVal),
-        new Vector3(volW,    0, zVal),
-        new Vector3(volW, volH, zVal),
-        new Vector3(   0, volH, zVal)
-            };
-            UploadPlaneVerticesToDynamicVb(zVerts);
-            context.InputAssembler.SetVertexBuffers(0, new VertexBufferBinding(dynamicSliceVb, Utilities.SizeOf<Vector3>(), 0));
-            context.DrawIndexed(6, 0, 0);
-        }
-        /// <summary>
-        /// Writes the 4 vertices of a slice plane into the dynamic VB.
-        /// </summary>
-        private void UploadPlaneVerticesToDynamicVb(Vector3[] verts)
-        {
-            DataStream stream;
-            var dataBox = context.MapSubresource(
-                dynamicSliceVb,
-                0,
-                MapMode.WriteDiscard,
-                SharpDX.Direct3D11.MapFlags.None,
-                out stream
-            );
-
-            // Write exactly 4 vertices
-            for (int i = 0; i < 4; i++)
-                stream.Write(verts[i]);
-
-            context.UnmapSubresource(dynamicSliceVb, 0);
-            stream.Dispose();
-        }
-        private void UpdateConstantBufferAndSet(int slot)
-        {
-            // 1) -----------------------------------------------
-            // Compute bounding box & bounding sphere for the volume.
-            // This helps us ensure the camera is set up so the entire volume is in view.
-
-            // Volume min/max in local space. Suppose the volume extends from (0,0,0) to (volW, volH, volD).
-            Vector3 volMin = new Vector3(0, 0, 0);
-            Vector3 volMax = new Vector3(volW, volH, volD);
-            Vector3 volCenter = (volMin + volMax) * 0.5f;
-
-            // Diagonal length:
-            float diag = (volMax - volMin).Length();
-            // Bounding sphere radius:
-            float radius = diag * 0.5f;
-
-
-            // 2) -----------------------------------------------
-            // Pick a camera position using some orbit controls. 
-            // For example, an Arcball approach with Yaw, Pitch, Distance.
-            // In a real app, might store yaw, pitch, distance as class-level fields
-            // and let the user interact with them. Below are just placeholders.
-
-            float yaw = 0.7f;    // in radians
-            float pitch = 0.4f;    // in radians
-            float distance = radius * 2.5f; // how far the camera sits from center. Adjust as needed.
-
-            // Convert spherical coords => cartesian (an example approach).
-            // We want to orbit around volCenter.
-            float cosPitch = (float)Math.Cos(pitch);
-            float sinPitch = (float)Math.Sin(pitch);
-            float cosYaw = (float)Math.Cos(yaw);
-            float sinYaw = (float)Math.Sin(yaw);
-
-            Vector3 camPosLocal = new Vector3(
-                distance * cosPitch * cosYaw,
-                distance * sinPitch,
-                distance * cosPitch * sinYaw);
-
-            // Our final camera position in world space:
-            Vector3 cameraPosition = volCenter + camPosLocal;
-            // Our camera look-target is the center of the volume:
-            Vector3 cameraTarget = volCenter;
-            // Typically "up" is +Y:
-            Vector3 cameraUp = Vector3.UnitY;
-
-            // Build the View matrix:
-            Matrix viewMat = Matrix.LookAtLH(cameraPosition, cameraTarget, cameraUp);
-
-
-            // 3) -----------------------------------------------
-            // Build a Perspective projection matrix.
-            // FOV, aspect ratio, near & far planes can be user defined or just set here.
-            float fovDegrees = 60.0f;
-            float fovRadians = MathUtil.DegreesToRadians(fovDegrees);
-
-            float aspect = (float)renderPanel.ClientSize.Width /
-                           (float)renderPanel.ClientSize.Height;
-
-            // If wanted to ensure aspect is valid:
-            if (aspect < 0.1f) aspect = 1f;
-
-            // We can pick near & far to comfortably enclose the volume:
-            float nearPlane = 0.1f;
-            float farPlane = distance * 10f; // or something bigger than the volume distance
-
-            Matrix projMat = Matrix.PerspectiveFovLH(fovRadians, aspect, nearPlane, farPlane);
-
-            // 4) -----------------------------------------------
-            // Combine into a single view-projection:
-            Matrix viewProj = viewMat * projMat;
-
-            // 5) -----------------------------------------------
-            // Fill out our ConstantData struct with everything we need:
-            var cdata = new ConstantData();
-
-            cdata.worldViewProj = viewProj;
-            cdata.invView = Matrix.Invert(viewMat);
-
-            // thresholds.x = min threshold
-            // thresholds.y = max threshold
-            // thresholds.z = ray step size
-            // thresholds.w = showGray ? 1 : 0
-            cdata.thresholds = new Vector4(
-                minThresholdNorm,
-                maxThresholdNorm,
-                stepSize,
-                showGray ? 1.0f : 0.0f
-            );
-
-            // dims = (volW, volH, volD, optionalValue)
-            cdata.dims = new Vector4(volW, volH, volD, 0);
-
-            // sliceCoords = ( sliceXNormalized, sliceYNormalized, sliceZNormalized, showSlices? 1.0 : 0.0 )
-            cdata.sliceCoords = new Vector4(
-                sliceX / (float)Math.Max(1, volW - 1),
-                sliceY / (float)Math.Max(1, volH - 1),
-                sliceZ / (float)Math.Max(1, volD - 1),
-                showSlices ? 1.0f : 0.0f
-            );
-
-            // 6) -----------------------------------------------
-            // Push this data into the GPU’s constant buffer:
-            context.UpdateSubresource(ref cdata, constantBuffer);
-
-            // Finally bind the constant buffer to both VS and PS (or GS, CS, etc. if needed).
-            context.VertexShader.SetConstantBuffer(slot, constantBuffer);
-            context.PixelShader.SetConstantBuffer(slot, constantBuffer);
         }
 
         public int SliceX => sliceX;
         public int SliceY => sliceY;
         public int SliceZ => sliceZ;
-        public bool[] GetLabelVisibilityArray()
+
+        public bool CutXEnabled
         {
-            var copy = new bool[256];
-            Array.Copy(labelVisible, copy, 256);
-            return copy;
+            get { return cutXEnabled; }
+            set
+            {
+                cutXEnabled = value;
+                NeedsRender = true;
+            }
         }
+
+        public bool CutYEnabled
+        {
+            get { return cutYEnabled; }
+            set
+            {
+                cutYEnabled = value;
+                NeedsRender = true;
+            }
+        }
+
+        public bool CutZEnabled
+        {
+            get { return cutZEnabled; }
+            set
+            {
+                cutZEnabled = value;
+                NeedsRender = true;
+            }
+        }
+
+        public float CutXPosition
+        {
+            get { return cutXPosition; }
+            set
+            {
+                cutXPosition = Math.Max(0.0f, Math.Min(1.0f, value));
+                NeedsRender = true;
+            }
+        }
+
+        public float CutYPosition
+        {
+            get { return cutYPosition; }
+            set
+            {
+                cutYPosition = Math.Max(0.0f, Math.Min(1.0f, value));
+                NeedsRender = true;
+            }
+        }
+
+        public float CutZPosition
+        {
+            get { return cutZPosition; }
+            set
+            {
+                cutZPosition = Math.Max(0.0f, Math.Min(1.0f, value));
+                NeedsRender = true;
+            }
+        }
+
+        public float CutXDirection
+        {
+            get { return cutXDirection; }
+            set
+            {
+                cutXDirection = (value >= 0) ? 1.0f : -1.0f;
+                NeedsRender = true;
+            }
+        }
+
+        public float CutYDirection
+        {
+            get { return cutYDirection; }
+            set
+            {
+                cutYDirection = (value >= 0) ? 1.0f : -1.0f;
+                NeedsRender = true;
+            }
+        }
+
+        public float CutZDirection
+        {
+            get { return cutZDirection; }
+            set
+            {
+                cutZDirection = (value >= 0) ? 1.0f : -1.0f;
+                NeedsRender = true;
+            }
+        }
+
+        public bool UseLodSystem
+        {
+            get { return useLodSystem; }
+            set
+            {
+                useLodSystem = value;
+                NeedsRender = true;
+            }
+        }
+        #endregion
+
+        #region Initialization
+        public SharpDXVolumeRenderer(MainForm mainForm, Panel panel)
+        {
+            this.mainForm = mainForm;
+            this.renderPanel = panel;
+
+            // Get volume dimensions
+            volW = mainForm.GetWidth();
+            volH = mainForm.GetHeight();
+            volD = mainForm.GetDepth();
+
+            // Default slice positions
+            sliceX = volW / 2;
+            sliceY = volH / 2;
+            sliceZ = volD / 2;
+
+            // Set initial camera distance based on volume size
+            float maxDim = Math.Max(volW, Math.Max(volH, volD));
+            cameraDistance = maxDim * 2.0f;
+
+            // Set default visibility and opacity for all materials
+            for (int i = 0; i < MAX_LABELS; i++)
+            {
+                labelVisible[i] = true;
+                labelOpacity[i] = 1.0f;
+            }
+
+            // Special case for exterior (material 0)
+            labelVisible[0] = false;
+            labelOpacity[0] = 0.0f;
+
+            // Register mouse handlers
+            renderPanel.MouseDown += OnMouseDown;
+            renderPanel.MouseMove += OnMouseMove;
+            renderPanel.MouseUp += OnMouseUp;
+            renderPanel.MouseWheel += OnMouseWheel;
+            renderPanel.BackColor = System.Drawing.Color.Black;
+
+            try
+            {
+                // Initialize DirectX
+                CreateDeviceAndSwapChain();
+                CreateRenderTargets();
+                CreateRenderStates();
+                CreateShaders();
+                CreateCubeGeometry();
+                CreateVolumeTextures();
+                CreateLabelTextures();
+                CreateMaterialColorTexture();
+                CreateColorMapTexture();
+                CreateLodTextures();
+                Vector3 volumeCenter = new Vector3(volW / 2.0f, volH / 2.0f, volD / 2.0f);
+                cameraYaw = 0.8f; // Approximately 45 degrees
+                cameraPitch = 0.6f; // Slightly elevated view
+                cameraDistance = Math.Max(volW, Math.Max(volH, volD)) * 2.0f;
+                panOffset = Vector3.Zero;
+                NeedsRender = true;
+
+               
+
+                Logger.Log($"[SharpDXVolumeRenderer] Successfully created {volW}x{volH}x{volD} volume renderer");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Initialization error: " + ex.Message);
+                MessageBox.Show("Failed to initialize volume renderer: " + ex.Message);
+            }
+        }
+
+        private void CreateDeviceAndSwapChain()
+        {
+            try
+            {
+                // Ensure panel size is valid
+                int width = Math.Max(1, renderPanel.ClientSize.Width);
+                int height = Math.Max(1, renderPanel.ClientSize.Height);
+
+                // Create SwapChain description with improved settings for stability
+                SwapChainDescription swapChainDesc = new SwapChainDescription
+                {
+                    BufferCount = 2, // Double buffering for better stability
+                    ModeDescription = new ModeDescription(width, height, new Rational(60, 1), Format.B8G8R8A8_UNorm), // BGRA format can be more efficient
+                    IsWindowed = true,
+                    OutputHandle = renderPanel.Handle,
+                    SampleDescription = new SampleDescription(1, 0), // No MSAA
+                    SwapEffect = SwapEffect.Discard, // Discard is more compatible with older hardware
+                    Usage = Usage.RenderTargetOutput,
+                    Flags = SwapChainFlags.AllowModeSwitch, // Add mode switch to support alpha rendering
+                };
+
+                // Try different device options in case of failure
+                DeviceCreationFlags deviceFlags = DeviceCreationFlags.BgraSupport; // Add BGRA support
+
+                try
+                {
+                    // Create device with no debugging for better performance
+                    Device.CreateWithSwapChain(
+                        DriverType.Hardware,
+                        deviceFlags,
+                        new[] { FeatureLevel.Level_11_0, FeatureLevel.Level_10_1, FeatureLevel.Level_10_0, FeatureLevel.Level_9_3 },
+                        swapChainDesc,
+                        out device,
+                        out swapChain);
+
+                    Logger.Log("[SharpDXVolumeRenderer] Created device with hardware acceleration");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log("[SharpDXVolumeRenderer] Failed to create hardware device: " + ex.Message);
+
+                    // Try again with reference driver
+                    try
+                    {
+                        Device.CreateWithSwapChain(
+                            DriverType.Reference, // Software reference renderer
+                            deviceFlags,
+                            new[] { FeatureLevel.Level_11_0, FeatureLevel.Level_10_1, FeatureLevel.Level_10_0, FeatureLevel.Level_9_3 },
+                            swapChainDesc,
+                            out device,
+                            out swapChain);
+
+                        Logger.Log("[SharpDXVolumeRenderer] Created device with reference renderer");
+                    }
+                    catch (Exception refEx)
+                    {
+                        Logger.Log("[SharpDXVolumeRenderer] Failed to create reference device: " + refEx.Message);
+
+                        // Last resort - WARP software renderer
+                        try
+                        {
+                            Device.CreateWithSwapChain(
+                                DriverType.Warp, // WARP software renderer
+                                deviceFlags,
+                                new[] { FeatureLevel.Level_11_0, FeatureLevel.Level_10_1, FeatureLevel.Level_10_0, FeatureLevel.Level_9_3 },
+                                swapChainDesc,
+                                out device,
+                                out swapChain);
+
+                            Logger.Log("[SharpDXVolumeRenderer] Created device with WARP (software) renderer");
+                        }
+                        catch (Exception warpEx)
+                        {
+                            Logger.Log("[SharpDXVolumeRenderer] Failed to create any device: " + warpEx.Message);
+                            throw new Exception("Failed to initialize graphics device. Please update your graphics drivers.", warpEx);
+                        }
+                    }
+                }
+
+                context = device.ImmediateContext;
+
+                // Prevent Alt+Enter fullscreen toggle
+                using (Factory factory = swapChain.GetParent<Factory>())
+                {
+                    factory.MakeWindowAssociation(renderPanel.Handle, WindowAssociationFlags.IgnoreAltEnter);
+                }
+
+                Logger.Log("[SharpDXVolumeRenderer] Device and SwapChain created successfully");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Error creating device: " + ex.Message);
+                throw;
+            }
+        }
+
+        private void CreateRenderTargets()
+        {
+            try
+            {
+                // Clean up old render targets
+                Utilities.Dispose(ref renderTargetView);
+                Utilities.Dispose(ref depthView);
+                Utilities.Dispose(ref depthBuffer);
+
+                // Ensure valid dimensions 
+                int width = Math.Max(1, renderPanel.ClientSize.Width);
+                int height = Math.Max(1, renderPanel.ClientSize.Height);
+
+                // Resize swapchain buffers if needed
+                swapChain.ResizeBuffers(
+                    2, // Double buffering
+                    width,
+                    height,
+                    Format.B8G8R8A8_UNorm, // RGBA format for proper transparency
+                    SwapChainFlags.None);
+
+                // Create render target view from backbuffer
+                using (Texture2D backBuffer = Texture2D.FromSwapChain<Texture2D>(swapChain, 0))
+                {
+                    renderTargetView = new RenderTargetView(device, backBuffer);
+                }
+
+                // Create depth buffer
+                Texture2DDescription depthDesc = new Texture2DDescription
+                {
+                    Width = width,
+                    Height = height,
+                    ArraySize = 1,
+                    BindFlags = BindFlags.DepthStencil,
+                    CpuAccessFlags = CpuAccessFlags.None,
+                    Format = Format.D24_UNorm_S8_UInt,
+                    MipLevels = 1,
+                    OptionFlags = ResourceOptionFlags.None,
+                    SampleDescription = new SampleDescription(1, 0),
+                    Usage = ResourceUsage.Default
+                };
+
+                depthBuffer = new Texture2D(device, depthDesc);
+                depthView = new DepthStencilView(device, depthBuffer);
+
+                Logger.Log("[SharpDXVolumeRenderer] Render targets recreated successfully");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Error creating render targets: " + ex.Message);
+                throw;
+            }
+        }
+
+        private void CreateRenderStates()
+        {
+            try
+            {
+                // Create solid rasterizer state
+                RasterizerStateDescription solidRsDesc = new RasterizerStateDescription
+                {
+                    CullMode = CullMode.Back,
+                    FillMode = FillMode.Solid,
+                    IsDepthClipEnabled = true,
+                    IsFrontCounterClockwise = false
+                };
+                solidRasterState = new RasterizerState(device, solidRsDesc);
+
+                // Create wireframe rasterizer state
+                RasterizerStateDescription wireframeRsDesc = new RasterizerStateDescription
+                {
+                    CullMode = CullMode.None,
+                    FillMode = FillMode.Wireframe,
+                    IsDepthClipEnabled = true,
+                    IsFrontCounterClockwise = false
+                };
+                wireframeRasterState = new RasterizerState(device, wireframeRsDesc);
+
+                // Create alpha blend state for volume rendering
+                BlendStateDescription blendDesc = new BlendStateDescription();
+                blendDesc.RenderTarget[0].IsBlendEnabled = true;
+                blendDesc.RenderTarget[0].SourceBlend = BlendOption.SourceAlpha;
+                blendDesc.RenderTarget[0].DestinationBlend = BlendOption.InverseSourceAlpha;
+                blendDesc.RenderTarget[0].BlendOperation = BlendOperation.Add;
+                blendDesc.RenderTarget[0].SourceAlphaBlend = BlendOption.One;
+                blendDesc.RenderTarget[0].DestinationAlphaBlend = BlendOption.InverseSourceAlpha;
+                blendDesc.RenderTarget[0].AlphaBlendOperation = BlendOperation.Add;
+                blendDesc.RenderTarget[0].RenderTargetWriteMask = ColorWriteMaskFlags.All;
+                blendDesc.AlphaToCoverageEnable = false;
+                blendDesc.IndependentBlendEnable = false;
+                alphaBlendState = new BlendState(device, blendDesc);
+
+                // Create samplers
+                SamplerStateDescription linearSampDesc = new SamplerStateDescription
+                {
+                    Filter = Filter.MinMagMipLinear,
+                    AddressU = TextureAddressMode.Clamp,
+                    AddressV = TextureAddressMode.Clamp,
+                    AddressW = TextureAddressMode.Clamp,
+                    ComparisonFunction = Comparison.Never,
+                    MinimumLod = 0,
+                    MaximumLod = float.MaxValue,
+                    MaximumAnisotropy = 1
+                };
+                linearSampler = new SamplerState(device, linearSampDesc);
+
+                SamplerStateDescription pointSampDesc = new SamplerStateDescription
+                {
+                    Filter = Filter.MinMagMipPoint,
+                    AddressU = TextureAddressMode.Clamp,
+                    AddressV = TextureAddressMode.Clamp,
+                    AddressW = TextureAddressMode.Clamp,
+                    ComparisonFunction = Comparison.Never,
+                    MinimumLod = 0,
+                    MaximumLod = float.MaxValue,
+                    MaximumAnisotropy = 1
+                };
+                pointSampler = new SamplerState(device, pointSampDesc);
+
+                Logger.Log("[SharpDXVolumeRenderer] Render states created successfully");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Error creating render states: " + ex.Message);
+                throw;
+            }
+        }
+
+        private void CreateShaders()
+        {
+            try
+            {
+                // Load shader code from a string
+                string shaderCode = LoadVolumeRenderingShader();
+
+                // First, compile the vertex shader
+                using (var vertexShaderBytecode = SharpDX.D3DCompiler.ShaderBytecode.Compile(
+                    shaderCode, "VSMain", "vs_5_0", SharpDX.D3DCompiler.ShaderFlags.Debug))
+                {
+                    if (vertexShaderBytecode.HasErrors)
+                    {
+                        Logger.Log("[SharpDXVolumeRenderer] VS compilation error: " + vertexShaderBytecode.Message);
+                        throw new Exception("Vertex shader compilation failed: " + vertexShaderBytecode.Message);
+                    }
+
+                    volumeVertexShader = new VertexShader(device, vertexShaderBytecode);
+
+                    // Create input layout - MUST match vertex structure
+                    InputElement[] inputElements = new[] {
+                        new InputElement("POSITION", 0, Format.R32G32B32_Float, 0, 0)
+                    };
+
+                    inputLayout = new InputLayout(device, vertexShaderBytecode, inputElements);
+                }
+
+                // Then, compile the pixel shader
+                using (var pixelShaderBytecode = SharpDX.D3DCompiler.ShaderBytecode.Compile(
+                    shaderCode, "PSMain", "ps_5_0", SharpDX.D3DCompiler.ShaderFlags.Debug))
+                {
+                    if (pixelShaderBytecode.HasErrors)
+                    {
+                        Logger.Log("[SharpDXVolumeRenderer] PS compilation error: " + pixelShaderBytecode.Message);
+                        throw new Exception("Pixel shader compilation failed: " + pixelShaderBytecode.Message);
+                    }
+
+                    volumePixelShader = new PixelShader(device, pixelShaderBytecode);
+                }
+
+                // Create constant buffer for shader parameters
+                constantBuffer = new Buffer(device, Utilities.SizeOf<ConstantBufferData>(),
+                    ResourceUsage.Default, BindFlags.ConstantBuffer, CpuAccessFlags.None, ResourceOptionFlags.None, 0);
+
+                Logger.Log("[SharpDXVolumeRenderer] Shaders created successfully");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Error creating shaders: " + ex.Message);
+                throw;
+            }
+        }
+
+        private string LoadVolumeRenderingShader()
+        {
+            // Load the updated shader code from the artifact
+            return @"
+// Volume rendering shader with support for:
+// - Grayscale volume visualization with multiple color maps
+// - Material/label visualization with colors
+// - Orthogonal slicing planes with colored borders
+// - Thresholding
+// - Dataset cutting along each axis
+
+// Constant buffer with rendering parameters
+cbuffer ConstantBuffer : register(b0)
+{
+    matrix worldViewProj;        // World-view-projection matrix
+    matrix invViewMatrix;        // Inverse view matrix for ray calculation
+    float4 thresholds;           // x=min, y=max, z=stepSize, w=showGrayscale
+    float4 dimensions;           // xyz=volume dimensions, w=unused
+    float4 sliceCoords;          // xyz=slice positions normalized (0-1), w=showSlices
+    float4 cameraPosition;       // Camera position in world space
+    float4 colorMapIndex;        // x=colorMapIndex, y=slice border thickness, z,w=unused
+    float4 cutPlaneX;            // x=enabled, y=direction(1=forward,-1=backward), z=position, w=unused
+    float4 cutPlaneY;            // x=enabled, y=direction(1=forward,-1=backward), z=position, w=unused
+    float4 cutPlaneZ;            // x=enabled, y=direction(1=forward,-1=backward), z=position, w=unused
+};
+
+// Material properties
+Texture1D<float> materialVisibility : register(t0);    // Whether material is visible (0=hidden, 1=visible)
+Texture1D<float> materialOpacity : register(t1);       // Material opacity (0-1)
+Texture3D<float> volumeTexture : register(t2);         // Grayscale volume data (0-1)
+Texture3D<float> labelTexture : register(t3);          // Label/material volume as float
+Texture1D<float4> materialColors : register(t4);       // Material color lookup texture
+Texture1D<float4> colorMaps : register(t5);            // Color maps for grayscale visualization
+
+// Samplers
+SamplerState linearSampler : register(s0);
+SamplerState pointSampler : register(s1);
+
+// Structures
+struct VS_INPUT
+{
+    float3 Position : POSITION;
+};
+
+struct VS_OUTPUT
+{
+    float4 Position : SV_POSITION;
+    float3 WorldPos : POSITION0;
+    float3 TexCoord : TEXCOORD0;
+};
+
+// Ray-box intersection function
+bool IntersectBox(float3 rayOrigin, float3 rayDir, float3 boxMin, float3 boxMax, 
+                 out float tNear, out float tFar)
+{
+    // Compute intersection with all planes
+    float3 invRayDir = 1.0 / (rayDir + 0.0000001f); // Avoid division by zero
+    float3 t1 = (boxMin - rayOrigin) * invRayDir;
+    float3 t2 = (boxMax - rayOrigin) * invRayDir;
+    
+    // Sort t values
+    float3 tMin = min(t1, t2);
+    float3 tMax = max(t1, t2);
+    
+    // Find the largest tMin and smallest tMax
+    tNear = max(max(tMin.x, tMin.y), tMin.z);
+    tFar = min(min(tMax.x, tMax.y), tMax.z);
+    
+    return tFar > tNear && tFar > 0.0;
+}
+
+// Vertex shader
+VS_OUTPUT VSMain(VS_INPUT input)
+{
+    VS_OUTPUT output;
+    
+    // Transform vertex to clip space
+    output.Position = mul(float4(input.Position, 1.0), worldViewProj);
+    
+    // Pass through world position
+    output.WorldPos = input.Position;
+    
+    // Normalize texture coordinates to [0,1]
+    output.TexCoord = input.Position / dimensions.xyz;
+    
+    return output;
+}
+
+// Helper function for slice planes
+bool IsOnSlicePlane(float3 pos, float3 slicePos, float epsilon, out int sliceType)
+{
+    // Check if the position is on any of the three slice planes
+    bool onXSlice = abs(pos.x - slicePos.x * dimensions.x) < epsilon;
+    bool onYSlice = abs(pos.y - slicePos.y * dimensions.y) < epsilon;
+    bool onZSlice = abs(pos.z - slicePos.z * dimensions.z) < epsilon;
+    
+    // Set slice type (1=X, 2=Y, 3=Z)
+    sliceType = 0;
+    if (onXSlice) sliceType = 1;
+    else if (onYSlice) sliceType = 2;
+    else if (onZSlice) sliceType = 3;
+    
+    return (sliceType > 0);
+}
+
+// Helper function to check if a point is within the slice border
+bool IsOnSliceBorder(float3 pos, float3 slicePos, float thickness, int sliceType)
+{
+    if (sliceType == 1) // X slice (YZ plane)
+    {
+        float y = pos.y / dimensions.y;
+        float z = pos.z / dimensions.z;
+        return (y < thickness || y > 1.0 - thickness || z < thickness || z > 1.0 - thickness);
+    }
+    else if (sliceType == 2) // Y slice (XZ plane)
+    {
+        float x = pos.x / dimensions.x;
+        float z = pos.z / dimensions.z;
+        return (x < thickness || x > 1.0 - thickness || z < thickness || z > 1.0 - thickness);
+    }
+    else if (sliceType == 3) // Z slice (XY plane)
+    {
+        float x = pos.x / dimensions.x;
+        float y = pos.y / dimensions.y;
+        return (x < thickness || x > 1.0 - thickness || y < thickness || y > 1.0 - thickness);
+    }
+    return false;
+}
+
+// Check if a point is cut by any cutting plane
+bool IsCutByPlane(float3 pos)
+{
+    // Check X cutting plane
+    if (cutPlaneX.x > 0.5) { // If enabled
+        if (cutPlaneX.y > 0) { // Forward cut
+            if (pos.x > cutPlaneX.z * dimensions.x) return true;
+        } else { // Backward cut
+            if (pos.x < cutPlaneX.z * dimensions.x) return true;
+        }
+    }
+    
+    // Check Y cutting plane
+    if (cutPlaneY.x > 0.5) { // If enabled
+        if (cutPlaneY.y > 0) { // Forward cut
+            if (pos.y > cutPlaneY.z * dimensions.y) return true;
+        } else { // Backward cut
+            if (pos.y < cutPlaneY.z * dimensions.y) return true;
+        }
+    }
+    
+    // Check Z cutting plane
+    if (cutPlaneZ.x > 0.5) { // If enabled
+        if (cutPlaneZ.y > 0) { // Forward cut
+            if (pos.z > cutPlaneZ.z * dimensions.z) return true;
+        } else { // Backward cut
+            if (pos.z < cutPlaneZ.z * dimensions.z) return true;
+        }
+    }
+    
+    return false;
+}
+
+// Get color from the selected color map
+float4 ApplyColorMap(float intensity, float minThreshold, float maxThreshold, int mapIndex)
+{
+    // Normalize intensity to 0-1 range based on thresholds
+    float normalizedIntensity = (intensity - minThreshold) / (maxThreshold - minThreshold);
+    normalizedIntensity = saturate(normalizedIntensity); // Clamp to [0,1]
+    
+    // Sample from the color map based on the intensity
+    // The colorMaps texture is a 1D texture with different color maps stacked
+    // Each map has 256 entries, so we offset by mapIndex * 256
+    float mapOffset = mapIndex * 256;
+    float samplePos = (mapOffset + normalizedIntensity * 255) / 1024.0; // Assuming total size of 1024
+    float4 color = colorMaps.SampleLevel(linearSampler, samplePos, 0);
+    
+    // Adjust alpha based on intensity
+    float alpha = normalizedIntensity * 0.5 + 0.2;
+    color.a = min(0.7, alpha);
+    
+    return color;
+}
+
+// Improved edge detection for wireframe
+bool IsOnBoundingBoxEdge(float3 texCoord, float edgeThickness)
+{
+    // Check if we're near any of the 12 edges of the box
+    // This approach is more precise than the previous one
+    
+    // We need at least two coordinates to be near the edge
+    int nearEdgeCount = 0;
+    
+    // Check each dimension
+    for (int i = 0; i < 3; i++)
+    {
+        float coord = texCoord[i];
+        if (coord < edgeThickness || coord > (1.0 - edgeThickness))
+        {
+            nearEdgeCount++;
+        }
+    }
+    
+    // We're on an edge if exactly two coordinates are at extremes
+    return nearEdgeCount >= 2;
+}
+
+// Pixel shader implementing ray marching through the volume
+float4 PSMain(VS_OUTPUT input) : SV_TARGET
+{
+    // Get the ray origin and direction in world space
+    float3 rayOrigin = cameraPosition.xyz;
+    float3 rayDir = normalize(input.WorldPos - rayOrigin);
+    
+    // Compute intersection with the volume bounding box
+    float tNear, tFar;
+    float3 boxMin = float3(0, 0, 0);
+    float3 boxMax = dimensions.xyz;
+    
+    // Check if ray actually hits the bounding box
+    if (!IntersectBox(rayOrigin, rayDir, boxMin, boxMax, tNear, tFar))
+    {
+        // Ray completely misses the volume - return fully transparent
+        return float4(0, 0, 0, 0);
+    }
+    
+    // Ensure we start inside the volume
+    tNear = max(tNear, 0.0);
+    
+    // Step size for ray marching - this must be small enough
+    float stepSize = max(0.5, thresholds.z);
+    int maxSteps = 2000; // Higher limit for quality
+    
+    // Initialize accumulated color
+    float4 accumulatedColor = float4(0, 0, 0, 0);
+    
+    // Start ray marching from the near intersection point
+    float t = tNear;
+    
+    // Thresholds
+    float minThreshold = thresholds.x;
+    float maxThreshold = thresholds.y;
+    
+    // Whether to show grayscale
+    bool showGrayscale = thresholds.w > 0.5;
+    
+    // Whether to show orthogonal slices
+    bool showSlices = sliceCoords.w > 0.5;
+    
+    // Slice positions
+    float3 slicePos = sliceCoords.xyz;
+    
+    // Color map index
+    int mapIndex = (int)(colorMapIndex.x + 0.5);
+    
+    // Border thickness for slices
+    float borderThickness = colorMapIndex.y;
+    
+    // Ray marching loop
+    for (int i = 0; i < maxSteps && t < tFar; i++)
+    {
+        // Calculate current position along the ray
+        float3 pos = rayOrigin + t * rayDir;
+        
+        // Convert to texture coordinates [0,1]
+        float3 texCoord = pos / dimensions.xyz;
+        
+        // Robust bounds check - add extra safety margin
+        if (any(texCoord < -0.001) || any(texCoord > 1.001))
+        {
+            break;
+        }
+        
+        // Check if this point is cut by any cutting plane
+        if (IsCutByPlane(pos))
+        {
+            t += stepSize;
+            continue;
+        }
+        
+        // Handle slice planes with higher priority
+        int sliceType = 0;
+        if (showSlices && IsOnSlicePlane(pos, slicePos, stepSize * 1.5, sliceType))
+        {
+            // We're on a slice plane - render it
+            // Clamp coordinates to valid range to avoid sampling artifacts
+            float3 safeCoord = clamp(texCoord, 0.001, 0.999);
+            
+            // Sample the volume with clamped coordinates
+            float intensity = volumeTexture.SampleLevel(linearSampler, safeCoord, 0);
+            float labelValue = labelTexture.SampleLevel(pointSampler, safeCoord, 0);
+            
+            // Convert label to material ID
+            uint materialId = (uint)(labelValue + 0.5);
+            
+            // Check if we're on a slice border
+            bool onBorder = IsOnSliceBorder(pos, slicePos, borderThickness, sliceType);
+            
+            // Create the slice color - either from material, grayscale, or border
+            float4 sliceColor;
+            
+            if (onBorder)
+            {
+                // Use different colors for borders based on slice type
+                if (sliceType == 1) // X slice (YZ plane) - Red
+                    sliceColor = float4(1.0, 0.0, 0.0, 0.9);
+                else if (sliceType == 2) // Y slice (XZ plane) - Green
+                    sliceColor = float4(0.0, 1.0, 0.0, 0.9);
+                else if (sliceType == 3) // Z slice (XY plane) - Blue
+                    sliceColor = float4(0.0, 0.0, 1.0, 0.9);
+            }
+            else if (materialId > 0 && materialVisibility[materialId] > 0.5)
+            {
+                // Use material color for the slice
+                sliceColor = materialColors[materialId];
+                sliceColor.a *= materialOpacity[materialId];
+                sliceColor.a = min(sliceColor.a, 0.9); // Cap opacity
+            }
+            else
+            {
+                // Use color map or grayscale for the slice with higher opacity for better visibility
+                if (mapIndex >= 0)
+                    sliceColor = ApplyColorMap(intensity, minThreshold, maxThreshold, mapIndex);
+                else
+                    sliceColor = float4(intensity, intensity, intensity, 0.7);
+                
+                // Higher opacity for slices
+                sliceColor.a = 0.7;
+            }
+            
+            // Accumulate the slice color
+            accumulatedColor = sliceColor;
+            
+            // Early exit after hitting a slice
+            break;
+        }
+        
+        // Safety check before sampling the volume 
+        if (any(texCoord < 0.0) || any(texCoord > 1.0))
+        {
+            t += stepSize;
+            continue;
+        }
+        
+        // Sample volume data
+        float intensity = volumeTexture.SampleLevel(linearSampler, texCoord, 0);
+        float labelValue = labelTexture.SampleLevel(pointSampler, texCoord, 0);
+        
+        // Convert label to material ID
+        uint materialId = (uint)(labelValue + 0.5);
+        
+        // Initialize this sample's color to transparent
+        float4 sampleColor = float4(0, 0, 0, 0);
+        
+        // Process the regular volume 
+        if (showGrayscale && intensity >= minThreshold && intensity <= maxThreshold)
+        {
+            // Apply color map based on selected index
+            if (mapIndex >= 0)
+                sampleColor = ApplyColorMap(intensity, minThreshold, maxThreshold, mapIndex);
+            else
+                sampleColor = float4(intensity, intensity, intensity, intensity * 0.5 + 0.2);
+        }
+        
+        // Overlay material color if applicable
+        if (materialId > 0 && materialVisibility[materialId] > 0.5)
+        {
+            // Use material color
+            float4 matColor = materialColors[materialId];
+            matColor.a *= materialOpacity[materialId];
+            
+            // Replace grayscale with material color
+            sampleColor = matColor;
+        }
+        
+        // Front-to-back compositing if the sample has color
+        if (sampleColor.a > 0.01)
+        {
+            // Pre-multiply alpha
+            sampleColor.rgb *= sampleColor.a;
+            
+            // Accumulate color
+            accumulatedColor += (1.0 - accumulatedColor.a) * sampleColor;
+            
+            // Early ray termination for efficiency
+            if (accumulatedColor.a > 0.95)
+            {
+                break;
+            }
+        }
+        
+        // Move along ray
+        t += stepSize;
+    }
+    
+    // Draw wireframe if needed - only if we didn't hit anything solid
+    if (accumulatedColor.a < 0.01)
+    {
+        // Use a much thinner wireframe
+        float edgeThickness = 0.003;
+        
+        // Check if we're on an edge of the bounding box
+        if (IsOnBoundingBoxEdge(input.TexCoord, edgeThickness))
+        {
+            // Draw wireframe in bright white with low opacity
+            return float4(1.0, 1.0, 1.0, 0.3);
+        }
+        
+        // For non-edge pixels, return fully transparent color
+        return float4(0, 0, 0, 0);
+    }
+    
+    // Return the final accumulated color
+    return accumulatedColor;
+}";
+        }
+
+        private void CreateCubeGeometry()
+        {
+            try
+            {
+                // Create cube vertices - using actual volume dimensions
+                Vector3[] vertices = new Vector3[8]
+                {
+                    new Vector3(0, 0, 0),                // 0: bottom-left-back
+                    new Vector3(volW, 0, 0),             // 1: bottom-right-back
+                    new Vector3(volW, volH, 0),          // 2: top-right-back
+                    new Vector3(0, volH, 0),             // 3: top-left-back
+                    new Vector3(0, 0, volD),             // 4: bottom-left-front
+                    new Vector3(volW, 0, volD),          // 5: bottom-right-front
+                    new Vector3(volW, volH, volD),       // 6: top-right-front
+                    new Vector3(0, volH, volD)           // 7: top-left-front
+                };
+
+                // Create cube indices (6 faces, 2 triangles per face)
+                int[] indices = new int[]
+                {
+                    // Back face (CCW)
+                    0, 2, 1, 0, 3, 2,
+                    // Front face (CCW)
+                    4, 5, 6, 4, 6, 7,
+                    // Left face (CCW)
+                    0, 4, 7, 0, 7, 3,
+                    // Right face (CCW)
+                    1, 2, 6, 1, 6, 5,
+                    // Bottom face (CCW)
+                    0, 1, 5, 0, 5, 4,
+                    // Top face (CCW)
+                    3, 7, 6, 3, 6, 2
+                };
+
+                cubeIndexCount = indices.Length;
+
+                // Create vertex buffer
+                BufferDescription vbDesc = new BufferDescription(
+                    Utilities.SizeOf<Vector3>() * vertices.Length,
+                    ResourceUsage.Default,
+                    BindFlags.VertexBuffer,
+                    CpuAccessFlags.None,
+                    ResourceOptionFlags.None,
+                    0);
+
+                cubeVertexBuffer = Buffer.Create(device, vertices, vbDesc);
+
+                // Create index buffer
+                BufferDescription ibDesc = new BufferDescription(
+                    sizeof(int) * indices.Length,
+                    ResourceUsage.Default,
+                    BindFlags.IndexBuffer,
+                    CpuAccessFlags.None,
+                    ResourceOptionFlags.None,
+                    sizeof(int));
+
+                cubeIndexBuffer = Buffer.Create(device, indices, ibDesc);
+
+                Logger.Log("[SharpDXVolumeRenderer] Cube geometry created successfully");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Error creating cube geometry: " + ex.Message);
+                throw;
+            }
+        }
+
+        private void CreateVolumeTextures()
+        {
+            try
+            {
+                // Load grayscale volume data
+                if (mainForm.volumeData != null)
+                {
+                    volumeTexture = CreateTexture3DFromChunkedVolume(mainForm.volumeData, Format.R8_UNorm);
+                    if (volumeTexture != null)
+                    {
+                        ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
+                        {
+                            Format = Format.R8_UNorm,
+                            Dimension = ShaderResourceViewDimension.Texture3D,
+                            Texture3D = new ShaderResourceViewDescription.Texture3DResource
+                            {
+                                MipLevels = 1,
+                                MostDetailedMip = 0
+                            }
+                        };
+
+                        volumeSRV = new ShaderResourceView(device, volumeTexture, srvDesc);
+                        Logger.Log($"[SharpDXVolumeRenderer] Created volume texture: {volW}x{volH}x{volD}");
+                    }
+                }
+
+                // Load label volume if available
+                if (mainForm.volumeLabels != null)
+                {
+                    // Change from R8_UInt to R32_Float
+                    labelTexture = CreateTexture3DFromChunkedLabelVolume(mainForm.volumeLabels, Format.R32_Float);
+                    if (labelTexture != null)
+                    {
+                        ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
+                        {
+                            // Change from R8_UInt to R32_Float
+                            Format = Format.R32_Float,
+                            Dimension = ShaderResourceViewDimension.Texture3D,
+                            Texture3D = new ShaderResourceViewDescription.Texture3DResource
+                            {
+                                MipLevels = 1,
+                                MostDetailedMip = 0
+                            }
+                        };
+
+                        labelSRV = new ShaderResourceView(device, labelTexture, srvDesc);
+                        Logger.Log("[SharpDXVolumeRenderer] Created label volume texture");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Error creating volume textures: " + ex.Message);
+                // Don't throw here - the application should still work for basic cube rendering
+                Logger.Log("[SharpDXVolumeRenderer] Continuing with basic rendering only");
+            }
+        }
+
+        private void CreateLabelTextures()
+        {
+            try
+            {
+                // Create 1D textures for label visibility and opacity
+                Texture1DDescription texDesc = new Texture1DDescription
+                {
+                    Width = MAX_LABELS,
+                    ArraySize = 1,
+                    BindFlags = BindFlags.ShaderResource,
+                    CpuAccessFlags = CpuAccessFlags.Write,
+                    Format = Format.R32_Float,
+                    MipLevels = 1,
+                    OptionFlags = ResourceOptionFlags.None,
+                    Usage = ResourceUsage.Dynamic
+                };
+
+                labelVisibilityTexture = new Texture1D(device, texDesc);
+                labelOpacityTexture = new Texture1D(device, texDesc);
+
+                // Create shader resource views
+                ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
+                {
+                    Format = Format.R32_Float,
+                    Dimension = ShaderResourceViewDimension.Texture1D,
+                    Texture1D = new ShaderResourceViewDescription.Texture1DResource
+                    {
+                        MipLevels = 1,
+                        MostDetailedMip = 0
+                    }
+                };
+
+                labelVisibilitySRV = new ShaderResourceView(device, labelVisibilityTexture, srvDesc);
+                labelOpacitySRV = new ShaderResourceView(device, labelOpacityTexture, srvDesc);
+
+                // Upload initial data
+                UpdateLabelTextures();
+
+                Logger.Log("[SharpDXVolumeRenderer] Label textures created successfully");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Error creating label textures: " + ex.Message);
+                // Don't throw here - the application should still work for basic cube rendering
+            }
+        }
+
+        private void CreateMaterialColorTexture()
+        {
+            try
+            {
+                // Create a color texture for materials
+                // Always create this texture even if Materials collection is empty
+
+                // Create texture descriptor
+                Texture1DDescription texDesc = new Texture1DDescription
+                {
+                    Width = MAX_LABELS,
+                    ArraySize = 1,
+                    BindFlags = BindFlags.ShaderResource,
+                    CpuAccessFlags = CpuAccessFlags.Write,
+                    Format = Format.R32G32B32A32_Float, // Use float4 format for compatibility
+                    MipLevels = 1,
+                    OptionFlags = ResourceOptionFlags.None,
+                    Usage = ResourceUsage.Dynamic
+                };
+
+                materialColorTexture = new Texture1D(device, texDesc);
+
+                // Create shader resource view
+                ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
+                {
+                    Format = Format.R32G32B32A32_Float,
+                    Dimension = ShaderResourceViewDimension.Texture1D,
+                    Texture1D = new ShaderResourceViewDescription.Texture1DResource
+                    {
+                        MipLevels = 1,
+                        MostDetailedMip = 0
+                    }
+                };
+
+                materialColorSRV = new ShaderResourceView(device, materialColorTexture, srvDesc);
+
+                // Upload default colors then override with material colors if available
+                UpdateMaterialColors();
+
+                Logger.Log("[SharpDXVolumeRenderer] Material color texture created successfully");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Error creating material color texture: " + ex.Message);
+                throw; // Rethrow to signal critical error
+            }
+        }
+
+        /// <summary>
+        /// Creates a 1D texture containing predefined color maps
+        /// </summary>
+        private void CreateColorMapTexture()
+        {
+            try
+            {
+                // Create texture with 4 color maps, each 256 entries (total 1024 entries)
+                Texture1DDescription texDesc = new Texture1DDescription
+                {
+                    Width = 1024, // 4 color maps x 256 entries each
+                    ArraySize = 1,
+                    BindFlags = BindFlags.ShaderResource,
+                    CpuAccessFlags = CpuAccessFlags.Write,
+                    Format = Format.R32G32B32A32_Float,
+                    MipLevels = 1,
+                    OptionFlags = ResourceOptionFlags.None,
+                    Usage = ResourceUsage.Dynamic
+                };
+
+                colorMapTexture = new Texture1D(device, texDesc);
+
+                // Create shader resource view
+                ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
+                {
+                    Format = Format.R32G32B32A32_Float,
+                    Dimension = ShaderResourceViewDimension.Texture1D,
+                    Texture1D = new ShaderResourceViewDescription.Texture1DResource
+                    {
+                        MipLevels = 1,
+                        MostDetailedMip = 0
+                    }
+                };
+
+                colorMapSRV = new ShaderResourceView(device, colorMapTexture, srvDesc);
+
+                // Initialize color maps
+                UpdateColorMaps();
+
+                Logger.Log("[SharpDXVolumeRenderer] Color map texture created successfully");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Error creating color map texture: " + ex.Message);
+                // Non-critical, continue without color maps
+            }
+        }
+
+        /// <summary>
+        /// Creates lower resolution (LOD) versions of the volume textures for performance
+        /// </summary>
+        private void CreateLodTextures()
+        {
+            try
+            {
+                // Only proceed if we have a valid volume texture
+                if (volumeTexture == null || mainForm.volumeData == null)
+                {
+                    Logger.Log("[SharpDXVolumeRenderer] Skipping LOD texture creation - no volume data");
+                    useLodSystem = false; // Disable LOD if no volume data
+                    return;
+                }
+
+                // LOD level 0 is the original texture
+                lodVolumeTextures[0] = volumeTexture;
+                lodVolumeSRVs[0] = volumeSRV;
+
+                // Create LOD textures with progressively lower resolution
+                ChunkedVolume originalVolume = mainForm.volumeData;
+                bool anyLodCreated = false;
+
+                for (int i = 1; i <= MAX_LOD_LEVELS; i++)
+                {
+                    try
+                    {
+                        // Create downsampled volume at 1/2^i resolution
+                        int factorX = (int)Math.Pow(2, i);
+                        int factorY = (int)Math.Pow(2, i);
+                        int factorZ = (int)Math.Pow(2, i);
+
+                        int newWidth = Math.Max(1, volW / factorX);
+                        int newHeight = Math.Max(1, volH / factorY);
+                        int newDepth = Math.Max(1, volD / factorZ);
+
+                        // Create a new texture with lower resolution
+                        Texture3DDescription lodDesc = new Texture3DDescription
+                        {
+                            Width = newWidth,
+                            Height = newHeight,
+                            Depth = newDepth,
+                            MipLevels = 1,
+                            Format = Format.R8_UNorm,
+                            Usage = ResourceUsage.Default,
+                            BindFlags = BindFlags.ShaderResource,
+                            CpuAccessFlags = CpuAccessFlags.None,
+                            OptionFlags = ResourceOptionFlags.None
+                        };
+
+                        lodVolumeTextures[i] = new Texture3D(device, lodDesc);
+
+                        // Create a downsample buffer in CPU memory
+                        byte[] lodData = new byte[newWidth * newHeight * newDepth];
+
+                        // Simple downsampling by averaging blocks of voxels
+                        for (int z = 0; z < newDepth; z++)
+                        {
+                            for (int y = 0; y < newHeight; y++)
+                            {
+                                for (int x = 0; x < newWidth; x++)
+                                {
+                                    // Original coordinates
+                                    int ox = x * factorX;
+                                    int oy = y * factorY;
+                                    int oz = z * factorZ;
+
+                                    // Sample from the original volume (simplified for illustration)
+                                    byte value = originalVolume[
+                                        Math.Min(ox, volW - 1),
+                                        Math.Min(oy, volH - 1),
+                                        Math.Min(oz, volD - 1)];
+
+                                    // Store the downsampled value
+                                    lodData[z * newWidth * newHeight + y * newWidth + x] = value;
+                                }
+                            }
+                        }
+
+                        // Upload to the texture
+                        context.UpdateSubresource(lodData, lodVolumeTextures[i], 0);
+
+                        // Create a shader resource view for this LOD level
+                        ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
+                        {
+                            Format = Format.R8_UNorm,
+                            Dimension = ShaderResourceViewDimension.Texture3D,
+                            Texture3D = new ShaderResourceViewDescription.Texture3DResource
+                            {
+                                MipLevels = 1,
+                                MostDetailedMip = 0
+                            }
+                        };
+
+                        lodVolumeSRVs[i] = new ShaderResourceView(device, lodVolumeTextures[i], srvDesc);
+                        anyLodCreated = true;
+                    }
+                    catch (Exception lodEx)
+                    {
+                        Logger.Log($"[SharpDXVolumeRenderer] Failed to create LOD level {i}: {lodEx.Message}");
+                        lodVolumeTextures[i] = null;
+                        lodVolumeSRVs[i] = null;
+                    }
+                }
+
+                if (anyLodCreated)
+                {
+                    Logger.Log("[SharpDXVolumeRenderer] Created LOD textures for large volume optimization");
+                }
+                else
+                {
+                    // If no LOD textures were created, disable the LOD system
+                    useLodSystem = false;
+                    Logger.Log("[SharpDXVolumeRenderer] LOD system disabled - failed to create any LOD textures");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Error creating LOD textures: " + ex.Message);
+                useLodSystem = false; // Disable LOD on error
+            }
+        }
+        public void ForceInitialRender()
+        {
+            // Store previous state
+            int oldLodLevel = currentLodLevel;
+            bool oldDebugMode = debugMode;
+
+            try
+            {
+                // Set up for best quality initial render
+                currentLodLevel = 0;
+                debugMode = false;
+                NeedsRender = true;
+
+                // Make sure all resources are properly set
+                if (context != null)
+                {
+                    // Clear any previous state
+                    context.ClearState();
+
+                    // Ensure viewport is correctly set
+                    int width = Math.Max(1, renderPanel.ClientSize.Width);
+                    int height = Math.Max(1, renderPanel.ClientSize.Height);
+                    context.Rasterizer.SetViewport(0, 0, width, height);
+                }
+
+                // Force an initial render with default camera position
+                Render();
+
+                // Log success
+                Logger.Log("[SharpDXVolumeRenderer] Initial render completed successfully");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Initial render failed: " + ex.Message);
+            }
+            finally
+            {
+                // Restore previous state
+                currentLodLevel = oldLodLevel;
+                debugMode = oldDebugMode;
+            }
+        }
+
+        /// <summary>
+        /// Updates the material color texture based on main form's material list
+        /// </summary>
+        private void UpdateMaterialColors()
+        {
+            try
+            {
+                // Skip if material texture is null
+                if (materialColorTexture == null)
+                    return;
+
+                // Create an array of default color data
+                Vector4[] colorData = new Vector4[MAX_LABELS];
+
+                // Fill the array with default colors
+                for (int i = 0; i < MAX_LABELS; i++)
+                {
+                    switch (i % 16)
+                    {
+                        case 0: colorData[i] = new Vector4(0.0f, 0.0f, 0.0f, 0.0f); break; // Exterior (transparent)
+                        case 1: colorData[i] = new Vector4(1.0f, 0.0f, 0.0f, 1.0f); break; // Red
+                        case 2: colorData[i] = new Vector4(0.0f, 1.0f, 0.0f, 1.0f); break; // Green
+                        case 3: colorData[i] = new Vector4(0.0f, 0.0f, 1.0f, 1.0f); break; // Blue
+                        case 4: colorData[i] = new Vector4(1.0f, 1.0f, 0.0f, 1.0f); break; // Yellow
+                        case 5: colorData[i] = new Vector4(1.0f, 0.0f, 1.0f, 1.0f); break; // Magenta
+                        case 6: colorData[i] = new Vector4(0.0f, 1.0f, 1.0f, 1.0f); break; // Cyan
+                        case 7: colorData[i] = new Vector4(1.0f, 0.5f, 0.0f, 1.0f); break; // Orange
+                        case 8: colorData[i] = new Vector4(0.5f, 0.0f, 1.0f, 1.0f); break; // Purple
+                        case 9: colorData[i] = new Vector4(0.0f, 0.5f, 0.0f, 1.0f); break; // Dark Green
+                        case 10: colorData[i] = new Vector4(0.5f, 0.5f, 0.5f, 1.0f); break; // Gray
+                        case 11: colorData[i] = new Vector4(1.0f, 0.75f, 0.8f, 1.0f); break; // Pink
+                        case 12: colorData[i] = new Vector4(0.6f, 0.3f, 0.1f, 1.0f); break; // Brown
+                        case 13: colorData[i] = new Vector4(0.9f, 0.9f, 0.9f, 1.0f); break; // Light Gray
+                        case 14: colorData[i] = new Vector4(0.4f, 0.7f, 0.4f, 1.0f); break; // Light Green
+                        case 15: colorData[i] = new Vector4(0.0f, 0.4f, 0.8f, 1.0f); break; // Light Blue
+                    }
+                }
+
+                // Override with actual colors from materials list if available
+                if (mainForm.Materials != null && mainForm.Materials.Count > 0)
+                {
+                    foreach (Material mat in mainForm.Materials)
+                    {
+                        if (mat.ID < MAX_LABELS)
+                        {
+                            System.Drawing.Color color = mat.Color;
+                            colorData[mat.ID] = new Vector4(
+                                color.R / 255.0f,
+                                color.G / 255.0f,
+                                color.B / 255.0f,
+                                1.0f); // Full alpha
+
+                            // Special case for exterior (material ID 0)
+                            if (mat.IsExterior)
+                            {
+                                colorData[mat.ID].W = 0.0f; // Make exterior fully transparent
+                            }
+                        }
+                    }
+                }
+
+                // Map the texture and update it
+                try
+                {
+                    DataStream dataStream;
+                    context.MapSubresource(
+                        materialColorTexture,
+                        0,
+                        MapMode.WriteDiscard,
+                        SharpDX.Direct3D11.MapFlags.None,
+                        out dataStream);
+
+                    foreach (Vector4 color in colorData)
+                    {
+                        dataStream.Write(color);
+                    }
+
+                    context.UnmapSubresource(materialColorTexture, 0);
+                    dataStream.Dispose();
+
+                    Logger.Log("[SharpDXVolumeRenderer] Material colors updated successfully");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log("[SharpDXVolumeRenderer] Failed to update material colors: " + ex.Message);
+                    throw;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] UpdateMaterialColors error: " + ex.Message);
+                throw; // Rethrow as this is critical
+            }
+        }
+
+        /// <summary>
+        /// Updates the color map texture with predefined color maps
+        /// </summary>
+        private void UpdateColorMaps()
+        {
+            try
+            {
+                // Skip if color map texture is null
+                if (colorMapTexture == null)
+                    return;
+
+                // Create an array for all color map data (4 maps * 256 entries)
+                Vector4[] colorMapData = new Vector4[1024];
+
+                // Map 0: Grayscale (already handled in shader)
+                for (int i = 0; i < 256; i++)
+                {
+                    float v = i / 255.0f;
+                    colorMapData[i] = new Vector4(v, v, v, v * 0.7f + 0.1f);
+                }
+
+                // Map 1: "Hot" colormap (black-red-yellow-white)
+                for (int i = 0; i < 256; i++)
+                {
+                    float t = i / 255.0f;
+                    float r = Math.Min(1.0f, 3.0f * t);
+                    float g = Math.Max(0.0f, Math.Min(1.0f, 3.0f * t - 1.0f));
+                    float b = Math.Max(0.0f, Math.Min(1.0f, 3.0f * t - 2.0f));
+                    colorMapData[256 + i] = new Vector4(r, g, b, t * 0.7f + 0.1f);
+                }
+
+                // Map 2: "Cool" colormap (blue-cyan-green)
+                for (int i = 0; i < 256; i++)
+                {
+                    float t = i / 255.0f;
+                    float r = Math.Max(0.0f, Math.Min(1.0f, t * 1.5f - 0.5f));
+                    float g = Math.Min(1.0f, t * 1.5f);
+                    float b = Math.Min(1.0f, 2.0f - t * 1.5f);
+                    colorMapData[512 + i] = new Vector4(r, g, b, t * 0.7f + 0.1f);
+                }
+
+                // Map 3: "Rainbow" colormap
+                for (int i = 0; i < 256; i++)
+                {
+                    float t = i / 255.0f;
+                    // Convert to HSV and back to RGB
+                    float h = (1.0f - t) * 240.0f / 360.0f; // 240° (blue) to 0° (red)
+                    float s = 1.0f;
+                    float v = 1.0f;
+
+                    // HSV to RGB conversion
+                    int hi = (int)(h * 6) % 6;
+                    float f = h * 6 - hi;
+                    float p = v * (1 - s);
+                    float q = v * (1 - f * s);
+                    float u = v * (1 - (1 - f) * s);
+
+                    float r, g, b;
+                    switch (hi)
+                    {
+                        case 0: r = v; g = u; b = p; break;
+                        case 1: r = q; g = v; b = p; break;
+                        case 2: r = p; g = v; b = u; break;
+                        case 3: r = p; g = q; b = v; break;
+                        case 4: r = u; g = p; b = v; break;
+                        default: r = v; g = p; b = q; break;
+                    }
+
+                    colorMapData[768 + i] = new Vector4(r, g, b, t * 0.7f + 0.1f);
+                }
+
+                // Map the texture and update it
+                try
+                {
+                    DataStream dataStream;
+                    context.MapSubresource(
+                        colorMapTexture,
+                        0,
+                        MapMode.WriteDiscard,
+                        SharpDX.Direct3D11.MapFlags.None,
+                        out dataStream);
+
+                    foreach (Vector4 color in colorMapData)
+                    {
+                        dataStream.Write(color);
+                    }
+
+                    context.UnmapSubresource(colorMapTexture, 0);
+                    dataStream.Dispose();
+
+                    Logger.Log("[SharpDXVolumeRenderer] Color maps updated successfully");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log("[SharpDXVolumeRenderer] Failed to update color maps: " + ex.Message);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] UpdateColorMaps error: " + ex.Message);
+                // Non-critical, continue without color maps
+            }
+        }
+
+
+        private Texture3D CreateTexture3DFromChunkedVolume(ChunkedVolume volume, Format format)
+        {
+            if (volume == null) return null;
+
+            // Create the 3D texture
+            Texture3DDescription desc = new Texture3DDescription
+            {
+                Width = volume.Width,
+                Height = volume.Height,
+                Depth = volume.Depth,
+                MipLevels = 1,
+                Format = format,
+                Usage = ResourceUsage.Default,
+                BindFlags = BindFlags.ShaderResource,
+                CpuAccessFlags = CpuAccessFlags.None,
+                OptionFlags = ResourceOptionFlags.None
+            };
+
+            Texture3D texture = new Texture3D(device, desc);
+
+            // Upload data chunk by chunk
+            int chunkDim = volume.ChunkDim;
+
+            for (int cz = 0; cz < volume.ChunkCountZ; cz++)
+            {
+                int zBase = cz * chunkDim;
+                int zSize = Math.Min(chunkDim, volume.Depth - zBase);
+
+                for (int cy = 0; cy < volume.ChunkCountY; cy++)
+                {
+                    int yBase = cy * chunkDim;
+                    int ySize = Math.Min(chunkDim, volume.Height - yBase);
+
+                    for (int cx = 0; cx < volume.ChunkCountX; cx++)
+                    {
+                        int xBase = cx * chunkDim;
+                        int xSize = Math.Min(chunkDim, volume.Width - xBase);
+
+                        int chunkIndex = volume.GetChunkIndex(cx, cy, cz);
+                        byte[] chunkData = volume.GetChunkBytes(chunkIndex);
+
+                        // Copy slice by slice
+                        for (int z = 0; z < zSize; z++)
+                        {
+                            byte[] sliceData = new byte[xSize * ySize];
+                            int chunkZOffset = z * chunkDim * chunkDim;
+
+                            for (int y = 0; y < ySize; y++)
+                            {
+                                System.Buffer.BlockCopy(
+                                    chunkData,
+                                    chunkZOffset + y * chunkDim,
+                                    sliceData,
+                                    y * xSize,
+                                    xSize);
+                            }
+
+                            // Upload slice to texture
+                            GCHandle handle = GCHandle.Alloc(sliceData, GCHandleType.Pinned);
+                            try
+                            {
+                                DataBox dataBox = new DataBox(handle.AddrOfPinnedObject(), xSize, xSize * ySize);
+                                ResourceRegion region = new ResourceRegion(
+                                    xBase, yBase, zBase + z,
+                                    xBase + xSize, yBase + ySize, zBase + z + 1);
+
+                                device.ImmediateContext.UpdateSubresource(dataBox, texture, 0, region);
+                            }
+                            finally
+                            {
+                                handle.Free();
+                            }
+                        }
+                    }
+                }
+            }
+
+            return texture;
+        }
+
+        private Texture3D CreateTexture3DFromChunkedLabelVolume(ChunkedLabelVolume volume, Format format)
+        {
+            if (volume == null) return null;
+
+            // Create the 3D texture
+            Texture3DDescription desc = new Texture3DDescription
+            {
+                Width = volume.Width,
+                Height = volume.Height,
+                Depth = volume.Depth,
+                MipLevels = 1,
+                Format = format,
+                Usage = ResourceUsage.Default,
+                BindFlags = BindFlags.ShaderResource,
+                CpuAccessFlags = CpuAccessFlags.None,
+                OptionFlags = ResourceOptionFlags.None
+            };
+
+            Texture3D texture = new Texture3D(device, desc);
+
+            // Upload data chunk by chunk
+            int chunkDim = volume.ChunkDim;
+
+            for (int cz = 0; cz < volume.ChunkCountZ; cz++)
+            {
+                int zBase = cz * chunkDim;
+                int zSize = Math.Min(chunkDim, volume.Depth - zBase);
+
+                for (int cy = 0; cy < volume.ChunkCountY; cy++)
+                {
+                    int yBase = cy * chunkDim;
+                    int ySize = Math.Min(chunkDim, volume.Height - yBase);
+
+                    for (int cx = 0; cx < volume.ChunkCountX; cx++)
+                    {
+                        int xBase = cx * chunkDim;
+                        int xSize = Math.Min(chunkDim, volume.Width - xBase);
+
+                        int chunkIndex = volume.GetChunkIndex(cx, cy, cz);
+                        byte[] chunkData = volume.GetChunkBytes(chunkIndex);
+
+                        // Copy slice by slice
+                        for (int z = 0; z < zSize; z++)
+                        {
+                            // Different handling based on format
+                            if (format == Format.R32_Float)
+                            {
+                                // For Float format, convert bytes to floats
+                                float[] sliceData = new float[xSize * ySize];
+                                int chunkZOffset = z * chunkDim * chunkDim;
+
+                                for (int y = 0; y < ySize; y++)
+                                {
+                                    for (int x = 0; x < xSize; x++)
+                                    {
+                                        // Convert byte to float
+                                        int srcIndex = chunkZOffset + y * chunkDim + x;
+                                        int destIndex = y * xSize + x;
+                                        sliceData[destIndex] = chunkData[srcIndex]; // Implicit conversion from byte to float
+                                    }
+                                }
+
+                                // Upload slice to texture with correct stride for floats
+                                GCHandle handle = GCHandle.Alloc(sliceData, GCHandleType.Pinned);
+                                try
+                                {
+                                    // Note: float is 4 bytes
+                                    DataBox dataBox = new DataBox(handle.AddrOfPinnedObject(), xSize * sizeof(float), xSize * ySize * sizeof(float));
+                                    ResourceRegion region = new ResourceRegion(
+                                        xBase, yBase, zBase + z,
+                                        xBase + xSize, yBase + ySize, zBase + z + 1);
+
+                                    device.ImmediateContext.UpdateSubresource(dataBox, texture, 0, region);
+                                }
+                                finally
+                                {
+                                    handle.Free();
+                                }
+                            }
+                            else
+                            {
+                                // Original code for byte formats
+                                byte[] sliceData = new byte[xSize * ySize];
+                                int chunkZOffset = z * chunkDim * chunkDim;
+
+                                for (int y = 0; y < ySize; y++)
+                                {
+                                    System.Buffer.BlockCopy(
+                                        chunkData,
+                                        chunkZOffset + y * chunkDim,
+                                        sliceData,
+                                        y * xSize,
+                                        xSize);
+                                }
+
+                                // Upload slice to texture
+                                GCHandle handle = GCHandle.Alloc(sliceData, GCHandleType.Pinned);
+                                try
+                                {
+                                    DataBox dataBox = new DataBox(handle.AddrOfPinnedObject(), xSize, xSize * ySize);
+                                    ResourceRegion region = new ResourceRegion(
+                                        xBase, yBase, zBase + z,
+                                        xBase + xSize, yBase + ySize, zBase + z + 1);
+
+                                    device.ImmediateContext.UpdateSubresource(dataBox, texture, 0, region);
+                                }
+                                finally
+                                {
+                                    handle.Free();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            return texture;
+        }
+        #endregion
+
+        #region Rendering
+        public void Render()
+        {
+            if (device == null || swapChain == null || renderPanel == null)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Cannot render: Device, SwapChain, or Panel is null");
+                return;
+            }
+
+            // Check if the panel is minimized or has zero dimensions
+            if (renderPanel.ClientSize.Width < 1 || renderPanel.ClientSize.Height < 1)
+            {
+                return; // Skip rendering to invisible panels
+            }
+
+            try
+            {
+                // Ensure valid viewport dimensions
+                int width = Math.Max(1, renderPanel.ClientSize.Width);
+                int height = Math.Max(1, renderPanel.ClientSize.Height);
+
+                // Make sure viewport is set explicitly
+                context.Rasterizer.SetViewport(0, 0, width, height);
+
+                // Verify render targets are valid
+                if (renderTargetView == null || depthView == null)
+                {
+                    Logger.Log("[SharpDXVolumeRenderer] Cannot render: Render targets are null");
+                    RecreateRenderTargets();
+                    if (renderTargetView == null || depthView == null)
+                        return;
+                }
+
+                // Clear the render target
+                context.OutputMerger.SetRenderTargets(depthView, renderTargetView);
+                context.ClearRenderTargetView(renderTargetView, new Color4(0.0f, 0.0f, 0.0f, 0.0f));
+                context.ClearDepthStencilView(depthView, DepthStencilClearFlags.Depth | DepthStencilClearFlags.Stencil, 1.0f, 0);
+
+                // Set blend state for volume rendering
+                context.OutputMerger.SetBlendState(alphaBlendState);
+
+                // Handle LOD levels for movement
+                bool isMoving = isDragging || isPanning;
+                if (useLodSystem && isMoving)
+                {
+                    // During movement, use a suitable LOD level that exists
+                    bool foundValidLod = false;
+                    for (int i = 1; i <= MAX_LOD_LEVELS; i++)
+                    {
+                        if (lodVolumeSRVs[i] != null)
+                        {
+                            currentLodLevel = i;
+                            foundValidLod = true;
+                            break;
+                        }
+                    }
+
+                    // If no LOD textures exist, fall back to the original
+                    if (!foundValidLod || lodVolumeSRVs[currentLodLevel] == null)
+                    {
+                        currentLodLevel = 0;
+                    }
+                }
+                else
+                {
+                    // When not moving, use highest quality
+                    currentLodLevel = 0;
+                }
+
+                // Render the volume
+                RenderVolume();
+
+                // Draw scale bar and pixel size info
+                // We'll skip this during camera movement to improve performance
+                if (frameCount > 10 && !isMoving && frameCount % 30 == 0)
+                {
+                    DrawScaleBar();
+                }
+                else if (isMoving && scaleBarPictureBox != null)
+                {
+                    // Hide the scale bar during camera movement
+                    scaleBarPictureBox.Visible = false;
+                }
+                else if (!isMoving && scaleBarPictureBox != null && !scaleBarPictureBox.Visible)
+                {
+                    // Show the scale bar when camera is stationary
+                    scaleBarPictureBox.Visible = true;
+                }
+
+                // Present the scene - MODIFIED: use 0 for sync interval during movement for smoother rotation
+                try
+                {
+                    // During movement, disable VSync (0) for more responsive feel
+                    // When stationary, use VSync (1) to prevent tearing
+                    swapChain.Present(isMoving ? 0 : 1, PresentFlags.None);
+                }
+                catch (SharpDXException ex)
+                {
+                    // Handle device errors as before...
+                    if (ex.ResultCode.Code == SharpDX.DXGI.ResultCode.DeviceRemoved.Result.Code)
+                    {
+                        var reason = device.DeviceRemovedReason;
+                        Logger.Log($"[SharpDXVolumeRenderer] Device Removed Error: {reason}");
+                        try
+                        {
+                            RecreateDevice();
+                        }
+                        catch (Exception recEx)
+                        {
+                            Logger.Log($"[SharpDXVolumeRenderer] Failed to recover from device removed: {recEx.Message}");
+                            throw;
+                        }
+                    }
+                    else if (ex.ResultCode.Code == SharpDX.DXGI.ResultCode.DeviceReset.Result.Code)
+                    {
+                        Logger.Log("[SharpDXVolumeRenderer] Device Reset detected, recreating device");
+                        try
+                        {
+                            RecreateDevice();
+                        }
+                        catch (Exception recEx)
+                        {
+                            Logger.Log($"[SharpDXVolumeRenderer] Failed to recover from device reset: {recEx.Message}");
+                            throw;
+                        }
+                    }
+                    else
+                    {
+                        Logger.Log("[SharpDXVolumeRenderer] Present error: " + ex.Message);
+                        throw;
+                    }
+                }
+
+                // Reset the needs render flag for infrequent renders when nothing changes
+                if (!isMoving)
+                {
+                    // Only clear the flag if we're not in an interactive state
+                    NeedsRender = false;
+                }
+                else
+                {
+                    // Always need to render during movement
+                    NeedsRender = true;
+                }
+
+                // Log occasionally
+                if (frameCount++ % 300 == 0)
+                {
+                    Logger.Log("[SharpDXVolumeRenderer] Frame rendered");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Render error: " + ex.Message + "\n" + ex.StackTrace);
+                throw;
+            }
+        }
+        private void RecreateRenderTargets()
+        {
+            try
+            {
+                // Clean up old render targets
+                Utilities.Dispose(ref renderTargetView);
+                Utilities.Dispose(ref depthView);
+                Utilities.Dispose(ref depthBuffer);
+
+                // Ensure valid dimensions
+                int width = Math.Max(1, renderPanel.ClientSize.Width);
+                int height = Math.Max(1, renderPanel.ClientSize.Height);
+
+                // Create render target view from backbuffer
+                using (Texture2D backBuffer = Texture2D.FromSwapChain<Texture2D>(swapChain, 0))
+                {
+                    renderTargetView = new RenderTargetView(device, backBuffer);
+                }
+
+                // Create depth buffer
+                Texture2DDescription depthDesc = new Texture2DDescription
+                {
+                    Width = width,
+                    Height = height,
+                    ArraySize = 1,
+                    BindFlags = BindFlags.DepthStencil,
+                    CpuAccessFlags = CpuAccessFlags.None,
+                    Format = Format.D24_UNorm_S8_UInt,
+                    MipLevels = 1,
+                    OptionFlags = ResourceOptionFlags.None,
+                    SampleDescription = new SampleDescription(1, 0),
+                    Usage = ResourceUsage.Default
+                };
+
+                depthBuffer = new Texture2D(device, depthDesc);
+                depthView = new DepthStencilView(device, depthBuffer);
+
+                Logger.Log("[SharpDXVolumeRenderer] Render targets recreated successfully");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Error recreating render targets: " + ex.Message);
+                throw;
+            }
+        }
+        private void RecreateDevice()
+        {
+            // Clean up existing resources first
+            CleanupDirectXResources();
+
+            // Recreate device and swapchain
+            CreateDeviceAndSwapChain();
+            CreateRenderTargets();
+            CreateRenderStates();
+            CreateShaders();
+
+            // Recreate volume resources
+            CreateVolumeTextures();
+            CreateLabelTextures();
+            CreateMaterialColorTexture();
+            CreateColorMapTexture();
+            CreateLodTextures();
+
+            Logger.Log("[SharpDXVolumeRenderer] Device and resources recreated after device removed error");
+        }
+        private void CleanupDirectXResources()
+        {
+            // Clean up render states
+            Utilities.Dispose(ref solidRasterState);
+            Utilities.Dispose(ref wireframeRasterState);
+            Utilities.Dispose(ref alphaBlendState);
+            Utilities.Dispose(ref linearSampler);
+            Utilities.Dispose(ref pointSampler);
+
+            // Clean up shaders
+            Utilities.Dispose(ref volumeVertexShader);
+            Utilities.Dispose(ref volumePixelShader);
+            Utilities.Dispose(ref inputLayout);
+            Utilities.Dispose(ref constantBuffer);
+
+            // Clean up volume textures
+            Utilities.Dispose(ref volumeSRV);
+            Utilities.Dispose(ref volumeTexture);
+            Utilities.Dispose(ref labelSRV);
+            Utilities.Dispose(ref labelTexture);
+
+            // Clean up LOD textures
+            for (int i = 1; i <= MAX_LOD_LEVELS; i++)
+            {
+                Utilities.Dispose(ref lodVolumeSRVs[i]);
+                Utilities.Dispose(ref lodVolumeTextures[i]);
+            }
+
+            // Clean up label textures
+            Utilities.Dispose(ref labelVisibilitySRV);
+            Utilities.Dispose(ref labelVisibilityTexture);
+            Utilities.Dispose(ref labelOpacitySRV);
+            Utilities.Dispose(ref labelOpacityTexture);
+            Utilities.Dispose(ref materialColorSRV);
+            Utilities.Dispose(ref materialColorTexture);
+            Utilities.Dispose(ref colorMapSRV);
+            Utilities.Dispose(ref colorMapTexture);
+
+            // Clean up render targets
+            Utilities.Dispose(ref renderTargetView);
+            Utilities.Dispose(ref depthView);
+            Utilities.Dispose(ref depthBuffer);
+
+            // Don't dispose the device or swapchain yet - we'll recreate them
+            Logger.Log("[SharpDXVolumeRenderer] Device resources cleaned up for recreation");
+        }
+        private void RenderVolume()
+        {
+            try
+            {
+                // Check for required resources
+                if (context == null || cubeVertexBuffer == null || cubeIndexBuffer == null)
+                {
+                    Logger.Log("[SharpDXVolumeRenderer] Cannot render volume: Required resources are null");
+                    return;
+                }
+
+                // Use wireframe in debug mode
+                context.Rasterizer.State = debugMode ? wireframeRasterState : solidRasterState;
+
+                // Setup rendering pipeline
+                context.InputAssembler.InputLayout = inputLayout;
+                context.InputAssembler.PrimitiveTopology = PrimitiveTopology.TriangleList;
+                context.InputAssembler.SetVertexBuffers(0, new VertexBufferBinding(cubeVertexBuffer, Utilities.SizeOf<Vector3>(), 0));
+                context.InputAssembler.SetIndexBuffer(cubeIndexBuffer, Format.R32_UInt, 0);
+
+                // Clear any previous resources to avoid driver state confusion
+                ShaderResourceView[] nullResources = new ShaderResourceView[6]; // Increased to 6 for color map
+                context.PixelShader.SetShaderResources(0, 6, nullResources);
+
+                // Set samplers
+                context.PixelShader.SetSampler(0, linearSampler);
+                context.PixelShader.SetSampler(1, pointSampler);
+
+                // Set the blend state explicitly
+                context.OutputMerger.SetBlendState(alphaBlendState, new Color4(0, 0, 0, 0), 0xFFFFFFFF);
+
+                // Prepare resources array
+                ShaderResourceView[] resources = new ShaderResourceView[6]; // Increased to 6 for color map
+
+                // Fill the resources array with available resources
+                if (labelVisibilitySRV != null) resources[0] = labelVisibilitySRV;
+                if (labelOpacitySRV != null) resources[1] = labelOpacitySRV;
+
+                // Always ensure we have a valid texture at resource position 2
+                bool isMoving = isDragging || isPanning;
+                bool useLodForMovement = useLodSystem && isMoving && currentLodLevel > 0 &&
+                                       currentLodLevel <= MAX_LOD_LEVELS;
+
+                // Set the volume texture resource - use LOD if available during movement, otherwise use original
+                if (volumeSRV != null)
+                {
+                    if (useLodForMovement && lodVolumeSRVs[currentLodLevel] != null)
+                    {
+                        // Use lower detail texture during movement
+                        resources[2] = lodVolumeSRVs[currentLodLevel];
+                    }
+                    else
+                    {
+                        // Use full detail texture
+                        resources[2] = volumeSRV;
+                    }
+                }
+
+                if (labelSRV != null) resources[3] = labelSRV;
+                if (materialColorSRV != null) resources[4] = materialColorSRV;
+                if (colorMapSRV != null) resources[5] = colorMapSRV;
+
+                // Set all resources at once
+                context.PixelShader.SetShaderResources(0, resources);
+
+                // Set shaders
+                context.VertexShader.Set(volumeVertexShader);
+                context.PixelShader.Set(volumePixelShader);
+
+                // Update constant buffer for rendering
+                float currentStepSize = isMoving ? Math.Min(3.0f, stepSize * 2.0f) : stepSize;
+
+                // For LOD, adjust step size based on level
+                if (useLodSystem && currentLodLevel > 0 && isMoving)
+                {
+                    currentStepSize = lodStepSizes[currentLodLevel];
+                }
+
+                UpdateConstantBuffer(currentStepSize);
+                context.VertexShader.SetConstantBuffer(0, constantBuffer);
+                context.PixelShader.SetConstantBuffer(0, constantBuffer);
+
+                // Draw the cube
+                context.DrawIndexed(cubeIndexCount, 0, 0);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] RenderVolume error: " + ex.Message);
+                // For render failures, switch to wireframe mode
+                debugMode = true;
+            }
+        }
+        /// <summary>
+        /// Draws a scale bar and pixel size information in the corner of the render target.
+        /// </summary>
+        private void DrawScaleBar()
+        {
+            try
+            {
+                // Determine scale bar size based on camera distance
+                float scale = cameraDistance / 500.0f;
+                float barLength = Math.Min(volW, Math.Min(volH, volD)) * 0.2f * scale;
+
+                // Get the pixel size to convert to real-world units
+                double pixelSizeInMeters = mainForm.GetPixelSize();
+                string lengthLabel;
+
+                // Format with appropriate units
+                if (pixelSizeInMeters > 0)
+                {
+                    double realWorldLength = barLength * pixelSizeInMeters;
+                    lengthLabel = FormatPixelSize(realWorldLength);
+                }
+                else
+                {
+                    lengthLabel = $"{barLength:F1} voxels";
+                }
+
+                // Position the scale bar in the bottom-right corner
+                int width = renderPanel.ClientSize.Width;
+                int height = renderPanel.ClientSize.Height;
+                int barX = width - 120;
+                int barY = height - 40;
+
+                // Create the scale bar bitmap
+                System.Drawing.Bitmap bitmap = new System.Drawing.Bitmap(120, 35);
+                using (System.Drawing.Graphics g = System.Drawing.Graphics.FromImage(bitmap))
+                {
+                    // Fill with a semi-transparent background
+                    using (var brush = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(128, 0, 0, 32)))
+                    {
+                        g.FillRectangle(brush, 0, 0, bitmap.Width, bitmap.Height);
+                    }
+
+                    // Draw the scale bar
+                    using (var pen = new System.Drawing.Pen(System.Drawing.Color.White, 2))
+                    {
+                        g.DrawLine(pen, 10, 25, 110, 25);
+                        g.DrawLine(pen, 10, 20, 10, 30);
+                        g.DrawLine(pen, 110, 20, 110, 30);
+                    }
+
+                    // Draw the scale label
+                    using (var font = new System.Drawing.Font("Arial", 8))
+                    {
+                        g.DrawString(lengthLabel, font, System.Drawing.Brushes.White, 40, 5);
+                    }
+                }
+
+                // Create a PictureBox if it doesn't exist
+                if (scaleBarPictureBox == null)
+                {
+                    scaleBarPictureBox = new PictureBox();
+                    scaleBarPictureBox.SizeMode = PictureBoxSizeMode.AutoSize;
+                    scaleBarPictureBox.BackColor = System.Drawing.Color.Transparent;
+                    renderPanel.Controls.Add(scaleBarPictureBox);
+                    scaleBarPictureBox.BringToFront();
+                }
+
+                // Update the PictureBox
+                scaleBarPictureBox.Image?.Dispose();
+                scaleBarPictureBox.Image = bitmap;
+                scaleBarPictureBox.Location = new System.Drawing.Point(barX - 10, barY - 25);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] RenderScaleBar error: " + ex.Message);
+            }
+        }
+
+
+        /// <summary>
+        /// Formats a pixel size in meters into a human-readable string
+        /// </summary>
+        private string FormatPixelSize(double meters)
+        {
+            if (meters >= 1e-3) // 1mm or larger
+                return $"{(meters * 1000):0.###} mm";
+
+            if (meters >= 1e-6) // 1µm or larger
+                return $"{(meters * 1e6):0.###} μm";
+
+            return $"{(meters * 1e9):0.###} nm";
+        }
+        private void UpdateConstantBuffer(float overrideStepSize = -1.0f)
+        {
+            try
+            {
+                // Calculate camera position from spherical coordinates
+                float cosPitch = (float)Math.Cos(cameraPitch);
+                float sinPitch = (float)Math.Sin(cameraPitch);
+                float cosYaw = (float)Math.Cos(cameraYaw);
+                float sinYaw = (float)Math.Sin(cameraYaw);
+
+                Vector3 volumeCenter = new Vector3(volW / 2.0f, volH / 2.0f, volD / 2.0f);
+
+                Vector3 cameraDirection = new Vector3(
+                    cosPitch * cosYaw,
+                    sinPitch,
+                    cosPitch * sinYaw);
+
+                Vector3 cameraPosition = volumeCenter - (cameraDirection * cameraDistance) + panOffset;
+
+                // Create view and projection matrices
+                Matrix viewMatrix = Matrix.LookAtLH(
+                    cameraPosition,
+                    volumeCenter + panOffset,
+                    Vector3.UnitY);
+
+                float aspectRatio = (float)renderPanel.ClientSize.Width / Math.Max(1, renderPanel.ClientSize.Height);
+                Matrix projectionMatrix = Matrix.PerspectiveFovLH(
+                    (float)Math.PI / 4.0f,  // 45 degrees field of view
+                    aspectRatio,
+                    1.0f,  // Near plane - set to 1.0 to avoid clipping
+                    cameraDistance * 10.0f);
+
+                // Create world-view-projection matrix
+                Matrix worldViewProj = Matrix.Transpose(viewMatrix * projectionMatrix);
+                Matrix invViewMatrix = Matrix.Transpose(Matrix.Invert(viewMatrix));
+
+                // Use the override step size if provided
+                float actualStepSize = (overrideStepSize > 0.0f) ? overrideStepSize : stepSize;
+
+                // Create constant buffer data for shader
+                ConstantBufferData cbData = new ConstantBufferData
+                {
+                    WorldViewProj = worldViewProj,
+                    InvViewMatrix = invViewMatrix,
+                    Thresholds = new Vector4(minThresholdNorm, maxThresholdNorm, actualStepSize, showGrayscale ? 1.0f : 0.0f),
+                    Dimensions = new Vector4(volW, volH, volD, 0),
+                    SliceCoords = new Vector4(
+                        (float)sliceX / volW,
+                        (float)sliceY / volH,
+                        (float)sliceZ / volD,
+                        showSlices ? 1.0f : 0.0f),
+                    CameraPosition = new Vector4(cameraPosition, 1.0f),
+                    ColorMapParams = new Vector4(colorMapIndex, sliceBorderThickness, 0, 0),
+                    // Add cutting plane data
+                    CutPlaneX = new Vector4(
+                        cutXEnabled ? 1.0f : 0.0f,  // enabled
+                        cutXDirection,               // direction
+                        cutXPosition,                // position
+                        0.0f),                       // unused
+                    CutPlaneY = new Vector4(
+                        cutYEnabled ? 1.0f : 0.0f,
+                        cutYDirection,
+                        cutYPosition,
+                        0.0f),
+                    CutPlaneZ = new Vector4(
+                        cutZEnabled ? 1.0f : 0.0f,
+                        cutZDirection,
+                        cutZPosition,
+                        0.0f)
+                };
+
+                // Update the constant buffer
+                context.UpdateSubresource(ref cbData, constantBuffer);
+
+                if (frameCount % 60 == 0)
+                {
+                    Logger.Log("[SharpDXVolumeRenderer] Updated constant buffer");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] UpdateConstantBuffer error: " + ex.Message);
+            }
+        }
+
+
+        private void UpdateLabelTextures()
+        {
+            try
+            {
+                // Update visibility texture
+                DataStream visibilityStream;
+                context.MapSubresource(
+                    labelVisibilityTexture,
+                    0,
+                    MapMode.WriteDiscard,
+                    SharpDX.Direct3D11.MapFlags.None,
+                    out visibilityStream);
+
+                for (int i = 0; i < MAX_LABELS; i++)
+                {
+                    visibilityStream.Write(labelVisible[i] ? 1.0f : 0.0f);
+                }
+
+                context.UnmapSubresource(labelVisibilityTexture, 0);
+                visibilityStream.Dispose();
+
+                // Update opacity texture
+                DataStream opacityStream;
+                context.MapSubresource(
+                    labelOpacityTexture,
+                    0,
+                    MapMode.WriteDiscard,
+                    SharpDX.Direct3D11.MapFlags.None,
+                    out opacityStream);
+
+                for (int i = 0; i < MAX_LABELS; i++)
+                {
+                    opacityStream.Write(labelOpacity[i]);
+                }
+
+                context.UnmapSubresource(labelOpacityTexture, 0);
+                opacityStream.Dispose();
+
+                // Also update material colors if needed
+                if (mainForm.Materials != null && mainForm.Materials.Count > 0)
+                {
+                    UpdateMaterialColors();
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] UpdateLabelTextures error: " + ex.Message);
+            }
+        }
+        #endregion
+
+        #region Public Methods
         public void OnResize()
         {
-            if (swapChain == null) return;
-            context.OutputMerger.SetRenderTargets(depthView, renderTargetView);
+            if (device == null || swapChain == null) return;
 
-            renderTargetView?.Dispose();
-            depthView?.Dispose();
-            depthBuffer?.Dispose();
-            exitRTV?.Dispose();
-            exitSRV?.Dispose();
-            exitTexture?.Dispose();
+            try
+            {
+                // Release render targets
+                Utilities.Dispose(ref renderTargetView);
+                Utilities.Dispose(ref depthView);
+                Utilities.Dispose(ref depthBuffer);
 
-            swapChain.ResizeBuffers(1, renderPanel.ClientSize.Width, renderPanel.ClientSize.Height,
-                Format.R8G8B8A8_UNorm, SwapChainFlags.None);
+                // Ensure valid dimensions
+                int width = Math.Max(1, renderPanel.ClientSize.Width);
+                int height = Math.Max(1, renderPanel.ClientSize.Height);
 
-            CreateRenderTargets();
+                // Resize swap chain
+                swapChain.ResizeBuffers(
+                    2, // Double buffering
+                    width,
+                    height,
+                    Format.R8G8B8A8_UNorm,
+                    SwapChainFlags.None);
+
+                // Recreate render targets
+                CreateRenderTargets();
+
+                // Mark that we need rendering
+                NeedsRender = true;
+
+                Logger.Log($"[SharpDXVolumeRenderer] Resized to {width}x{height}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] OnResize error: " + ex.Message);
+            }
         }
 
-        // Called externally to set threshold
-        public int MinThreshold
+        public void UpdateSlices(int x, int y, int z)
         {
-            get => (int)(minThresholdNorm * 255f);
-            set => minThresholdNorm = Math.Min(1f, Math.Max(0f, value / 255f));
-        }
-        public int MaxThreshold
-        {
-            get => (int)(maxThresholdNorm * 255f);
-            set => maxThresholdNorm = Math.Min(1f, Math.Max(0f, value / 255f));
-        }
+            sliceX = Math.Max(0, Math.Min(x, volW - 1));
+            sliceY = Math.Max(0, Math.Min(y, volH - 1));
+            sliceZ = Math.Max(0, Math.Min(z, volD - 1));
 
-        public bool ShowGrayscale
-        {
-            get => showGray;
-            set => showGray = value;
+            // Mark that we need rendering
+            NeedsRender = true;
         }
 
         public void SetRaymarchStepSize(float step)
         {
-            stepSize = step;
+            stepSize = Math.Max(0.1f, Math.Min(5.0f, step));
+
+            // Mark that we need rendering
+            NeedsRender = true;
         }
 
-        public bool ShowOrthoslices
+        public void SetMaterialVisibility(byte materialId, bool visible)
         {
-            get => showSlices;
-            set => showSlices = value;
-        }
-        public void UpdateSlices(int sx, int sy, int sz)
-        {
-            sliceX = Math.Max(0, Math.Min(sx, volW - 1));
-            sliceY = Math.Max(0, Math.Min(sy, volH - 1));
-            sliceZ = Math.Max(0, Math.Min(sz, volD - 1));
+            if (materialId < MAX_LABELS)
+            {
+                labelVisible[materialId] = visible;
+                UpdateLabelTextures();
+
+                // Mark that we need rendering
+                NeedsRender = true;
+            }
         }
 
-        public void SetMaterialVisibility(byte matId, bool visible)
+        public void SetMaterialOpacity(byte materialId, float opacity)
         {
-            if (matId < MaxLabels)
+            if (materialId < MAX_LABELS)
             {
-                labelVisible[matId] = visible;
+                labelOpacity[materialId] = Math.Max(0.0f, Math.Min(1.0f, opacity));
+                UpdateLabelTextures();
+
+                // Mark that we need rendering
+                NeedsRender = true;
             }
         }
-        public void SetMaterialOpacity(byte matId, float opacity)
+
+        public bool GetMaterialVisibility(byte materialId)
         {
-            if (matId < MaxLabels)
+            if (materialId < MAX_LABELS)
             {
-                labelOpacity[matId] = Math.Min(1f, Math.Max(0f, opacity));
+                return labelVisible[materialId];
             }
+            return false;
+        }
+
+        public float GetMaterialOpacity(byte materialId)
+        {
+            if (materialId < MAX_LABELS)
+            {
+                return labelOpacity[materialId];
+            }
+            return 1.0f;
+        }
+
+        public bool[] GetLabelVisibilityArray()
+        {
+            bool[] result = new bool[MAX_LABELS];
+            Array.Copy(labelVisible, result, MAX_LABELS);
+            return result;
         }
 
         public void SaveScreenshot(string filePath)
         {
-            Render(); // Ensure latest frame
+            // Ensure we have a fresh render
+            NeedsRender = true;
+            Render();
 
-            using (var backBuffer = Texture2D.FromSwapChain<Texture2D>(swapChain, 0))
+            try
             {
-                var textureDesc = backBuffer.Description;
-
-                // Create a CPU-readable copy
-                var copyDesc = new Texture2DDescription
+                using (var backBuffer = Texture2D.FromSwapChain<Texture2D>(swapChain, 0))
                 {
-                    Width = textureDesc.Width,
-                    Height = textureDesc.Height,
-                    MipLevels = 1,
-                    ArraySize = 1,
-                    Format = textureDesc.Format,
-                    SampleDescription = new SampleDescription(1, 0),
-                    Usage = ResourceUsage.Staging,
-                    BindFlags = BindFlags.None,
-                    CpuAccessFlags = CpuAccessFlags.Read,
-                    OptionFlags = ResourceOptionFlags.None
-                };
+                    // Create a staging texture for CPU read access
+                    var desc = backBuffer.Description;
+                    desc.CpuAccessFlags = CpuAccessFlags.Read;
+                    desc.Usage = ResourceUsage.Staging;
+                    desc.BindFlags = BindFlags.None;
+                    desc.OptionFlags = ResourceOptionFlags.None;
 
-                using (var copyTex = new Texture2D(device, copyDesc))
-                {
-                    context.CopyResource(backBuffer, copyTex);
-
-                    var map = context.MapSubresource(copyTex, 0, MapMode.Read, SharpDX.Direct3D11.MapFlags.None);
-
-                    using (var bmp = new System.Drawing.Bitmap(textureDesc.Width, textureDesc.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                    using (var stagingTexture = new Texture2D(device, desc))
                     {
-                        var bmpData = bmp.LockBits(
-                            new System.Drawing.Rectangle(0, 0, bmp.Width, bmp.Height),
-                            System.Drawing.Imaging.ImageLockMode.WriteOnly,
-                            System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                        // Copy to staging texture
+                        context.CopyResource(backBuffer, stagingTexture);
 
-                        unsafe
+                        // Map the staging texture
+                        var dataBox = context.MapSubresource(
+                            stagingTexture,
+                            0,
+                            MapMode.Read,
+                            SharpDX.Direct3D11.MapFlags.None);
+
+                        // Create a bitmap and copy the data
+                        using (var bitmap = new System.Drawing.Bitmap(
+                            desc.Width,
+                            desc.Height,
+                            System.Drawing.Imaging.PixelFormat.Format32bppArgb))
                         {
-                            byte* srcPtr = (byte*)map.DataPointer;
-                            byte* dstPtr = (byte*)bmpData.Scan0;
+                            var bitmapData = bitmap.LockBits(
+                                new System.Drawing.Rectangle(0, 0, bitmap.Width, bitmap.Height),
+                                System.Drawing.Imaging.ImageLockMode.WriteOnly,
+                                System.Drawing.Imaging.PixelFormat.Format32bppArgb);
 
-                            for (int y = 0; y < textureDesc.Height; y++)
+                            // Copy data row by row
+                            for (int y = 0; y < desc.Height; y++)
                             {
-                                System.Buffer.MemoryCopy(srcPtr + y * map.RowPitch, dstPtr + y * bmpData.Stride, bmpData.Stride, bmpData.Stride);
+                                IntPtr sourceRow = dataBox.DataPointer + y * dataBox.RowPitch;
+                                IntPtr destRow = bitmapData.Scan0 + y * bitmapData.Stride;
+                                Utilities.CopyMemory(destRow, sourceRow, desc.Width * 4);
                             }
+
+                            bitmap.UnlockBits(bitmapData);
+                            bitmap.Save(filePath);
                         }
 
-                        bmp.UnlockBits(bmpData);
-                        bmp.RotateFlip(System.Drawing.RotateFlipType.RotateNoneFlipY);
-                        bmp.Save(filePath);
+                        // Unmap the resource
+                        context.UnmapSubresource(stagingTexture, 0);
                     }
+                }
 
-                    context.UnmapSubresource(copyTex, 0);
+                Logger.Log("[SharpDXVolumeRenderer] Screenshot saved to: " + filePath);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Screenshot error: " + ex.Message);
+            }
+        }
+        #endregion
+
+        #region Mouse Handlers
+        private void OnMouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                // Orbit camera
+                isDragging = true;
+                lastMousePosition = e.Location;
+
+                // Set temporary lower quality during movement
+                stepSize = Math.Min(2.0f, stepSize * 2.0f);
+
+                // Mark that we need rendering
+                NeedsRender = true;
+            }
+            else if (e.Button == MouseButtons.Right)
+            {
+                // Pan camera
+                isPanning = true;
+                lastMousePosition = e.Location;
+
+                // Set temporary lower quality during movement
+                stepSize = Math.Min(2.0f, stepSize * 2.0f);
+
+                // Mark that we need rendering
+                NeedsRender = true;
+            }
+        }
+
+
+        private void OnMouseMove(object sender, MouseEventArgs e)
+        {
+            if (isDragging)
+            {
+                // Calculate delta with damping for smoother movement
+                float dx = (e.X - lastMousePosition.X) * 0.01f;
+                float dy = (e.Y - lastMousePosition.Y) * 0.01f;
+
+                // Smaller movements produce less aggressive camera changes
+                if (Math.Abs(dx) > 0.0001f || Math.Abs(dy) > 0.0001f)
+                {
+                    cameraYaw += dx;
+                    cameraPitch = Math.Max(-1.5f, Math.Min(1.5f, cameraPitch + dy));
+
+                    // Only update last position if we actually moved significantly
+                    lastMousePosition = e.Location;
+
+                    // Mark that we need rendering
+                    NeedsRender = true;
+                }
+            }
+            else if (isPanning)
+            {
+                // Pan the camera with damping
+                float dx = (e.X - lastMousePosition.X) * 0.1f;
+                float dy = (e.Y - lastMousePosition.Y) * 0.1f;
+
+                // Only update for significant movements
+                if (Math.Abs(dx) > 0.01f || Math.Abs(dy) > 0.01f)
+                {
+                    // Convert screen space to world space direction
+                    float cosYaw = (float)Math.Cos(cameraYaw);
+                    float sinYaw = (float)Math.Sin(cameraYaw);
+
+                    Vector3 rightDir = new Vector3(sinYaw, 0, -cosYaw);
+                    Vector3 upDir = Vector3.UnitY;
+
+                    panOffset += rightDir * dx - upDir * dy;
+
+                    // Only update last position if we actually moved significantly
+                    lastMousePosition = e.Location;
+
+                    // Mark that we need rendering
+                    NeedsRender = true;
                 }
             }
         }
-    }
 
-    // Helper class that loads a chunked volume into a SharpDX Texture3D
-    public static class VolumeLoader
-    {
-        public static Texture3D CreateTexture3DFromChunked(Device device, ChunkedVolume vol, Format format)
+        private void OnMouseUp(object sender, MouseEventArgs e)
         {
-            if (vol == null) return null;
-            var desc = new Texture3DDescription()
+            if (e.Button == MouseButtons.Left)
             {
-                Width = vol.Width,
-                Height = vol.Height,
-                Depth = vol.Depth,
-                MipLevels = 1,
-                Format = format, // e.g. R8_UNorm
-                Usage = ResourceUsage.Default,
-                BindFlags = BindFlags.ShaderResource,
-                CpuAccessFlags = CpuAccessFlags.None,
-                OptionFlags = ResourceOptionFlags.None
-            };
-            var tex3D = new Texture3D(device, desc);
+                isDragging = false;
 
-            // Upload chunk by chunk
-            int cd = vol.ChunkDim;
-            for (int cz = 0; cz < vol.ChunkCountZ; cz++)
+                // Force a high-quality render after movement stops
+                currentLodLevel = 0;
+                NeedsRender = true;
+            }
+            else if (e.Button == MouseButtons.Right)
             {
-                int zBase = cz * cd;
-                int zSize = Math.Min(cd, vol.Depth - zBase);
-                for (int cy = 0; cy < vol.ChunkCountY; cy++)
+                isPanning = false;
+
+                // Force a high-quality render after movement stops
+                currentLodLevel = 0;
+                NeedsRender = true;
+            }
+        }
+
+        private void OnMouseWheel(object sender, MouseEventArgs e)
+        {
+            // Zoom in/out with smoother response
+            float zoomFactor = e.Delta > 0 ? 0.95f : 1.05f; // More gentle zoom
+
+            // Calculate previous distance to compare later
+            float prevDistance = cameraDistance;
+
+            // Apply zoom with smoothing
+            cameraDistance *= zoomFactor;
+
+            // Clamp distance
+            float minDistance = Math.Max(1.0f, Math.Min(volW, Math.Min(volH, volD)) * 0.5f);
+            float maxDistance = Math.Max(volW, Math.Max(volH, volD)) * 5.0f;
+            cameraDistance = Math.Max(minDistance, Math.Min(maxDistance, cameraDistance));
+
+            // Only render if the distance actually changed significantly
+            if (Math.Abs(cameraDistance - prevDistance) > 0.1f)
+            {
+                // Mark that we need rendering
+                NeedsRender = true;
+            }
+        }
+        #endregion
+
+        #region IDisposable Implementation
+        public void Dispose()
+        {
+            try
+            {
+                // Dispose render states
+                Utilities.Dispose(ref solidRasterState);
+                Utilities.Dispose(ref wireframeRasterState);
+                Utilities.Dispose(ref alphaBlendState);
+                Utilities.Dispose(ref linearSampler);
+                Utilities.Dispose(ref pointSampler);
+
+                // Dispose shaders and buffers
+                Utilities.Dispose(ref volumeVertexShader);
+                Utilities.Dispose(ref volumePixelShader);
+                Utilities.Dispose(ref inputLayout);
+                Utilities.Dispose(ref constantBuffer);
+                Utilities.Dispose(ref cubeVertexBuffer);
+                Utilities.Dispose(ref cubeIndexBuffer);
+
+                // Dispose volume textures
+                Utilities.Dispose(ref volumeSRV);
+                Utilities.Dispose(ref volumeTexture);
+                Utilities.Dispose(ref labelSRV);
+                Utilities.Dispose(ref labelTexture);
+
+                // Dispose LOD textures
+                for (int i = 1; i <= MAX_LOD_LEVELS; i++)
                 {
-                    int yBase = cy * cd;
-                    int ySize = Math.Min(cd, vol.Height - yBase);
-                    for (int cx = 0; cx < vol.ChunkCountX; cx++)
-                    {
-                        int xBase = cx * cd;
-                        int xSize = Math.Min(cd, vol.Width - xBase);
-                        var chunkIdx = vol.GetChunkIndex(cx, cy, cz);
-                        var chunkBytes = vol.GetChunkBytes(chunkIdx);
-                        // Copy subregion
-                        for (int zz = 0; zz < zSize; zz++)
-                        {
-                            var sliceBytes = new byte[xSize * ySize];
-                            int chunkZOff = zz * cd * cd;
-                            for (int yy = 0; yy < ySize; yy++)
-                            {
-                                System.Buffer.BlockCopy(chunkBytes,
-                                    chunkZOff + yy * cd + 0,
-                                    sliceBytes,
-                                    yy * xSize,
-                                    xSize);
-                            }
-                            // Now upload slice
-                            var handle = GCHandle.Alloc(sliceBytes, GCHandleType.Pinned);
-                            try
-                            {
-                                var box = new DataBox(handle.AddrOfPinnedObject(), xSize, xSize * ySize);
-                                var region = new ResourceRegion(
-                                    xBase, yBase, zBase + zz,
-                                    xBase + xSize, yBase + ySize, zBase + zz + 1);
-                                device.ImmediateContext.UpdateSubresource(box, tex3D, 0, region);
-                            }
-                            finally
-                            {
-                                handle.Free();
-                            }
-                        }
-                    }
+                    Utilities.Dispose(ref lodVolumeSRVs[i]);
+                    Utilities.Dispose(ref lodVolumeTextures[i]);
                 }
-            }
-            return tex3D;
-        }
 
-        public static Texture3D CreateTexture3DFromChunked(Device device, ChunkedLabelVolume vol, Format format)
-        {
-            if (vol == null) return null;
-            var desc = new Texture3DDescription()
-            {
-                Width = vol.Width,
-                Height = vol.Height,
-                Depth = vol.Depth,
-                MipLevels = 1,
-                Format = format, // R8_UInt or similar
-                Usage = ResourceUsage.Default,
-                BindFlags = BindFlags.ShaderResource,
-                CpuAccessFlags = CpuAccessFlags.None,
-                OptionFlags = ResourceOptionFlags.None
-            };
-            var tex3D = new Texture3D(device, desc);
+                // Dispose label textures
+                Utilities.Dispose(ref labelVisibilitySRV);
+                Utilities.Dispose(ref labelVisibilityTexture);
+                Utilities.Dispose(ref labelOpacitySRV);
+                Utilities.Dispose(ref labelOpacityTexture);
+                Utilities.Dispose(ref materialColorSRV);
+                Utilities.Dispose(ref materialColorTexture);
+                Utilities.Dispose(ref colorMapSRV);
+                Utilities.Dispose(ref colorMapTexture);
 
-            int cd = vol.ChunkDim;
-            for (int cz = 0; cz < vol.ChunkCountZ; cz++)
-            {
-                int zBase = cz * cd;
-                int zSize = Math.Min(cd, vol.Depth - zBase);
-                for (int cy = 0; cy < vol.ChunkCountY; cy++)
+                // Dispose render targets
+                Utilities.Dispose(ref renderTargetView);
+                Utilities.Dispose(ref depthView);
+                Utilities.Dispose(ref depthBuffer);
+
+                // Dispose device and swap chain
+                Utilities.Dispose(ref swapChain);
+                Utilities.Dispose(ref context);
+                Utilities.Dispose(ref device);
+                if (scaleBarPictureBox != null)
                 {
-                    int yBase = cy * cd;
-                    int ySize = Math.Min(cd, vol.Height - yBase);
-                    for (int cx = 0; cx < vol.ChunkCountX; cx++)
-                    {
-                        int xBase = cx * cd;
-                        int xSize = Math.Min(cd, vol.Width - xBase);
-                        var chunkIdx = vol.GetChunkIndex(cx, cy, cz);
-                        var chunkBytes = vol.GetChunkBytes(chunkIdx);
-                        // Copy subregion
-                        for (int zz = 0; zz < zSize; zz++)
-                        {
-                            var sliceBytes = new byte[xSize * ySize];
-                            int chunkZOff = zz * cd * cd;
-                            for (int yy = 0; yy < ySize; yy++)
-                            {
-                                System.Buffer.BlockCopy(
-                                    chunkBytes,
-                                    chunkZOff + yy * cd,
-                                    sliceBytes,
-                                    yy * xSize,
-                                    xSize);
-                            }
-                            var handle = GCHandle.Alloc(sliceBytes, GCHandleType.Pinned);
-                            try
-                            {
-                                var box = new DataBox(handle.AddrOfPinnedObject(), xSize, xSize * ySize);
-                                var region = new ResourceRegion(
-                                    xBase, yBase, zBase + zz,
-                                    xBase + xSize, yBase + ySize, zBase + zz + 1);
-                                device.ImmediateContext.UpdateSubresource(box, tex3D, 0, region);
-                            }
-                            finally
-                            {
-                                handle.Free();
-                            }
-                        }
-                    }
+                    scaleBarPictureBox.Image?.Dispose();
+                    scaleBarPictureBox.Dispose();
+                    scaleBarPictureBox = null;
                 }
+
+                Logger.Log("[SharpDXVolumeRenderer] Resources disposed successfully");
             }
-            return tex3D;
-        }
-    }
-
-    internal static class ShaderStrings
-    {
-        public const string VolumeRaymarchHlsl = @"
-//--------------------------------------------------------------------------------------
-// Constant buffer definition
-//--------------------------------------------------------------------------------------
-cbuffer ConstantData : register(b0)
-{
-    float4x4 worldViewProj; // Combined view-projection matrix
-    float4x4 invView;       // Inverse of the view matrix
-
-    // thresholds.x = min threshold
-    // thresholds.y = max threshold
-    // thresholds.z = step size for raymarching
-    // thresholds.w = whether to show grayscale (1.0) or not (0.0)
-    float4 thresholds;
-
-    // dims.x = volume width
-    // dims.y = volume height
-    // dims.z = volume depth
-    // dims.w = unused or #labels if needed
-    float4 dims;
-
-    // sliceCoords.x = normalized sliceX
-    // sliceCoords.y = normalized sliceY
-    // sliceCoords.z = normalized sliceZ
-    // sliceCoords.w = showSlices? 1.0 : 0.0
-    float4 sliceCoords;
-}
-
-//--------------------------------------------------------------------------------------
-// Resources
-//--------------------------------------------------------------------------------------
-Texture2D<float4> ExitTex : register(t0);
-
-// GrayTex is the 3D grayscale volume (0..1 range)
-Texture3D<float> GrayTex : register(t1);
-
-// LabelTex is the 3D label volume (uint IDs)
-Texture3D<uint> LabelTex : register(t2);
-
-// LabelVis: 1D float array with 256 entries (label ID => visible?)
-Texture1D<float> LabelVis : register(t3);
-
-// LabelOpac: 1D float array with 256 entries (label ID => alpha)
-Texture1D<float> LabelOpac : register(t4);
-
-// Sampler states
-SamplerState samLinear : register(s0);
-SamplerState samPoint  : register(s1);
-
-//--------------------------------------------------------------------------------------
-// VS_OUT struct used by all passes
-//--------------------------------------------------------------------------------------
-struct VS_OUT
-{
-    float4 posH : SV_POSITION;  // Projected position
-    float3 posW : POSITION0;    // local volume coords
-};
-
-//--------------------------------------------------------------------------------------
-// Forward declaration or simply place HueFromLabel above usage
-//--------------------------------------------------------------------------------------
-float3 HueFromLabel(uint labelId);
-
-//--------------------------------------------------------------------------------------
-// Vertex Shader (VSMain): transforms volume or slice geometry into clip space
-//--------------------------------------------------------------------------------------
-VS_OUT VSMain(float3 position : POSITION)
-{
-    VS_OUT o;
-    float4 worldPos = float4(position, 1.0f);
-
-    // Transform by worldViewProj
-    o.posH = mul(worldPos, worldViewProj);
-    // Pass through the local coords for sampling
-    o.posW = position;
-
-    return o;
-}
-
-//--------------------------------------------------------------------------------------
-// PSBackface: Renders the back faces of the cube to a float4 texture
-//             The RGB stores the normalized exit position of the ray
-//--------------------------------------------------------------------------------------
-float4 PSBackface(VS_OUT input) : SV_TARGET
-{
-    // Normalize volume position to [0,1]
-    float3 uvw = float3(
-        input.posW.x / dims.x,
-        input.posW.y / dims.y,
-        input.posW.z / dims.z
-    );
-
-    // Write uvw into the RGBA, alpha=1 for convenience
-    return float4(uvw, 1.0f);
-}
-
-//--------------------------------------------------------------------------------------
-// PSRaymarch: Renders the front faces, sampling from the back-face texture
-//             to determine the exit position, then accumulates color from the volume.
-//--------------------------------------------------------------------------------------
-float4 PSRaymarch(VS_OUT input) : SV_TARGET
-{
-    float minT     = thresholds.x;
-    float maxT     = thresholds.y;
-    float stepSize = thresholds.z;
-    bool  showGray = (thresholds.w > 0.5);
-
-    // Entry in [0..1]^3
-    float3 uvwEntry = float3(
-        input.posW.x / dims.x,
-        input.posW.y / dims.y,
-        input.posW.z / dims.z
-    );
-
-    // Retrieve exit from ExitTex
-    int2 pixCoord = int2(round(input.posH.xy));
-    float4 exitVal = ExitTex.Load(int3(pixCoord, 0));
-    float3 uvwExit = exitVal.xyz;
-
-    float3 rayDir = uvwExit - uvwEntry;
-    float dist = length(rayDir);
-
-    // Steps
-    int steps = (int)(dist / stepSize) + 1;
-    float3 stepVec = rayDir / (float)steps;
-
-    float4 finalColor = float4(0, 0, 0, 0);
-
-    // Raymarch front->back
-    [loop]
-    for (int i = 0; i < steps; i++)
-    {
-        float3 samplePos = uvwEntry + stepVec * i;
-
-        // If out of [0..1], stop
-        if (any(samplePos < 0.0f) || any(samplePos > 1.0f))
-            break;
-
-        // If grayscale is enabled, sample GrayTex & threshold
-        float grayVal = 0;
-        if (showGray)
-        {
-            grayVal = GrayTex.SampleLevel(samLinear, samplePos, 0).r;
-            if (grayVal < minT || grayVal > maxT)
-                grayVal = 0.0f;
-        }
-
-        // Sample label
-        uint labelVal = LabelTex.SampleLevel(samLinear, samplePos, 0);
-        if (labelVal > 0 && labelVal < 256)
-        {
-            float vis = LabelVis.Load(labelVal);
-            if (vis > 0.5f)
+            catch (Exception ex)
             {
-                float alpha = LabelOpac.Load(labelVal);
-                float3 colorLabel = HueFromLabel(labelVal);
-                float4 curSample  = float4(colorLabel, alpha);
-
-                // Blend front->back
-                finalColor.rgb = lerp(finalColor.rgb, curSample.rgb, curSample.a);
-                finalColor.a    = finalColor.a + curSample.a * (1 - finalColor.a);
-
-                // Early out if nearly opaque
-                if (finalColor.a > 0.95f)
-                    break;
+                Logger.Log("[SharpDXVolumeRenderer] Error during disposal: " + ex.Message);
             }
         }
-
-        // If grayscale is valid, blend it as well
-        if (showGray && grayVal > 0.0f)
-        {
-            float4 grayC = float4(grayVal, grayVal, grayVal, 0.5f);
-            finalColor.rgb = lerp(finalColor.rgb, grayC.rgb, grayC.a);
-            finalColor.a    = finalColor.a + grayC.a * (1 - finalColor.a);
-            if (finalColor.a > 0.95f)
-                break;
-        }
+        #endregion
     }
-
-    return finalColor;
-}
-
-//--------------------------------------------------------------------------------------
-// HueFromLabel: Maps a label ID to a pseudo-random color
-//--------------------------------------------------------------------------------------
-float3 HueFromLabel(uint labelId)
-{
-    // e.g. labelId -> some pseudo-random hue in [0..360)
-    float h = fmod((labelId * 37), 360);
-
-    // Convert hue to RGB with fixed S=0.8, V=1.0
-    float s = 0.8;
-    float v = 1.0;
-    float c = s * v;
-    float x = c * (1 - abs(fmod(h / 60.0, 2.0) - 1));
-    float3 rgb;
-
-         if (h < 60)  rgb = float3(c, x, 0);
-    else if (h < 120) rgb = float3(x, c, 0);
-    else if (h < 180) rgb = float3(0, c, x);
-    else if (h < 240) rgb = float3(0, x, c);
-    else if (h < 300) rgb = float3(x, 0, c);
-    else              rgb = float3(c, 0, x);
-
-    float m = v - c;
-    return rgb + m;
-}
-
-//--------------------------------------------------------------------------------------
-// PSSlice: Renders a single slice of the volume in the XY, YZ, or XZ plane
-//--------------------------------------------------------------------------------------
-float4 PSSlice(VS_OUT input) : SV_TARGET
-{
-    float3 uvw = float3(
-        input.posW.x / dims.x,
-        input.posW.y / dims.y,
-        input.posW.z / dims.z
-    );
-
-    float g = GrayTex.SampleLevel(samPoint, uvw, 0).r;
-
-    // Discard if out of threshold range
-    if (g < thresholds.x || g > thresholds.y)
-        discard;
-
-    return float4(g, g, g, 1);
-}
-";
-    }
-
-
 }

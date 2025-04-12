@@ -6,9 +6,6 @@ using SharpDX; // for Vector3, etc.
 using CTSegmenter;
 using Point = System.Drawing.Point;
 using Color = System.Drawing.Color;
-using CTSegmenter.SharpDXIntegration;
-
-
 
 namespace CTSegmenter.SharpDXIntegration
 {
@@ -19,12 +16,93 @@ namespace CTSegmenter.SharpDXIntegration
         private SharpDXVolumeRenderer volumeRenderer;
         private SharpDXControlPanel controlPanel;
         private bool formLoaded = false;
+        private Timer renderTimer;
+        private bool isRendering = false;
+        private DateTime lastRenderTime = DateTime.MinValue;
+        private int renderFailCount = 0;
+        private const int MAX_FAILURES = 3;
 
         public SharpDXViewerForm(MainForm main)
         {
             mainForm = main;
             InitializeComponent();
             Logger.Log("[SharpDXViewerForm] Constructor finished.");
+        }
+
+        private void SetupRenderTimer()
+        {
+            renderTimer = new Timer();
+            renderTimer.Interval = 33; // Increase responsiveness to ~30fps (from 100ms/10fps)
+
+            renderTimer.Tick += (s, e) => {
+                if (volumeRenderer != null && !isRendering)
+                {
+                    try
+                    {
+                        isRendering = true;
+                        lastRenderTime = DateTime.Now;
+
+                        // Force render at least once per second even if nothing is changing
+                        // This ensures the volume stays visible
+                        bool forceRender = (DateTime.Now - lastRenderTime).TotalSeconds > 1.0;
+                        bool needsRender = volumeRenderer.NeedsRender || forceRender;
+
+                        if (needsRender)
+                        {
+                            volumeRenderer.Render();
+                            renderFailCount = 0; // Reset failure counter on success
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        renderFailCount++;
+                        Logger.Log($"[SharpDXViewerForm] Render failed ({renderFailCount}/{MAX_FAILURES}): {ex.Message}");
+
+                        // After several consecutive failures, try to recreate the renderer
+                        if (renderFailCount >= MAX_FAILURES)
+                        {
+                            try
+                            {
+                                RecreateRenderer();
+                                renderFailCount = 0;
+                            }
+                            catch (Exception recreateEx)
+                            {
+                                renderTimer.Stop();
+                                MessageBox.Show("3D rendering disabled due to failures. Please reopen the viewer.",
+                                             "Rendering Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        isRendering = false;
+                    }
+                }
+            };
+        }
+
+        private void RecreateRenderer()
+        {
+            // Stop rendering during recreation
+            renderTimer.Stop();
+
+            // Dispose existing renderer
+            if (volumeRenderer != null)
+            {
+                try
+                {
+                    volumeRenderer.Dispose();
+                }
+                catch { } // Ignore disposal errors
+            }
+
+            // Create new renderer
+            volumeRenderer = new SharpDXVolumeRenderer(mainForm, renderPanel);
+            Logger.Log("[SharpDXViewerForm] Renderer recreated");
+
+            // Restart timer
+            renderTimer.Start();
         }
 
         private void InitializeComponent()
@@ -50,6 +128,18 @@ namespace CTSegmenter.SharpDXIntegration
             // Hook form events
             this.Load += (s, e) => OnFormLoaded();
             this.FormClosing += (s, e) => OnFormClosing(e);
+            this.SizeChanged += (s, e) => { volumeRenderer?.OnResize(); };
+            renderPanel.SizeChanged += (s, e) => { volumeRenderer?.OnResize(); };
+
+            // Add render timer
+            renderTimer = new Timer();
+            renderTimer.Interval = 50; // 20 fps
+            renderTimer.Tick += (s, e) => {
+                if (volumeRenderer != null)
+                {
+                    volumeRenderer.Render();
+                }
+            };
         }
 
         private void OnFormLoaded()
@@ -58,17 +148,41 @@ namespace CTSegmenter.SharpDXIntegration
             {
                 if (formLoaded) return;
                 formLoaded = true;
+
                 // Create the volume renderer
                 volumeRenderer = new SharpDXVolumeRenderer(mainForm, renderPanel);
                 Logger.Log("[SharpDXViewerForm] Volume renderer created.");
 
                 // Create the control panel
                 controlPanel = new SharpDXControlPanel(this, mainForm, volumeRenderer);
-                controlPanel.Show(this); // show as owned by this form
+                controlPanel.Show(this);
                 PositionWindows();
 
-                // Trigger initial draw
-                volumeRenderer.Render();
+                // IMPORTANT: Force initial renders with high quality and no LOD
+                volumeRenderer.UseLodSystem = false;
+                volumeRenderer.NeedsRender = true;
+
+                // Perform multiple high-quality renders to ensure the volume is visible
+                for (int i = 0; i < 3; i++) // Try multiple times to ensure it works
+                {
+                    try
+                    {
+                        volumeRenderer.ForceInitialRender();
+                        Application.DoEvents(); // Let UI update
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[SharpDXViewerForm] Initial render attempt {i} failed: {ex.Message}");
+                    }
+                }
+
+                // Re-enable LOD for normal operation
+                volumeRenderer.UseLodSystem = true;
+
+                // Setup the render timer to maintain display
+                SetupRenderTimer();
+                renderTimer.Start();
+                Logger.Log("[SharpDXViewerForm] Render timer started.");
             }
             catch (Exception ex)
             {
@@ -89,10 +203,40 @@ namespace CTSegmenter.SharpDXIntegration
             controlPanel.Location = new Point(panelX, this.Top);
         }
 
+        public void SetDebugMode(bool enabled)
+        {
+            if (volumeRenderer != null)
+            {
+                volumeRenderer.DebugMode = enabled;
+                volumeRenderer.NeedsRender = true;
+            }
+        }
+
+        public void SetColorMap(int colorMapIndex)
+        {
+            if (volumeRenderer != null)
+            {
+                volumeRenderer.ColorMapIndex = colorMapIndex;
+                volumeRenderer.NeedsRender = true;
+            }
+        }
+
+        public void RunViewportTest()
+        {
+            if (volumeRenderer != null)
+            {
+                Logger.Log("[SharpDXViewerForm] Running viewport test");
+                volumeRenderer.Render();
+            }
+        }
+
         private void OnFormClosing(FormClosingEventArgs e)
         {
             try
             {
+                // Stop the render timer
+                renderTimer.Stop();
+
                 // Dispose volume renderer
                 volumeRenderer?.Dispose();
                 volumeRenderer = null;
@@ -133,35 +277,36 @@ namespace CTSegmenter.SharpDXIntegration
         public void SetGrayscaleVisible(bool isVisible)
         {
             volumeRenderer.ShowGrayscale = isVisible;
-            volumeRenderer.Render();
+            volumeRenderer.NeedsRender = true;
         }
 
         // Called by control panel for toggling slices
         public void SetSlicesEnabled(bool enabled)
         {
             volumeRenderer.ShowOrthoslices = enabled;
-            volumeRenderer.Render();
+            volumeRenderer.NeedsRender = true;
         }
 
         public void SetSliceIndices(int xSlice, int ySlice, int zSlice)
         {
             volumeRenderer.UpdateSlices(xSlice, ySlice, zSlice);
-            volumeRenderer.Render();
+            volumeRenderer.NeedsRender = true;
         }
 
         // Called by control panel for toggling/hiding materials
         public void SetMaterialVisibility(byte matId, bool isVisible)
         {
             volumeRenderer.SetMaterialVisibility(matId, isVisible);
-            volumeRenderer.Render();
+            volumeRenderer.NeedsRender = true;
         }
 
         // Called by control panel for material opacity changes
         public void SetMaterialOpacity(byte matId, float opacity)
         {
             volumeRenderer.SetMaterialOpacity(matId, opacity);
-            volumeRenderer.Render();
+            volumeRenderer.NeedsRender = true;
         }
+
         public bool GetMaterialVisibility(byte matId)
         {
             if (volumeRenderer == null) return false;
@@ -173,10 +318,116 @@ namespace CTSegmenter.SharpDXIntegration
             if (volumeRenderer == null) return 1.0f;
             return volumeRenderer.GetMaterialOpacity(matId);
         }
+        public void SetLodEnabled(bool enabled)
+        {
+            if (volumeRenderer != null)
+            {
+                volumeRenderer.UseLodSystem = enabled;
+                volumeRenderer.NeedsRender = true;
+                Logger.Log($"[SharpDXViewerForm] LOD system {(enabled ? "enabled" : "disabled")}");
+            }
+        }
+        // New methods for dataset cutting
+        public void SetCutXEnabled(bool enabled)
+        {
+            if (volumeRenderer != null)
+            {
+                volumeRenderer.CutXEnabled = enabled;
+                volumeRenderer.NeedsRender = true;
+            }
+        }
 
-        
+        public void SetCutYEnabled(bool enabled)
+        {
+            if (volumeRenderer != null)
+            {
+                volumeRenderer.CutYEnabled = enabled;
+                volumeRenderer.NeedsRender = true;
+            }
+        }
 
-        // Called by control panel for “Export Model” (OBJ or STL)
+        public void SetCutZEnabled(bool enabled)
+        {
+            if (volumeRenderer != null)
+            {
+                volumeRenderer.CutZEnabled = enabled;
+                volumeRenderer.NeedsRender = true;
+            }
+        }
+
+        public void SetCutXPosition(float position)
+        {
+            if (volumeRenderer != null)
+            {
+                volumeRenderer.CutXPosition = position;
+                volumeRenderer.NeedsRender = true;
+            }
+        }
+
+        public void SetCutYPosition(float position)
+        {
+            if (volumeRenderer != null)
+            {
+                volumeRenderer.CutYPosition = position;
+                volumeRenderer.NeedsRender = true;
+            }
+        }
+
+        public void SetCutZPosition(float position)
+        {
+            if (volumeRenderer != null)
+            {
+                volumeRenderer.CutZPosition = position;
+                volumeRenderer.NeedsRender = true;
+            }
+        }
+
+        public void SetCutXDirection(float direction)
+        {
+            if (volumeRenderer != null)
+            {
+                volumeRenderer.CutXDirection = direction;
+                volumeRenderer.NeedsRender = true;
+            }
+        }
+
+        public void SetCutYDirection(float direction)
+        {
+            if (volumeRenderer != null)
+            {
+                volumeRenderer.CutYDirection = direction;
+                volumeRenderer.NeedsRender = true;
+            }
+        }
+
+        public void SetCutZDirection(float direction)
+        {
+            if (volumeRenderer != null)
+            {
+                volumeRenderer.CutZDirection = direction;
+                volumeRenderer.NeedsRender = true;
+            }
+        }
+
+        public void ResetAllCuts()
+        {
+            if (volumeRenderer != null)
+            {
+                // Reset all cutting plane parameters
+                volumeRenderer.CutXEnabled = false;
+                volumeRenderer.CutYEnabled = false;
+                volumeRenderer.CutZEnabled = false;
+                volumeRenderer.CutXPosition = 0.5f;
+                volumeRenderer.CutYPosition = 0.5f;
+                volumeRenderer.CutZPosition = 0.5f;
+                volumeRenderer.CutXDirection = 1.0f;
+                volumeRenderer.CutYDirection = 1.0f;
+                volumeRenderer.CutZDirection = 1.0f;
+                volumeRenderer.NeedsRender = true;
+            }
+        }
+
+        // Called by control panel for "Export Model" (OBJ or STL)
         public async Task ExportModelAsync(bool exportLabels, bool exportGrayscaleSurface,
                                            string filePath, float isoLevel)
         {

@@ -258,6 +258,8 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="VolumeRenderer.cs" />
+    <Compile Include="VolumeRendererSharpDX.cs" />
+    <Compile Include="VoxelMeshExporter.cs" />
     <Content Include="CT3DViewer.txt">
       <SubType>Form</SubType>
     </Content>
@@ -312,6 +314,7 @@
     <Compile Include="SegmentAnythingCT.cs" />
     <Compile Include="TextureClassifier.cs" />
     <Compile Include="VolumeExtensions.cs" />
+    <Content Include="VolumeShader.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="favicon.ico" />

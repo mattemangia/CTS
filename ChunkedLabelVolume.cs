@@ -242,5 +242,37 @@ namespace CTSegmenter
             _mmf?.Dispose();
             ReleaseFileLock();
         }
+
+        public int ChunkCountX => chunkCountX;
+        public int ChunkCountY => chunkCountY;
+        public int ChunkCountZ => chunkCountZ;
+
+        /// <summary>
+        /// Returns the raw bytes of a single chunk (ChunkDim^3 bytes).
+        /// </summary>
+        public byte[] GetChunkBytes(int chunkIndex)
+        {
+            if (!_useMemoryMapping)
+            {
+                // Return the in-RAM chunk array
+                return _chunks[chunkIndex];
+            }
+            else
+            {
+                // Read from the memory-mapped accessor
+                byte[] data = new byte[ChunkDim * ChunkDim * ChunkDim];
+                _accessors[chunkIndex].ReadArray(0, data, 0, data.Length);
+                return data;
+            }
+        }
+
+        /// <summary>
+        /// Converts (cx, cy, cz) chunk coordinates into a linear chunk index.
+        /// </summary>
+        public int GetChunkIndex(int cx, int cy, int cz)
+        {
+            return (cz * chunkCountY + cy) * chunkCountX + cx;
+        }
+
     }
 }

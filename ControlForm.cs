@@ -6,6 +6,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using CTSegmenter.SharpDXIntegration;
 
 namespace CTSegmenter
 {
@@ -166,7 +167,7 @@ namespace CTSegmenter
                 }
 
                 // Create and show the 3D viewer form
-                CTViewer3DForm viewer3DForm = new CTViewer3DForm(mainForm);
+                SharpDXViewerForm viewer3DForm = new SharpDXViewerForm(mainForm);
                 viewer3DForm.Show();
             };
             ToolStripMenuItem textureClassifierMenuItem = new ToolStripMenuItem("Texture Classifier");

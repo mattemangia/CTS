@@ -8,6 +8,8 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Media3D;
+using System.Windows.Forms;
+using System.Windows.Forms.Integration;
 
 using HelixToolkit.Wpf;
 using HelixToolkit.Wpf.SharpDX;
@@ -25,6 +27,11 @@ using Format = SharpDX.DXGI.Format;
 using MeshBuilder = HelixToolkit.Wpf.SharpDX.MeshBuilder;
 using PerspectiveCamera = HelixToolkit.Wpf.SharpDX.PerspectiveCamera;
 using System.Diagnostics;
+using System.Windows.Forms.Design;
+using System.Windows.Documents;
+using System.Drawing.Imaging;
+using Rectangle = System.Drawing.Rectangle;
+using PixelFormat = System.Drawing.Imaging.PixelFormat;
 
 namespace CTSegmenter
 {
@@ -120,7 +127,7 @@ namespace CTSegmenter
                 {
                     Position = new Point3D(0, 0, -500),
                     LookDirection = new Vector3D(0, 0, 1),
-                    UpDirection = new Vector3D(0, -1, 0),
+                    UpDirection = new Vector3D(0, -1, 0), // This corrects the orientation issue
                     FieldOfView = 60
                 };
                 viewport.Camera = camera;
@@ -151,6 +158,17 @@ namespace CTSegmenter
                 ySlicePlaneModel = new MeshGeometryModel3D();
                 zSlicePlaneModel = new MeshGeometryModel3D();
 
+                
+
+                // Setup coordinate system
+                viewport.CoordinateSystemLabelForeground = System.Windows.Media.Color.FromRgb(255,255,255);
+                viewport.ShowCoordinateSystem = true;
+
+                // Setup ViewCube orientation correctly
+                viewport.ModelUpDirection = new Vector3D(0, -1, 0);
+                viewport.ViewCubeHorizontalPosition = viewport.Width-200;
+                viewport.ViewCubeVerticalPosition = viewport.Height-200;
+
                 // Set render technique options
                 viewport.FXAALevel = FXAALevel.None; // Disable FXAA for performance
                 viewport.EnableSwapChainRendering = true; // For better GPU performance
@@ -160,6 +178,11 @@ namespace CTSegmenter
                 viewport.ZoomExtentsWhenLoaded = true;
                 viewport.RotationSensitivity = 0.5;
                 viewport.ZoomSensitivity = 0.5;
+                viewport.LeftRightPanSensitivity = 0.5;
+                viewport.UpDownPanSensitivity = 0.5;
+                viewport.IsPanEnabled = true;
+                viewport.CameraRotationMode = HelixToolkit.Wpf.SharpDX.CameraRotationMode.Turnball;
+                viewport.InfiniteSpin = true;
 
                 Logger.Log("[VolumeRenderer] Viewport configured with optimized settings");
             }
@@ -303,7 +326,10 @@ namespace CTSegmenter
                 dataLoaded = true;
 
                 // Reset camera to show entire volume - IMPORTANT for fixing the zoom issue
-                ResetCameraView();
+                if (!dataLoaded)
+                {
+                    ResetCameraView();
+                }
 
                 renderTimer.Stop();
                 Logger.Log($"[VolumeRenderer] Volume rendering completed in {renderTimer.ElapsedMilliseconds}ms");
@@ -626,23 +652,30 @@ namespace CTSegmenter
             if (maxThreshold > 255) maxThreshold = 255;
             if (minThreshold > maxThreshold) minThreshold = maxThreshold;
 
-            // Apply custom transfer function to emphasize features
-            for (int i = minThreshold; i <= maxThreshold && i < 256; i++)
+            // Apply transfer function with hard cutoff for thresholding
+            for (int i = 0; i < 256; i++)
             {
-                float normalizedIntensity = (i - minThreshold) / (float)(maxThreshold - minThreshold);
-                float intensity = i / 255f;
+                if (i >= minThreshold && i <= maxThreshold)
+                {
+                    float normalizedIntensity = (i - minThreshold) / (float)Math.Max(1, maxThreshold - minThreshold);
+                    float intensity = i / 255f;
 
-                // Apply gamma correction for better visibility
-                float alpha = (float)Math.Pow(normalizedIntensity, 1.5); // Adjust gamma for better visibility
+                    // Set alpha to 1.0 for full opacity within the threshold range
+                    float alpha = 1.0f; // Changed from normalizedIntensity
 
-                grayColorMap[i] = new Color4(intensity, intensity, intensity, alpha);
+                    grayColorMap[i] = new Color4(intensity, intensity, intensity, alpha);
+                }
+                else
+                {
+                    // Complete transparency for values outside threshold range
+                    grayColorMap[i] = new Color4(0, 0, 0, 0);
+                }
             }
 
-            // Create or update material transfer map
+            // Ensure the material color map works properly
             labelColorMap = new Color4[256];
             for (int i = 0; i < 256; i++)
                 labelColorMap[i] = new Color4(0, 0, 0, 0);
-            labelColorMap[0] = new Color4(0, 0, 0, 0);
 
             foreach (var mat in mainForm.Materials)
             {
@@ -658,7 +691,7 @@ namespace CTSegmenter
                 labelColorMap[mat.ID] = new Color4(c.R / 255f, c.G / 255f, c.B / 255f, alpha);
             }
 
-            Logger.Log("[VolumeRenderer] Transfer functions updated");
+            Logger.Log("[VolumeRenderer] Transfer functions updated with fixed thresholds");
         }
 
         /// <summary>
@@ -737,19 +770,12 @@ namespace CTSegmenter
 
             slicePlanesGroup.Children.Clear();
 
-            var xPlane = BuildSlicePlaneX(xPos, width, height, depth, pixelSize, new Color4(1f, 0f, 0f, 0.5f));
-            slicePlanesGroup.Children.Add(xPlane);
-            xSlicePlaneModel = xPlane;
+            // Create slice planes using thresholded textures
+            CreateThresholdedSliceX(xPos, width, height, depth, pixelSize);
+            CreateThresholdedSliceY(yPos, width, height, depth, pixelSize);
+            CreateThresholdedSliceZ(zPos, width, height, depth, pixelSize);
 
-            var yPlane = BuildSlicePlaneY(yPos, width, height, depth, pixelSize, new Color4(0f, 1f, 0f, 0.5f));
-            slicePlanesGroup.Children.Add(yPlane);
-            ySlicePlaneModel = yPlane;
-
-            var zPlane = BuildSlicePlaneZ(zPos, width, height, depth, pixelSize, new Color4(0f, 0f, 1f, 0.5f));
-            slicePlanesGroup.Children.Add(zPlane);
-            zSlicePlaneModel = zPlane;
-
-            Logger.Log($"[VolumeRenderer] Updated slice planes => X={xPos}, Y={yPos}, Z={zPos}");
+            Logger.Log($"[VolumeRenderer] Updated slice planes with thresholding => X={xPos}, Y={yPos}, Z={zPos}");
         }
 
         private MeshGeometryModel3D BuildSlicePlaneX(int xPos, int width, int height, int depth, double pixelSize, Color4 sliceColor)
@@ -846,20 +872,106 @@ namespace CTSegmenter
             sliceX = xPos;
             if (slicePlanesVisible)
             {
-                double totalY = mainForm.GetHeight() * pixelSize;
-                double totalZ = mainForm.GetDepth() * pixelSize;
-                double xCoord = xPos * pixelSize;
-                var meshX = new MeshBuilder();
-                meshX.AddQuad(
-                    new Vector3((float)xCoord, 0, 0),
-                    new Vector3((float)xCoord, (float)totalY, 0),
-                    new Vector3((float)xCoord, (float)totalY, (float)totalZ),
-                    new Vector3((float)xCoord, 0, (float)totalZ)
-                );
-                xSlicePlaneModel.Geometry = meshX.ToMesh();
+                int height = mainForm.GetHeight();
+                int depth = mainForm.GetDepth();
+                CreateThresholdedSliceX(xPos, width, height, depth, pixelSize);
+                // Force viewport update
+                viewport.InvalidateVisual();
             }
         }
+        private void CreateThresholdedSliceX(int xPos, int width, int height, int depth, double pixelSize)
+        {
+            try
+            {
+                // 1) Create a Bitmap sized [depth x height]
+                //    Because for X-slice, the 'horizontal' axis in the slice is Z,
+                //    and the 'vertical' axis is Y.
+                using (Bitmap bmp = new Bitmap(depth, height, PixelFormat.Format32bppArgb))
+                {
+                    Rectangle rect = new Rectangle(0, 0, bmp.Width, bmp.Height);
 
+                    // 2) Allocate a byte array for BGRA data
+                    //    Each pixel takes 4 bytes => totalPixels * 4
+                    int totalPixels = bmp.Width * bmp.Height;
+                    byte[] pixels = new byte[totalPixels * 4];
+
+                    // 3) Fill the pixel array
+                    //    We'll do: row = y, col = z
+                    Parallel.For(0, height, y =>
+                    {
+                        // rowOffset is the start index for this row in the pixel buffer
+                        int rowOffset = y * bmp.Width * 4;
+
+                        for (int z = 0; z < depth; z++)
+                        {
+                            int idx = rowOffset + z * 4;
+
+                            // Read voxel from volumeData[xPos, y, z]
+                            byte val = mainForm.volumeData[xPos, y, z];
+
+                            // Apply threshold
+                            if (val < minThreshold || val > maxThreshold)
+                            {
+                                // Transparent pixel
+                                pixels[idx + 0] = 0; // B
+                                pixels[idx + 1] = 0; // G
+                                pixels[idx + 2] = 0; // R
+                                pixels[idx + 3] = 0; // A
+                            }
+                            else
+                            {
+                                // Grayscale pixel, fully opaque
+                                pixels[idx + 0] = val;    // B
+                                pixels[idx + 1] = val;    // G
+                                pixels[idx + 2] = val;    // R
+                                pixels[idx + 3] = 255;    // A
+                            }
+                        }
+                    });
+
+                    // 4) Copy the entire byte[] into the Bitmap
+                    BitmapData data = bmp.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+                    try
+                    {
+                        System.Runtime.InteropServices.Marshal.Copy(pixels, 0, data.Scan0, pixels.Length);
+                    }
+                    finally
+                    {
+                        bmp.UnlockBits(data);
+                    }
+
+                    // 5) Convert that Bitmap into a texture/material
+                    var material = CreateSliceMaterial(bmp, true);
+
+                    // 6) Build the actual 3D quad for the slice plane at x = xPos * pixelSize
+                    float xCoord = (float)(xPos * pixelSize);
+                    float totalY = (float)(height * pixelSize);
+                    float totalZ = (float)(depth * pixelSize);
+
+                    var builder = new MeshBuilder();
+                    builder.AddQuad(
+                        new Vector3(xCoord, 0, 0),
+                        new Vector3(xCoord, totalY, 0),
+                        new Vector3(xCoord, totalY, totalZ),
+                        new Vector3(xCoord, 0, totalZ)
+                    );
+
+                    xSlicePlaneModel = new MeshGeometryModel3D
+                    {
+                        Geometry = builder.ToMeshGeometry3D(),
+                        Material = material,
+                        CullMode = CullMode.None
+                    };
+
+                    // 7) Finally add to our slicePlanesGroup
+                    slicePlanesGroup.Children.Add(xSlicePlaneModel);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[VolumeRenderer] Error creating X slice: {ex.Message}");
+            }
+        }
         /// <summary>
         /// Update Y-axis slice position
         /// </summary>
@@ -868,19 +980,96 @@ namespace CTSegmenter
             sliceY = yPos;
             if (slicePlanesVisible)
             {
-                double totalX = mainForm.GetWidth() * pixelSize;
-                double totalZ = mainForm.GetDepth() * pixelSize;
-                double yCoord = yPos * pixelSize;
-                var meshY = new MeshBuilder();
-                meshY.AddQuad(
-                    new Vector3(0, (float)yCoord, 0),
-                    new Vector3((float)totalX, (float)yCoord, 0),
-                    new Vector3((float)totalX, (float)yCoord, (float)totalZ),
-                    new Vector3(0, (float)yCoord, (float)totalZ)
-                );
-                ySlicePlaneModel.Geometry = meshY.ToMesh();
+                int width = mainForm.GetWidth();
+                int depth = mainForm.GetDepth();
+                CreateThresholdedSliceY(yPos, width, height, depth, pixelSize);
+                // Force viewport update
+                viewport.InvalidateVisual();
             }
         }
+        private void CreateThresholdedSliceY(int yPos, int width, int height, int depth, double pixelSize)
+        {
+            try
+            {
+                // 1) For Y-slice, the plane is sized [width x depth]
+                //    Because 'horizontal' is X, 'vertical' is Z in the slice
+                using (Bitmap bmp = new Bitmap(width, depth, PixelFormat.Format32bppArgb))
+                {
+                    Rectangle rect = new Rectangle(0, 0, bmp.Width, bmp.Height);
+                    int totalPixels = bmp.Width * bmp.Height;
+                    byte[] pixels = new byte[totalPixels * 4];
+
+                    // 2) Fill the pixel array
+                    //    row => z, col => x
+                    Parallel.For(0, depth, z =>
+                    {
+                        int rowOffset = z * bmp.Width * 4;
+                        for (int x = 0; x < width; x++)
+                        {
+                            int idx = rowOffset + x * 4;
+
+                            byte val = mainForm.volumeData[x, yPos, z];
+
+                            if (val < minThreshold || val > maxThreshold)
+                            {
+                                pixels[idx + 0] = 0;
+                                pixels[idx + 1] = 0;
+                                pixels[idx + 2] = 0;
+                                pixels[idx + 3] = 0;
+                            }
+                            else
+                            {
+                                pixels[idx + 0] = val;
+                                pixels[idx + 1] = val;
+                                pixels[idx + 2] = val;
+                                pixels[idx + 3] = 255;
+                            }
+                        }
+                    });
+
+                    // 3) LockBits & copy
+                    BitmapData data = bmp.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+                    try
+                    {
+                        System.Runtime.InteropServices.Marshal.Copy(pixels, 0, data.Scan0, pixels.Length);
+                    }
+                    finally
+                    {
+                        bmp.UnlockBits(data);
+                    }
+
+                    // 4) Create material
+                    var material = CreateSliceMaterial(bmp, true);
+
+                    // 5) Build the plane at y = yPos * pixelSize
+                    float yCoord = (float)(yPos * pixelSize);
+                    float totalX = (float)(width * pixelSize);
+                    float totalZ = (float)(depth * pixelSize);
+
+                    var builder = new MeshBuilder();
+                    builder.AddQuad(
+                        new Vector3(0, yCoord, 0),
+                        new Vector3(totalX, yCoord, 0),
+                        new Vector3(totalX, yCoord, totalZ),
+                        new Vector3(0, yCoord, totalZ)
+                    );
+
+                    ySlicePlaneModel = new MeshGeometryModel3D
+                    {
+                        Geometry = builder.ToMeshGeometry3D(),
+                        Material = material,
+                        CullMode = CullMode.None
+                    };
+
+                    slicePlanesGroup.Children.Add(ySlicePlaneModel);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[VolumeRenderer] Error creating Y slice: {ex.Message}");
+            }
+        }
+
 
         /// <summary>
         /// Update Z-axis slice position
@@ -890,52 +1079,197 @@ namespace CTSegmenter
             sliceZ = zPos;
             if (slicePlanesVisible)
             {
-                double totalX = mainForm.GetWidth() * pixelSize;
-                double totalY = mainForm.GetHeight() * pixelSize;
-                double zCoord = zPos * pixelSize;
-                var meshZ = new MeshBuilder();
-                meshZ.AddQuad(
-                    new Vector3(0, 0, (float)zCoord),
-                    new Vector3((float)totalX, 0, (float)zCoord),
-                    new Vector3((float)totalX, (float)totalY, (float)zCoord),
-                    new Vector3(0, (float)totalY, (float)zCoord)
-                );
-                zSlicePlaneModel.Geometry = meshZ.ToMesh();
+                int width = mainForm.GetWidth();
+                int height = mainForm.GetHeight();
+                CreateThresholdedSliceZ(zPos, width, height, depth, pixelSize);
+                // Force viewport update
+                viewport.InvalidateVisual();
             }
         }
+        private void CreateThresholdedSliceZ(int zPos, int width, int height, int depth, double pixelSize)
+        {
+            try
+            {
+                // 1) For Z-slice, the plane is [width x height]
+                using (Bitmap bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+                {
+                    Rectangle rect = new Rectangle(0, 0, bmp.Width, bmp.Height);
+                    int totalPixels = bmp.Width * bmp.Height;
+                    byte[] pixels = new byte[totalPixels * 4];
+
+                    // 2) row => y, col => x
+                    Parallel.For(0, height, y =>
+                    {
+                        int rowOffset = y * bmp.Width * 4;
+                        for (int x = 0; x < width; x++)
+                        {
+                            int idx = rowOffset + x * 4;
+
+                            byte val = mainForm.volumeData[x, y, zPos];
+
+                            if (val < minThreshold || val > maxThreshold)
+                            {
+                                pixels[idx + 0] = 0;
+                                pixels[idx + 1] = 0;
+                                pixels[idx + 2] = 0;
+                                pixels[idx + 3] = 0;
+                            }
+                            else
+                            {
+                                pixels[idx + 0] = val;
+                                pixels[idx + 1] = val;
+                                pixels[idx + 2] = val;
+                                pixels[idx + 3] = 255;
+                            }
+                        }
+                    });
+
+                    // 3) LockBits & copy
+                    BitmapData data = bmp.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+                    try
+                    {
+                        System.Runtime.InteropServices.Marshal.Copy(pixels, 0, data.Scan0, pixels.Length);
+                    }
+                    finally
+                    {
+                        bmp.UnlockBits(data);
+                    }
+
+                    // 4) Create the slice material
+                    var material = CreateSliceMaterial(bmp, true);
+
+                    // 5) Build the plane at z = zPos * pixelSize
+                    float zCoord = (float)(zPos * pixelSize);
+                    float totalX = (float)(width * pixelSize);
+                    float totalY = (float)(height * pixelSize);
+
+                    var builder = new MeshBuilder();
+                    builder.AddQuad(
+                        new Vector3(0, 0, zCoord),
+                        new Vector3(totalX, 0, zCoord),
+                        new Vector3(totalX, totalY, zCoord),
+                        new Vector3(0, totalY, zCoord)
+                    );
+
+                    zSlicePlaneModel = new MeshGeometryModel3D
+                    {
+                        Geometry = builder.ToMeshGeometry3D(),
+                        Material = material,
+                        CullMode = CullMode.None
+                    };
+
+                    slicePlanesGroup.Children.Add(zSlicePlaneModel);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[VolumeRenderer] Error creating Z slice: {ex.Message}");
+            }
+        }
+
+        private PhongMaterial CreateSliceMaterial(System.Drawing.Bitmap bitmap, bool isTransparent)
+        {
+            try
+            {
+                // Convert bitmap to stream
+                System.IO.MemoryStream stream = new System.IO.MemoryStream();
+                bitmap.Save(stream, System.Drawing.Imaging.ImageFormat.Png);
+                stream.Position = 0;
+
+                // Create a BitmapImage
+                var bitmapImage = new System.Windows.Media.Imaging.BitmapImage();
+                bitmapImage.BeginInit();
+                bitmapImage.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                bitmapImage.StreamSource = stream;
+                bitmapImage.EndInit();
+                bitmapImage.Freeze();
+
+                // Create a new material
+                var material = new PhongMaterial
+                {
+                    DiffuseMap = new HelixToolkit.Wpf.SharpDX.TextureModel(stream),
+                    DiffuseColor = new SharpDX.Color4(1, 1, 1, 1),
+                    EmissiveColor = new SharpDX.Color4(0.1f, 0.1f, 0.1f, 1f)
+                };
+
+                if (isTransparent)
+                {
+                    material.DiffuseColor = new SharpDX.Color4(0,0,0,0);
+                   
+                }
+
+                return material;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[VolumeRenderer] Error creating slice material: {ex.Message}");
+
+                // Return a default material
+                return new PhongMaterial
+                {
+                    DiffuseColor = new SharpDX.Color4(0.7f, 0.7f, 0.7f, 0.5f),
+                     
+                };
+            }
+        }
+
 
         /// <summary>
         /// Reset camera to show the entire volume in the viewport
         /// </summary>
         public void ResetCameraView()
         {
-            if (camera == null || !dataLoaded) return;
+            if (camera == null) return;
 
-            // Calculate volume center
-            double centerX = volWidth * voxelSize / 2.0;
-            double centerY = volHeight * voxelSize / 2.0;
-            double centerZ = volDepth * voxelSize / 2.0;
-            var center = new Point3D(centerX, centerY, centerZ);
+            try
+            {
+                // Calculate volume dimensions
+                double volWidth = mainForm.GetWidth();
+                double volHeight = mainForm.GetHeight();
+                double volDepth = mainForm.GetDepth();
+                double pixelSize = mainForm.GetPixelSize();
+                if (pixelSize <= 0) pixelSize = 1.0;
 
-            // Calculate maximum dimension for camera positioning
-            double maxDim = Math.Max(volWidth * voxelSize, Math.Max(volHeight * voxelSize, volDepth * voxelSize));
+                Logger.Log($"[ResetCameraView] Volume dimensions: {volWidth}x{volHeight}x{volDepth}, pixel size: {pixelSize}");
 
-            // Position camera to view the entire volume
-            camera.Position = new Point3D(centerX, centerY, -2.5 * maxDim);
-            camera.LookDirection = new Vector3D(0, 0, 1);
-            camera.UpDirection = new Vector3D(0, -1, 0);
+                // Calculate volume center in world coordinates
+                double centerX = volWidth * pixelSize / 2.0;
+                double centerY = volHeight * pixelSize / 2.0;
+                double centerZ = volDepth * pixelSize / 2.0;
 
-            // Set near and far planes properly
-            camera.NearPlaneDistance = maxDim * 0.01;
-            camera.FarPlaneDistance = maxDim * 10;
+                // Calculate diagonal of the volume for sizing
+                double diagonal = Math.Sqrt(
+                    volWidth * volWidth +
+                    volHeight * volHeight +
+                    volDepth * volDepth) * pixelSize;
 
-            // Set field of view to ensure volume fits in view
-            camera.FieldOfView = 45;
+                // Position camera at a reasonable distance
+                // Using diagonal/2 should give a good field of view
+                double distance = diagonal * 0.8;
 
-            // Force viewport to update
-            viewport.ZoomExtents();
+                Logger.Log($"[ResetCameraView] Center: ({centerX}, {centerY}, {centerZ}), Distance: {distance}");
 
-            Logger.Log("[VolumeRenderer] Camera view reset to show entire volume");
+                // Set camera parameters directly
+                camera.Position = new Point3D(centerX, centerY, -distance);
+                camera.LookDirection = new Vector3D(0, 0, 1);
+                camera.UpDirection = new Vector3D(0, -1, 0);
+
+                // Adjust field of view for better perspective
+                camera.FieldOfView = 40;
+
+                // Set near and far planes
+                camera.NearPlaneDistance = 0.1;
+                camera.FarPlaneDistance = diagonal * 10;
+
+                // Force viewport to redraw
+                viewport.InvalidateVisual();
+
+                Logger.Log("[VolumeRenderer] Camera view reset successfully");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[VolumeRenderer] Error in ResetCameraView: {ex.Message}");
+            }
         }
 
         /// <summary>

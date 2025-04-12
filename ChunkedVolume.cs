@@ -491,5 +491,29 @@ namespace CTSegmenter
             }
         }
         #endregion
+
+        #region ChunkIndexing
+        // Add these members to the ChunkedVolume class:
+        public int ChunkDim => _chunkDim;
+        public int ChunkCountX => _chunkCountX;
+        public int ChunkCountY => _chunkCountY;
+        public int ChunkCountZ => _chunkCountZ;
+        public byte[] GetChunkBytes(int chunkIndex)
+        {
+            if (!_useMemoryMapping)
+                return _chunks[chunkIndex];
+            else
+            {
+                byte[] data = new byte[_chunkDim * _chunkDim * _chunkDim];
+                _accessors[chunkIndex].ReadArray(0, data, 0, data.Length);
+                return data;
+            }
+        }
+        public int GetChunkIndex(int cx, int cy, int cz)
+        {
+            return (cz * _chunkCountY + cy) * _chunkCountX + cx;
+        }
+
+        #endregion
     }
 }

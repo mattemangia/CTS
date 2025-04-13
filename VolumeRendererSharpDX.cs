@@ -14,6 +14,9 @@ using Format = SharpDX.DXGI.Format;
 using System.Diagnostics.Metrics;
 using System.IO;
 using CTSegmenter.SharpDXIntegration;
+using System.Threading.Tasks;
+using System.Threading;
+using Timer = System.Windows.Forms.Timer;
 
 namespace CTSegmenter
 {
@@ -75,6 +78,11 @@ namespace CTSegmenter
         private bool isDragging = false;
         private System.Drawing.Point lastMousePosition;
         private bool isPanning = false;
+
+        //Render Streamin Cancellation Token
+        private CancellationTokenSource initStreamingCts;
+        private Task streamingInitTask;
+        private ProgressForm streamingProgressForm;
 
         // Label properties
         private const int MAX_LABELS = 256;
@@ -212,6 +220,8 @@ namespace CTSegmenter
         private int currentStreamingLOD = 0;
         private bool isInitializingStreaming = false;
 
+
+
         public bool UseStreamingRenderer
         {
             get { return useStreamingRenderer; }
@@ -224,6 +234,19 @@ namespace CTSegmenter
                     // If turning OFF streaming render, restore original state
                     if (useStreamingRenderer && !value)
                     {
+                        // Cancel any ongoing initialization task
+                        if (initStreamingCts != null && !initStreamingCts.IsCancellationRequested)
+                        {
+                            initStreamingCts.Cancel();
+                        }
+
+                        // Close progress form if open
+                        if (streamingProgressForm != null && !streamingProgressForm.IsDisposed)
+                        {
+                            streamingProgressForm.Close();
+                            streamingProgressForm = null;
+                        }
+
                         // Clean up streaming resources
                         DisposeStreamingResources();
 
@@ -232,42 +255,60 @@ namespace CTSegmenter
                         {
                             Logger.Log("[SharpDXVolumeRenderer] Recreating standard textures after disabling streaming");
 
-                            // Clean up existing textures first
-                            Utilities.Dispose(ref volumeSRV);
-                            Utilities.Dispose(ref volumeTexture);
-
-                            // Create new volume texture from the volume data
-                            volumeTexture = CreateTexture3DFromChunkedVolume(mainForm.volumeData, Format.R8_UNorm);
-
-                            if (volumeTexture != null)
+                            try
                             {
-                                ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
+                                // Clean up existing textures first
+                                Utilities.Dispose(ref volumeSRV);
+                                Utilities.Dispose(ref volumeTexture);
+
+                                // Create new volume texture from the volume data
+                                volumeTexture = CreateTexture3DFromChunkedVolume(mainForm.volumeData, Format.R8_UNorm);
+
+                                if (volumeTexture != null)
                                 {
-                                    Format = Format.R8_UNorm,
-                                    Dimension = ShaderResourceViewDimension.Texture3D,
-                                    Texture3D = new ShaderResourceViewDescription.Texture3DResource
+                                    ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
                                     {
-                                        MipLevels = 1,
-                                        MostDetailedMip = 0
-                                    }
-                                };
+                                        Format = Format.R8_UNorm,
+                                        Dimension = ShaderResourceViewDimension.Texture3D,
+                                        Texture3D = new ShaderResourceViewDescription.Texture3DResource
+                                        {
+                                            MipLevels = 1,
+                                            MostDetailedMip = 0
+                                        }
+                                    };
 
-                                volumeSRV = new ShaderResourceView(device, volumeTexture, srvDesc);
-                                Logger.Log("[SharpDXVolumeRenderer] Standard volume texture recreated successfully");
+                                    volumeSRV = new ShaderResourceView(device, volumeTexture, srvDesc);
+                                    Logger.Log("[SharpDXVolumeRenderer] Standard volume texture recreated successfully");
+                                }
+                                else
+                                {
+                                    Logger.Log("[SharpDXVolumeRenderer] ERROR: Failed to recreate volume texture!");
+                                }
                             }
-                            else
+                            catch (Exception ex)
                             {
-                                Logger.Log("[SharpDXVolumeRenderer] ERROR: Failed to recreate volume texture!");
+                                Logger.Log($"[SharpDXVolumeRenderer] Error recreating standard textures: {ex.Message}");
+                                // Even if recreation fails, continue with disabling streaming
                             }
                         }
                     }
 
+                    // Store original volume texture before switching to streaming mode
+                    Texture3D originalVolumeTex = null;
+                    ShaderResourceView originalVolumeSRV = null;
+                    if (!useStreamingRenderer && value && volumeTexture != null)
+                    {
+                        originalVolumeTex = volumeTexture;
+                        originalVolumeSRV = volumeSRV;
+                    }
+
+                    // Update the flag immediately
                     useStreamingRenderer = value;
 
                     if (useStreamingRenderer)
                     {
-                        // Initialize streaming textures
-                        InitializeStreamingRenderer();
+                        // Initialize streaming textures ASYNCHRONOUSLY
+                        InitializeStreamingRendererAsync();
                     }
 
                     NeedsRender = true;
@@ -2555,6 +2596,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                         try
                         {
                             RecreateDevice();
+                            renderFailCount = 0;
                         }
                         catch (Exception recEx)
                         {
@@ -2606,6 +2648,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 throw;
             }
         }
+
 
         private System.Drawing.Point? WorldToScreen(Vector3 worldPos)
         {
@@ -3410,23 +3453,27 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
         #region Mouse Handlers
         private void OnMouseDown(object sender, MouseEventArgs e)
         {
-            if (measurementMode && e.Button == MouseButtons.Left)
+            // If in measurement mode, only handle measurement creation and block all other interactions
+            if (measurementMode)
             {
-                // Start measurement
-                isDrawingMeasurement = true;
-
-                // Perform ray cast to find the start point in 3D space
-                if (RaycastToVolume(e.X, e.Y, out Vector3 worldPos))
+                if (e.Button == MouseButtons.Left)
                 {
-                    measureStartPoint = worldPos;
-                    measureEndPoint = worldPos; // Initialize end point to same as start point
-                    Logger.Log($"[SharpDXVolumeRenderer] Started measurement at {worldPos}");
+                    // Start measurement
+                    isDrawingMeasurement = true;
+
+                    // Perform ray cast to find the start point in 3D space
+                    if (RaycastToVolume(e.X, e.Y, out Vector3 worldPos))
+                    {
+                        measureStartPoint = worldPos;
+                        measureEndPoint = worldPos; // Initialize end point to same as start point
+                        Logger.Log($"[SharpDXVolumeRenderer] Started measurement at {worldPos}");
+                    }
+
+                    // Mark that we need rendering to show the measurement preview
+                    NeedsRender = true;
                 }
 
-                // Mark that we need rendering to show the measurement preview
-                NeedsRender = true;
-
-                // Important: Return here to prevent other mouse handling
+                // Important: Block ALL mouse interactions in measurement mode
                 return;
             }
             else if (e.Button == MouseButtons.Left)
@@ -3459,16 +3506,20 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
         private void OnMouseMove(object sender, MouseEventArgs e)
         {
-            if (isDrawingMeasurement)
+            // If in measurement mode, only update the measurement end point
+            if (measurementMode)
             {
-                // Update the end point of the measurement
-                if (RaycastToVolume(e.X, e.Y, out Vector3 worldPos))
+                if (isDrawingMeasurement)
                 {
-                    measureEndPoint = worldPos;
-                    NeedsRender = true; // Redraw to show the measurement preview
+                    // Update the end point of the measurement
+                    if (RaycastToVolume(e.X, e.Y, out Vector3 worldPos))
+                    {
+                        measureEndPoint = worldPos;
+                        NeedsRender = true; // Redraw to show the measurement preview
+                    }
                 }
 
-                // Important: Return here to prevent other mouse handling
+                // Important: Block ALL other mouse handling in measurement mode
                 return;
             }
             else if (isDragging)
@@ -3518,103 +3569,158 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
         }
 
 
+
         private void OnMouseUp(object sender, MouseEventArgs e)
         {
-            if (isDrawingMeasurement && e.Button == MouseButtons.Left)
+            // If in measurement mode, only handle measurement completion
+            if (measurementMode)
             {
-                // Finish measurement
-                if (RaycastToVolume(e.X, e.Y, out Vector3 worldPos))
+                if (isDrawingMeasurement && e.Button == MouseButtons.Left)
                 {
-                    measureEndPoint = worldPos;
-
-                    // Calculate distance
-                    float distance = Vector3.Distance(measureStartPoint, measureEndPoint);
-
-                    // Convert to real-world units
-                    double pixelSizeInMeters = mainForm.GetPixelSize();
-                    double realWorldDistance = distance * pixelSizeInMeters;
-                    string unit = "m";
-                    float displayDistance = (float)realWorldDistance;
-
-                    // Format with appropriate units
-                    if (realWorldDistance < 0.001 && realWorldDistance > 0)
+                    // Finish measurement
+                    if (RaycastToVolume(e.X, e.Y, out Vector3 worldPos))
                     {
-                        unit = "µm";
-                        displayDistance = (float)(realWorldDistance * 1e6);
-                    }
-                    else if (realWorldDistance < 1 && realWorldDistance >= 0.001)
-                    {
-                        unit = "mm";
-                        displayDistance = (float)(realWorldDistance * 1e3);
-                    }
+                        measureEndPoint = worldPos;
 
-                    // Check if the measurement is on a slice plane
-                    bool isOnSlice = false;
-                    int sliceType = 0;
-                    int slicePosition = 0;
+                        // Calculate distance
+                        float distance = Vector3.Distance(measureStartPoint, measureEndPoint);
 
-                    if (showSlices)
-                    {
-                        // Check X slice (YZ plane)
-                        if (Math.Abs(measureStartPoint.X - sliceX) < 0.5f && Math.Abs(measureEndPoint.X - sliceX) < 0.5f)
+                        // Don't add measurements that are too small (likely accidental clicks)
+                        if (distance < 0.5f)
                         {
-                            isOnSlice = true;
-                            sliceType = 1;
-                            slicePosition = sliceX;
+                            isDrawingMeasurement = false;
+                            Logger.Log("[SharpDXVolumeRenderer] Measurement too small, discarded");
+                            NeedsRender = true;
+                            return;
                         }
-                        // Check Y slice (XZ plane)
-                        else if (Math.Abs(measureStartPoint.Y - sliceY) < 0.5f && Math.Abs(measureEndPoint.Y - sliceY) < 0.5f)
+
+                        // Convert to real-world units
+                        double pixelSizeInMeters = mainForm.GetPixelSize();
+                        double realWorldDistance = distance * pixelSizeInMeters;
+                        string unit = "m";
+                        float displayDistance = (float)realWorldDistance;
+
+                        // Format with appropriate units
+                        if (realWorldDistance < 0.001 && realWorldDistance > 0)
                         {
-                            isOnSlice = true;
-                            sliceType = 2;
-                            slicePosition = sliceY;
+                            unit = "µm";
+                            displayDistance = (float)(realWorldDistance * 1e6);
                         }
-                        // Check Z slice (XY plane)
-                        else if (Math.Abs(measureStartPoint.Z - sliceZ) < 0.5f && Math.Abs(measureEndPoint.Z - sliceZ) < 0.5f)
+                        else if (realWorldDistance < 1 && realWorldDistance >= 0.001)
                         {
-                            isOnSlice = true;
-                            sliceType = 3;
-                            slicePosition = sliceZ;
+                            unit = "mm";
+                            displayDistance = (float)(realWorldDistance * 1e3);
+                        }
+
+                        // Check if the measurement is on a slice plane
+                        bool isOnSlice = false;
+                        int sliceType = 0;
+                        int slicePosition = 0;
+
+                        if (showXSlice || showYSlice || showZSlice)
+                        {
+                            // Check X slice (YZ plane)
+                            if (showXSlice && Math.Abs(measureStartPoint.X - sliceX) < 0.5f &&
+                                Math.Abs(measureEndPoint.X - sliceX) < 0.5f)
+                            {
+                                isOnSlice = true;
+                                sliceType = 1;
+                                slicePosition = sliceX;
+                            }
+                            // Check Y slice (XZ plane)
+                            else if (showYSlice && Math.Abs(measureStartPoint.Y - sliceY) < 0.5f &&
+                                     Math.Abs(measureEndPoint.Y - sliceY) < 0.5f)
+                            {
+                                isOnSlice = true;
+                                sliceType = 2;
+                                slicePosition = sliceY;
+                            }
+                            // Check Z slice (XY plane)
+                            else if (showZSlice && Math.Abs(measureStartPoint.Z - sliceZ) < 0.5f &&
+                                     Math.Abs(measureEndPoint.Z - sliceZ) < 0.5f)
+                            {
+                                isOnSlice = true;
+                                sliceType = 3;
+                                slicePosition = sliceZ;
+                            }
+                        }
+
+                        // Create measurement with a distinct color based on index
+                        System.Drawing.Color measurementColor;
+                        int colorIndex = measurements.Count % 7;
+                        switch (colorIndex)
+                        {
+                            case 0: measurementColor = System.Drawing.Color.White; break;
+                            case 1: measurementColor = System.Drawing.Color.Yellow; break;
+                            case 2: measurementColor = System.Drawing.Color.Cyan; break;
+                            case 3: measurementColor = System.Drawing.Color.Magenta; break;
+                            case 4: measurementColor = System.Drawing.Color.LimeGreen; break;
+                            case 5: measurementColor = System.Drawing.Color.Orange; break;
+                            case 6: measurementColor = System.Drawing.Color.Pink; break;
+                            default: measurementColor = System.Drawing.Color.White; break;
+                        }
+
+                        var measurement = new MeasurementLine
+                        {
+                            Start = measureStartPoint,
+                            End = measureEndPoint,
+                            Distance = distance,
+                            RealDistance = displayDistance,
+                            Unit = unit,
+                            Label = $"M{measurements.Count + 1}",
+                            IsOnSlice = isOnSlice,
+                            SliceType = sliceType,
+                            SlicePosition = slicePosition,
+                            Visible = true, // Ensure the measurement is visible by default
+                            Color = measurementColor
+                        };
+
+                        measurements.Add(measurement);
+
+                        // Log the measurement creation
+                        Logger.Log($"[SharpDXVolumeRenderer] Added measurement: {measurement.Label}, " +
+                                  $"Distance: {displayDistance:F2} {unit}, " +
+                                  $"Visible: {measurement.Visible}");
+
+                        // IMPORTANT: Update the UI on the correct thread
+                        if (controlPanel != null)
+                        {
+                            try
+                            {
+                                // Use BeginInvoke to ensure UI update happens on UI thread
+                                renderPanel.BeginInvoke(new Action(() => {
+                                    controlPanel.RefreshMeasurementsList();
+                                }));
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Log($"[SharpDXVolumeRenderer] Error updating control panel: {ex.Message}");
+                            }
                         }
                     }
 
-                    // Create measurement
-                    var measurement = new MeasurementLine
-                    {
-                        Start = measureStartPoint,
-                        End = measureEndPoint,
-                        Distance = distance,
-                        RealDistance = displayDistance,
-                        Unit = unit,
-                        Label = $"M{measurements.Count + 1}",
-                        IsOnSlice = isOnSlice,
-                        SliceType = sliceType,
-                        SlicePosition = slicePosition
-                    };
+                    isDrawingMeasurement = false;
+                    measurementMode = false; // Exit measurement mode after creating one
 
-                    measurements.Add(measurement);
-
-                    // Update the UI
+                    // Notify UI that measurement mode is complete
                     if (controlPanel != null)
                     {
-                        controlPanel.RefreshMeasurementsList();
+                        try
+                        {
+                            renderPanel.BeginInvoke(new Action(() => {
+                                controlPanel.UpdateMeasurementUI(false);
+                            }));
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[SharpDXVolumeRenderer] Error updating measurement UI: {ex.Message}");
+                        }
                     }
 
-                    Logger.Log($"[SharpDXVolumeRenderer] Added measurement: {measurement}");
+                    NeedsRender = true;
                 }
 
-                isDrawingMeasurement = false;
-                measurementMode = false; // Exit measurement mode after creating one
-
-                // Notify UI that measurement mode is complete
-                if (controlPanel != null)
-                {
-                    controlPanel.UpdateMeasurementUI(false);
-                }
-
-                NeedsRender = true;
-
-                // Important: Return here to prevent other mouse handling
+                // Important: Block ALL other mouse handling in measurement mode
                 return;
             }
             else if (e.Button == MouseButtons.Left)
@@ -3916,13 +4022,6 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     if (!measurement.Visible)
                         continue;
 
-                    // Check if the points are visible (in the view frustum)
-                    var screenStart = WorldToScreen(measurement.Start);
-                    var screenEnd = WorldToScreen(measurement.End);
-
-                    if (!screenStart.HasValue || !screenEnd.HasValue)
-                        continue;
-
                     // Convert color to Vector4
                     System.Drawing.Color measurementColor = measurement.Color;
                     Vector4 color = new Vector4(
@@ -3935,7 +4034,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     vertices.Add(new LineVertex(measurement.Start, color));
                     vertices.Add(new LineVertex(measurement.End, color));
 
-                    // Also store in the individual arrays for backward compatibility
+                    // Also store in the individual arrays (for backward compatibility)
                     measurementVertices.Add(measurement.Start);
                     measurementColors.Add(color);
                     measurementVertices.Add(measurement.End);
@@ -3979,7 +4078,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                         BindFlags.VertexBuffer,
                         CpuAccessFlags.Write,
                         ResourceOptionFlags.None,
-                        0);
+                        stride);
 
                     lineVertexBuffer = new Buffer(device, vbDesc);
                 }
@@ -4024,19 +4123,13 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
         {
             try
             {
-                EnsureTextRenderer();
-
                 if (textRenderer == null)
                     return;
 
                 // Clear existing labels
                 textRenderer.ClearLabels();
 
-                // Don't add any labels if no measurements or not in drawing mode
-                if (measurements.Count == 0 && !isDrawingMeasurement)
-                    return;
-
-                // Add labels for existing measurements
+                // Process each visible measurement
                 foreach (var measurement in measurements)
                 {
                     if (!measurement.Visible)
@@ -4052,22 +4145,22 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     var startPoint = screenStart.Value;
                     var endPoint = screenEnd.Value;
 
-                    // Calculate text position (middle of the line)
+                    // Calculate midpoint for the label
                     int textX = (startPoint.X + endPoint.X) / 2;
                     int textY = (startPoint.Y + endPoint.Y) / 2;
 
-                    // Create the label text
+                    // Format the label text
                     string labelText = $"{measurement.Label}: {measurement.RealDistance:F2} {measurement.Unit}";
 
-                    // Add the label
+                    // Add to the text renderer
                     textRenderer.AddLabel(
                         labelText,
                         new System.Drawing.Point(textX, textY),
-                        System.Drawing.Color.FromArgb(150, 0, 0, 0),
-                        System.Drawing.Color.White);
+                        System.Drawing.Color.FromArgb(150, 0, 0, 0),  // Semi-transparent background
+                        System.Drawing.Color.White);  // White text
                 }
 
-                // Add label for active measurement if drawing
+                // Add label for the in-progress measurement
                 if (isDrawingMeasurement)
                 {
                     var screenStart = WorldToScreen(measureStartPoint);
@@ -4078,14 +4171,15 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                         var startPoint = screenStart.Value;
                         var endPoint = screenEnd.Value;
 
-                        // Calculate distance
+                        // Calculate the distance
                         float distance = Vector3.Distance(measureStartPoint, measureEndPoint);
                         double pixelSizeInMeters = mainForm.GetPixelSize();
                         double realWorldDistance = distance * pixelSizeInMeters;
+
+                        // Format with appropriate units
                         string unit = "m";
                         float displayDistance = (float)realWorldDistance;
 
-                        // Format with appropriate units
                         if (realWorldDistance < 0.001 && realWorldDistance > 0)
                         {
                             unit = "µm";
@@ -4103,31 +4197,36 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                         int textX = (startPoint.X + endPoint.X) / 2;
                         int textY = (startPoint.Y + endPoint.Y) / 2;
 
-                        // Add the label
+                        // Add the in-progress label
                         textRenderer.AddLabel(
                             labelText,
                             new System.Drawing.Point(textX, textY),
                             System.Drawing.Color.FromArgb(150, 0, 0, 0),
-                            System.Drawing.Color.White);
+                            System.Drawing.Color.Yellow);  // Use yellow for active measurement
                     }
                 }
             }
             catch (Exception ex)
             {
-                Logger.Log("[SharpDXVolumeRenderer] Error updating measurement labels: " + ex.Message);
+                Logger.Log($"[SharpDXVolumeRenderer] Error updating measurement labels: {ex.Message}");
             }
         }
+
         private void RenderMeasurements()
         {
             try
             {
-                if (lineVertexBuffer == null || (measurements.Count == 0 && !isDrawingMeasurement))
+                // Skip if no measurements or no buffers initialized
+                if ((measurements.Count == 0 && !isDrawingMeasurement) || lineVertexBuffer == null ||
+                    lineVertexShader == null || linePixelShader == null)
+                {
                     return;
+                }
 
                 // First reset shader resources to avoid state conflicts
                 ResetShaderResources();
 
-                // Update the measurement buffer
+                // Update the measurement vertex buffer with current measurements
                 UpdateMeasurementBuffer();
 
                 // Set shader and input layout for line rendering
@@ -4150,15 +4249,288 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 // Enable blending for the lines
                 context.OutputMerger.SetBlendState(alphaBlendState);
 
-                // Draw the lines
-                context.Draw(measurementVertices.Count, 0);
+                // Calculate vertex count based on visible measurements
+                int vertexCount = 0;
+                foreach (var measurement in measurements)
+                {
+                    if (measurement.Visible)
+                        vertexCount += 2;
+                }
+
+                if (isDrawingMeasurement)
+                    vertexCount += 2; // Add the in-progress measurement
+
+                // Only draw if there are actually vertices to draw
+                if (vertexCount > 0)
+                {
+                    context.Draw(vertexCount, 0);
+                }
+
+                // CRITICAL: Restore the shaders and states before rendering text
+                // This is essential to prevent the black screen issue
+                context.VertexShader.Set(volumeVertexShader);
+                context.PixelShader.Set(volumePixelShader);
+
+                // Do NOT call UpdateMeasurementLabels which uses the text renderer
+                // We'll handle text differently
+
+                // Draw the measurement labels directly on the DirectX surface
+                DrawMeasurementLabelsDirectly();
 
                 // Reset shader resources again to avoid affecting subsequent rendering
                 ResetShaderResources();
             }
             catch (Exception ex)
             {
-                Logger.Log("[SharpDXVolumeRenderer] Error rendering measurements: " + ex.Message);
+                Logger.Log($"[SharpDXVolumeRenderer] Error rendering measurements: {ex.Message}");
+            }
+        }
+        private void DrawMeasurementLabelsDirectly()
+        {
+            // We'll manually draw measurement labels by creating overlay controls
+            // on top of the rendering surface, rather than using the text renderer
+
+            try
+            {
+                // Use the context current state without changing it
+                // and leverage Windows Forms controls for text instead
+
+                // First, make sure all existing text controls are cleared
+                RemoveAllMeasurementTextControls();
+
+                // Process each visible measurement
+                foreach (var measurement in measurements)
+                {
+                    if (!measurement.Visible)
+                        continue;
+
+                    // Convert 3D world coordinates to screen coordinates
+                    var screenStart = WorldToScreen(measurement.Start);
+                    var screenEnd = WorldToScreen(measurement.End);
+
+                    if (!screenStart.HasValue || !screenEnd.HasValue)
+                        continue;
+
+                    var startPoint = screenStart.Value;
+                    var endPoint = screenEnd.Value;
+
+                    // Calculate midpoint for the label
+                    int textX = (startPoint.X + endPoint.X) / 2;
+                    int textY = (startPoint.Y + endPoint.Y) / 2;
+
+                    // Format the label text
+                    string labelText = $"{measurement.Label}: {measurement.RealDistance:F2} {measurement.Unit}";
+
+                    // Create a label control for the measurement
+                    AddMeasurementTextControl(labelText,
+                        new System.Drawing.Point(textX, textY),
+                        measurement.Color);
+                }
+
+                // Add label for the in-progress measurement
+                if (isDrawingMeasurement)
+                {
+                    var screenStart = WorldToScreen(measureStartPoint);
+                    var screenEnd = WorldToScreen(measureEndPoint);
+
+                    if (screenStart.HasValue && screenEnd.HasValue)
+                    {
+                        var startPoint = screenStart.Value;
+                        var endPoint = screenEnd.Value;
+
+                        // Calculate the distance
+                        float distance = Vector3.Distance(measureStartPoint, measureEndPoint);
+                        double pixelSizeInMeters = mainForm.GetPixelSize();
+                        double realWorldDistance = distance * pixelSizeInMeters;
+
+                        // Format with appropriate units
+                        string unit = "m";
+                        float displayDistance = (float)realWorldDistance;
+
+                        if (realWorldDistance < 0.001 && realWorldDistance > 0)
+                        {
+                            unit = "µm";
+                            displayDistance = (float)(realWorldDistance * 1e6);
+                        }
+                        else if (realWorldDistance < 1 && realWorldDistance >= 0.001)
+                        {
+                            unit = "mm";
+                            displayDistance = (float)(realWorldDistance * 1e3);
+                        }
+
+                        string labelText = $"Distance: {displayDistance:F2} {unit} ({distance:F1} voxels)";
+
+                        // Calculate text position (middle of the line)
+                        int textX = (startPoint.X + endPoint.X) / 2;
+                        int textY = (startPoint.Y + endPoint.Y) / 2;
+
+                        // Add the in-progress label
+                        AddMeasurementTextControl(labelText,
+                            new System.Drawing.Point(textX, textY),
+                            System.Drawing.Color.Yellow);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] Error drawing measurement labels: {ex.Message}");
+            }
+        }
+        private List<Label> measurementLabels = new List<Label>();
+
+        // Method to add a measurement text control
+        private void AddMeasurementTextControl(string text, System.Drawing.Point location, System.Drawing.Color color)
+        {
+            try
+            {
+                // Create a label control
+                Label label = new Label();
+                label.Text = text;
+                label.AutoSize = true;
+                label.BackColor = System.Drawing.Color.FromArgb(120, 0, 0, 0); // Semi-transparent background
+                label.ForeColor = color;
+                label.Font = new System.Drawing.Font("Arial", 8, System.Drawing.FontStyle.Bold);
+
+                // Adjust location to center the text
+                System.Drawing.Size textSize = TextRenderer.MeasureText(text, label.Font);
+                label.Location = new System.Drawing.Point(
+                    location.X - textSize.Width / 2,
+                    location.Y - textSize.Height / 2);
+
+                // Add to the render panel
+                renderPanel.Controls.Add(label);
+                label.BringToFront();
+
+                // Store in our collection for later cleanup
+                measurementLabels.Add(label);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] Error adding measurement label: {ex.Message}");
+            }
+        }
+
+        // Method to remove all measurement text controls
+        public void RemoveAllMeasurementTextControls()
+        {
+            try
+            {
+                foreach (var label in measurementLabels)
+                {
+                    try
+                    {
+                        // Remove from panel and dispose
+                        if (label != null && !label.IsDisposed)
+                        {
+                            renderPanel.Controls.Remove(label);
+                            label.Dispose();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[SharpDXVolumeRenderer] Error removing measurement label: {ex.Message}");
+                    }
+                }
+
+                // Clear the collection
+                measurementLabels.Clear();
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] Error removing measurement labels: {ex.Message}");
+            }
+        }
+
+
+        private void UpdateMeasurementVertexBuffer()
+        {
+            try
+            {
+                // Calculate total required vertex count
+                int totalMeasurements = measurements.Count + (isDrawingMeasurement ? 1 : 0);
+                int vertexCount = totalMeasurements * 2; // 2 vertices per line
+
+                if (vertexCount == 0)
+                    return;
+
+                // Create a list to hold properly formatted vertices
+                List<LineVertex> vertices = new List<LineVertex>(vertexCount);
+
+                // Add all visible measurements
+                foreach (var measurement in measurements)
+                {
+                    if (!measurement.Visible)
+                        continue;
+
+                    // Convert world coordinates to view space
+                    Vector3 start = measurement.Start;
+                    Vector3 end = measurement.End;
+
+                    // Get color (use white if not specified)
+                    Vector4 color = new Vector4(
+                        measurement.Color.R / 255.0f,
+                        measurement.Color.G / 255.0f,
+                        measurement.Color.B / 255.0f,
+                        1.0f);
+
+                    // Add start and end vertices
+                    vertices.Add(new LineVertex(start, color));
+                    vertices.Add(new LineVertex(end, color));
+                }
+
+                // Add the in-progress measurement if drawing
+                if (isDrawingMeasurement)
+                {
+                    // Use yellow for active measurement
+                    Vector4 activeColor = new Vector4(1.0f, 1.0f, 0.0f, 1.0f);
+                    vertices.Add(new LineVertex(measureStartPoint, activeColor));
+                    vertices.Add(new LineVertex(measureEndPoint, activeColor));
+                }
+
+                // Skip if no vertices to render
+                if (vertices.Count == 0)
+                    return;
+
+                // Determine buffer size needed
+                int stride = Utilities.SizeOf<LineVertex>();
+                int dataSize = stride * vertices.Count;
+
+                // Recreate buffer if needed
+                if (lineVertexBuffer == null || lineVertexBuffer.Description.SizeInBytes < dataSize)
+                {
+                    if (lineVertexBuffer != null)
+                        lineVertexBuffer.Dispose();
+
+                    BufferDescription bufDesc = new BufferDescription(
+                        Math.Max(dataSize, 1024), // Minimum 1KB buffer
+                        ResourceUsage.Dynamic,
+                        BindFlags.VertexBuffer,
+                        CpuAccessFlags.Write,
+                        ResourceOptionFlags.None,
+                        stride);
+
+                    lineVertexBuffer = new Buffer(device, bufDesc);
+                }
+
+                // Map buffer for writing
+                DataStream dataStream;
+                context.MapSubresource(
+                    lineVertexBuffer,
+                    0,
+                    MapMode.WriteDiscard,
+                    SharpDX.Direct3D11.MapFlags.None,
+                    out dataStream);
+
+                // Write all vertices in one go
+                dataStream.WriteRange(vertices.ToArray());
+
+                // Unmap the buffer
+                context.UnmapSubresource(lineVertexBuffer, 0);
+                dataStream.Dispose();
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] Error updating measurement buffer: {ex.Message}");
             }
         }
 
@@ -4234,6 +4606,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             }
 
             ChunkedVolume volume = mainForm.volumeData;
+            bool anyLodCreated = false;
 
             // Create a series of downsampled textures at different resolutions
             for (int lodLevel = 0; lodLevel < lodTextures.Length; lodLevel++)
@@ -4284,9 +4657,12 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                                 // Calculate linear index in the lodData array
                                 int idx = (z * width * height) + (y * width) + x;
 
-                                // Sample from the original volume
-                                byte value = volume[srcX, srcY, srcZ];
-                                lodData[idx] = value;
+                                // Sample from the original volume with bounds checking
+                                if (srcX < volW && srcY < volH && srcZ < volD)
+                                {
+                                    byte value = volume[srcX, srcY, srcZ];
+                                    lodData[idx] = value;
+                                }
                             }
                         }
                     }
@@ -4307,20 +4683,15 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     };
 
                     lodSRVs[lodLevel] = new ShaderResourceView(device, lodTextures[lodLevel], srvDesc);
+                    anyLodCreated = true;
 
-                    // IMPORTANT: For LOD level 0 (highest resolution), also set it as the main volume texture
-                    // This ensures we have a fallback texture for the standard renderer
+                    // IMPORTANT: For LOD level 0 (highest resolution), also temporarily use as main texture
+                    // Note: We'll keep the original volume texture reference for when streaming is disabled
                     if (lodLevel == 0)
                     {
-                        // Save a backup of the original volume
-                        Texture3D originalVolume = volumeTexture;
-                        ShaderResourceView originalSRV = volumeSRV;
-
-                        // Update the main volume texture
-                        volumeTexture = lodTextures[0];
-                        volumeSRV = lodSRVs[0];
-
-                        Logger.Log("[SharpDXVolumeRenderer] Updated main volume texture with highest LOD level");
+                        // Update the current rendering texture (we'll switch back later if needed)
+                        currentStreamingLOD = 0;
+                        Logger.Log("[SharpDXVolumeRenderer] Created highest-resolution LOD texture");
                     }
                 }
                 catch (Exception ex)
@@ -4328,9 +4699,44 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     Logger.Log($"[SharpDXVolumeRenderer] Error creating LOD level {lodLevel}: {ex.Message}");
                 }
             }
+
+            if (!anyLodCreated)
+            {
+                // If we couldn't create any LOD textures, disable streaming mode
+                Logger.Log("[SharpDXVolumeRenderer] Failed to create any LOD textures, disabling streaming");
+                useStreamingRenderer = false;
+            }
         }
         private void RenderVolumeWithStreaming()
         {
+            if (isInitializingStreaming)
+            {
+                // Use wireframe mode temporarily during initialization
+                var oldState = context.Rasterizer.State;
+                context.Rasterizer.State = wireframeRasterState;
+
+                // Setup rendering pipeline (minimal setup just for the box)
+                context.InputAssembler.InputLayout = inputLayout;
+                context.InputAssembler.PrimitiveTopology = PrimitiveTopology.TriangleList;
+                context.InputAssembler.SetVertexBuffers(0, new VertexBufferBinding(cubeVertexBuffer, Utilities.SizeOf<Vector3>(), 0));
+                context.InputAssembler.SetIndexBuffer(cubeIndexBuffer, Format.R32_UInt, 0);
+
+                // Set shaders
+                context.VertexShader.Set(volumeVertexShader);
+                context.PixelShader.Set(volumePixelShader);
+
+                // Set a simple constant buffer for the initialization state
+                UpdateConstantBuffer(1.0f);
+                context.VertexShader.SetConstantBuffer(0, constantBuffer);
+                context.PixelShader.SetConstantBuffer(0, constantBuffer);
+
+                // Draw just the bounding box
+                context.DrawIndexed(cubeIndexCount, 0, 0);
+
+                // Restore original state
+                context.Rasterizer.State = oldState;
+                return;
+            }
             try
             {
                 if (context == null || cubeVertexBuffer == null || cubeIndexBuffer == null)
@@ -4384,24 +4790,89 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 // CRITICAL FIX: Ensure we always have a valid volume texture
                 bool hasValidTexture = false;
 
-                // Try to use the streaming LOD textures first
-                if (currentStreamingLOD < lodSRVs.Length && lodSRVs[currentStreamingLOD] != null)
+                // Try streaming LOD textures first, with bounds checking
+                if (currentStreamingLOD >= 0 && currentStreamingLOD < lodSRVs.Length && lodSRVs[currentStreamingLOD] != null)
                 {
                     resources[2] = lodSRVs[currentStreamingLOD];
                     hasValidTexture = true;
-                    Logger.Log($"[RenderVolumeWithStreaming] Using LOD level {currentStreamingLOD}");
+                    if (frameCount % 60 == 0)  // Log less frequently to reduce spam
+                    {
+                        Logger.Log($"[RenderVolumeWithStreaming] Using LOD level {currentStreamingLOD}");
+                    }
                 }
                 // Fall back to the original volume texture if available
                 else if (volumeSRV != null)
                 {
                     resources[2] = volumeSRV;
                     hasValidTexture = true;
-                    Logger.Log("[RenderVolumeWithStreaming] Using original volume texture");
+                    Logger.Log("[RenderVolumeWithStreaming] Using original volume texture as fallback");
                 }
 
                 if (!hasValidTexture)
                 {
                     Logger.Log("[RenderVolumeWithStreaming] WARNING: No valid volume texture available!");
+
+                    // Critical fix: Try to create a simple, minimal texture if we have no valid texture
+                    // This will at least display something instead of just the bounding box
+                    if (resources[2] == null)
+                    {
+                        try
+                        {
+                            // Create a small texture with some gradient data for visibility
+                            const int tempSize = 64;
+                            Texture3DDescription tempDesc = new Texture3DDescription
+                            {
+                                Width = tempSize,
+                                Height = tempSize,
+                                Depth = tempSize,
+                                MipLevels = 1,
+                                Format = Format.R8_UNorm,
+                                Usage = ResourceUsage.Default,
+                                BindFlags = BindFlags.ShaderResource,
+                                CpuAccessFlags = CpuAccessFlags.None,
+                                OptionFlags = ResourceOptionFlags.None
+                            };
+
+                            Texture3D tempTexture = new Texture3D(device, tempDesc);
+                            byte[] tempData = new byte[tempSize * tempSize * tempSize];
+
+                            // Fill with simple gradient pattern
+                            for (int z = 0; z < tempSize; z++)
+                            {
+                                for (int y = 0; y < tempSize; y++)
+                                {
+                                    for (int x = 0; x < tempSize; x++)
+                                    {
+                                        int idx = (z * tempSize * tempSize) + (y * tempSize) + x;
+                                        // Simple gradient pattern
+                                        tempData[idx] = (byte)(((x * 255) / tempSize + (y * 255) / tempSize + (z * 255) / tempSize) / 3);
+                                    }
+                                }
+                            }
+
+                            context.UpdateSubresource(tempData, tempTexture, 0);
+
+                            ShaderResourceViewDescription tempSrvDesc = new ShaderResourceViewDescription
+                            {
+                                Format = Format.R8_UNorm,
+                                Dimension = ShaderResourceViewDimension.Texture3D,
+                                Texture3D = new ShaderResourceViewDescription.Texture3DResource
+                                {
+                                    MipLevels = 1,
+                                    MostDetailedMip = 0
+                                }
+                            };
+
+                            ShaderResourceView tempSrv = new ShaderResourceView(device, tempTexture, tempSrvDesc);
+                            resources[2] = tempSrv;
+
+                            Logger.Log("[RenderVolumeWithStreaming] Created temporary texture as last resort");
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[RenderVolumeWithStreaming] Failed to create temporary texture: {ex.Message}");
+                        }
+                    }
                 }
 
                 if (labelSRV != null) resources[3] = labelSRV;
@@ -4435,6 +4906,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 debugMode = true;
             }
         }
+
 
 
         private void LoadLowResolutionOverview()
@@ -4963,56 +5435,62 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 debugMode = true;
             }
         }
+        public void ClearMeasurementLabels()
+        {
+            // Clear any existing measurement label controls
+            RemoveAllMeasurementTextControls();
+        }
         private void DisposeStreamingResources()
         {
             try
             {
                 Logger.Log("[SharpDXVolumeRenderer] Disposing streaming renderer resources");
 
-                // Clean up all the LOD textures except level 0 which might be shared
-                for (int i = 1; i < lodTextures.Length; i++)
+                // Clean up the streaming LOD textures
+                for (int i = 0; i < lodTextures.Length; i++)
                 {
-                    if (lodSRVs[i] != null)
+                    try
                     {
-                        // Don't need ref here as we're not nulling the array elements
-                        lodSRVs[i].Dispose();
-                        lodTextures[i].Dispose();
+                        if (lodSRVs[i] != null)
+                        {
+                            lodSRVs[i].Dispose();
+                            lodSRVs[i] = null;
+                        }
 
-                        // Now set to null
-                        lodSRVs[i] = null;
-                        lodTextures[i] = null;
+                        if (lodTextures[i] != null)
+                        {
+                            lodTextures[i].Dispose();
+                            lodTextures[i] = null;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[SharpDXVolumeRenderer] Error disposing LOD texture {i}: {ex.Message}");
                     }
                 }
 
                 // Clean up loaded chunks if any
                 lock (chunkLock)
                 {
-                    // Method 1: Use the existing UnloadChunk method if available
-                    List<Vector3> chunkKeys = loadedChunks.Keys.ToList();
-                    foreach (Vector3 key in chunkKeys)
+                    try
                     {
-                        UnloadChunk(key);
-                    }
+                        // Use the existing UnloadChunk method to properly dispose each chunk
+                        List<Vector3> chunkKeys = loadedChunks.Keys.ToList();
+                        foreach (Vector3 key in chunkKeys)
+                        {
+                            UnloadChunk(key);
+                        }
 
-                    // Alternative approach if UnloadChunk doesn't work properly:
-                    /*
-                    // Dispose all SRVs
-                    foreach (var srv in loadedChunkSRVs.Values.ToList())
+                        // Clear all collections
+                        loadedChunks.Clear();
+                        loadedChunkSRVs.Clear();
+                        chunkLoadQueue.Clear();
+                        visibleChunks.Clear();
+                    }
+                    catch (Exception ex)
                     {
-                        srv.Dispose();
+                        Logger.Log($"[SharpDXVolumeRenderer] Error cleaning up chunks: {ex.Message}");
                     }
-
-                    // Dispose all textures
-                    foreach (var texture in loadedChunks.Values.ToList())
-                    {
-                        texture.Dispose();
-                    }
-                    */
-
-                    loadedChunks.Clear();
-                    loadedChunkSRVs.Clear();
-                    chunkLoadQueue.Clear();
-                    visibleChunks.Clear();
                 }
 
                 Logger.Log("[SharpDXVolumeRenderer] Streaming resources disposed");
@@ -5022,8 +5500,277 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 Logger.Log($"[SharpDXVolumeRenderer] Error disposing streaming resources: {ex.Message}");
             }
         }
+        // Fixed code with renamed progress variable to avoid naming conflict
+        private void InitializeStreamingRendererAsync()
+        {
+            // Cancel any existing initialization
+            if (initStreamingCts != null && !initStreamingCts.IsCancellationRequested)
+            {
+                initStreamingCts.Cancel();
+            }
 
+            initStreamingCts = new CancellationTokenSource();
+            var token = initStreamingCts.Token;
 
+            // Create a progress form to show the user something is happening
+            if (streamingProgressForm != null && !streamingProgressForm.IsDisposed)
+            {
+                streamingProgressForm.Close();
+            }
+
+            // Create and show the progress form on the UI thread
+            mainForm.Invoke((Action)(() => {
+                streamingProgressForm = new ProgressForm("Initializing Streaming Renderer...");
+                streamingProgressForm.FormClosed += (s, e) => {
+                    // If the user closes the form, cancel the initialization
+                    if (!initStreamingCts.IsCancellationRequested)
+                    {
+                        initStreamingCts.Cancel();
+                        useStreamingRenderer = false;
+                        NeedsRender = true;
+                    }
+                };
+                streamingProgressForm.Show(mainForm);
+                streamingProgressForm.UpdateProgress(0, 100);
+            }));
+
+            // Set a flag to indicate initialization is in progress
+            isInitializingStreaming = true;
+
+            // Start the async task
+            streamingInitTask = Task.Run(() => {
+                try
+                {
+                    Logger.Log("[InitializeStreamingRendererAsync] Starting initialization on background thread");
+
+                    // Set a timer to update the progress UI periodically
+                    int progressPercent = 0;
+                    var timer = new System.Threading.Timer(state => {
+                        if (streamingProgressForm != null && !streamingProgressForm.IsDisposed)
+                        {
+                            progressPercent = (progressPercent + 3) % 100; // Simple progress simulation
+                            streamingProgressForm.SafeUpdateProgress(progressPercent, 100, "Creating LOD textures...");
+                        }
+                    }, null, 0, 300);
+
+                    try
+                    {
+                        // Create a series of progressively lower-resolution versions of the volume
+                        // These will be used during camera movement and then progressively refined
+                        CreateStreamingLODTexturesAsync(token, progressValue => {
+                            if (streamingProgressForm != null && !streamingProgressForm.IsDisposed)
+                            {
+                                streamingProgressForm.SafeUpdateProgress(progressValue, 100);
+                            }
+                        });
+
+                        token.ThrowIfCancellationRequested();
+
+                        // Important: Force render with new resources
+                        NeedsRender = true;
+                    }
+                    finally
+                    {
+                        // Clean up the timer
+                        timer.Dispose();
+                    }
+
+                    // Update progress to 100% when done
+                    if (streamingProgressForm != null && !streamingProgressForm.IsDisposed)
+                    {
+                        streamingProgressForm.SafeUpdateProgress(100, 100, "Initialization complete!");
+
+                        // Close the form after a short delay
+                        Task.Delay(1000).ContinueWith(_ => {
+                            mainForm.Invoke((Action)(() => {
+                                if (streamingProgressForm != null && !streamingProgressForm.IsDisposed)
+                                {
+                                    streamingProgressForm.Close();
+                                    streamingProgressForm = null;
+                                }
+                            }));
+                        });
+                    }
+
+                    Logger.Log("[InitializeStreamingRendererAsync] Streaming renderer initialized successfully");
+                }
+                catch (OperationCanceledException)
+                {
+                    Logger.Log("[InitializeStreamingRendererAsync] Initialization canceled");
+                    // If canceled, make sure streaming mode is disabled
+                    useStreamingRenderer = false;
+                    NeedsRender = true;
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[InitializeStreamingRendererAsync] Error initializing streaming renderer: {ex.Message}");
+
+                    // Show error message to user
+                    mainForm.Invoke((Action)(() => {
+                        MessageBox.Show(mainForm,
+                            $"Failed to initialize streaming renderer: {ex.Message}\n\nFalling back to standard renderer.",
+                            "Initialization Error",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Error);
+                    }));
+
+                    // Disable streaming mode on error
+                    useStreamingRenderer = false;
+                    NeedsRender = true;
+                }
+                finally
+                {
+                    isInitializingStreaming = false;
+
+                    // Close progress form if still open
+                    mainForm.Invoke((Action)(() => {
+                        if (streamingProgressForm != null && !streamingProgressForm.IsDisposed)
+                        {
+                            streamingProgressForm.Close();
+                            streamingProgressForm = null;
+                        }
+                    }));
+                }
+            }, token);
+        }
+        private void CreateStreamingLODTexturesAsync(CancellationToken token, Action<int> progressCallback)
+        {
+            // Clean up any existing textures first
+            for (int i = 0; i < lodTextures.Length; i++)
+            {
+                Utilities.Dispose(ref lodSRVs[i]);
+                Utilities.Dispose(ref lodTextures[i]);
+            }
+
+            if (mainForm.volumeData == null)
+            {
+                Logger.Log("[CreateStreamingLODTexturesAsync] No volume data available for streaming LODs");
+                throw new InvalidOperationException("No volume data available to create streaming LODs");
+            }
+
+            ChunkedVolume volume = mainForm.volumeData;
+            bool anyLodCreated = false;
+
+            // Report initial progress
+            progressCallback(5);
+
+            // Create a series of downsampled textures at different resolutions
+            for (int lodLevel = 0; lodLevel < lodTextures.Length; lodLevel++)
+            {
+                // Check for cancellation
+                token.ThrowIfCancellationRequested();
+
+                // Update progress
+                progressCallback(5 + (lodLevel * 90 / lodTextures.Length));
+
+                try
+                {
+                    // Level 0 is highest resolution, each level reduces by 2x
+                    int downsampleFactor = (int)Math.Pow(2, lodLevel);
+
+                    // Calculate dimensions for this LOD level
+                    int width = Math.Max(1, volW / downsampleFactor);
+                    int height = Math.Max(1, volH / downsampleFactor);
+                    int depth = Math.Max(1, volD / downsampleFactor);
+
+                    Logger.Log($"[CreateStreamingLODTexturesAsync] Creating LOD level {lodLevel}: {width}x{height}x{depth}");
+
+                    // Create the texture
+                    Texture3DDescription desc = new Texture3DDescription
+                    {
+                        Width = width,
+                        Height = height,
+                        Depth = depth,
+                        MipLevels = 1,
+                        Format = Format.R8_UNorm,
+                        Usage = ResourceUsage.Default,
+                        BindFlags = BindFlags.ShaderResource,
+                        CpuAccessFlags = CpuAccessFlags.None,
+                        OptionFlags = ResourceOptionFlags.None
+                    };
+
+                    lodTextures[lodLevel] = new Texture3D(device, desc);
+
+                    // Create the data array for this LOD level
+                    byte[] lodData = new byte[width * height * depth];
+
+                    // Use parallel processing for faster downsampling
+                    Parallel.For(0, depth, new ParallelOptions { CancellationToken = token, MaxDegreeOfParallelism = Environment.ProcessorCount }, z => {
+                        // Check cancellation occasionally but not on every iteration
+                        if (z % 10 == 0) token.ThrowIfCancellationRequested();
+
+                        for (int y = 0; y < height; y++)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                // Calculate source coordinates in the original volume
+                                int srcX = Math.Min(x * downsampleFactor, volW - 1);
+                                int srcY = Math.Min(y * downsampleFactor, volH - 1);
+                                int srcZ = Math.Min(z * downsampleFactor, volD - 1);
+
+                                // Calculate linear index in the lodData array
+                                int idx = (z * width * height) + (y * width) + x;
+
+                                // Sample from the original volume with bounds checking
+                                if (srcX < volW && srcY < volH && srcZ < volD)
+                                {
+                                    byte value = volume[srcX, srcY, srcZ];
+                                    lodData[idx] = value;
+                                }
+                            }
+                        }
+                    });
+
+                    // Check for cancellation again before resource-intensive GPU operations
+                    token.ThrowIfCancellationRequested();
+
+                    // Upload the data to the texture
+                    context.UpdateSubresource(lodData, lodTextures[lodLevel], 0);
+
+                    // Create a shader resource view
+                    ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
+                    {
+                        Format = Format.R8_UNorm,
+                        Dimension = ShaderResourceViewDimension.Texture3D,
+                        Texture3D = new ShaderResourceViewDescription.Texture3DResource
+                        {
+                            MipLevels = 1,
+                            MostDetailedMip = 0
+                        }
+                    };
+
+                    lodSRVs[lodLevel] = new ShaderResourceView(device, lodTextures[lodLevel], srvDesc);
+                    anyLodCreated = true;
+
+                    // For LOD level 0 (highest resolution), also use as main texture for now
+                    if (lodLevel == 0)
+                    {
+                        currentStreamingLOD = 0;
+                        Logger.Log("[CreateStreamingLODTexturesAsync] Created highest-resolution LOD texture");
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    // Rethrow cancellation exception to be handled by the caller
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[CreateStreamingLODTexturesAsync] Error creating LOD level {lodLevel}: {ex.Message}");
+                    // Continue with next LOD level
+                }
+            }
+
+            // Final progress update
+            progressCallback(100);
+
+            if (!anyLodCreated)
+            {
+                // If we couldn't create any LOD textures, disable streaming mode
+                Logger.Log("[CreateStreamingLODTexturesAsync] Failed to create any LOD textures");
+                throw new InvalidOperationException("Failed to create any LOD textures for streaming");
+            }
+        }
 
         #endregion
     }

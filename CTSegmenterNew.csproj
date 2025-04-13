@@ -249,6 +249,9 @@
   <ItemGroup>
     <Compile Include="Annotations.cs" />
     <Compile Include="Binning.cs" />
+    <Compile Include="BrightnessContrastForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="ChunkedLabelVolume.cs" />
     <Compile Include="ChunkedVolume.cs" />
     <Compile Include="ControlForm.cs">
@@ -268,7 +271,6 @@
     </Content>
     <Compile Include="CTFusion.cs" />
     <Content Include="ILLink\ILLink.Descriptors.LibraryBuild.xml" />
-    <Content Include="MainLoop - Copy.txt" />
     <Compile Include="CTViewer3DForm.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -279,9 +281,6 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="LRUCache.cs" />
-    <Compile Include="MainLoop - Copy.Designer.cs">
-      <DependentUpon>MainLoop - Copy.txt</DependentUpon>
-    </Compile>
     <Compile Include="MainLoop.cs" />
     <Compile Include="Logger.cs" />
     <Compile Include="LogWindow.cs">
@@ -323,9 +322,6 @@
     <Content Include="favicon.ico" />
   </ItemGroup>
   <ItemGroup>
-    <EmbeddedResource Include="MainLoop - Copy.resx">
-      <DependentUpon>MainLoop - Copy.txt</DependentUpon>
-    </EmbeddedResource>
     <EmbeddedResource Include="MainLoop.resx">
       <DependentUpon>MainLoop.cs</DependentUpon>
     </EmbeddedResource>

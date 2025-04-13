@@ -25,7 +25,7 @@ namespace CTSegmenter.SharpDXIntegration
         private const int MAX_FAILURES = 3;
 
         private bool measurementMode = false;
-        private List<MeasurementLine> measurements = new List<MeasurementLine>();
+        
         private bool isDrawingMeasurement = false;
         private SharpDX.Vector3 measureStartPoint;
         private SharpDX.Vector3 measureEndPoint;
@@ -483,6 +483,12 @@ namespace CTSegmenter.SharpDXIntegration
             measurementMode = !measurementMode;
             isDrawingMeasurement = false;
 
+            // Clean up text controls when exiting measurement mode
+            if (!measurementMode)
+            {
+                volumeRenderer.RemoveAllMeasurementTextControls();
+            }
+
             // Propagate the measurement mode to the renderer
             if (volumeRenderer != null)
             {
@@ -497,57 +503,130 @@ namespace CTSegmenter.SharpDXIntegration
                 Logger.Log($"[SharpDXViewerForm] Measurement mode {(measurementMode ? "enabled" : "disabled")}");
             }
 
+            volumeRenderer.NeedsRender = true;
             return measurementMode;
         }
-
         public void SetMeasurementsVisible(bool visible)
         {
-            foreach (var measurement in measurements)
+            Logger.Log($"[SharpDXViewerForm] Setting all measurements visibility to {visible}");
+
+            if (volumeRenderer != null && volumeRenderer.measurements != null)
             {
-                measurement.Visible = visible;
+                // Apply visibility to all measurements in the renderer's list
+                foreach (var measurement in volumeRenderer.measurements)
+                {
+                    measurement.Visible = visible;
+                }
+
+                // Force a re-render to reflect visibility changes
+                volumeRenderer.NeedsRender = true;
             }
-            volumeRenderer.NeedsRender = true;
+
+            // If control panel exists, update the UI to reflect this change
+            if (controlPanel != null)
+            {
+                try
+                {
+                    controlPanel.BeginInvoke(new Action(() => {
+                        // Update checkboxes in the measurements list to match new visibility
+                        controlPanel.RefreshMeasurementsList();
+                    }));
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[SharpDXViewerForm] Error updating UI after changing measurement visibility: {ex.Message}");
+                }
+            }
         }
 
         public void SetMeasurementVisibility(int index, bool visible)
         {
-            if (index >= 0 && index < measurements.Count)
+            Logger.Log($"[SharpDXViewerForm] Setting measurement at index {index} visibility to {visible}");
+
+            if (volumeRenderer != null && volumeRenderer.measurements != null)
             {
-                measurements[index].Visible = visible;
-                volumeRenderer.NeedsRender = true;
+                if (index >= 0 && index < volumeRenderer.measurements.Count)
+                {
+                    volumeRenderer.measurements[index].Visible = visible;
+
+                    // Force a re-render to reflect visibility changes
+                    volumeRenderer.NeedsRender = true;
+                }
+                else
+                {
+                    Logger.Log($"[SharpDXViewerForm] Invalid measurement index: {index}, count: {volumeRenderer.measurements.Count}");
+                }
             }
         }
 
         public void DeleteMeasurement(int index)
         {
-            if (index >= 0 && index < measurements.Count)
+            Logger.Log($"[SharpDXViewerForm] Deleting measurement at index {index}");
+
+            if (volumeRenderer != null && volumeRenderer.measurements != null)
             {
-                measurements.RemoveAt(index);
-                volumeRenderer.NeedsRender = true;
+                if (index >= 0 && index < volumeRenderer.measurements.Count)
+                {
+                    // Remove the measurement from the renderer's list directly
+                    volumeRenderer.measurements.RemoveAt(index);
+                    Logger.Log($"[SharpDXViewerForm] Measurement deleted, new count: {volumeRenderer.measurements.Count}");
+
+                    // Force a re-render
+                    volumeRenderer.NeedsRender = true;
+
+                    // Also clear any text overlays in the renderer
+                    volumeRenderer.ClearMeasurementLabels();
+                }
+                else
+                {
+                    Logger.Log($"[SharpDXViewerForm] Cannot delete: Invalid measurement index: {index}, count: {volumeRenderer.measurements.Count}");
+                }
+
+                // If control panel exists, update the UI to reflect this change
+                if (controlPanel != null)
+                {
+                    try
+                    {
+                        controlPanel.BeginInvoke(new Action(() => {
+                            controlPanel.RefreshMeasurementsList();
+                        }));
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[SharpDXViewerForm] Error updating UI after deleting measurement: {ex.Message}");
+                    }
+                }
+            }
+            else
+            {
+                Logger.Log("[SharpDXViewerForm] Cannot delete measurement: renderer or measurements list is null");
             }
         }
 
         public List<MeasurementLine> GetMeasurements()
         {
+            // Always return a reference to the renderer's measurements list
             if (volumeRenderer != null)
             {
-                // Use the renderer's measurements list - it has the most up-to-date version
                 return volumeRenderer.measurements;
             }
-            return measurements; // Fall back to form's copy if renderer is null
+            return new List<MeasurementLine>(); // Return empty list as fallback
         }
 
         public void ExportMeasurementsToCSV(string filePath)
         {
             try
             {
+                // Use the volumeRenderer's measurements list instead of the local measurements field
+                var measurementsToExport = volumeRenderer.measurements;
+
                 using (StreamWriter sw = new StreamWriter(filePath))
                 {
                     // Write header
                     sw.WriteLine("Label,Distance (voxels),Real Distance,Unit,Start X,Start Y,Start Z,End X,End Y,End Z,On Slice,Slice Type,Slice Position");
 
                     // Write each measurement
-                    foreach (var m in measurements)
+                    foreach (var m in measurementsToExport)
                     {
                         sw.WriteLine($"\"{m.Label}\",{m.Distance:F2},{m.RealDistance:F3},\"{m.Unit}\",{m.Start.X:F1},{m.Start.Y:F1},{m.Start.Z:F1},{m.End.X:F1},{m.End.Y:F1},{m.End.Z:F1},{m.IsOnSlice},{m.SliceType},{m.SlicePosition}");
                     }

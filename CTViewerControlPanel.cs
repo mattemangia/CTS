@@ -32,6 +32,7 @@ namespace CTSegmenter.SharpDXIntegration
         private TabPage tabSlices;
         private TabPage tabCutting;
         private TabPage tabInfo;
+        FlowLayoutPanel panel = new FlowLayoutPanel();
 
         // Material controls
         private CheckedListBox lstMaterials;
@@ -129,14 +130,11 @@ namespace CTSegmenter.SharpDXIntegration
             lblTitle.Margin = new Padding(0, 0, 0, 10);
             panel.Controls.Add(lblTitle);
 
-            // Show/Hide measurements
+            // Show/Hide all measurements checkbox
             chkShowMeasurements = new CheckBox();
-            chkShowMeasurements.Text = "Show Measurements";
+            chkShowMeasurements.Text = "Show All Measurements";
             chkShowMeasurements.Checked = true;
-            chkShowMeasurements.CheckedChanged += (s, e) =>
-            {
-                viewerForm.SetMeasurementsVisible(chkShowMeasurements.Checked);
-            };
+            chkShowMeasurements.CheckedChanged += chkShowMeasurements_CheckedChanged;
             panel.Controls.Add(chkShowMeasurements);
 
             // Measurement mode button
@@ -145,6 +143,7 @@ namespace CTSegmenter.SharpDXIntegration
             btnAddMeasure.Width = 200;
             btnAddMeasure.Click += (s, e) =>
             {
+                Logger.Log("[SharpDXControlPanel] Add measurement button clicked");
                 bool currentMode = viewerForm.ToggleMeasurementMode();
                 UpdateMeasurementUI(currentMode);
             };
@@ -161,29 +160,21 @@ namespace CTSegmenter.SharpDXIntegration
             lstMeasurements.Width = 330;
             lstMeasurements.Height = 200;
             lstMeasurements.CheckOnClick = true;
-            lstMeasurements.ItemCheck += (s, e) =>
-            {
-                // Toggle visibility of the measurement
-                if (e.Index >= 0 && e.Index < lstMeasurements.Items.Count)
-                {
-                    viewerForm.SetMeasurementVisibility(e.Index, e.NewValue == CheckState.Checked);
-                }
+            lstMeasurements.ItemCheck += lstMeasurements_ItemCheck;
+
+            // Add selection changed event to update UI when selection changes
+            lstMeasurements.SelectedIndexChanged += (s, e) => {
+                btnDeleteMeasure.Enabled = lstMeasurements.SelectedIndex >= 0;
             };
+
             panel.Controls.Add(lstMeasurements);
 
             // Delete selected measurement
             btnDeleteMeasure = new Button();
             btnDeleteMeasure.Text = "Delete Selected";
             btnDeleteMeasure.Width = 150;
-            btnDeleteMeasure.Click += (s, e) =>
-            {
-                int selectedIndex = lstMeasurements.SelectedIndex;
-                if (selectedIndex >= 0)
-                {
-                    viewerForm.DeleteMeasurement(selectedIndex);
-                    RefreshMeasurementsList();
-                }
-            };
+            btnDeleteMeasure.Enabled = false; // Start disabled until selection is made
+            btnDeleteMeasure.Click += btnDeleteMeasure_Click;
             panel.Controls.Add(btnDeleteMeasure);
 
             // Export measurements
@@ -217,6 +208,92 @@ namespace CTSegmenter.SharpDXIntegration
             panel.Controls.Add(btnExportMeasures);
 
             tabMeasurements.Controls.Add(panel);
+
+            // Refresh measurements list to show any existing measurements
+            RefreshMeasurementsList();
+        }
+        private void chkShowMeasurements_CheckedChanged(object sender, EventArgs e)
+        {
+            bool isChecked = chkShowMeasurements.Checked;
+            Logger.Log($"[SharpDXControlPanel] Show measurements checkbox changed to: {isChecked}");
+
+            // Call the viewer to set all measurements visible/invisible
+            viewerForm.SetMeasurementsVisible(isChecked);
+
+            // Also update the checkbox state in the list
+            try
+            {
+                for (int i = 0; i < lstMeasurements.Items.Count; i++)
+                {
+                    lstMeasurements.SetItemChecked(i, isChecked);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXControlPanel] Error updating checkboxes: {ex.Message}");
+            }
+        }
+        private void btnDeleteMeasure_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                int selectedIndex = lstMeasurements.SelectedIndex;
+                Logger.Log($"[SharpDXControlPanel] Delete button clicked, selected index: {selectedIndex}");
+
+                if (selectedIndex >= 0)
+                {
+                    Logger.Log($"[SharpDXControlPanel] Deleting measurement at index: {selectedIndex}");
+
+                    // Call the viewer to delete the measurement
+                    viewerForm.DeleteMeasurement(selectedIndex);
+
+                    // Update status
+                    lblStatus.Text = "Measurement deleted.";
+                }
+                else
+                {
+                    Logger.Log("[SharpDXControlPanel] No measurement selected for deletion");
+                    lblStatus.Text = "Please select a measurement to delete.";
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXControlPanel] Error in delete measurement: {ex.Message}");
+                lblStatus.Text = "Error deleting measurement.";
+            }
+        }
+        private void InitializeShowMeasurementsCheckbox()
+        {
+            // Show/Hide measurements
+            chkShowMeasurements = new CheckBox();
+            chkShowMeasurements.Text = "Show All Measurements";
+            chkShowMeasurements.Checked = true;
+
+            // Use the new event handler
+            chkShowMeasurements.CheckedChanged += chkShowMeasurements_CheckedChanged;
+
+            // Add to panel
+            panel.Controls.Add(chkShowMeasurements);
+        }
+        private void lstMeasurements_ItemCheck(object sender, ItemCheckEventArgs e)
+        {
+            try
+            {
+                // Toggle visibility of the measurement
+                if (e.Index >= 0 && e.Index < lstMeasurements.Items.Count)
+                {
+                    bool newVisibility = (e.NewValue == CheckState.Checked);
+
+                    Logger.Log($"[SharpDXControlPanel] Setting measurement {e.Index} visibility to {newVisibility}");
+
+                    // Call the viewer to update visibility
+                    viewerForm.SetMeasurementVisibility(e.Index, newVisibility);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXControlPanel] Error toggling measurement visibility: {ex.Message}");
+            }
         }
         private void InitializeRenderingTab()
         {
@@ -1515,6 +1592,8 @@ namespace CTSegmenter.SharpDXIntegration
         {
             try
             {
+                Logger.Log($"[SharpDXControlPanel] UpdateMeasurementUI called, isMeasuring: {isMeasuring}");
+
                 // Update the button text
                 if (btnAddMeasure != null)
                 {
@@ -1540,6 +1619,7 @@ namespace CTSegmenter.SharpDXIntegration
                 Logger.Log($"[SharpDXControlPanel] Error updating measurement UI: {ex.Message}");
             }
         }
+
         public void RefreshMeasurementsList()
         {
             try
@@ -1557,10 +1637,30 @@ namespace CTSegmenter.SharpDXIntegration
                 var measurements = viewerForm.GetMeasurements();
                 if (measurements != null)
                 {
+                    // Log how many measurements we're adding
+                    Logger.Log($"[SharpDXControlPanel] Refreshing measurements list with {measurements.Count} measurements");
+
+                    // Temporarily remove the item check event handler to avoid cascading events
+                    lstMeasurements.ItemCheck -= lstMeasurements_ItemCheck;
+
                     foreach (var measurement in measurements)
                     {
-                        lstMeasurements.Items.Add(measurement.ToString(), measurement.Visible);
+                        // Create a descriptive string for the measurement
+                        string itemText = $"{measurement.Label}: {measurement.RealDistance:F2} {measurement.Unit}";
+
+                        // Add to list and set visibility checkbox state
+                        lstMeasurements.Items.Add(itemText, measurement.Visible);
+
+                        // Log each measurement for debugging
+                        Logger.Log($"[SharpDXControlPanel] Added measurement to list: {itemText}, Visible: {measurement.Visible}");
                     }
+
+                    // Restore the event handler
+                    lstMeasurements.ItemCheck += lstMeasurements_ItemCheck;
+                }
+                else
+                {
+                    Logger.Log("[SharpDXControlPanel] No measurements returned from viewer");
                 }
 
                 // Restore selection if possible
@@ -1568,6 +1668,9 @@ namespace CTSegmenter.SharpDXIntegration
                 {
                     lstMeasurements.SelectedIndex = selectedIndex;
                 }
+
+                // Update the UI
+                lstMeasurements.Refresh();
             }
             catch (Exception ex)
             {

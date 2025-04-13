@@ -308,6 +308,7 @@ namespace CTSegmenter
             });
             ToolStripSeparator toolsSeparator = new ToolStripSeparator();
             toolsMenu.DropDownItems.Add(toolsSeparator);
+            AddBrightnessContrastMenu();
             ToolStripMenuItem segmentAnythingToolMenuItem = new ToolStripMenuItem("Segment Anything");
             segmentAnythingToolMenuItem.Click += (s, e) =>
             {
@@ -1318,7 +1319,27 @@ namespace CTSegmenter
 
 
 
+        private void AddBrightnessContrastMenu()
+        {
+            // Create menu item for Brightness/Contrast tool
+            ToolStripMenuItem brightnessContrastMenuItem = new ToolStripMenuItem("Brightness/Contrast");
+            brightnessContrastMenuItem.Click += (s, e) =>
+            {
+                if (mainForm.volumeData == null)
+                {
+                    MessageBox.Show("Please load a dataset first.", "No Data",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
 
+                // Create and show the Brightness/Contrast adjustment form
+                BrightnessContrastForm brightnessForm = new BrightnessContrastForm(mainForm);
+                brightnessForm.Show();
+            };
+
+            // Add the menu item to the Tools menu
+            toolsMenu.DropDownItems.Add(brightnessContrastMenuItem);
+        }
 
 
 

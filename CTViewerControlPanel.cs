@@ -46,10 +46,26 @@ namespace CTSegmenter.SharpDXIntegration
         private RadioButton radCutZForward, radCutZBackward;
         private TrackBar trkCutX, trkCutY, trkCutZ;
 
+        private CheckBox chkSliceX, chkSliceY, chkSliceZ;
+
+
         // Info panel
         private Label lblVolumeInfo;
         private Label lblMaterialsInfo;
         private Label lblPixelSizeInfo;
+
+        private Label lblXSliceValue;
+        private Label lblYSliceValue;
+        private Label lblZSliceValue;
+
+        //Measurement Tab
+        private TabPage tabMeasurements;
+        private CheckedListBox lstMeasurements;
+        private Button btnAddMeasure, btnDeleteMeasure, btnExportMeasures;
+        private CheckBox chkShowMeasurements;
+
+        //Streaming render
+        CheckBox chkUseStreaming;
 
         public SharpDXControlPanel(SharpDXViewerForm viewer, MainForm main, SharpDXVolumeRenderer renderer)
         {
@@ -63,6 +79,7 @@ namespace CTSegmenter.SharpDXIntegration
             InitializeSlicesTab();
             InitializeCuttingTab();
             InitializeInfoTab();
+            InitializeMeasurementsTab();
 
             // Select the first tab
             tabControl.SelectedIndex = 0;
@@ -89,10 +106,118 @@ namespace CTSegmenter.SharpDXIntegration
             tabControl.TabPages.Add(tabSlices);
             tabControl.TabPages.Add(tabCutting);
             tabControl.TabPages.Add(tabInfo);
+            tabMeasurements = new TabPage("Measurements");
+            tabControl.TabPages.Add(tabMeasurements);
 
             this.Controls.Add(tabControl);
         }
+        private void InitializeMeasurementsTab()
+        {
+            // Create panel to hold controls
+            FlowLayoutPanel panel = new FlowLayoutPanel();
+            panel.Dock = DockStyle.Fill;
+            panel.FlowDirection = FlowDirection.TopDown;
+            panel.AutoScroll = true;
+            panel.Padding = new Padding(10);
+            panel.WrapContents = false;
 
+            // Add title label
+            Label lblTitle = new Label();
+            lblTitle.Text = "Measurement Tools";
+            lblTitle.Font = new Font(lblTitle.Font.FontFamily, 10, FontStyle.Bold);
+            lblTitle.AutoSize = true;
+            lblTitle.Margin = new Padding(0, 0, 0, 10);
+            panel.Controls.Add(lblTitle);
+
+            // Show/Hide measurements
+            chkShowMeasurements = new CheckBox();
+            chkShowMeasurements.Text = "Show Measurements";
+            chkShowMeasurements.Checked = true;
+            chkShowMeasurements.CheckedChanged += (s, e) =>
+            {
+                viewerForm.SetMeasurementsVisible(chkShowMeasurements.Checked);
+            };
+            panel.Controls.Add(chkShowMeasurements);
+
+            // Measurement mode button
+            btnAddMeasure = new Button();
+            btnAddMeasure.Text = "Add New Measurement";
+            btnAddMeasure.Width = 200;
+            btnAddMeasure.Click += (s, e) =>
+            {
+                bool currentMode = viewerForm.ToggleMeasurementMode();
+                UpdateMeasurementUI(currentMode);
+            };
+            panel.Controls.Add(btnAddMeasure);
+
+            // Add measurements list
+            Label lblMeasurements = new Label();
+            lblMeasurements.Text = "Existing Measurements:";
+            lblMeasurements.AutoSize = true;
+            lblMeasurements.Margin = new Padding(0, 10, 0, 5);
+            panel.Controls.Add(lblMeasurements);
+
+            lstMeasurements = new CheckedListBox();
+            lstMeasurements.Width = 330;
+            lstMeasurements.Height = 200;
+            lstMeasurements.CheckOnClick = true;
+            lstMeasurements.ItemCheck += (s, e) =>
+            {
+                // Toggle visibility of the measurement
+                if (e.Index >= 0 && e.Index < lstMeasurements.Items.Count)
+                {
+                    viewerForm.SetMeasurementVisibility(e.Index, e.NewValue == CheckState.Checked);
+                }
+            };
+            panel.Controls.Add(lstMeasurements);
+
+            // Delete selected measurement
+            btnDeleteMeasure = new Button();
+            btnDeleteMeasure.Text = "Delete Selected";
+            btnDeleteMeasure.Width = 150;
+            btnDeleteMeasure.Click += (s, e) =>
+            {
+                int selectedIndex = lstMeasurements.SelectedIndex;
+                if (selectedIndex >= 0)
+                {
+                    viewerForm.DeleteMeasurement(selectedIndex);
+                    RefreshMeasurementsList();
+                }
+            };
+            panel.Controls.Add(btnDeleteMeasure);
+
+            // Export measurements
+            btnExportMeasures = new Button();
+            btnExportMeasures.Text = "Export Measurements";
+            btnExportMeasures.Width = 200;
+            btnExportMeasures.Margin = new Padding(0, 10, 0, 0);
+            btnExportMeasures.Click += (s, e) =>
+            {
+                using (var saveDlg = new SaveFileDialog())
+                {
+                    saveDlg.Filter = "CSV files (*.csv)|*.csv";
+                    saveDlg.FileName = "measurements.csv";
+
+                    if (saveDlg.ShowDialog(this) == DialogResult.OK)
+                    {
+                        try
+                        {
+                            viewerForm.ExportMeasurementsToCSV(saveDlg.FileName);
+                            lblStatus.Text = "Measurements exported to CSV.";
+                        }
+                        catch (Exception ex)
+                        {
+                            lblStatus.Text = "Export failed.";
+                            MessageBox.Show($"Error exporting measurements: {ex.Message}", "Export Error",
+                                MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
+                    }
+                }
+            };
+            panel.Controls.Add(btnExportMeasures);
+
+            tabMeasurements.Controls.Add(panel);
+        }
         private void InitializeRenderingTab()
         {
             // Create panel to hold controls
@@ -138,7 +263,135 @@ namespace CTSegmenter.SharpDXIntegration
                 viewerForm.SetGrayscaleVisible(chkShowGrayscale.Checked);
             };
             panel.Controls.Add(chkShowGrayscale);
+            CheckBox chkUseStreaming = new CheckBox();
+            chkUseStreaming.Text = "Use Streaming Renderer (for huge datasets)";
+            chkUseStreaming.Checked = volumeRenderer.UseStreamingRenderer; // Get current state
+            chkUseStreaming.CheckedChanged += (s, e) =>
+            {
+                viewerForm.SetStreamingRendererEnabled(chkUseStreaming.Checked);
+            };
+            panel.Controls.Add(chkUseStreaming);
+            GroupBox grpHugeVolumes = new GroupBox();
+            grpHugeVolumes.Text = "Large Volume Optimization";
+            grpHugeVolumes.Width = 350;
+            grpHugeVolumes.Height = 140;
+            grpHugeVolumes.Margin = new Padding(0, 10, 0, 5);
 
+            // Add a description label
+            Label lblHugeVolumes = new Label();
+            lblHugeVolumes.Text = "For very large datasets (30GB+), reduce resolution to improve performance:";
+            lblHugeVolumes.Location = new Point(10, 20);
+            lblHugeVolumes.Width = 330;
+            lblHugeVolumes.Height = 30;
+            grpHugeVolumes.Controls.Add(lblHugeVolumes);
+
+            // Add a "Downsample" button
+            Button btnDownsample = new Button();
+            btnDownsample.Text = "Apply Downsampling (1/2 Resolution)";
+            btnDownsample.Location = new Point(10, 55);
+            btnDownsample.Width = 250;
+            btnDownsample.Click += async (s, e) => {
+                // Confirm with user
+                DialogResult result = MessageBox.Show(
+                    "This will reduce the dataset resolution by half to save memory.\n" +
+                    "Loading will take a moment but should be much faster than full resolution.\n\n" +
+                    "Continue?",
+                    "Apply Downsampling",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
+
+                if (result == DialogResult.Yes)
+                {
+                    btnDownsample.Enabled = false;
+                    lblStatus.Text = "Applying downsampling...";
+                    progress.Value = 0;
+                    progress.Visible = true;
+                    Application.DoEvents();
+
+                    try
+                    {
+                        // Implement progress reporting
+                        var progressHandler = new Progress<int>(value => {
+                            progress.Value = value;
+                            lblStatus.Text = $"Downsampling... {value}%";
+                            Application.DoEvents();
+                        });
+
+                        // Call the downsampling function
+                        await viewerForm.ApplyDownsampling(2, progressHandler);
+                        lblStatus.Text = "Downsampling complete. Memory usage reduced.";
+                    }
+                    catch (Exception ex)
+                    {
+                        lblStatus.Text = "Error applying downsampling.";
+                        MessageBox.Show("Error: " + ex.Message, "Downsampling Error",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                    finally
+                    {
+                        progress.Visible = false;
+                        btnDownsample.Enabled = true;
+                    }
+                }
+            };
+            grpHugeVolumes.Controls.Add(btnDownsample);
+
+            // Add a higher downsampling button for extremely large datasets
+            Button btnHigherDownsample = new Button();
+            btnHigherDownsample.Text = "Apply Aggressive Downsampling (1/4 Resolution)";
+            btnHigherDownsample.Location = new Point(10, 85);
+            btnHigherDownsample.Width = 300;
+            btnHigherDownsample.Click += async (s, e) => {
+                // Confirm with user
+                DialogResult result = MessageBox.Show(
+                    "This will reduce the dataset resolution to 1/4 for extremely large datasets.\n" +
+                    "Quality will be reduced but memory usage will be dramatically lower.\n\n" +
+                    "Continue?",
+                    "Apply Aggressive Downsampling",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
+
+                if (result == DialogResult.Yes)
+                {
+                    btnHigherDownsample.Enabled = false;
+                    lblStatus.Text = "Applying aggressive downsampling...";
+                    progress.Value = 0;
+                    progress.Visible = true;
+                    Application.DoEvents();
+
+                    try
+                    {
+                        var progressHandler = new Progress<int>(value => {
+                            progress.Value = value;
+                            lblStatus.Text = $"Downsampling... {value}%";
+                            Application.DoEvents();
+                        });
+
+                        await viewerForm.ApplyDownsampling(4, progressHandler);
+                        lblStatus.Text = "Aggressive downsampling complete.";
+                    }
+                    catch (Exception ex)
+                    {
+                        lblStatus.Text = "Error applying downsampling.";
+                        MessageBox.Show("Error: " + ex.Message, "Downsampling Error",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                    finally
+                    {
+                        progress.Visible = false;
+                        btnHigherDownsample.Enabled = true;
+                    }
+                }
+            };
+            grpHugeVolumes.Controls.Add(btnHigherDownsample);
+
+            // Add explanation label
+            Label lblStreaming = new Label();
+            lblStreaming.Text = "Streaming mode progressively loads volume chunks as needed.\nRecommended for datasets larger than 8GB.";
+            lblStreaming.AutoSize = true;
+            lblStreaming.Font = new Font(lblStreaming.Font.FontFamily, lblStreaming.Font.Size, FontStyle.Italic);
+            lblStreaming.ForeColor = Color.DarkGray;
+            panel.Controls.Add(lblStreaming);
             // Quality dropdown
             Label lblQuality = new Label();
             lblQuality.Text = "Rendering Quality:";
@@ -270,9 +523,31 @@ namespace CTSegmenter.SharpDXIntegration
             btnScreenshot.Width = 200;
             btnScreenshot.Click += (s, e) =>
             {
-                string fileName = $"screenshot_{DateTime.Now:yyyyMMdd_HHmmss}.png";
-                string path = Path.Combine(Application.StartupPath, fileName);
-                viewerForm.TakeScreenshot(path);
+                using (var saveDlg = new SaveFileDialog())
+                {
+                    saveDlg.Filter = "JPEG Image (*.jpg)|*.jpg|PNG Image (*.png)|*.png|All Files (*.*)|*.*";
+                    saveDlg.DefaultExt = ".jpg";
+                    saveDlg.FileName = $"screenshot_{DateTime.Now:yyyyMMdd_HHmmss}";
+
+                    if (saveDlg.ShowDialog(this) == DialogResult.OK)
+                    {
+                        // Show "Saving..." message
+                        lblStatus.Text = "Saving screenshot...";
+                        Application.DoEvents(); // Update UI
+
+                        try
+                        {
+                            viewerForm.TakeScreenshot(saveDlg.FileName);
+                            lblStatus.Text = "Screenshot saved successfully.";
+                        }
+                        catch (Exception ex)
+                        {
+                            lblStatus.Text = "Error saving screenshot.";
+                            MessageBox.Show($"Error saving screenshot: {ex.Message}", "Screenshot Error",
+                                MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
+                    }
+                }
             };
             panel.Controls.Add(btnScreenshot);
 
@@ -309,9 +584,17 @@ namespace CTSegmenter.SharpDXIntegration
                         exportGrayscaleSurface = (result == DialogResult.Yes);
 
                         // Update status before export
-                        lblStatus.Text = "Exporting 3D model...";
+                        lblStatus.Text = "Preparing to export...";
                         progress.Value = 0;
                         progress.Visible = true;
+
+                        // Setup progress reporting
+                        var progressHandler = new Progress<int>(value => {
+                            progress.Value = value;
+                            lblStatus.Text = $"Exporting 3D model... {value}%";
+                            Application.DoEvents(); // Allow UI to refresh
+                        });
+
                         Application.DoEvents();
 
                         // Disable UI during export
@@ -323,7 +606,8 @@ namespace CTSegmenter.SharpDXIntegration
                                 exportLabels,
                                 exportGrayscaleSurface,
                                 saveDlg.FileName,
-                                isoLevel);
+                                isoLevel,
+                                progressHandler);
 
                             lblStatus.Text = "Export complete.";
                         }
@@ -426,7 +710,22 @@ namespace CTSegmenter.SharpDXIntegration
 
                 Material mat = (Material)lstMaterials.Items[e.Index];
                 bool isChecked = (e.NewValue == CheckState.Checked);
-                viewerForm.SetMaterialVisibility(mat.ID, isChecked);
+
+                // Debug output to verify the event is firing
+                Logger.Log($"[SharpDXControlPanel] Material visibility changed: {mat.Name} (ID: {mat.ID}) to {isChecked}");
+
+                // Direct call to volumeRenderer instead of through viewerForm
+                if (volumeRenderer != null)
+                {
+                    // Set visibility directly on the renderer
+                    volumeRenderer.SetMaterialVisibility(mat.ID, isChecked);
+                    volumeRenderer.NeedsRender = true;
+                }
+                else
+                {
+                    // Fallback to viewerForm if volumeRenderer is not available
+                    viewerForm.SetMaterialVisibility(mat.ID, isChecked);
+                }
             };
 
             // When user selects a material, update the opacity slider to show its current opacity
@@ -519,19 +818,30 @@ namespace CTSegmenter.SharpDXIntegration
             lblTitle.Margin = new Padding(0, 0, 0, 10);
             panel.Controls.Add(lblTitle);
 
-            // Enable/disable slices
+            // Enable/disable all slices (master control)
             chkSlices = new CheckBox();
-            chkSlices.Text = "Show Orthogonal Slices";
+            chkSlices.Text = "Enable All Orthogonal Slices";
             chkSlices.Checked = false;
             chkSlices.CheckedChanged += (s, e) =>
             {
+                // Set all individual slices to match
+                chkSliceX.Checked = chkSlices.Checked;
+                chkSliceY.Checked = chkSlices.Checked;
+                chkSliceZ.Checked = chkSlices.Checked;
+
+                // Update the viewer
                 viewerForm.SetSlicesEnabled(chkSlices.Checked);
-                // Enable/disable slice sliders
-                trkXSlice.Enabled = chkSlices.Checked;
-                trkYSlice.Enabled = chkSlices.Checked;
-                trkZSlice.Enabled = chkSlices.Checked;
+
+                // Sliders and labels will be managed by the individual checkboxes
             };
             panel.Controls.Add(chkSlices);
+
+            // Add individual slice controls
+            Label lblIndividualSlices = new Label();
+            lblIndividualSlices.Text = "Individual Slice Controls:";
+            lblIndividualSlices.AutoSize = true;
+            lblIndividualSlices.Margin = new Padding(0, 10, 0, 5);
+            panel.Controls.Add(lblIndividualSlices);
 
             // Add colored indicators for each slice direction
             Label lblSliceColors = new Label();
@@ -586,12 +896,20 @@ namespace CTSegmenter.SharpDXIntegration
 
             panel.Controls.Add(colorPanel);
 
-            // X Slice (YZ plane)
-            Label lblXSlice = new Label();
-            lblXSlice.Text = "X Slice (YZ plane - Red)";
-            lblXSlice.AutoSize = true;
-            lblXSlice.Margin = new Padding(0, 10, 0, 5);
-            panel.Controls.Add(lblXSlice);
+            // X Slice Control (YZ plane) - Individual CheckBox
+            chkSliceX = new CheckBox();
+            chkSliceX.Text = "Show X Slice (YZ plane - Red)";
+            chkSliceX.Checked = viewerForm.GetSliceXEnabled();
+            chkSliceX.CheckedChanged += OnIndividualSliceCheckChanged;
+            panel.Controls.Add(chkSliceX);
+
+            // Add the value label
+            lblXSliceValue = new Label();
+            lblXSliceValue.Text = $"Slice: {trkXSlice?.Value ?? 0}/{trkXSlice?.Maximum ?? 0}";
+            lblXSliceValue.AutoSize = true;
+            lblXSliceValue.Enabled = chkSliceX.Checked;
+            lblXSliceValue.TextAlign = ContentAlignment.MiddleRight;
+            panel.Controls.Add(lblXSliceValue);
 
             trkXSlice = new TrackBar();
             trkXSlice.Minimum = 0;
@@ -599,16 +917,26 @@ namespace CTSegmenter.SharpDXIntegration
             trkXSlice.Value = trkXSlice.Maximum / 2;
             trkXSlice.TickFrequency = Math.Max(1, mainForm.GetWidth() / 20);
             trkXSlice.Width = 330;
-            trkXSlice.Enabled = false;
-            trkXSlice.Scroll += (s, e) => UpdateSlices();
+            trkXSlice.Enabled = chkSliceX.Checked;
+            trkXSlice.Scroll += (s, e) => {
+                UpdateSlices();
+                lblXSliceValue.Text = $"Slice: {trkXSlice.Value}/{trkXSlice.Maximum}";
+            };
             panel.Controls.Add(trkXSlice);
 
-            // Y Slice (XZ plane)
-            Label lblYSlice = new Label();
-            lblYSlice.Text = "Y Slice (XZ plane - Green)";
-            lblYSlice.AutoSize = true;
-            lblYSlice.Margin = new Padding(0, 10, 0, 5);
-            panel.Controls.Add(lblYSlice);
+            // Y Slice Control (XZ plane) - Individual CheckBox
+            chkSliceY = new CheckBox();
+            chkSliceY.Text = "Show Y Slice (XZ plane - Green)";
+            chkSliceY.Checked = viewerForm.GetSliceYEnabled();
+            chkSliceY.CheckedChanged += OnIndividualSliceCheckChanged;
+            panel.Controls.Add(chkSliceY);
+
+            // Add the value label
+            lblYSliceValue = new Label();
+            lblYSliceValue.Text = $"Slice: {trkYSlice?.Value ?? 0}/{trkYSlice?.Maximum ?? 0}";
+            lblYSliceValue.AutoSize = true;
+            lblYSliceValue.Enabled = chkSliceY.Checked;
+            panel.Controls.Add(lblYSliceValue);
 
             trkYSlice = new TrackBar();
             trkYSlice.Minimum = 0;
@@ -616,16 +944,26 @@ namespace CTSegmenter.SharpDXIntegration
             trkYSlice.Value = trkYSlice.Maximum / 2;
             trkYSlice.TickFrequency = Math.Max(1, mainForm.GetHeight() / 20);
             trkYSlice.Width = 330;
-            trkYSlice.Enabled = false;
-            trkYSlice.Scroll += (s, e) => UpdateSlices();
+            trkYSlice.Enabled = chkSliceY.Checked;
+            trkYSlice.Scroll += (s, e) => {
+                UpdateSlices();
+                lblYSliceValue.Text = $"Slice: {trkYSlice.Value}/{trkYSlice.Maximum}";
+            };
             panel.Controls.Add(trkYSlice);
 
-            // Z Slice (XY plane)
-            Label lblZSlice = new Label();
-            lblZSlice.Text = "Z Slice (XY plane - Blue)";
-            lblZSlice.AutoSize = true;
-            lblZSlice.Margin = new Padding(0, 10, 0, 5);
-            panel.Controls.Add(lblZSlice);
+            // Z Slice Control (XY plane) - Individual CheckBox
+            chkSliceZ = new CheckBox();
+            chkSliceZ.Text = "Show Z Slice (XY plane - Blue)";
+            chkSliceZ.Checked = viewerForm.GetSliceZEnabled();
+            chkSliceZ.CheckedChanged += OnIndividualSliceCheckChanged;
+            panel.Controls.Add(chkSliceZ);
+
+            // Add the value label
+            lblZSliceValue = new Label();
+            lblZSliceValue.Text = $"Slice: {trkZSlice?.Value ?? 0}/{trkZSlice?.Maximum ?? 0}";
+            lblZSliceValue.AutoSize = true;
+            lblZSliceValue.Enabled = chkSliceZ.Checked;
+            panel.Controls.Add(lblZSliceValue);
 
             trkZSlice = new TrackBar();
             trkZSlice.Minimum = 0;
@@ -633,8 +971,11 @@ namespace CTSegmenter.SharpDXIntegration
             trkZSlice.Value = trkZSlice.Maximum / 2;
             trkZSlice.TickFrequency = Math.Max(1, mainForm.GetDepth() / 20);
             trkZSlice.Width = 330;
-            trkZSlice.Enabled = false;
-            trkZSlice.Scroll += (s, e) => UpdateSlices();
+            trkZSlice.Enabled = chkSliceZ.Checked;
+            trkZSlice.Scroll += (s, e) => {
+                UpdateSlices();
+                lblZSliceValue.Text = $"Slice: {trkZSlice.Value}/{trkZSlice.Maximum}";
+            };
             panel.Controls.Add(trkZSlice);
 
             // "Reset to center" button
@@ -647,11 +988,161 @@ namespace CTSegmenter.SharpDXIntegration
                 trkXSlice.Value = trkXSlice.Maximum / 2;
                 trkYSlice.Value = trkYSlice.Maximum / 2;
                 trkZSlice.Value = trkZSlice.Maximum / 2;
+
+                // Update labels
+                lblXSliceValue.Text = $"Slice: {trkXSlice.Value}/{trkXSlice.Maximum}";
+                lblYSliceValue.Text = $"Slice: {trkYSlice.Value}/{trkYSlice.Maximum}";
+                lblZSliceValue.Text = $"Slice: {trkZSlice.Value}/{trkZSlice.Maximum}";
+
                 UpdateSlices();
             };
             panel.Controls.Add(btnResetSlices);
 
             tabSlices.Controls.Add(panel);
+        }
+        private void UpdateMasterSliceCheckbox()
+        {
+            bool allChecked = chkSliceX.Checked && chkSliceY.Checked && chkSliceZ.Checked;
+            RemoveAllEventHandlers(chkSlices, "CheckedChanged");
+            chkSlices.Checked = allChecked;
+            chkSlices.CheckedChanged += OnMasterSliceCheckChanged;
+        }
+        private void OnIndividualSliceCheckChanged(object sender, EventArgs e)
+        {
+            CheckBox checkbox = sender as CheckBox;
+
+            // Determine which slice was changed
+            if (checkbox == chkSliceX)
+            {
+                viewerForm.SetSliceXEnabled(checkbox.Checked);
+                trkXSlice.Enabled = checkbox.Checked;
+                lblXSliceValue.Enabled = checkbox.Checked;
+            }
+            else if (checkbox == chkSliceY)
+            {
+                viewerForm.SetSliceYEnabled(checkbox.Checked);
+                trkYSlice.Enabled = checkbox.Checked;
+                lblYSliceValue.Enabled = checkbox.Checked;
+            }
+            else if (checkbox == chkSliceZ)
+            {
+                viewerForm.SetSliceZEnabled(checkbox.Checked);
+                trkZSlice.Enabled = checkbox.Checked;
+                lblZSliceValue.Enabled = checkbox.Checked;
+            }
+
+            // Update master checkbox correctly
+            UpdateMasterSliceCheckbox();
+        }
+        private void RemoveAllEventHandlers(Control control, string eventName)
+        {
+            try
+            {
+                // Use reflection to get the events field
+                var fi = typeof(Control).GetField("EVENT_HANDLERLIST",
+                                                 System.Reflection.BindingFlags.Static |
+                                                 System.Reflection.BindingFlags.NonPublic);
+
+                if (fi == null)
+                {
+                    // For newer .NET versions, the approach might be different
+                    // Just do the best we can - create a new checkbox with the same properties
+                    var oldCheckbox = control as CheckBox;
+                    if (oldCheckbox != null)
+                    {
+                        var newCheckbox = new CheckBox();
+                        newCheckbox.Text = oldCheckbox.Text;
+                        newCheckbox.Location = oldCheckbox.Location;
+                        newCheckbox.Size = oldCheckbox.Size;
+                        newCheckbox.Checked = oldCheckbox.Checked;
+
+                        var parent = oldCheckbox.Parent;
+                        if (parent != null)
+                        {
+                            int index = parent.Controls.GetChildIndex(oldCheckbox);
+                            parent.Controls.RemoveAt(index);
+                            parent.Controls.Add(newCheckbox);
+                            parent.Controls.SetChildIndex(newCheckbox, index);
+                            chkSlices = newCheckbox;
+
+                            // Add event handler
+                            newCheckbox.CheckedChanged += OnMasterSliceCheckChanged;
+                        }
+                    }
+                    return;
+                }
+
+                object handlerList = fi.GetValue(control);
+                var property = handlerList.GetType().GetProperty("Item", System.Reflection.BindingFlags.Public |
+                                                              System.Reflection.BindingFlags.Instance);
+                var key = control.GetType().GetField(eventName.ToUpper(),
+                                                    System.Reflection.BindingFlags.Static |
+                                                    System.Reflection.BindingFlags.NonPublic).GetValue(control);
+
+                var handlers = property.GetValue(handlerList, new object[] { key });
+                if (handlers != null)
+                {
+                    var getInvocationListMethod = handlers.GetType().GetMethod("GetInvocationList");
+                    var delegates = (Delegate[])getInvocationListMethod.Invoke(handlers, null);
+
+                    var eventInfo = control.GetType().GetEvent(eventName);
+                    foreach (var del in delegates)
+                    {
+                        eventInfo.RemoveEventHandler(control, del);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // If reflection approach fails, use a simpler workaround
+                Logger.Log($"[SharpDXControlPanel] Error removing event handlers: {ex.Message}");
+
+                // Simpler approach: Just update the checkbox state without triggering event handlers
+                if (control is CheckBox checkbox)
+                {
+                    bool currentState = checkbox.Checked;
+
+                    // This removes the event handlers, but may be platform-dependent
+                    try
+                    {
+                        control.Parent.Controls.Remove(control);
+                        control.Parent.Controls.Add(control);
+
+                        // Reset the state and add our new handler
+                        checkbox.Checked = currentState;
+                        checkbox.CheckedChanged += OnMasterSliceCheckChanged;
+                    }
+                    catch
+                    {
+                        // If that fails too, just try to reset the handler
+                        try
+                        {
+                            // As a last resort, try to be clever with BeginInvoke
+                            checkbox.BeginInvoke(new Action(() =>
+                            {
+                                checkbox.CheckedChanged -= OnMasterSliceCheckChanged;
+                                checkbox.Checked = currentState;
+                                checkbox.CheckedChanged += OnMasterSliceCheckChanged;
+                            }));
+                        }
+                        catch
+                        {
+                            // If all else fails, log the issue
+                            Logger.Log("[SharpDXControlPanel] Failed to reset event handlers");
+                        }
+                    }
+                }
+            }
+        }
+        private void OnMasterSliceCheckChanged(object sender, EventArgs e)
+        {
+            // Set all individual slices to match
+            chkSliceX.Checked = chkSlices.Checked;
+            chkSliceY.Checked = chkSlices.Checked;
+            chkSliceZ.Checked = chkSlices.Checked;
+
+            // Update the viewer
+            viewerForm.SetSlicesEnabled(chkSlices.Checked);
         }
 
         private void InitializeCuttingTab()
@@ -1020,7 +1511,69 @@ namespace CTSegmenter.SharpDXIntegration
 
             tabInfo.Controls.Add(panel);
         }
+        public void UpdateMeasurementUI(bool isMeasuring)
+        {
+            try
+            {
+                // Update the button text
+                if (btnAddMeasure != null)
+                {
+                    btnAddMeasure.Text = isMeasuring ? "Cancel Measurement" : "Add New Measurement";
+                }
 
+                // Update the status label
+                if (lblStatus != null)
+                {
+                    lblStatus.Text = isMeasuring ?
+                        "Click and drag to measure in 3D view..." :
+                        "Ready.";
+                }
+
+                // This is important: we need to refresh the measurements list to show current state
+                RefreshMeasurementsList();
+
+                // Log the state change
+                Logger.Log($"[SharpDXControlPanel] Measurement UI updated, mode: {(isMeasuring ? "measuring" : "normal")}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXControlPanel] Error updating measurement UI: {ex.Message}");
+            }
+        }
+        public void RefreshMeasurementsList()
+        {
+            try
+            {
+                if (lstMeasurements == null)
+                    return;
+
+                // Store selection
+                int selectedIndex = lstMeasurements.SelectedIndex;
+
+                // Clear list
+                lstMeasurements.Items.Clear();
+
+                // Get the measurements from the viewer
+                var measurements = viewerForm.GetMeasurements();
+                if (measurements != null)
+                {
+                    foreach (var measurement in measurements)
+                    {
+                        lstMeasurements.Items.Add(measurement.ToString(), measurement.Visible);
+                    }
+                }
+
+                // Restore selection if possible
+                if (selectedIndex >= 0 && selectedIndex < lstMeasurements.Items.Count)
+                {
+                    lstMeasurements.SelectedIndex = selectedIndex;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXControlPanel] Error refreshing measurements list: {ex.Message}");
+            }
+        }
         private string FormatSize(double meters)
         {
             if (meters >= 1)

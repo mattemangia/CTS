@@ -11,6 +11,9 @@ using System.Linq;
 using Buffer = SharpDX.Direct3D11.Buffer;
 using Device = SharpDX.Direct3D11.Device;
 using Format = SharpDX.DXGI.Format;
+using System.Diagnostics.Metrics;
+using System.IO;
+using CTSegmenter.SharpDXIntegration;
 
 namespace CTSegmenter
 {
@@ -20,6 +23,11 @@ namespace CTSegmenter
         private bool debugMode = false;
         private MainForm mainForm;
         private Panel renderPanel;
+        private SharpDXControlPanel controlPanel;
+        public void SetControlPanel(SharpDXControlPanel panel)
+        {
+            controlPanel = panel;
+        }
 
         // Core DirectX objects
         private Device device;
@@ -111,10 +119,27 @@ namespace CTSegmenter
         private float cutYDirection = 1.0f;
         private float cutZDirection = 1.0f;
 
+        //Measures
+        private bool measurementMode = false;
+        public List<MeasurementLine> measurements = new List<MeasurementLine>();
+        private bool isDrawingMeasurement = false;
+        private SharpDX.Vector3 measureStartPoint;
+        private SharpDX.Vector3 measureEndPoint;
+        private PictureBox measurementOverlay;
+        private MeasurementTextRenderer textRenderer;
+
         // Frame counter for logging
         private int frameCount = 0;
 
         private PictureBox scaleBarPictureBox;
+
+        //DirectX measurements
+        private Buffer lineVertexBuffer;
+        private VertexShader lineVertexShader;
+        private PixelShader linePixelShader;
+        private InputLayout lineInputLayout;
+        private List<Vector3> measurementVertices = new List<Vector3>();
+        private List<Vector4> measurementColors = new List<Vector4>();
 
         // LOD system for large datasets
         private bool useLodSystem = true;
@@ -124,6 +149,134 @@ namespace CTSegmenter
         private Texture3D[] lodVolumeTextures = new Texture3D[MAX_LOD_LEVELS + 1];
         private ShaderResourceView[] lodVolumeSRVs = new ShaderResourceView[MAX_LOD_LEVELS + 1];
 
+        private bool showXSlice = false;
+        private bool showYSlice = false;
+        private bool showZSlice = false;
+        public bool ShowXSlice
+        {
+            get { return showXSlice; }
+            set
+            {
+                showXSlice = value;
+                NeedsRender = true;
+            }
+        }
+
+        public bool ShowYSlice
+        {
+            get { return showYSlice; }
+            set
+            {
+                showYSlice = value;
+                NeedsRender = true;
+            }
+        }
+
+        public bool ShowZSlice
+        {
+            get { return showZSlice; }
+            set
+            {
+                showZSlice = value;
+                NeedsRender = true;
+            }
+        }
+        public bool ShowOrthoslices
+        {
+            get { return showXSlice || showYSlice || showZSlice; }
+            set
+            {
+                // When setting all slices at once
+                showXSlice = value;
+                showYSlice = value;
+                showZSlice = value;
+                NeedsRender = true;
+            }
+        }
+
+
+        //Streaming rendering
+        private bool useStreamingRenderer = false;
+        private Dictionary<Vector3, Texture3D> loadedChunks = new Dictionary<Vector3, Texture3D>();
+        private Dictionary<Vector3, ShaderResourceView> loadedChunkSRVs = new Dictionary<Vector3, ShaderResourceView>();
+        private Queue<Vector3> chunkLoadQueue = new Queue<Vector3>();
+        private HashSet<Vector3> visibleChunks = new HashSet<Vector3>();
+        private Timer chunkLoadTimer;
+        private const int MAX_LOADED_CHUNKS = 32; // Adjust based on GPU memory
+        private Vector3 cameraPositionPrevious;
+        private float cameraDistancePrevious;
+        private readonly object chunkLock = new object();
+  
+        private Texture3D[] lodTextures = new Texture3D[5]; // Different LOD levels (0-4)
+        private ShaderResourceView[] lodSRVs = new ShaderResourceView[5];
+        private int currentStreamingLOD = 0;
+        private bool isInitializingStreaming = false;
+
+        public bool UseStreamingRenderer
+        {
+            get { return useStreamingRenderer; }
+            set
+            {
+                if (useStreamingRenderer != value)
+                {
+                    Logger.Log($"[SharpDXVolumeRenderer] Switching streaming renderer: {useStreamingRenderer} -> {value}");
+
+                    // If turning OFF streaming render, restore original state
+                    if (useStreamingRenderer && !value)
+                    {
+                        // Clean up streaming resources
+                        DisposeStreamingResources();
+
+                        // Force recreation of the original textures
+                        if (mainForm.volumeData != null)
+                        {
+                            Logger.Log("[SharpDXVolumeRenderer] Recreating standard textures after disabling streaming");
+
+                            // Clean up existing textures first
+                            Utilities.Dispose(ref volumeSRV);
+                            Utilities.Dispose(ref volumeTexture);
+
+                            // Create new volume texture from the volume data
+                            volumeTexture = CreateTexture3DFromChunkedVolume(mainForm.volumeData, Format.R8_UNorm);
+
+                            if (volumeTexture != null)
+                            {
+                                ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
+                                {
+                                    Format = Format.R8_UNorm,
+                                    Dimension = ShaderResourceViewDimension.Texture3D,
+                                    Texture3D = new ShaderResourceViewDescription.Texture3DResource
+                                    {
+                                        MipLevels = 1,
+                                        MostDetailedMip = 0
+                                    }
+                                };
+
+                                volumeSRV = new ShaderResourceView(device, volumeTexture, srvDesc);
+                                Logger.Log("[SharpDXVolumeRenderer] Standard volume texture recreated successfully");
+                            }
+                            else
+                            {
+                                Logger.Log("[SharpDXVolumeRenderer] ERROR: Failed to recreate volume texture!");
+                            }
+                        }
+                    }
+
+                    useStreamingRenderer = value;
+
+                    if (useStreamingRenderer)
+                    {
+                        // Initialize streaming textures
+                        InitializeStreamingRenderer();
+                    }
+
+                    NeedsRender = true;
+                }
+            }
+        }
+
+
+
         // Constant buffer structure - matches shader layout exactly
         [StructLayout(LayoutKind.Sequential)]
         private struct ConstantBufferData
@@ -132,7 +285,11 @@ namespace CTSegmenter
             public Matrix InvViewMatrix;
             public Vector4 Thresholds;  // x=min, y=max, z=stepSize, w=showGrayscale
             public Vector4 Dimensions;  // xyz=volume dimensions, w=unused
-            public Vector4 SliceCoords; // xyz=slice positions, w=showSlices
+
+            // Modified: SliceCoords.w now contains a bit field for slice visibility:
+            // bit 0 (0x1) = X slice, bit 1 (0x2) = Y slice, bit 2 (0x4) = Z slice
+            public Vector4 SliceCoords; // xyz=slice positions, w=slice visibility flags
+
             public Vector4 CameraPosition; // Camera position for ray origin calculation
             public Vector4 ColorMapParams; // x=colorMapIndex, y=slice border thickness, z,w=unused
             public Vector4 CutPlaneX; // x=enabled, y=direction, z=position, w=unused
@@ -182,16 +339,7 @@ namespace CTSegmenter
             }
         }
 
-        public bool ShowOrthoslices
-        {
-            get { return showSlices; }
-            set
-            {
-                showSlices = value;
-                NeedsRender = true; // Mark that rendering is needed
-            }
-        }
-
+       
         public int ColorMapIndex
         {
             get { return colorMapIndex; }
@@ -353,19 +501,41 @@ namespace CTSegmenter
                 CreateRenderStates();
                 CreateShaders();
                 CreateCubeGeometry();
+
+                // Check the dataset size to determine rendering approach
+                long volumeSizeBytes = (long)volW * volH * volD;
+                bool isLargeDataset = volumeSizeBytes > 8L * 1024L * 1024L * 1024L; // 8GB threshold
+
+                if (isLargeDataset)
+                {
+                    // For large datasets, enable streaming renderer by default
+                    useStreamingRenderer = true;
+                    Logger.Log($"[SharpDXVolumeRenderer] Large dataset detected ({volumeSizeBytes / (1024 * 1024 * 1024)}GB), using streaming renderer");
+                }
+
+                // Create textures - modified to handle streaming for large datasets
                 CreateVolumeTextures();
                 CreateLabelTextures();
                 CreateMaterialColorTexture();
                 CreateColorMapTexture();
                 CreateLodTextures();
+
+                // Initialize streaming renderer if enabled
+                if (useStreamingRenderer)
+                {
+                    InitializeStreamingRenderer();
+                }
+
+                CreateMeasurementResources();
+
                 Vector3 volumeCenter = new Vector3(volW / 2.0f, volH / 2.0f, volD / 2.0f);
                 cameraYaw = 0.8f; // Approximately 45 degrees
                 cameraPitch = 0.6f; // Slightly elevated view
                 cameraDistance = Math.Max(volW, Math.Max(volH, volD)) * 2.0f;
                 panOffset = Vector3.Zero;
                 NeedsRender = true;
+                textRenderer = new MeasurementTextRenderer(renderPanel);
 
-               
 
                 Logger.Log($"[SharpDXVolumeRenderer] Successfully created {volW}x{volH}x{volD} volume renderer");
             }
@@ -671,7 +841,7 @@ cbuffer ConstantBuffer : register(b0)
     matrix invViewMatrix;        // Inverse view matrix for ray calculation
     float4 thresholds;           // x=min, y=max, z=stepSize, w=showGrayscale
     float4 dimensions;           // xyz=volume dimensions, w=unused
-    float4 sliceCoords;          // xyz=slice positions normalized (0-1), w=showSlices
+    float4 sliceCoords;          // xyz=slice positions normalized (0-1), w=slice visibility flags
     float4 cameraPosition;       // Camera position in world space
     float4 colorMapIndex;        // x=colorMapIndex, y=slice border thickness, z,w=unused
     float4 cutPlaneX;            // x=enabled, y=direction(1=forward,-1=backward), z=position, w=unused
@@ -741,13 +911,22 @@ VS_OUTPUT VSMain(VS_INPUT input)
     return output;
 }
 
-// Helper function for slice planes
+// Helper function for slice planes with individual slice visibility
 bool IsOnSlicePlane(float3 pos, float3 slicePos, float epsilon, out int sliceType)
 {
+    // sliceCoords.w now contains a bit field for slice visibility
+    // We need to convert to int for bitwise operations
+    int sliceFlags = (int)(sliceCoords.w + 0.5); // Round to nearest int
+    
+    // Check which slices are enabled using integer bitwise operations
+    bool xSliceEnabled = (sliceFlags & 1) != 0;
+    bool ySliceEnabled = (sliceFlags & 2) != 0;
+    bool zSliceEnabled = (sliceFlags & 4) != 0;
+    
     // Check if the position is on any of the three slice planes
-    bool onXSlice = abs(pos.x - slicePos.x * dimensions.x) < epsilon;
-    bool onYSlice = abs(pos.y - slicePos.y * dimensions.y) < epsilon;
-    bool onZSlice = abs(pos.z - slicePos.z * dimensions.z) < epsilon;
+    bool onXSlice = xSliceEnabled && abs(pos.x - slicePos.x * dimensions.x) < epsilon;
+    bool onYSlice = ySliceEnabled && abs(pos.y - slicePos.y * dimensions.y) < epsilon;
+    bool onZSlice = zSliceEnabled && abs(pos.z - slicePos.z * dimensions.z) < epsilon;
     
     // Set slice type (1=X, 2=Y, 3=Z)
     sliceType = 0;
@@ -898,8 +1077,8 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
     // Whether to show grayscale
     bool showGrayscale = thresholds.w > 0.5;
     
-    // Whether to show orthogonal slices
-    bool showSlices = sliceCoords.w > 0.5;
+    // Whether any slices are enabled (w component contains the bit flags)
+    bool anySlicesEnabled = sliceCoords.w > 0.0;
     
     // Slice positions
     float3 slicePos = sliceCoords.xyz;
@@ -934,7 +1113,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
         
         // Handle slice planes with higher priority
         int sliceType = 0;
-        if (showSlices && IsOnSlicePlane(pos, slicePos, stepSize * 1.5, sliceType))
+        if (anySlicesEnabled && IsOnSlicePlane(pos, slicePos, stepSize * 1.5, sliceType))
         {
             // We're on a slice plane - render it
             // Clamp coordinates to valid range to avoid sampling artifacts
@@ -1140,8 +1319,84 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
         {
             try
             {
-                // Load grayscale volume data
-                if (mainForm.volumeData != null)
+                // For streaming renderer with large datasets, we only create LOD textures initially
+                if (useStreamingRenderer && mainForm.volumeData != null)
+                {
+                    // Create a single low-resolution overview texture
+                    int downsampleFactor = 8; // Start with a significant downsampling
+                    int dsWidth = Math.Max(1, volW / downsampleFactor);
+                    int dsHeight = Math.Max(1, volH / downsampleFactor);
+                    int dsDepth = Math.Max(1, volD / downsampleFactor);
+
+                    Logger.Log($"[SharpDXVolumeRenderer] Creating low-res overview texture: {dsWidth}x{dsHeight}x{dsDepth}");
+
+                    // Create the downsampled texture
+                    Texture3DDescription desc = new Texture3DDescription
+                    {
+                        Width = dsWidth,
+                        Height = dsHeight,
+                        Depth = dsDepth,
+                        MipLevels = 1,
+                        Format = Format.R8_UNorm,
+                        Usage = ResourceUsage.Default,
+                        BindFlags = BindFlags.ShaderResource,
+                        CpuAccessFlags = CpuAccessFlags.None,
+                        OptionFlags = ResourceOptionFlags.None
+                    };
+
+                    volumeTexture = new Texture3D(device, desc);
+
+                    // Create a downsampled buffer
+                    byte[] dsData = new byte[dsWidth * dsHeight * dsDepth];
+
+                    // Simple downsampling - skip most voxels
+                    for (int z = 0; z < dsDepth; z++)
+                    {
+                        for (int y = 0; y < dsHeight; y++)
+                        {
+                            for (int x = 0; x < dsWidth; x++)
+                            {
+                                // Sample from the original volume
+                                int srcX = x * downsampleFactor;
+                                int srcY = y * downsampleFactor;
+                                int srcZ = z * downsampleFactor;
+
+                                // Ensure we don't go out of bounds
+                                srcX = Math.Min(srcX, volW - 1);
+                                srcY = Math.Min(srcY, volH - 1);
+                                srcZ = Math.Min(srcZ, volD - 1);
+
+                                byte value = mainForm.volumeData[srcX, srcY, srcZ];
+
+                                // Store in the downsampled array
+                                int dstIndex = (z * dsHeight * dsWidth) + (y * dsWidth) + x;
+                                dsData[dstIndex] = value;
+                            }
+                        }
+                    }
+
+                    // Upload the data
+                    context.UpdateSubresource(dsData, volumeTexture, 0);
+
+                    // Create the resource view
+                    ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
+                    {
+                        Format = Format.R8_UNorm,
+                        Dimension = ShaderResourceViewDimension.Texture3D,
+                        Texture3D = new ShaderResourceViewDescription.Texture3DResource
+                        {
+                            MipLevels = 1,
+                            MostDetailedMip = 0
+                        }
+                    };
+
+                    volumeSRV = new ShaderResourceView(device, volumeTexture, srvDesc);
+                    Logger.Log($"[SharpDXVolumeRenderer] Created low-res overview texture");
+
+                    // No need to create full resolution volume texture - chunks will be loaded as needed
+                }
+                // For standard rendering, create the full volume texture
+                else if (mainForm.volumeData != null && !useStreamingRenderer)
                 {
                     volumeTexture = CreateTexture3DFromChunkedVolume(mainForm.volumeData, Format.R8_UNorm);
                     if (volumeTexture != null)
@@ -1162,7 +1417,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     }
                 }
 
-                // Load label volume if available
+                // Load label volume if available - keep this the same
                 if (mainForm.volumeLabels != null)
                 {
                     // Change from R8_UInt to R32_Float
@@ -1459,6 +1714,135 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 useLodSystem = false; // Disable LOD on error
             }
         }
+        private bool RaycastToVolume(int screenX, int screenY, out Vector3 worldPos)
+        {
+            worldPos = Vector3.Zero;
+
+            try
+            {
+                // Convert screen coordinates to normalized device coordinates (-1 to 1)
+                float ndcX = (2.0f * screenX / renderPanel.ClientSize.Width) - 1.0f;
+                float ndcY = 1.0f - (2.0f * screenY / renderPanel.ClientSize.Height);
+
+                // Create normalized device coordinates point
+                Vector4 ndcPoint = new Vector4(ndcX, ndcY, 0, 1);
+
+                // Create view and projection matrices
+                float aspectRatio = (float)renderPanel.ClientSize.Width / Math.Max(1, renderPanel.ClientSize.Height);
+
+                // Get camera matrix
+                float cosPitch = (float)Math.Cos(cameraPitch);
+                float sinPitch = (float)Math.Sin(cameraPitch);
+                float cosYaw = (float)Math.Cos(cameraYaw);
+                float sinYaw = (float)Math.Sin(cameraYaw);
+
+                Vector3 volumeCenter = new Vector3(volW / 2.0f, volH / 2.0f, volD / 2.0f);
+                Vector3 cameraDirection = new Vector3(
+                    cosPitch * cosYaw,
+                    sinPitch,
+                    cosPitch * sinYaw);
+                Vector3 cameraPosition = volumeCenter - (cameraDirection * cameraDistance) + panOffset;
+
+                Matrix viewMatrix = Matrix.LookAtLH(
+                    cameraPosition,
+                    volumeCenter + panOffset,
+                    Vector3.UnitY);
+
+                Matrix projMatrix = Matrix.PerspectiveFovLH(
+                    (float)Math.PI / 4.0f,
+                    aspectRatio,
+                    1.0f,
+                    cameraDistance * 10.0f);
+
+                // Invert the view-projection matrix
+                Matrix invViewProj = Matrix.Invert(viewMatrix * projMatrix);
+
+                // Transform from NDC space to world space
+                Vector4 worldPoint = Vector4.Transform(ndcPoint, invViewProj);
+
+                // Convert to 3D direction (normalize)
+                if (worldPoint.W != 0)
+                {
+                    worldPoint /= worldPoint.W;
+                }
+
+                // Create ray from camera position to world point
+                Vector3 rayDirection = new Vector3(
+                    worldPoint.X - cameraPosition.X,
+                    worldPoint.Y - cameraPosition.Y,
+                    worldPoint.Z - cameraPosition.Z);
+                rayDirection.Normalize();
+
+                // Perform ray-box intersection to get the point in the volume
+                Vector3 boxMin = new Vector3(0, 0, 0);
+                Vector3 boxMax = new Vector3(volW, volH, volD);
+
+                float tNear, tFar;
+                if (IntersectBox(cameraPosition, rayDirection, boxMin, boxMax, out tNear, out tFar) && tNear < tFar)
+                {
+                    if (tNear < 0) tNear = 0; // Start from camera if inside volume
+
+                    // Calculate intersection point
+                    worldPos = cameraPosition + rayDirection * tNear;
+
+                    // Clamp to volume boundaries
+                    worldPos.X = Math.Max(0, Math.Min(volW, worldPos.X));
+                    worldPos.Y = Math.Max(0, Math.Min(volH, worldPos.Y));
+                    worldPos.Z = Math.Max(0, Math.Min(volD, worldPos.Z));
+
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] Raycast error: {ex.Message}");
+            }
+
+            return false;
+        }
+        private bool IntersectBox(Vector3 rayOrigin, Vector3 rayDir,
+                         Vector3 boxMin, Vector3 boxMax,
+                         out float tNear, out float tFar)
+        {
+            tNear = float.MinValue;
+            tFar = float.MaxValue;
+
+            // For each axis, calculate the near and far intersection times
+            for (int i = 0; i < 3; i++)
+            {
+                float origin = i == 0 ? rayOrigin.X : (i == 1 ? rayOrigin.Y : rayOrigin.Z);
+                float direction = i == 0 ? rayDir.X : (i == 1 ? rayDir.Y : rayDir.Z);
+                float boxMinValue = i == 0 ? boxMin.X : (i == 1 ? boxMin.Y : boxMin.Z);
+                float boxMaxValue = i == 0 ? boxMax.X : (i == 1 ? boxMax.Y : boxMax.Z);
+
+                if (Math.Abs(direction) < 1e-6) // Ray is parallel to the slab
+                {
+                    if (origin < boxMinValue || origin > boxMaxValue)
+                        return false; // Ray is outside the slab
+                }
+                else // Ray is not parallel to the slab
+                {
+                    float invDirection = 1.0f / direction;
+                    float t1 = (boxMinValue - origin) * invDirection;
+                    float t2 = (boxMaxValue - origin) * invDirection;
+
+                    if (t1 > t2)
+                    {
+                        float temp = t1;
+                        t1 = t2;
+                        t2 = temp;
+                    }
+
+                    tNear = Math.Max(tNear, t1);
+                    tFar = Math.Min(tFar, t2);
+
+                    if (tNear > tFar)
+                        return false; // No intersection
+                }
+            }
+
+            return true; // If we get here, there is an intersection
+        }
         public void ForceInitialRender()
         {
             // Store previous state
@@ -1706,199 +2090,355 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
         {
             if (volume == null) return null;
 
-            // Create the 3D texture
-            Texture3DDescription desc = new Texture3DDescription
+            try
             {
-                Width = volume.Width,
-                Height = volume.Height,
-                Depth = volume.Depth,
-                MipLevels = 1,
-                Format = format,
-                Usage = ResourceUsage.Default,
-                BindFlags = BindFlags.ShaderResource,
-                CpuAccessFlags = CpuAccessFlags.None,
-                OptionFlags = ResourceOptionFlags.None
-            };
+                // Check if volume exceeds hardware limits (most hardware limits 3D textures to ~2048^3)
+                // For extremely large volumes, we'll create a downsampled version
+                int width = volume.Width;
+                int height = volume.Height;
+                int depth = volume.Depth;
 
-            Texture3D texture = new Texture3D(device, desc);
+                // Check if dimensions are too large for a single texture (more than ~2048 in any dimension)
+                bool needsDownsampling = width > 2048 || height > 2048 || depth > 2048;
 
-            // Upload data chunk by chunk
-            int chunkDim = volume.ChunkDim;
+                // Calculate maximum volume in bytes (approximate) to avoid memory issues
+                long volumeSizeInBytes = (long)width * height * depth;
+                bool exceedsMemoryLimit = volumeSizeInBytes > 4L * 1024L * 1024L * 1024L; // 4GB safe limit
 
-            for (int cz = 0; cz < volume.ChunkCountZ; cz++)
-            {
-                int zBase = cz * chunkDim;
-                int zSize = Math.Min(chunkDim, volume.Depth - zBase);
+                int downsampleFactor = 1;
 
-                for (int cy = 0; cy < volume.ChunkCountY; cy++)
+                if (needsDownsampling || exceedsMemoryLimit)
                 {
-                    int yBase = cy * chunkDim;
-                    int ySize = Math.Min(chunkDim, volume.Height - yBase);
-
-                    for (int cx = 0; cx < volume.ChunkCountX; cx++)
+                    // Calculate appropriate downsampling factor based on size
+                    while ((width / downsampleFactor > 1024 || height / downsampleFactor > 1024 ||
+                           depth / downsampleFactor > 1024) ||
+                           ((long)(width / downsampleFactor) * (height / downsampleFactor) *
+                           (depth / downsampleFactor) > 1024L * 1024L * 1024L))
                     {
-                        int xBase = cx * chunkDim;
-                        int xSize = Math.Min(chunkDim, volume.Width - xBase);
+                        downsampleFactor *= 2;
+                    }
 
-                        int chunkIndex = volume.GetChunkIndex(cx, cy, cz);
-                        byte[] chunkData = volume.GetChunkBytes(chunkIndex);
+                    // Log the downsampling to inform the user
+                    Logger.Log($"[SharpDXVolumeRenderer] Large volume detected ({width}x{height}x{depth}), creating downsampled version (factor: {downsampleFactor})");
 
-                        // Copy slice by slice
-                        for (int z = 0; z < zSize; z++)
+                    // Update dimensions
+                    width /= downsampleFactor;
+                    height /= downsampleFactor;
+                    depth /= downsampleFactor;
+                }
+
+                // Create the 3D texture with potentially reduced size
+                Texture3DDescription desc = new Texture3DDescription
+                {
+                    Width = width,
+                    Height = height,
+                    Depth = depth,
+                    MipLevels = 1,
+                    Format = format,
+                    Usage = ResourceUsage.Default,
+                    BindFlags = BindFlags.ShaderResource,
+                    CpuAccessFlags = CpuAccessFlags.None,
+                    OptionFlags = ResourceOptionFlags.None
+                };
+
+                Logger.Log($"[SharpDXVolumeRenderer] Creating volume texture: {width}x{height}x{depth}");
+                Texture3D texture = new Texture3D(device, desc);
+
+                // Upload data chunk by chunk, with downsampling if needed
+                int chunkDim = volume.ChunkDim;
+
+                for (int cz = 0; cz < volume.ChunkCountZ; cz++)
+                {
+                    int zBase = cz * chunkDim;
+
+                    for (int cy = 0; cy < volume.ChunkCountY; cy++)
+                    {
+                        int yBase = cy * chunkDim;
+
+                        for (int cx = 0; cx < volume.ChunkCountX; cx++)
                         {
-                            byte[] sliceData = new byte[xSize * ySize];
-                            int chunkZOffset = z * chunkDim * chunkDim;
+                            int xBase = cx * chunkDim;
+                            int chunkIndex = volume.GetChunkIndex(cx, cy, cz);
+                            byte[] chunkData = volume.GetChunkBytes(chunkIndex);
 
-                            for (int y = 0; y < ySize; y++)
+                            // If we're downsampling, process fewer slices
+                            for (int z = 0; z < chunkDim; z += downsampleFactor)
                             {
-                                System.Buffer.BlockCopy(
-                                    chunkData,
-                                    chunkZOffset + y * chunkDim,
-                                    sliceData,
-                                    y * xSize,
-                                    xSize);
-                            }
+                                if ((zBase + z) / downsampleFactor >= depth) break;
 
-                            // Upload slice to texture
-                            GCHandle handle = GCHandle.Alloc(sliceData, GCHandleType.Pinned);
-                            try
-                            {
-                                DataBox dataBox = new DataBox(handle.AddrOfPinnedObject(), xSize, xSize * ySize);
-                                ResourceRegion region = new ResourceRegion(
-                                    xBase, yBase, zBase + z,
-                                    xBase + xSize, yBase + ySize, zBase + z + 1);
+                                // Create a downsampled slice
+                                int dsWidth = Math.Min(width - (xBase / downsampleFactor), chunkDim / downsampleFactor);
+                                int dsHeight = Math.Min(height - (yBase / downsampleFactor), chunkDim / downsampleFactor);
 
-                                device.ImmediateContext.UpdateSubresource(dataBox, texture, 0, region);
-                            }
-                            finally
-                            {
-                                handle.Free();
+                                if (dsWidth <= 0 || dsHeight <= 0) continue;
+
+                                byte[] sliceData = new byte[dsWidth * dsHeight];
+                                int sliceIndex = 0;
+
+                                // Extract downsampled data from the chunk
+                                for (int y = 0; y < chunkDim; y += downsampleFactor)
+                                {
+                                    if ((yBase + y) / downsampleFactor >= height) break;
+
+                                    for (int x = 0; x < chunkDim; x += downsampleFactor)
+                                    {
+                                        if ((xBase + x) / downsampleFactor >= width) break;
+
+                                        // Simple downsampling: just take one voxel from each block
+                                        int srcIndex = (z * chunkDim + y) * chunkDim + x;
+
+                                        if (srcIndex < chunkData.Length)
+                                        {
+                                            sliceData[sliceIndex++] = chunkData[srcIndex];
+                                        }
+                                    }
+                                }
+
+                                // Upload this slice to the texture
+                                GCHandle handle = GCHandle.Alloc(sliceData, GCHandleType.Pinned);
+                                try
+                                {
+                                    DataBox dataBox = new DataBox(handle.AddrOfPinnedObject(), dsWidth, dsWidth * dsHeight);
+                                    ResourceRegion region = new ResourceRegion(
+                                        xBase / downsampleFactor,
+                                        yBase / downsampleFactor,
+                                        (zBase + z) / downsampleFactor,
+                                        (xBase / downsampleFactor) + dsWidth,
+                                        (yBase / downsampleFactor) + dsHeight,
+                                        (zBase + z) / downsampleFactor + 1);
+
+                                    device.ImmediateContext.UpdateSubresource(dataBox, texture, 0, region);
+                                }
+                                finally
+                                {
+                                    handle.Free();
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            return texture;
+                return texture;
+            }
+            catch (SharpDXException ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] DirectX error creating volume texture: {ex.Message} (HRESULT: {ex.HResult:X})");
+
+                // If we hit the "out of memory" error, suggest solutions
+                if (ex.HResult == -2147024882) // 0x8007000E = E_OUTOFMEMORY
+                {
+                    Logger.Log("[SharpDXVolumeRenderer] Out of memory error. This dataset is too large for available GPU memory.");
+                }
+
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] Error creating volume texture: {ex.Message}");
+                throw;
+            }
         }
 
         private Texture3D CreateTexture3DFromChunkedLabelVolume(ChunkedLabelVolume volume, Format format)
         {
             if (volume == null) return null;
 
-            // Create the 3D texture
-            Texture3DDescription desc = new Texture3DDescription
+            try
             {
-                Width = volume.Width,
-                Height = volume.Height,
-                Depth = volume.Depth,
-                MipLevels = 1,
-                Format = format,
-                Usage = ResourceUsage.Default,
-                BindFlags = BindFlags.ShaderResource,
-                CpuAccessFlags = CpuAccessFlags.None,
-                OptionFlags = ResourceOptionFlags.None
-            };
+                // Apply the same downsampling logic as for the grayscale volume
+                int width = volume.Width;
+                int height = volume.Height;
+                int depth = volume.Depth;
 
-            Texture3D texture = new Texture3D(device, desc);
+                // Check if dimensions are too large for a single texture
+                bool needsDownsampling = width > 2048 || height > 2048 || depth > 2048;
 
-            // Upload data chunk by chunk
-            int chunkDim = volume.ChunkDim;
+                // Calculate approximate memory requirements
+                long volumeSizeInBytes = (long)width * height * depth * (format == Format.R32_Float ? 4 : 1);
+                bool exceedsMemoryLimit = volumeSizeInBytes > 2L * 1024L * 1024L * 1024L; // 2GB limit for label data
 
-            for (int cz = 0; cz < volume.ChunkCountZ; cz++)
-            {
-                int zBase = cz * chunkDim;
-                int zSize = Math.Min(chunkDim, volume.Depth - zBase);
+                int downsampleFactor = 1;
 
-                for (int cy = 0; cy < volume.ChunkCountY; cy++)
+                if (needsDownsampling || exceedsMemoryLimit)
                 {
-                    int yBase = cy * chunkDim;
-                    int ySize = Math.Min(chunkDim, volume.Height - yBase);
-
-                    for (int cx = 0; cx < volume.ChunkCountX; cx++)
+                    // Calculate appropriate downsampling factor
+                    while ((width / downsampleFactor > 1024 || height / downsampleFactor > 1024 ||
+                           depth / downsampleFactor > 1024) ||
+                           ((long)(width / downsampleFactor) * (height / downsampleFactor) *
+                           (depth / downsampleFactor) * (format == Format.R32_Float ? 4 : 1) > 1024L * 1024L * 1024L))
                     {
-                        int xBase = cx * chunkDim;
-                        int xSize = Math.Min(chunkDim, volume.Width - xBase);
+                        downsampleFactor *= 2;
+                    }
 
-                        int chunkIndex = volume.GetChunkIndex(cx, cy, cz);
-                        byte[] chunkData = volume.GetChunkBytes(chunkIndex);
+                    Logger.Log($"[SharpDXVolumeRenderer] Large label volume detected ({width}x{height}x{depth}), creating downsampled version (factor: {downsampleFactor})");
 
-                        // Copy slice by slice
-                        for (int z = 0; z < zSize; z++)
+                    width /= downsampleFactor;
+                    height /= downsampleFactor;
+                    depth /= downsampleFactor;
+                }
+
+                // Create the 3D texture with potentially reduced size
+                Texture3DDescription desc = new Texture3DDescription
+                {
+                    Width = width,
+                    Height = height,
+                    Depth = depth,
+                    MipLevels = 1,
+                    Format = format,
+                    Usage = ResourceUsage.Default,
+                    BindFlags = BindFlags.ShaderResource,
+                    CpuAccessFlags = CpuAccessFlags.None,
+                    OptionFlags = ResourceOptionFlags.None
+                };
+
+                Logger.Log($"[SharpDXVolumeRenderer] Creating label texture: {width}x{height}x{depth}");
+                Texture3D texture = new Texture3D(device, desc);
+
+                // Upload data chunk by chunk with downsampling if needed
+                int chunkDim = volume.ChunkDim;
+
+                for (int cz = 0; cz < volume.ChunkCountZ; cz++)
+                {
+                    int zBase = cz * chunkDim;
+
+                    for (int cy = 0; cy < volume.ChunkCountY; cy++)
+                    {
+                        int yBase = cy * chunkDim;
+
+                        for (int cx = 0; cx < volume.ChunkCountX; cx++)
                         {
-                            // Different handling based on format
-                            if (format == Format.R32_Float)
-                            {
-                                // For Float format, convert bytes to floats
-                                float[] sliceData = new float[xSize * ySize];
-                                int chunkZOffset = z * chunkDim * chunkDim;
+                            int xBase = cx * chunkDim;
+                            int chunkIndex = volume.GetChunkIndex(cx, cy, cz);
+                            byte[] chunkData = volume.GetChunkBytes(chunkIndex);
 
-                                for (int y = 0; y < ySize; y++)
+                            // If we're downsampling, process fewer slices
+                            for (int z = 0; z < chunkDim; z += downsampleFactor)
+                            {
+                                if ((zBase + z) / downsampleFactor >= depth) break;
+
+                                // For float format (R32_Float), create a float array for the slice
+                                if (format == Format.R32_Float)
                                 {
-                                    for (int x = 0; x < xSize; x++)
+                                    int dsWidth = Math.Min(width - (xBase / downsampleFactor), chunkDim / downsampleFactor);
+                                    int dsHeight = Math.Min(height - (yBase / downsampleFactor), chunkDim / downsampleFactor);
+
+                                    if (dsWidth <= 0 || dsHeight <= 0) continue;
+
+                                    float[] sliceData = new float[dsWidth * dsHeight];
+                                    int sliceIndex = 0;
+
+                                    // Extract downsampled data from the chunk
+                                    for (int y = 0; y < chunkDim; y += downsampleFactor)
                                     {
-                                        // Convert byte to float
-                                        int srcIndex = chunkZOffset + y * chunkDim + x;
-                                        int destIndex = y * xSize + x;
-                                        sliceData[destIndex] = chunkData[srcIndex]; // Implicit conversion from byte to float
+                                        if ((yBase + y) / downsampleFactor >= height) break;
+
+                                        for (int x = 0; x < chunkDim; x += downsampleFactor)
+                                        {
+                                            if ((xBase + x) / downsampleFactor >= width) break;
+
+                                            // For labels, we want to preserve the original values exactly
+                                            int srcIndex = (z * chunkDim + y) * chunkDim + x;
+
+                                            if (srcIndex < chunkData.Length)
+                                            {
+                                                sliceData[sliceIndex++] = chunkData[srcIndex];
+                                            }
+                                        }
+                                    }
+
+                                    // Upload this slice to the texture
+                                    GCHandle handle = GCHandle.Alloc(sliceData, GCHandleType.Pinned);
+                                    try
+                                    {
+                                        DataBox dataBox = new DataBox(handle.AddrOfPinnedObject(), dsWidth * sizeof(float), dsWidth * dsHeight * sizeof(float));
+                                        ResourceRegion region = new ResourceRegion(
+                                            xBase / downsampleFactor,
+                                            yBase / downsampleFactor,
+                                            (zBase + z) / downsampleFactor,
+                                            (xBase / downsampleFactor) + dsWidth,
+                                            (yBase / downsampleFactor) + dsHeight,
+                                            (zBase + z) / downsampleFactor + 1);
+
+                                        device.ImmediateContext.UpdateSubresource(dataBox, texture, 0, region);
+                                    }
+                                    finally
+                                    {
+                                        handle.Free();
                                     }
                                 }
-
-                                // Upload slice to texture with correct stride for floats
-                                GCHandle handle = GCHandle.Alloc(sliceData, GCHandleType.Pinned);
-                                try
+                                else
                                 {
-                                    // Note: float is 4 bytes
-                                    DataBox dataBox = new DataBox(handle.AddrOfPinnedObject(), xSize * sizeof(float), xSize * ySize * sizeof(float));
-                                    ResourceRegion region = new ResourceRegion(
-                                        xBase, yBase, zBase + z,
-                                        xBase + xSize, yBase + ySize, zBase + z + 1);
+                                    // For byte format, same as grayscale volume
+                                    int dsWidth = Math.Min(width - (xBase / downsampleFactor), chunkDim / downsampleFactor);
+                                    int dsHeight = Math.Min(height - (yBase / downsampleFactor), chunkDim / downsampleFactor);
 
-                                    device.ImmediateContext.UpdateSubresource(dataBox, texture, 0, region);
-                                }
-                                finally
-                                {
-                                    handle.Free();
-                                }
-                            }
-                            else
-                            {
-                                // Original code for byte formats
-                                byte[] sliceData = new byte[xSize * ySize];
-                                int chunkZOffset = z * chunkDim * chunkDim;
+                                    if (dsWidth <= 0 || dsHeight <= 0) continue;
 
-                                for (int y = 0; y < ySize; y++)
-                                {
-                                    System.Buffer.BlockCopy(
-                                        chunkData,
-                                        chunkZOffset + y * chunkDim,
-                                        sliceData,
-                                        y * xSize,
-                                        xSize);
-                                }
+                                    byte[] sliceData = new byte[dsWidth * dsHeight];
+                                    int sliceIndex = 0;
 
-                                // Upload slice to texture
-                                GCHandle handle = GCHandle.Alloc(sliceData, GCHandleType.Pinned);
-                                try
-                                {
-                                    DataBox dataBox = new DataBox(handle.AddrOfPinnedObject(), xSize, xSize * ySize);
-                                    ResourceRegion region = new ResourceRegion(
-                                        xBase, yBase, zBase + z,
-                                        xBase + xSize, yBase + ySize, zBase + z + 1);
+                                    // Extract downsampled data from the chunk
+                                    for (int y = 0; y < chunkDim; y += downsampleFactor)
+                                    {
+                                        if ((yBase + y) / downsampleFactor >= height) break;
 
-                                    device.ImmediateContext.UpdateSubresource(dataBox, texture, 0, region);
-                                }
-                                finally
-                                {
-                                    handle.Free();
+                                        for (int x = 0; x < chunkDim; x += downsampleFactor)
+                                        {
+                                            if ((xBase + x) / downsampleFactor >= width) break;
+
+                                            int srcIndex = (z * chunkDim + y) * chunkDim + x;
+
+                                            if (srcIndex < chunkData.Length)
+                                            {
+                                                sliceData[sliceIndex++] = chunkData[srcIndex];
+                                            }
+                                        }
+                                    }
+
+                                    // Upload this slice to the texture
+                                    GCHandle handle = GCHandle.Alloc(sliceData, GCHandleType.Pinned);
+                                    try
+                                    {
+                                        DataBox dataBox = new DataBox(handle.AddrOfPinnedObject(), dsWidth, dsWidth * dsHeight);
+                                        ResourceRegion region = new ResourceRegion(
+                                            xBase / downsampleFactor,
+                                            yBase / downsampleFactor,
+                                            (zBase + z) / downsampleFactor,
+                                            (xBase / downsampleFactor) + dsWidth,
+                                            (yBase / downsampleFactor) + dsHeight,
+                                            (zBase + z) / downsampleFactor + 1);
+
+                                        device.ImmediateContext.UpdateSubresource(dataBox, texture, 0, region);
+                                    }
+                                    finally
+                                    {
+                                        handle.Free();
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            return texture;
+                return texture;
+            }
+            catch (SharpDXException ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] DirectX error creating label texture: {ex.Message} (HRESULT: {ex.HResult:X})");
+
+                // If we hit the "out of memory" error, suggest solutions
+                if (ex.HResult == -2147024882) // 0x8007000E = E_OUTOFMEMORY
+                {
+                    Logger.Log("[SharpDXVolumeRenderer] Out of memory error. This dataset is too large for available GPU memory.");
+                }
+
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] Error creating label texture: {ex.Message}");
+                throw;
+            }
         }
         #endregion
 
@@ -1945,7 +2485,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
                 // Handle LOD levels for movement
                 bool isMoving = isDragging || isPanning;
-                if (useLodSystem && isMoving)
+                if (useLodSystem && isMoving && !useStreamingRenderer)
                 {
                     // During movement, use a suitable LOD level that exists
                     bool foundValidLod = false;
@@ -1971,31 +2511,38 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     currentLodLevel = 0;
                 }
 
-                // Render the volume
-                RenderVolume();
+                // CRITICAL: First render the volume - use appropriate renderer based on mode
+                if (useStreamingRenderer)
+                {
+                    // Use the streaming renderer
+                    RenderVolumeWithStreaming();
+                }
+                else
+                {
+                    // Use the standard renderer
+                    RenderVolume();
+                }
+
+                // Then render measurements AFTER the volume is rendered
+                RenderMeasurements();
 
                 // Draw scale bar and pixel size info
-                // We'll skip this during camera movement to improve performance
-                if (frameCount > 10 && !isMoving && frameCount % 30 == 0)
+                if (!isMoving || frameCount % 5 == 0) // Update more frequently during movement
                 {
                     DrawScaleBar();
                 }
                 else if (isMoving && scaleBarPictureBox != null)
                 {
-                    // Hide the scale bar during camera movement
                     scaleBarPictureBox.Visible = false;
                 }
                 else if (!isMoving && scaleBarPictureBox != null && !scaleBarPictureBox.Visible)
                 {
-                    // Show the scale bar when camera is stationary
                     scaleBarPictureBox.Visible = true;
                 }
 
-                // Present the scene - MODIFIED: use 0 for sync interval during movement for smoother rotation
+                // Present the scene
                 try
                 {
-                    // During movement, disable VSync (0) for more responsive feel
-                    // When stationary, use VSync (1) to prevent tearing
                     swapChain.Present(isMoving ? 0 : 1, PresentFlags.None);
                 }
                 catch (SharpDXException ex)
@@ -2059,6 +2606,69 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 throw;
             }
         }
+
+        private System.Drawing.Point? WorldToScreen(Vector3 worldPos)
+        {
+            try
+            {
+                // Calculate view-projection matrix
+                float aspectRatio = (float)renderPanel.ClientSize.Width / Math.Max(1, renderPanel.ClientSize.Height);
+
+                // Get camera matrix
+                float cosPitch = (float)Math.Cos(cameraPitch);
+                float sinPitch = (float)Math.Sin(cameraPitch);
+                float cosYaw = (float)Math.Cos(cameraYaw);
+                float sinYaw = (float)Math.Sin(cameraYaw);
+
+                Vector3 volumeCenter = new Vector3(volW / 2.0f, volH / 2.0f, volD / 2.0f);
+                Vector3 cameraDirection = new Vector3(
+                    cosPitch * cosYaw,
+                    sinPitch,
+                    cosPitch * sinYaw);
+                Vector3 cameraPosition = volumeCenter - (cameraDirection * cameraDistance) + panOffset;
+
+                Matrix viewMatrix = Matrix.LookAtLH(
+                    cameraPosition,
+                    volumeCenter + panOffset,
+                    Vector3.UnitY);
+
+                Matrix projMatrix = Matrix.PerspectiveFovLH(
+                    (float)Math.PI / 4.0f,
+                    aspectRatio,
+                    1.0f,
+                    cameraDistance * 10.0f);
+
+                // Transform world position to clip space
+                Matrix viewProj = viewMatrix * projMatrix;
+                Vector4 clipPos = Vector4.Transform(new Vector4(worldPos, 1.0f), viewProj);
+
+                // Check if the point is behind the camera
+                if (clipPos.W <= 0)
+                    return null;
+
+                // Perspective divide to get normalized device coordinates
+                Vector3 ndcPos = new Vector3(
+                    clipPos.X / clipPos.W,
+                    clipPos.Y / clipPos.W,
+                    clipPos.Z / clipPos.W);
+
+                // Check if the point is outside the view frustum
+                if (ndcPos.X < -1 || ndcPos.X > 1 || ndcPos.Y < -1 || ndcPos.Y > 1)
+                    return null;
+
+                // Convert to screen coordinates
+                int screenX = (int)((ndcPos.X + 1) * 0.5f * renderPanel.ClientSize.Width);
+                int screenY = (int)((1 - ndcPos.Y) * 0.5f * renderPanel.ClientSize.Height);
+
+                return new System.Drawing.Point(screenX, screenY);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] WorldToScreen error: {ex.Message}");
+                return null;
+            }
+        }
+
         private void RecreateRenderTargets()
         {
             try
@@ -2181,6 +2791,9 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     return;
                 }
 
+                // IMPORTANT: Reset any previous shader resources to avoid state confusion
+                ResetShaderResources();
+
                 // Use wireframe in debug mode
                 context.Rasterizer.State = debugMode ? wireframeRasterState : solidRasterState;
 
@@ -2190,10 +2803,6 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 context.InputAssembler.SetVertexBuffers(0, new VertexBufferBinding(cubeVertexBuffer, Utilities.SizeOf<Vector3>(), 0));
                 context.InputAssembler.SetIndexBuffer(cubeIndexBuffer, Format.R32_UInt, 0);
 
-                // Clear any previous resources to avoid driver state confusion
-                ShaderResourceView[] nullResources = new ShaderResourceView[6]; // Increased to 6 for color map
-                context.PixelShader.SetShaderResources(0, 6, nullResources);
-
                 // Set samplers
                 context.PixelShader.SetSampler(0, linearSampler);
                 context.PixelShader.SetSampler(1, pointSampler);
@@ -2202,18 +2811,17 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 context.OutputMerger.SetBlendState(alphaBlendState, new Color4(0, 0, 0, 0), 0xFFFFFFFF);
 
                 // Prepare resources array
-                ShaderResourceView[] resources = new ShaderResourceView[6]; // Increased to 6 for color map
+                ShaderResourceView[] resources = new ShaderResourceView[6];
 
                 // Fill the resources array with available resources
                 if (labelVisibilitySRV != null) resources[0] = labelVisibilitySRV;
                 if (labelOpacitySRV != null) resources[1] = labelOpacitySRV;
 
-                // Always ensure we have a valid texture at resource position 2
+                // Set the volume texture resource - use LOD if available during movement, otherwise use original
                 bool isMoving = isDragging || isPanning;
                 bool useLodForMovement = useLodSystem && isMoving && currentLodLevel > 0 &&
                                        currentLodLevel <= MAX_LOD_LEVELS;
 
-                // Set the volume texture resource - use LOD if available during movement, otherwise use original
                 if (volumeSRV != null)
                 {
                     if (useLodForMovement && lodVolumeSRVs[currentLodLevel] != null)
@@ -2319,7 +2927,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     }
                 }
 
-                // Create a PictureBox if it doesn't exist
+                // Create or update PictureBox
                 if (scaleBarPictureBox == null)
                 {
                     scaleBarPictureBox = new PictureBox();
@@ -2329,14 +2937,18 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     scaleBarPictureBox.BringToFront();
                 }
 
-                // Update the PictureBox
-                scaleBarPictureBox.Image?.Dispose();
+                // Update the PictureBox - dispose old image first
+                var oldImage = scaleBarPictureBox.Image;
                 scaleBarPictureBox.Image = bitmap;
+                oldImage?.Dispose();
+
+                // Update position and ensure visibility
                 scaleBarPictureBox.Location = new System.Drawing.Point(barX - 10, barY - 25);
+                scaleBarPictureBox.Visible = true;
             }
             catch (Exception ex)
             {
-                Logger.Log("[SharpDXVolumeRenderer] RenderScaleBar error: " + ex.Message);
+                Logger.Log("[SharpDXVolumeRenderer] DrawScaleBar error: " + ex.Message);
             }
         }
 
@@ -2400,11 +3012,17 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     InvViewMatrix = invViewMatrix,
                     Thresholds = new Vector4(minThresholdNorm, maxThresholdNorm, actualStepSize, showGrayscale ? 1.0f : 0.0f),
                     Dimensions = new Vector4(volW, volH, volD, 0),
+
+                    // Update to pass individual slice visibility in the w component as a bit field
+                    // Bits: 0x1 = X slice, 0x2 = Y slice, 0x4 = Z slice
                     SliceCoords = new Vector4(
-                        (float)sliceX / volW,
-                        (float)sliceY / volH,
-                        (float)sliceZ / volD,
-                        showSlices ? 1.0f : 0.0f),
+                (float)sliceX / volW,
+                (float)sliceY / volH,
+                (float)sliceZ / volD,
+                (showXSlice ? 1.0f : 0.0f) +
+                (showYSlice ? 2.0f : 0.0f) +
+                (showZSlice ? 4.0f : 0.0f)),
+
                     CameraPosition = new Vector4(cameraPosition, 1.0f),
                     ColorMapParams = new Vector4(colorMapIndex, sliceBorderThickness, 0, 0),
                     // Add cutting plane data
@@ -2444,6 +3062,12 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
         {
             try
             {
+                if (labelVisibilityTexture == null || labelOpacityTexture == null)
+                {
+                    Logger.Log("[SharpDXVolumeRenderer] Cannot update label textures: textures are null");
+                    return;
+                }
+
                 // Update visibility texture
                 DataStream visibilityStream;
                 context.MapSubresource(
@@ -2455,7 +3079,14 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
                 for (int i = 0; i < MAX_LABELS; i++)
                 {
-                    visibilityStream.Write(labelVisible[i] ? 1.0f : 0.0f);
+                    float visValue = labelVisible[i] ? 1.0f : 0.0f;
+                    visibilityStream.Write(visValue);
+
+                    // Debug output for troubleshooting
+                    if (i < 10) // Only log the first few to avoid spam
+                    {
+                        Logger.Log($"[SharpDXVolumeRenderer] Material {i} visibility: {(labelVisible[i] ? "visible" : "hidden")}");
+                    }
                 }
 
                 context.UnmapSubresource(labelVisibilityTexture, 0);
@@ -2478,11 +3109,10 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 context.UnmapSubresource(labelOpacityTexture, 0);
                 opacityStream.Dispose();
 
-                // Also update material colors if needed
-                if (mainForm.Materials != null && mainForm.Materials.Count > 0)
-                {
-                    UpdateMaterialColors();
-                }
+                // Force a render after updating textures
+                NeedsRender = true;
+
+                Logger.Log("[SharpDXVolumeRenderer] Label textures updated successfully");
             }
             catch (Exception ex)
             {
@@ -2518,6 +3148,9 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 // Recreate render targets
                 CreateRenderTargets();
 
+                // Update scale bar position after resize
+                DrawScaleBar();
+
                 // Mark that we need rendering
                 NeedsRender = true;
 
@@ -2551,10 +3184,15 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
         {
             if (materialId < MAX_LABELS)
             {
+                Logger.Log($"[SharpDXVolumeRenderer] Setting material {materialId} visibility to {visible}");
+
+                // Update the visibility state
                 labelVisible[materialId] = visible;
+
+                // Make sure the visibility textures are updated immediately
                 UpdateLabelTextures();
 
-                // Mark that we need rendering
+                // Force a re-render
                 NeedsRender = true;
             }
         }
@@ -2563,10 +3201,16 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
         {
             if (materialId < MAX_LABELS)
             {
-                labelOpacity[materialId] = Math.Max(0.0f, Math.Min(1.0f, opacity));
+                opacity = Math.Max(0.0f, Math.Min(1.0f, opacity));
+                Logger.Log($"[SharpDXVolumeRenderer] Setting material {materialId} opacity to {opacity:F2}");
+
+                // Update the opacity state
+                labelOpacity[materialId] = opacity;
+
+                // Make sure the visibility textures are updated immediately
                 UpdateLabelTextures();
 
-                // Mark that we need rendering
+                // Force a re-render
                 NeedsRender = true;
             }
         }
@@ -2604,52 +3248,153 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
             try
             {
-                using (var backBuffer = Texture2D.FromSwapChain<Texture2D>(swapChain, 0))
+                // Get the dimensions of the render panel
+                int width = renderPanel.ClientSize.Width;
+                int height = renderPanel.ClientSize.Height;
+
+                // Create a bitmap to hold the entire screenshot including UI elements
+                using (var screenshot = new System.Drawing.Bitmap(width, height))
                 {
-                    // Create a staging texture for CPU read access
-                    var desc = backBuffer.Description;
-                    desc.CpuAccessFlags = CpuAccessFlags.Read;
-                    desc.Usage = ResourceUsage.Staging;
-                    desc.BindFlags = BindFlags.None;
-                    desc.OptionFlags = ResourceOptionFlags.None;
-
-                    using (var stagingTexture = new Texture2D(device, desc))
+                    // Create graphics object from the bitmap
+                    using (var g = System.Drawing.Graphics.FromImage(screenshot))
                     {
-                        // Copy to staging texture
-                        context.CopyResource(backBuffer, stagingTexture);
-
-                        // Map the staging texture
-                        var dataBox = context.MapSubresource(
-                            stagingTexture,
-                            0,
-                            MapMode.Read,
-                            SharpDX.Direct3D11.MapFlags.None);
-
-                        // Create a bitmap and copy the data
-                        using (var bitmap = new System.Drawing.Bitmap(
-                            desc.Width,
-                            desc.Height,
-                            System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                        // Capture the backbuffer first
+                        using (var backBuffer = Texture2D.FromSwapChain<Texture2D>(swapChain, 0))
                         {
-                            var bitmapData = bitmap.LockBits(
-                                new System.Drawing.Rectangle(0, 0, bitmap.Width, bitmap.Height),
-                                System.Drawing.Imaging.ImageLockMode.WriteOnly,
-                                System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                            // Create a staging texture for CPU read access
+                            var desc = backBuffer.Description;
+                            desc.CpuAccessFlags = CpuAccessFlags.Read;
+                            desc.Usage = ResourceUsage.Staging;
+                            desc.BindFlags = BindFlags.None;
+                            desc.OptionFlags = ResourceOptionFlags.None;
 
-                            // Copy data row by row
-                            for (int y = 0; y < desc.Height; y++)
+                            using (var stagingTexture = new Texture2D(device, desc))
                             {
-                                IntPtr sourceRow = dataBox.DataPointer + y * dataBox.RowPitch;
-                                IntPtr destRow = bitmapData.Scan0 + y * bitmapData.Stride;
-                                Utilities.CopyMemory(destRow, sourceRow, desc.Width * 4);
-                            }
+                                // Copy to staging texture
+                                context.CopyResource(backBuffer, stagingTexture);
 
-                            bitmap.UnlockBits(bitmapData);
-                            bitmap.Save(filePath);
+                                // Map the staging texture
+                                var dataBox = context.MapSubresource(
+                                    stagingTexture,
+                                    0,
+                                    MapMode.Read,
+                                    SharpDX.Direct3D11.MapFlags.None);
+
+                                // Create a bitmap of the 3D content
+                                using (var d3dBitmap = new System.Drawing.Bitmap(
+                                    desc.Width,
+                                    desc.Height,
+                                    System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                                {
+                                    var bitmapData = d3dBitmap.LockBits(
+                                        new System.Drawing.Rectangle(0, 0, d3dBitmap.Width, d3dBitmap.Height),
+                                        System.Drawing.Imaging.ImageLockMode.WriteOnly,
+                                        System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+
+                                    // Copy data row by row
+                                    for (int y = 0; y < desc.Height; y++)
+                                    {
+                                        IntPtr sourceRow = dataBox.DataPointer + y * dataBox.RowPitch;
+                                        IntPtr destRow = bitmapData.Scan0 + y * bitmapData.Stride;
+                                        Utilities.CopyMemory(destRow, sourceRow, desc.Width * 4);
+                                    }
+
+                                    d3dBitmap.UnlockBits(bitmapData);
+
+                                    // Draw the 3D content onto our screenshot bitmap
+                                    g.DrawImage(d3dBitmap, 0, 0, width, height);
+                                }
+
+                                // Unmap the resource
+                                context.UnmapSubresource(stagingTexture, 0);
+                            }
                         }
 
-                        // Unmap the resource
-                        context.UnmapSubresource(stagingTexture, 0);
+                        // Now capture all UI elements
+                        // First the scale bar if it exists
+                        bool wasScaleBarVisible = false;
+                        if (scaleBarPictureBox != null)
+                        {
+                            wasScaleBarVisible = scaleBarPictureBox.Visible;
+                            scaleBarPictureBox.Visible = true;
+                            DrawScaleBar(); // Force an update
+
+                            // Draw the scale bar onto the screenshot
+                            g.DrawImage(scaleBarPictureBox.Image, scaleBarPictureBox.Location);
+                            scaleBarPictureBox.Visible = wasScaleBarVisible;
+                        }
+
+                        // Now draw measurements if they're visible
+                        foreach (var measurement in measurements)
+                        {
+                            if (!measurement.Visible)
+                                continue;
+
+                            // Convert 3D world coordinates to screen coordinates
+                            var screenStart = WorldToScreen(measurement.Start);
+                            var screenEnd = WorldToScreen(measurement.End);
+
+                            if (!screenStart.HasValue || !screenEnd.HasValue)
+                                continue;
+
+                            var startPoint = screenStart.Value;
+                            var endPoint = screenEnd.Value;
+
+                            // Draw line
+                            using (var pen = new System.Drawing.Pen(measurement.Color, 2))
+                            {
+                                g.DrawLine(pen, startPoint.X, startPoint.Y, endPoint.X, endPoint.Y);
+
+                                // Draw endpoints
+                                float radius = 3;
+                                g.FillEllipse(System.Drawing.Brushes.White,
+                                    startPoint.X - radius, startPoint.Y - radius,
+                                    radius * 2, radius * 2);
+                                g.FillEllipse(System.Drawing.Brushes.White,
+                                    endPoint.X - radius, endPoint.Y - radius,
+                                    radius * 2, radius * 2);
+                            }
+
+                            // Draw label with distance
+                            string labelText = $"{measurement.Label}: {measurement.RealDistance:F2} {measurement.Unit}";
+
+                            // Calculate text position (middle of the line)
+                            int textX = (startPoint.X + endPoint.X) / 2;
+                            int textY = (startPoint.Y + endPoint.Y) / 2;
+
+                            // Draw background for the text for better visibility
+                            var font = new System.Drawing.Font("Arial", 8);
+                            var textSize = g.MeasureString(labelText, font);
+
+                            g.FillRectangle(
+                                new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(150, 0, 0, 0)),
+                                textX - textSize.Width / 2, textY - textSize.Height / 2,
+                                textSize.Width, textSize.Height);
+
+                            // Draw text
+                            g.DrawString(
+                                labelText,
+                                font,
+                                System.Drawing.Brushes.White,
+                                textX - textSize.Width / 2,
+                                textY - textSize.Height / 2);
+                        }
+                    }
+
+                    // Save the combined screenshot
+                    string extension = Path.GetExtension(filePath).ToLower();
+                    if (extension == ".jpg" || extension == ".jpeg")
+                    {
+                        screenshot.Save(filePath, System.Drawing.Imaging.ImageFormat.Jpeg);
+                    }
+                    else if (extension == ".png")
+                    {
+                        screenshot.Save(filePath, System.Drawing.Imaging.ImageFormat.Png);
+                    }
+                    else
+                    {
+                        // Default to JPEG
+                        screenshot.Save(filePath, System.Drawing.Imaging.ImageFormat.Jpeg);
                     }
                 }
 
@@ -2665,9 +3410,28 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
         #region Mouse Handlers
         private void OnMouseDown(object sender, MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Left)
+            if (measurementMode && e.Button == MouseButtons.Left)
             {
-                // Orbit camera
+                // Start measurement
+                isDrawingMeasurement = true;
+
+                // Perform ray cast to find the start point in 3D space
+                if (RaycastToVolume(e.X, e.Y, out Vector3 worldPos))
+                {
+                    measureStartPoint = worldPos;
+                    measureEndPoint = worldPos; // Initialize end point to same as start point
+                    Logger.Log($"[SharpDXVolumeRenderer] Started measurement at {worldPos}");
+                }
+
+                // Mark that we need rendering to show the measurement preview
+                NeedsRender = true;
+
+                // Important: Return here to prevent other mouse handling
+                return;
+            }
+            else if (e.Button == MouseButtons.Left)
+            {
+                // Original orbit camera behavior
                 isDragging = true;
                 lastMousePosition = e.Location;
 
@@ -2679,7 +3443,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             }
             else if (e.Button == MouseButtons.Right)
             {
-                // Pan camera
+                // Original pan camera behavior
                 isPanning = true;
                 lastMousePosition = e.Location;
 
@@ -2692,9 +3456,22 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
         }
 
 
+
         private void OnMouseMove(object sender, MouseEventArgs e)
         {
-            if (isDragging)
+            if (isDrawingMeasurement)
+            {
+                // Update the end point of the measurement
+                if (RaycastToVolume(e.X, e.Y, out Vector3 worldPos))
+                {
+                    measureEndPoint = worldPos;
+                    NeedsRender = true; // Redraw to show the measurement preview
+                }
+
+                // Important: Return here to prevent other mouse handling
+                return;
+            }
+            else if (isDragging)
             {
                 // Calculate delta with damping for smoother movement
                 float dx = (e.X - lastMousePosition.X) * 0.01f;
@@ -2740,9 +3517,107 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             }
         }
 
+
         private void OnMouseUp(object sender, MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Left)
+            if (isDrawingMeasurement && e.Button == MouseButtons.Left)
+            {
+                // Finish measurement
+                if (RaycastToVolume(e.X, e.Y, out Vector3 worldPos))
+                {
+                    measureEndPoint = worldPos;
+
+                    // Calculate distance
+                    float distance = Vector3.Distance(measureStartPoint, measureEndPoint);
+
+                    // Convert to real-world units
+                    double pixelSizeInMeters = mainForm.GetPixelSize();
+                    double realWorldDistance = distance * pixelSizeInMeters;
+                    string unit = "m";
+                    float displayDistance = (float)realWorldDistance;
+
+                    // Format with appropriate units
+                    if (realWorldDistance < 0.001 && realWorldDistance > 0)
+                    {
+                        unit = "µm";
+                        displayDistance = (float)(realWorldDistance * 1e6);
+                    }
+                    else if (realWorldDistance < 1 && realWorldDistance >= 0.001)
+                    {
+                        unit = "mm";
+                        displayDistance = (float)(realWorldDistance * 1e3);
+                    }
+
+                    // Check if the measurement is on a slice plane
+                    bool isOnSlice = false;
+                    int sliceType = 0;
+                    int slicePosition = 0;
+
+                    if (showSlices)
+                    {
+                        // Check X slice (YZ plane)
+                        if (Math.Abs(measureStartPoint.X - sliceX) < 0.5f && Math.Abs(measureEndPoint.X - sliceX) < 0.5f)
+                        {
+                            isOnSlice = true;
+                            sliceType = 1;
+                            slicePosition = sliceX;
+                        }
+                        // Check Y slice (XZ plane)
+                        else if (Math.Abs(measureStartPoint.Y - sliceY) < 0.5f && Math.Abs(measureEndPoint.Y - sliceY) < 0.5f)
+                        {
+                            isOnSlice = true;
+                            sliceType = 2;
+                            slicePosition = sliceY;
+                        }
+                        // Check Z slice (XY plane)
+                        else if (Math.Abs(measureStartPoint.Z - sliceZ) < 0.5f && Math.Abs(measureEndPoint.Z - sliceZ) < 0.5f)
+                        {
+                            isOnSlice = true;
+                            sliceType = 3;
+                            slicePosition = sliceZ;
+                        }
+                    }
+
+                    // Create measurement
+                    var measurement = new MeasurementLine
+                    {
+                        Start = measureStartPoint,
+                        End = measureEndPoint,
+                        Distance = distance,
+                        RealDistance = displayDistance,
+                        Unit = unit,
+                        Label = $"M{measurements.Count + 1}",
+                        IsOnSlice = isOnSlice,
+                        SliceType = sliceType,
+                        SlicePosition = slicePosition
+                    };
+
+                    measurements.Add(measurement);
+
+                    // Update the UI
+                    if (controlPanel != null)
+                    {
+                        controlPanel.RefreshMeasurementsList();
+                    }
+
+                    Logger.Log($"[SharpDXVolumeRenderer] Added measurement: {measurement}");
+                }
+
+                isDrawingMeasurement = false;
+                measurementMode = false; // Exit measurement mode after creating one
+
+                // Notify UI that measurement mode is complete
+                if (controlPanel != null)
+                {
+                    controlPanel.UpdateMeasurementUI(false);
+                }
+
+                NeedsRender = true;
+
+                // Important: Return here to prevent other mouse handling
+                return;
+            }
+            else if (e.Button == MouseButtons.Left)
             {
                 isDragging = false;
 
@@ -2759,6 +3634,8 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 NeedsRender = true;
             }
         }
+
+
 
         private void OnMouseWheel(object sender, MouseEventArgs e)
         {
@@ -2779,6 +3656,9 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             // Only render if the distance actually changed significantly
             if (Math.Abs(cameraDistance - prevDistance) > 0.1f)
             {
+                // Update scale bar immediately after zoom
+                DrawScaleBar();
+
                 // Mark that we need rendering
                 NeedsRender = true;
             }
@@ -2790,6 +3670,92 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
         {
             try
             {
+                // Clean up streaming resources if enabled
+                if (useStreamingRenderer)
+                {
+                    DisposeStreamingResources();
+                }
+
+                // First clean up UI controls
+                if (measurementOverlay != null)
+                {
+                    try
+                    {
+                        // Make sure we remove it from the panel first
+                        if (renderPanel != null && renderPanel.Controls.Contains(measurementOverlay))
+                        {
+                            renderPanel.Controls.Remove(measurementOverlay);
+                        }
+
+                        // Then dispose the image and picturebox
+                        if (measurementOverlay != null)
+                        {
+                            if (renderPanel != null && renderPanel.Controls.Contains(measurementOverlay))
+                            {
+                                renderPanel.Controls.Remove(measurementOverlay);
+                            }
+                            if (measurementOverlay.Image != null)
+                            {
+                                measurementOverlay.Image.Dispose();
+                                measurementOverlay.Image = null;
+                            }
+                            measurementOverlay.Dispose();
+                            measurementOverlay = null;
+                        }
+                        if (textRenderer != null)
+                        {
+                            textRenderer.Dispose();
+                            textRenderer = null;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log("[SharpDXVolumeRenderer] Error disposing measurementOverlay: " + ex.Message);
+                    }
+                }
+
+                if (scaleBarPictureBox != null)
+                {
+                    try
+                    {
+                        // Make sure we remove it from the panel first
+                        if (renderPanel != null && renderPanel.Controls.Contains(scaleBarPictureBox))
+                        {
+                            renderPanel.Controls.Remove(scaleBarPictureBox);
+                        }
+
+                        // Then dispose the image and picturebox
+                        if (scaleBarPictureBox.Image != null)
+                        {
+                            var img = scaleBarPictureBox.Image;
+                            scaleBarPictureBox.Image = null;
+                            img.Dispose();
+                        }
+                        scaleBarPictureBox.Dispose();
+                        scaleBarPictureBox = null;
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log("[SharpDXVolumeRenderer] Error disposing scaleBarPictureBox: " + ex.Message);
+                    }
+                }
+
+                // Unregister mouse event handlers
+                if (renderPanel != null)
+                {
+                    try
+                    {
+                        renderPanel.MouseDown -= OnMouseDown;
+                        renderPanel.MouseMove -= OnMouseMove;
+                        renderPanel.MouseUp -= OnMouseUp;
+                        renderPanel.MouseWheel -= OnMouseWheel;
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log("[SharpDXVolumeRenderer] Error removing event handlers: " + ex.Message);
+                    }
+                }
+
                 // Dispose render states
                 Utilities.Dispose(ref solidRasterState);
                 Utilities.Dispose(ref wireframeRasterState);
@@ -2837,12 +3803,6 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 Utilities.Dispose(ref swapChain);
                 Utilities.Dispose(ref context);
                 Utilities.Dispose(ref device);
-                if (scaleBarPictureBox != null)
-                {
-                    scaleBarPictureBox.Image?.Dispose();
-                    scaleBarPictureBox.Dispose();
-                    scaleBarPictureBox = null;
-                }
 
                 Logger.Log("[SharpDXVolumeRenderer] Resources disposed successfully");
             }
@@ -2851,6 +3811,1220 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 Logger.Log("[SharpDXVolumeRenderer] Error during disposal: " + ex.Message);
             }
         }
+        #endregion
+        #region DXMeasurements
+        public void SetMeasurementMode(bool enabled)
+        {
+            measurementMode = enabled;
+            if (!enabled)
+            {
+                isDrawingMeasurement = false;
+            }
+            NeedsRender = true;
+
+            Logger.Log($"[SharpDXVolumeRenderer] Measurement mode {(enabled ? "enabled" : "disabled")}");
+        }
+        private void CreateMeasurementResources()
+        {
+            try
+            {
+                // Compile the vertex shader for lines
+                string lineShaderCode = @"
+        cbuffer ConstantBuffer : register(b0)
+        {
+            matrix worldViewProj;
+        };
+
+        struct VS_INPUT
+        {
+            float3 Position : POSITION;
+            float4 Color : COLOR;
+        };
+
+        struct VS_OUTPUT
+        {
+            float4 Position : SV_POSITION;
+            float4 Color : COLOR;
+        };
+
+        VS_OUTPUT VSMain(VS_INPUT input)
+        {
+            VS_OUTPUT output;
+            output.Position = mul(float4(input.Position, 1.0), worldViewProj);
+            output.Color = input.Color;
+            return output;
+        }
+
+        float4 PSMain(VS_OUTPUT input) : SV_TARGET
+        {
+            return input.Color;
+        }";
+
+                using (var vertexShaderBytecode = SharpDX.D3DCompiler.ShaderBytecode.Compile(
+                    lineShaderCode, "VSMain", "vs_5_0", SharpDX.D3DCompiler.ShaderFlags.Debug))
+                {
+                    lineVertexShader = new VertexShader(device, vertexShaderBytecode);
+
+                    // Create input layout with position and color
+                    InputElement[] inputElements = new[] {
+                new InputElement("POSITION", 0, Format.R32G32B32_Float, 0, 0),
+                new InputElement("COLOR", 0, Format.R32G32B32A32_Float, 12, 0)
+            };
+
+                    lineInputLayout = new InputLayout(device, vertexShaderBytecode, inputElements);
+                }
+
+                using (var pixelShaderBytecode = SharpDX.D3DCompiler.ShaderBytecode.Compile(
+                    lineShaderCode, "PSMain", "ps_5_0", SharpDX.D3DCompiler.ShaderFlags.Debug))
+                {
+                    linePixelShader = new PixelShader(device, pixelShaderBytecode);
+                }
+
+                // Create an initial empty vertex buffer for measurements
+                BufferDescription vbDesc = new BufferDescription(
+                    1024, // Initial size
+                    ResourceUsage.Dynamic,
+                    BindFlags.VertexBuffer,
+                    CpuAccessFlags.Write,
+                    ResourceOptionFlags.None,
+                    0);
+
+                lineVertexBuffer = new Buffer(device, vbDesc);
+                EnsureTextRenderer();
+                Logger.Log("[SharpDXVolumeRenderer] Measurement rendering resources created");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Error creating measurement resources: " + ex.Message);
+            }
+        }
+
+        private void UpdateMeasurementBuffer()
+        {
+            try
+            {
+                // Clear existing vertex collections
+                measurementVertices.Clear();
+                measurementColors.Clear();
+
+                // Create a list to hold our properly formatted vertices
+                List<LineVertex> vertices = new List<LineVertex>();
+
+                // Process all saved measurements
+                foreach (var measurement in measurements)
+                {
+                    if (!measurement.Visible)
+                        continue;
+
+                    // Check if the points are visible (in the view frustum)
+                    var screenStart = WorldToScreen(measurement.Start);
+                    var screenEnd = WorldToScreen(measurement.End);
+
+                    if (!screenStart.HasValue || !screenEnd.HasValue)
+                        continue;
+
+                    // Convert color to Vector4
+                    System.Drawing.Color measurementColor = measurement.Color;
+                    Vector4 color = new Vector4(
+                        measurementColor.R / 255.0f,
+                        measurementColor.G / 255.0f,
+                        measurementColor.B / 255.0f,
+                        1.0f);
+
+                    // Add the line vertices (start and end points)
+                    vertices.Add(new LineVertex(measurement.Start, color));
+                    vertices.Add(new LineVertex(measurement.End, color));
+
+                    // Also store in the individual arrays for backward compatibility
+                    measurementVertices.Add(measurement.Start);
+                    measurementColors.Add(color);
+                    measurementVertices.Add(measurement.End);
+                    measurementColors.Add(color);
+                }
+
+                // Add current measurement being drawn if active
+                if (isDrawingMeasurement)
+                {
+                    // Use yellow for the active measurement
+                    Vector4 highlightColor = new Vector4(1.0f, 1.0f, 0.0f, 1.0f);
+
+                    // Add to the vertex list
+                    vertices.Add(new LineVertex(measureStartPoint, highlightColor));
+                    vertices.Add(new LineVertex(measureEndPoint, highlightColor));
+
+                    // Also add to the arrays
+                    measurementVertices.Add(measureStartPoint);
+                    measurementColors.Add(highlightColor);
+                    measurementVertices.Add(measureEndPoint);
+                    measurementColors.Add(highlightColor);
+                }
+
+                // If there are no vertices, nothing to update
+                if (vertices.Count == 0)
+                    return;
+
+                // Size of our vertex structure in bytes
+                int stride = Utilities.SizeOf<LineVertex>();
+                int vertexCount = vertices.Count;
+                int dataSize = stride * vertexCount;
+
+                // Recreate the buffer if needed or if it's too small
+                if (lineVertexBuffer == null || lineVertexBuffer.Description.SizeInBytes < dataSize)
+                {
+                    Utilities.Dispose(ref lineVertexBuffer);
+
+                    BufferDescription vbDesc = new BufferDescription(
+                        Math.Max(dataSize, 1024), // Ensure minimum size
+                        ResourceUsage.Dynamic,
+                        BindFlags.VertexBuffer,
+                        CpuAccessFlags.Write,
+                        ResourceOptionFlags.None,
+                        0);
+
+                    lineVertexBuffer = new Buffer(device, vbDesc);
+                }
+
+                // Map the buffer for writing
+                DataStream dataStream;
+                context.MapSubresource(
+                    lineVertexBuffer,
+                    0,
+                    MapMode.WriteDiscard,
+                    SharpDX.Direct3D11.MapFlags.None,
+                    out dataStream);
+
+                // Write all vertices in one go
+                dataStream.WriteRange(vertices.ToArray());
+
+                // Unmap the buffer
+                context.UnmapSubresource(lineVertexBuffer, 0);
+                dataStream.Dispose();
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Error updating measurement buffer: " + ex.Message);
+            }
+        }
+        private void EnsureTextRenderer()
+        {
+            try
+            {
+                if (textRenderer == null && renderPanel != null)
+                {
+                    textRenderer = new MeasurementTextRenderer(renderPanel);
+                    Logger.Log("[SharpDXVolumeRenderer] Created text renderer");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Error creating text renderer: " + ex.Message);
+            }
+        }
+        private void UpdateMeasurementLabels()
+        {
+            try
+            {
+                EnsureTextRenderer();
+
+                if (textRenderer == null)
+                    return;
+
+                // Clear existing labels
+                textRenderer.ClearLabels();
+
+                // Don't add any labels if no measurements or not in drawing mode
+                if (measurements.Count == 0 && !isDrawingMeasurement)
+                    return;
+
+                // Add labels for existing measurements
+                foreach (var measurement in measurements)
+                {
+                    if (!measurement.Visible)
+                        continue;
+
+                    // Convert 3D world coordinates to screen coordinates
+                    var screenStart = WorldToScreen(measurement.Start);
+                    var screenEnd = WorldToScreen(measurement.End);
+
+                    if (!screenStart.HasValue || !screenEnd.HasValue)
+                        continue;
+
+                    var startPoint = screenStart.Value;
+                    var endPoint = screenEnd.Value;
+
+                    // Calculate text position (middle of the line)
+                    int textX = (startPoint.X + endPoint.X) / 2;
+                    int textY = (startPoint.Y + endPoint.Y) / 2;
+
+                    // Create the label text
+                    string labelText = $"{measurement.Label}: {measurement.RealDistance:F2} {measurement.Unit}";
+
+                    // Add the label
+                    textRenderer.AddLabel(
+                        labelText,
+                        new System.Drawing.Point(textX, textY),
+                        System.Drawing.Color.FromArgb(150, 0, 0, 0),
+                        System.Drawing.Color.White);
+                }
+
+                // Add label for active measurement if drawing
+                if (isDrawingMeasurement)
+                {
+                    var screenStart = WorldToScreen(measureStartPoint);
+                    var screenEnd = WorldToScreen(measureEndPoint);
+
+                    if (screenStart.HasValue && screenEnd.HasValue)
+                    {
+                        var startPoint = screenStart.Value;
+                        var endPoint = screenEnd.Value;
+
+                        // Calculate distance
+                        float distance = Vector3.Distance(measureStartPoint, measureEndPoint);
+                        double pixelSizeInMeters = mainForm.GetPixelSize();
+                        double realWorldDistance = distance * pixelSizeInMeters;
+                        string unit = "m";
+                        float displayDistance = (float)realWorldDistance;
+
+                        // Format with appropriate units
+                        if (realWorldDistance < 0.001 && realWorldDistance > 0)
+                        {
+                            unit = "µm";
+                            displayDistance = (float)(realWorldDistance * 1e6);
+                        }
+                        else if (realWorldDistance < 1 && realWorldDistance >= 0.001)
+                        {
+                            unit = "mm";
+                            displayDistance = (float)(realWorldDistance * 1e3);
+                        }
+
+                        string labelText = $"Distance: {displayDistance:F2} {unit} ({distance:F1} voxels)";
+
+                        // Calculate text position (middle of the line)
+                        int textX = (startPoint.X + endPoint.X) / 2;
+                        int textY = (startPoint.Y + endPoint.Y) / 2;
+
+                        // Add the label
+                        textRenderer.AddLabel(
+                            labelText,
+                            new System.Drawing.Point(textX, textY),
+                            System.Drawing.Color.FromArgb(150, 0, 0, 0),
+                            System.Drawing.Color.White);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Error updating measurement labels: " + ex.Message);
+            }
+        }
+        private void RenderMeasurements()
+        {
+            try
+            {
+                if (lineVertexBuffer == null || (measurements.Count == 0 && !isDrawingMeasurement))
+                    return;
+
+                // First reset shader resources to avoid state conflicts
+                ResetShaderResources();
+
+                // Update the measurement buffer
+                UpdateMeasurementBuffer();
+
+                // Set shader and input layout for line rendering
+                context.InputAssembler.InputLayout = lineInputLayout;
+                context.InputAssembler.PrimitiveTopology = PrimitiveTopology.LineList;
+
+                // Use the correct stride based on our vertex structure
+                context.InputAssembler.SetVertexBuffers(0, new VertexBufferBinding(
+                    lineVertexBuffer,
+                    Utilities.SizeOf<LineVertex>(),
+                    0));
+
+                // Set shaders for line rendering
+                context.VertexShader.Set(lineVertexShader);
+                context.PixelShader.Set(linePixelShader);
+
+                // Set constant buffer with world-view-projection matrix
+                context.VertexShader.SetConstantBuffer(0, constantBuffer);
+
+                // Enable blending for the lines
+                context.OutputMerger.SetBlendState(alphaBlendState);
+
+                // Draw the lines
+                context.Draw(measurementVertices.Count, 0);
+
+                // Reset shader resources again to avoid affecting subsequent rendering
+                ResetShaderResources();
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Error rendering measurements: " + ex.Message);
+            }
+        }
+
+        #endregion
+        #region shader reset
+        private void ResetShaderResources()
+        {
+            try
+            {
+                // Clear any shader resources to avoid driver state confusion
+                ShaderResourceView[] nullResources = new ShaderResourceView[6];
+                context.PixelShader.SetShaderResources(0, 6, nullResources);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Error resetting shader resources: " + ex.Message);
+            }
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LineVertex
+        {
+            public Vector3 Position;
+            public Vector4 Color;
+
+            public LineVertex(Vector3 position, Vector4 color)
+            {
+                Position = position;
+                Color = color;
+            }
+        }
+        #endregion
+        #region Streaming Rendering
+        private void InitializeStreamingRenderer()
+        {
+            if (isInitializingStreaming || device == null)
+                return;
+
+            try
+            {
+                isInitializingStreaming = true;
+                Logger.Log("[SharpDXVolumeRenderer] Initializing streaming renderer");
+
+                // Create a series of progressively lower-resolution versions of the volume
+                // These will be used during camera movement and then progressively refined
+                CreateStreamingLODTextures();
+
+                // Important: Force render with new resources
+                NeedsRender = true;
+
+                isInitializingStreaming = false;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] Error initializing streaming renderer: {ex.Message}");
+                useStreamingRenderer = false;
+                isInitializingStreaming = false;
+            }
+        }
+
+        private void CreateStreamingLODTextures()
+        {
+            // Clean up any existing textures first
+            for (int i = 0; i < lodTextures.Length; i++)
+            {
+                Utilities.Dispose(ref lodSRVs[i]);
+                Utilities.Dispose(ref lodTextures[i]);
+            }
+
+            if (mainForm.volumeData == null)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] No volume data available for streaming LODs");
+                return;
+            }
+
+            ChunkedVolume volume = mainForm.volumeData;
+
+            // Create a series of downsampled textures at different resolutions
+            for (int lodLevel = 0; lodLevel < lodTextures.Length; lodLevel++)
+            {
+                try
+                {
+                    // Level 0 is highest resolution, each level reduces by 2x
+                    int downsampleFactor = (int)Math.Pow(2, lodLevel);
+
+                    // Calculate dimensions for this LOD level
+                    int width = Math.Max(1, volW / downsampleFactor);
+                    int height = Math.Max(1, volH / downsampleFactor);
+                    int depth = Math.Max(1, volD / downsampleFactor);
+
+                    Logger.Log($"[SharpDXVolumeRenderer] Creating streaming LOD level {lodLevel}: {width}x{height}x{depth}");
+
+                    // Create the texture
+                    Texture3DDescription desc = new Texture3DDescription
+                    {
+                        Width = width,
+                        Height = height,
+                        Depth = depth,
+                        MipLevels = 1,
+                        Format = Format.R8_UNorm,
+                        Usage = ResourceUsage.Default,
+                        BindFlags = BindFlags.ShaderResource,
+                        CpuAccessFlags = CpuAccessFlags.None,
+                        OptionFlags = ResourceOptionFlags.None
+                    };
+
+                    lodTextures[lodLevel] = new Texture3D(device, desc);
+
+                    // Create the data array for this LOD level
+                    byte[] lodData = new byte[width * height * depth];
+
+                    // Use a properly indexed approach to ensure correct memory layout
+                    for (int z = 0; z < depth; z++)
+                    {
+                        for (int y = 0; y < height; y++)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                // Calculate source coordinates in the original volume
+                                int srcX = Math.Min(x * downsampleFactor, volW - 1);
+                                int srcY = Math.Min(y * downsampleFactor, volH - 1);
+                                int srcZ = Math.Min(z * downsampleFactor, volD - 1);
+
+                                // Calculate linear index in the lodData array
+                                int idx = (z * width * height) + (y * width) + x;
+
+                                // Sample from the original volume
+                                byte value = volume[srcX, srcY, srcZ];
+                                lodData[idx] = value;
+                            }
+                        }
+                    }
+
+                    // Upload the data to the texture
+                    context.UpdateSubresource(lodData, lodTextures[lodLevel], 0);
+
+                    // Create a shader resource view
+                    ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
+                    {
+                        Format = Format.R8_UNorm,
+                        Dimension = ShaderResourceViewDimension.Texture3D,
+                        Texture3D = new ShaderResourceViewDescription.Texture3DResource
+                        {
+                            MipLevels = 1,
+                            MostDetailedMip = 0
+                        }
+                    };
+
+                    lodSRVs[lodLevel] = new ShaderResourceView(device, lodTextures[lodLevel], srvDesc);
+
+                    // IMPORTANT: For LOD level 0 (highest resolution), also set it as the main volume texture
+                    // This ensures we have a fallback texture for the standard renderer
+                    if (lodLevel == 0)
+                    {
+                        // Save a backup of the original volume
+                        Texture3D originalVolume = volumeTexture;
+                        ShaderResourceView originalSRV = volumeSRV;
+
+                        // Update the main volume texture
+                        volumeTexture = lodTextures[0];
+                        volumeSRV = lodSRVs[0];
+
+                        Logger.Log("[SharpDXVolumeRenderer] Updated main volume texture with highest LOD level");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[SharpDXVolumeRenderer] Error creating LOD level {lodLevel}: {ex.Message}");
+                }
+            }
+        }
+        private void RenderVolumeWithStreaming()
+        {
+            try
+            {
+                if (context == null || cubeVertexBuffer == null || cubeIndexBuffer == null)
+                {
+                    Logger.Log("[SharpDXVolumeRenderer] Cannot render volume: Required resources are null");
+                    return;
+                }
+
+                // IMPORTANT: Reset any previous shader resources to avoid state confusion
+                ResetShaderResources();
+
+                // Use wireframe in debug mode
+                context.Rasterizer.State = debugMode ? wireframeRasterState : solidRasterState;
+
+                // Setup rendering pipeline
+                context.InputAssembler.InputLayout = inputLayout;
+                context.InputAssembler.PrimitiveTopology = PrimitiveTopology.TriangleList;
+                context.InputAssembler.SetVertexBuffers(0, new VertexBufferBinding(cubeVertexBuffer, Utilities.SizeOf<Vector3>(), 0));
+                context.InputAssembler.SetIndexBuffer(cubeIndexBuffer, Format.R32_UInt, 0);
+
+                // Set samplers
+                context.PixelShader.SetSampler(0, linearSampler);
+                context.PixelShader.SetSampler(1, pointSampler);
+
+                // Set the blend state explicitly
+                context.OutputMerger.SetBlendState(alphaBlendState, new Color4(0, 0, 0, 0), 0xFFFFFFFF);
+
+                // Select LOD level based on camera movement
+                bool isMoving = isDragging || isPanning;
+                if (isMoving)
+                {
+                    // Use a lower resolution during movement
+                    currentStreamingLOD = Math.Min(2, lodTextures.Length - 1);
+                }
+                else
+                {
+                    // When static, progressively increase resolution
+                    if (currentStreamingLOD > 0)
+                    {
+                        currentStreamingLOD--;
+                    }
+                }
+
+                // Prepare resources array
+                ShaderResourceView[] resources = new ShaderResourceView[6];
+
+                // Fill the resources array with available resources
+                if (labelVisibilitySRV != null) resources[0] = labelVisibilitySRV;
+                if (labelOpacitySRV != null) resources[1] = labelOpacitySRV;
+
+                // CRITICAL FIX: Ensure we always have a valid volume texture
+                bool hasValidTexture = false;
+
+                // Try to use the streaming LOD textures first
+                if (currentStreamingLOD < lodSRVs.Length && lodSRVs[currentStreamingLOD] != null)
+                {
+                    resources[2] = lodSRVs[currentStreamingLOD];
+                    hasValidTexture = true;
+                    Logger.Log($"[RenderVolumeWithStreaming] Using LOD level {currentStreamingLOD}");
+                }
+                // Fall back to the original volume texture if available
+                else if (volumeSRV != null)
+                {
+                    resources[2] = volumeSRV;
+                    hasValidTexture = true;
+                    Logger.Log("[RenderVolumeWithStreaming] Using original volume texture");
+                }
+
+                if (!hasValidTexture)
+                {
+                    Logger.Log("[RenderVolumeWithStreaming] WARNING: No valid volume texture available!");
+                }
+
+                if (labelSRV != null) resources[3] = labelSRV;
+                if (materialColorSRV != null) resources[4] = materialColorSRV;
+                if (colorMapSRV != null) resources[5] = colorMapSRV;
+
+                // Set all resources at once
+                context.PixelShader.SetShaderResources(0, resources);
+
+                // Set shaders
+                context.VertexShader.Set(volumeVertexShader);
+                context.PixelShader.Set(volumePixelShader);
+
+                // Update constant buffer for rendering
+                float currentStepSize = isMoving ? Math.Min(3.0f, stepSize * 2.0f) : stepSize;
+
+                // For LOD, adjust step size based on level
+                currentStepSize = Math.Max(0.5f, currentStepSize * (currentStreamingLOD + 1));
+
+                UpdateConstantBuffer(currentStepSize);
+                context.VertexShader.SetConstantBuffer(0, constantBuffer);
+                context.PixelShader.SetConstantBuffer(0, constantBuffer);
+
+                // Draw the cube
+                context.DrawIndexed(cubeIndexCount, 0, 0);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] RenderVolumeWithStreaming error: " + ex.Message);
+                // For render failures, switch to wireframe mode
+                debugMode = true;
+            }
+        }
+
+
+        private void LoadLowResolutionOverview()
+        {
+            // Create heavily downsampled overview of the entire volume
+            try
+            {
+                int downsampleFactor = CalculateOptimalDownsampleFactor();
+                Logger.Log($"[SharpDXVolumeRenderer] Initial low-res overview using downsample factor: {downsampleFactor}");
+
+                // Create a heavily downsampled version for the overview
+                currentLodLevel = Math.Min(MAX_LOD_LEVELS, 2); // Use higher LOD initially
+
+                // Force creation of the LOD textures if they don't exist yet
+                if (lodVolumeTextures[currentLodLevel] == null)
+                {
+                    CreateLodTextures();
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] Error creating low-res overview: {ex.Message}");
+                // Fallback to standard rendering if streaming fails
+                useStreamingRenderer = false;
+            }
+        }
+
+        private int CalculateOptimalDownsampleFactor()
+        {
+            long volumeSizeInBytes = (long)volW * volH * volD;
+
+            // Target 512MB-1GB for initial overview
+            long targetSize = 512 * 1024 * 1024; // 512MB
+
+            int factor = 1;
+            while ((volumeSizeInBytes / (factor * factor * factor)) > targetSize && factor < 16)
+            {
+                factor *= 2;
+            }
+
+            return factor;
+        }
+
+        private void UpdateVisibleChunks()
+        {
+            if (!useStreamingRenderer)
+                return;
+
+            // Skip if camera hasn't moved significantly
+            float cameraMoveThreshold = 20.0f;
+            float zoomThreshold = 50.0f;
+
+            Vector3 cameraPos = GetCameraPosition();
+            bool significantCameraMove =
+                Vector3.Distance(cameraPos, cameraPositionPrevious) > cameraMoveThreshold ||
+                Math.Abs(cameraDistance - cameraDistancePrevious) > zoomThreshold;
+
+            if (!significantCameraMove && visibleChunks.Count > 0)
+                return;
+
+            // Update camera position cache
+            cameraPositionPrevious = cameraPos;
+            cameraDistancePrevious = cameraDistance;
+
+            // Calculate visible chunks based on camera frustum
+            HashSet<Vector3> newVisibleChunks = new HashSet<Vector3>();
+            int chunkSize = 64; // Size of each streaming chunk
+
+            // Divide the volume into chunks
+            int chunksX = (volW + chunkSize - 1) / chunkSize;
+            int chunksY = (volH + chunkSize - 1) / chunkSize;
+            int chunksZ = (volD + chunkSize - 1) / chunkSize;
+
+            // Get the view frustum for visibility determination
+            var viewFrustum = CalculateViewFrustum();
+
+            // Check which chunks intersect with the view frustum
+            for (int z = 0; z < chunksZ; z++)
+            {
+                for (int y = 0; y < chunksY; y++)
+                {
+                    for (int x = 0; x < chunksX; x++)
+                    {
+                        Vector3 chunkKey = new Vector3(x, y, z);
+
+                        // Calculate chunk bounds in world space
+                        Vector3 minBounds = new Vector3(
+                            x * chunkSize,
+                            y * chunkSize,
+                            z * chunkSize);
+
+                        Vector3 maxBounds = new Vector3(
+                            Math.Min((x + 1) * chunkSize, volW),
+                            Math.Min((y + 1) * chunkSize, volH),
+                            Math.Min((z + 1) * chunkSize, volD));
+
+                        // Test if this chunk is visible in the view frustum
+                        if (IsChunkVisible(minBounds, maxBounds, viewFrustum))
+                        {
+                            newVisibleChunks.Add(chunkKey);
+
+                            // If not already loaded or queued, add to load queue
+                            if (!loadedChunks.ContainsKey(chunkKey) && !chunkLoadQueue.Contains(chunkKey))
+                            {
+                                chunkLoadQueue.Enqueue(chunkKey);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Update the visible chunks set
+            lock (chunkLock)
+            {
+                visibleChunks = newVisibleChunks;
+
+                // Check if we need to unload any chunks
+                if (loadedChunks.Count > MAX_LOADED_CHUNKS)
+                {
+                    // Identify chunks to unload (not visible and loaded)
+                    var chunksToUnload = loadedChunks.Keys
+                        .Where(chunk => !visibleChunks.Contains(chunk))
+                        .ToList();
+
+                    // Unload the least recently used chunks until we're under the limit
+                    int chunksToRemove = Math.Min(chunksToUnload.Count,
+                                                 loadedChunks.Count - MAX_LOADED_CHUNKS);
+
+                    for (int i = 0; i < chunksToRemove; i++)
+                    {
+                        UnloadChunk(chunksToUnload[i]);
+                    }
+                }
+            }
+
+            Logger.Log($"[SharpDXVolumeRenderer] Visible chunks: {visibleChunks.Count}, Loaded: {loadedChunks.Count}, Queued: {chunkLoadQueue.Count}");
+        }
+        private Vector3 GetCameraPosition()
+        {
+            // Calculate current camera position
+            float cosPitch = (float)Math.Cos(cameraPitch);
+            float sinPitch = (float)Math.Sin(cameraPitch);
+            float cosYaw = (float)Math.Cos(cameraYaw);
+            float sinYaw = (float)Math.Sin(cameraYaw);
+
+            Vector3 volumeCenter = new Vector3(volW / 2.0f, volH / 2.0f, volD / 2.0f);
+            Vector3 cameraDirection = new Vector3(
+                cosPitch * cosYaw,
+                sinPitch,
+                cosPitch * sinYaw);
+
+            return volumeCenter - (cameraDirection * cameraDistance) + panOffset;
+        }
+        private ViewFrustum CalculateViewFrustum()
+        {
+            // Calculate the camera's view frustum for chunk visibility tests
+            float aspectRatio = (float)renderPanel.ClientSize.Width / Math.Max(1, renderPanel.ClientSize.Height);
+            float fov = (float)Math.PI / 4.0f;  // 45 degrees field of view
+
+            Vector3 cameraPos = GetCameraPosition();
+            float cosPitch = (float)Math.Cos(cameraPitch);
+            float sinPitch = (float)Math.Sin(cameraPitch);
+            float cosYaw = (float)Math.Cos(cameraYaw);
+            float sinYaw = (float)Math.Sin(cameraYaw);
+
+            Vector3 volumeCenter = new Vector3(volW / 2.0f, volH / 2.0f, volD / 2.0f);
+            Vector3 forward = Vector3.Normalize(volumeCenter + panOffset - cameraPos);
+            Vector3 right = Vector3.Normalize(Vector3.Cross(forward, Vector3.UnitY));
+            Vector3 up = Vector3.Cross(right, forward);
+
+            return new ViewFrustum
+            {
+                Position = cameraPos,
+                Forward = forward,
+                Up = up,
+                Right = right,
+                NearDist = 1.0f,
+                FarDist = cameraDistance * 10.0f,
+                FOV = fov,
+                AspectRatio = aspectRatio
+            };
+        }
+        private bool IsChunkVisible(Vector3 minBounds, Vector3 maxBounds, ViewFrustum frustum)
+        {
+            // Simple frustum culling check for a chunk
+            // Note: This is a simplified test - a more accurate test would check
+            // all 8 corners of the chunk against all 6 frustum planes
+
+            // Check if the volume center is roughly in the view direction
+            Vector3 chunkCenter = (minBounds + maxBounds) * 0.5f;
+            Vector3 toCenterDir = Vector3.Normalize(chunkCenter - frustum.Position);
+            float dotProduct = Vector3.Dot(toCenterDir, frustum.Forward);
+
+            // If the chunk is behind the camera, it's not visible
+            if (dotProduct < 0.2f) // Allow a wide angle to avoid popping
+                return false;
+
+            // Simple distance-based prioritization - chunks closer to camera are more visible
+            float distance = Vector3.Distance(frustum.Position, chunkCenter);
+
+            // Prioritize chunks closer to the camera, based on zoom level
+            float priorityDistance = cameraDistance * 2.0f;
+
+            return distance < priorityDistance;
+        }
+
+        private void LoadNextChunkFromQueue()
+        {
+            if (chunkLoadQueue.Count == 0 || !useStreamingRenderer)
+                return;
+
+            try
+            {
+                Vector3 chunkToLoad;
+
+                lock (chunkLock)
+                {
+                    if (chunkLoadQueue.Count == 0)
+                        return;
+
+                    chunkToLoad = chunkLoadQueue.Dequeue();
+
+                    // Skip if already loaded or no longer visible
+                    if (loadedChunks.ContainsKey(chunkToLoad) || !visibleChunks.Contains(chunkToLoad))
+                        return;
+
+                    // Check if we need to make room for this chunk
+                    if (loadedChunks.Count >= MAX_LOADED_CHUNKS)
+                    {
+                        // Find a chunk that's loaded but not visible
+                        var chunkToUnload = loadedChunks.Keys
+                            .FirstOrDefault(chunk => !visibleChunks.Contains(chunk));
+
+                        if (chunkToUnload != default)
+                        {
+                            UnloadChunk(chunkToUnload);
+                        }
+                        else
+                        {
+                            // If all loaded chunks are visible, skip loading this one for now
+                            // Put it back in the queue for later
+                            chunkLoadQueue.Enqueue(chunkToLoad);
+                            return;
+                        }
+                    }
+                }
+
+                // Load the chunk
+                LoadChunk(chunkToLoad);
+                NeedsRender = true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] Error in chunk loading: {ex.Message}");
+            }
+        }
+
+        private void LoadChunk(Vector3 chunkKey)
+        {
+            int chunkSize = 64;
+            int x = (int)chunkKey.X;
+            int y = (int)chunkKey.Y;
+            int z = (int)chunkKey.Z;
+
+            try
+            {
+                if (mainForm.volumeData == null)
+                    return;
+
+                // Calculate chunk bounds
+                int startX = x * chunkSize;
+                int startY = y * chunkSize;
+                int startZ = z * chunkSize;
+                int endX = Math.Min(startX + chunkSize, volW);
+                int endY = Math.Min(startY + chunkSize, volH);
+                int endZ = Math.Min(startZ + chunkSize, volD);
+                int width = endX - startX;
+                int height = endY - startY;
+                int depth = endZ - startZ;
+
+                // Create texture description
+                Texture3DDescription desc = new Texture3DDescription
+                {
+                    Width = width,
+                    Height = height,
+                    Depth = depth,
+                    MipLevels = 1,
+                    Format = Format.R8_UNorm,
+                    Usage = ResourceUsage.Default,
+                    BindFlags = BindFlags.ShaderResource,
+                    CpuAccessFlags = CpuAccessFlags.None,
+                    OptionFlags = ResourceOptionFlags.None
+                };
+
+                Texture3D texture = new Texture3D(device, desc);
+
+                // Extract the data for this chunk
+                byte[] chunkData = ExtractChunkData(mainForm.volumeData, startX, startY, startZ, width, height, depth);
+
+                // Upload the data
+                context.UpdateSubresource(chunkData, texture, 0);
+
+                // Create shader resource view
+                ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
+                {
+                    Format = Format.R8_UNorm,
+                    Dimension = ShaderResourceViewDimension.Texture3D,
+                    Texture3D = new ShaderResourceViewDescription.Texture3DResource
+                    {
+                        MipLevels = 1,
+                        MostDetailedMip = 0
+                    }
+                };
+
+                ShaderResourceView srv = new ShaderResourceView(device, texture, srvDesc);
+
+                // Store in dictionaries
+                lock (chunkLock)
+                {
+                    loadedChunks[chunkKey] = texture;
+                    loadedChunkSRVs[chunkKey] = srv;
+                }
+
+                Logger.Log($"[SharpDXVolumeRenderer] Loaded chunk {chunkKey} ({width}x{height}x{depth})");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] Error loading chunk {chunkKey}: {ex.Message}");
+            }
+        }
+
+        private byte[] ExtractChunkData(ChunkedVolume volume, int startX, int startY, int startZ, int width, int height, int depth)
+        {
+            try
+            {
+                byte[] chunkData = new byte[width * height * depth];
+
+                // Extract data using explicit 3D to 1D index calculation to ensure
+                // the layout matches what DirectX expects for a Texture3D
+                for (int z = 0; z < depth; z++)
+                {
+                    for (int y = 0; y < height; y++)
+                    {
+                        for (int x = 0; x < width; x++)
+                        {
+                            int vx = startX + x;
+                            int vy = startY + y;
+                            int vz = startZ + z;
+
+                            // Bounds check
+                            vx = Math.Min(vx, volW - 1);
+                            vy = Math.Min(vy, volH - 1);
+                            vz = Math.Min(vz, volD - 1);
+
+                            // This index calculation matches DirectX Texture3D layout
+                            int destIndex = z * (width * height) + y * width + x;
+
+                            // Get the voxel value from the chunked volume
+                            byte value = volume[vx, vy, vz];
+                            chunkData[destIndex] = value;
+                        }
+                    }
+                }
+
+                return chunkData;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ExtractChunkData] Error: {ex.Message}");
+                throw;
+            }
+        }
+
+
+        private void UnloadChunk(Vector3 chunkKey)
+        {
+            try
+            {
+                lock (chunkLock)
+                {
+                    if (loadedChunks.TryGetValue(chunkKey, out Texture3D texture))
+                    {
+                        if (loadedChunkSRVs.TryGetValue(chunkKey, out ShaderResourceView srv))
+                        {
+                            srv.Dispose();
+                            loadedChunkSRVs.Remove(chunkKey);
+                        }
+
+                        texture.Dispose();
+                        loadedChunks.Remove(chunkKey);
+
+                        Logger.Log($"[SharpDXVolumeRenderer] Unloaded chunk {chunkKey}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] Error unloading chunk {chunkKey}: {ex.Message}");
+            }
+        }
+
+        // ViewFrustum struct for visibility calculation
+        private struct ViewFrustum
+        {
+            public Vector3 Position;
+            public Vector3 Forward;
+            public Vector3 Up;
+            public Vector3 Right;
+            public float NearDist;
+            public float FarDist;
+            public float FOV;
+            public float AspectRatio;
+        }
+        private void RenderVolumeStreaming()
+        {
+            // Update which chunks are visible based on the current view
+            UpdateVisibleChunks();
+
+            // If no chunks are visible or loaded yet, render using LOD overview
+            if (visibleChunks.Count == 0 || loadedChunks.Count == 0)
+            {
+                // Fall back to LOD-based rendering
+                RenderVolume();
+                return;
+            }
+
+            try
+            {
+                // Reset any previous shader resources
+                ResetShaderResources();
+
+                // Set up standard rendering states
+                context.Rasterizer.State = debugMode ? wireframeRasterState : solidRasterState;
+                context.InputAssembler.InputLayout = inputLayout;
+                context.InputAssembler.PrimitiveTopology = PrimitiveTopology.TriangleList;
+                context.InputAssembler.SetVertexBuffers(0, new VertexBufferBinding(cubeVertexBuffer, Utilities.SizeOf<Vector3>(), 0));
+                context.InputAssembler.SetIndexBuffer(cubeIndexBuffer, Format.R32_UInt, 0);
+
+                // Set samplers
+                context.PixelShader.SetSampler(0, linearSampler);
+                context.PixelShader.SetSampler(1, pointSampler);
+
+                // Set blend state
+                context.OutputMerger.SetBlendState(alphaBlendState, new Color4(0, 0, 0, 0), 0xFFFFFFFF);
+
+                // Prepare resources array
+                ShaderResourceView[] resources = new ShaderResourceView[6];
+
+                // Fill the resources array with available resources
+                if (labelVisibilitySRV != null) resources[0] = labelVisibilitySRV;
+                if (labelOpacitySRV != null) resources[1] = labelOpacitySRV;
+
+                // Use LOD overview or streaming chunks
+                bool isMoving = isDragging || isPanning;
+
+                if (isMoving || loadedChunks.Count < visibleChunks.Count / 2)
+                {
+                    // During movement or if too few chunks are loaded, use the LOD overview
+                    if (lodVolumeSRVs[currentLodLevel] != null)
+                    {
+                        resources[2] = lodVolumeSRVs[currentLodLevel];
+                    }
+                    else if (volumeSRV != null)
+                    {
+                        resources[2] = volumeSRV;
+                    }
+                }
+                else
+                {
+                    // Use streaming chunks
+                    // Note: This is oversimplified - ideally we would need to modify the shader 
+                    // to handle multiple chunk textures together
+
+                    // For now, we'll just use one of the loaded chunks
+                    if (loadedChunks.Count > 0)
+                    {
+                        // Use a visible chunk
+                        var visibleLoadedChunk = loadedChunks.Keys.FirstOrDefault(chunk => visibleChunks.Contains(chunk));
+
+                        if (visibleLoadedChunk != default && loadedChunkSRVs.TryGetValue(visibleLoadedChunk, out ShaderResourceView srv))
+                        {
+                            resources[2] = srv;
+                        }
+                        else if (volumeSRV != null)
+                        {
+                            resources[2] = volumeSRV;
+                        }
+                    }
+                    else if (volumeSRV != null)
+                    {
+                        resources[2] = volumeSRV;
+                    }
+                }
+
+                if (labelSRV != null) resources[3] = labelSRV;
+                if (materialColorSRV != null) resources[4] = materialColorSRV;
+                if (colorMapSRV != null) resources[5] = colorMapSRV;
+
+                // Set all resources at once
+                context.PixelShader.SetShaderResources(0, resources);
+
+                // Set shaders
+                context.VertexShader.Set(volumeVertexShader);
+                context.PixelShader.Set(volumePixelShader);
+
+                // Update constant buffer for rendering
+                float currentStepSize = isMoving ? Math.Min(3.0f, stepSize * 2.0f) : stepSize;
+
+                // For LOD, adjust step size based on level
+                if (useLodSystem && currentLodLevel > 0 && isMoving)
+                {
+                    currentStepSize = lodStepSizes[currentLodLevel];
+                }
+
+                UpdateConstantBuffer(currentStepSize);
+                context.VertexShader.SetConstantBuffer(0, constantBuffer);
+                context.PixelShader.SetConstantBuffer(0, constantBuffer);
+
+                // Draw the cube
+                context.DrawIndexed(cubeIndexCount, 0, 0);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXVolumeRenderer] RenderVolumeStreaming error: " + ex.Message);
+                // For render failures, switch to wireframe mode
+                debugMode = true;
+            }
+        }
+        private void DisposeStreamingResources()
+        {
+            try
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Disposing streaming renderer resources");
+
+                // Clean up all the LOD textures except level 0 which might be shared
+                for (int i = 1; i < lodTextures.Length; i++)
+                {
+                    if (lodSRVs[i] != null)
+                    {
+                        // Don't need ref here as we're not nulling the array elements
+                        lodSRVs[i].Dispose();
+                        lodTextures[i].Dispose();
+
+                        // Now set to null
+                        lodSRVs[i] = null;
+                        lodTextures[i] = null;
+                    }
+                }
+
+                // Clean up loaded chunks if any
+                lock (chunkLock)
+                {
+                    // Method 1: Use the existing UnloadChunk method if available
+                    List<Vector3> chunkKeys = loadedChunks.Keys.ToList();
+                    foreach (Vector3 key in chunkKeys)
+                    {
+                        UnloadChunk(key);
+                    }
+
+                    // Alternative approach if UnloadChunk doesn't work properly:
+                    /*
+                    // Dispose all SRVs
+                    foreach (var srv in loadedChunkSRVs.Values.ToList())
+                    {
+                        srv.Dispose();
+                    }
+
+                    // Dispose all textures
+                    foreach (var texture in loadedChunks.Values.ToList())
+                    {
+                        texture.Dispose();
+                    }
+                    */
+
+                    loadedChunks.Clear();
+                    loadedChunkSRVs.Clear();
+                    chunkLoadQueue.Clear();
+                    visibleChunks.Clear();
+                }
+
+                Logger.Log("[SharpDXVolumeRenderer] Streaming resources disposed");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] Error disposing streaming resources: {ex.Message}");
+            }
+        }
+
+
+
         #endregion
     }
 }

@@ -6,6 +6,8 @@ using SharpDX; // for Vector3, etc.
 using CTSegmenter;
 using Point = System.Drawing.Point;
 using Color = System.Drawing.Color;
+using System.Collections.Generic;
+using System.IO;
 
 namespace CTSegmenter.SharpDXIntegration
 {
@@ -21,6 +23,60 @@ namespace CTSegmenter.SharpDXIntegration
         private DateTime lastRenderTime = DateTime.MinValue;
         private int renderFailCount = 0;
         private const int MAX_FAILURES = 3;
+
+        private bool measurementMode = false;
+        private List<MeasurementLine> measurements = new List<MeasurementLine>();
+        private bool isDrawingMeasurement = false;
+        private SharpDX.Vector3 measureStartPoint;
+        private SharpDX.Vector3 measureEndPoint;
+
+        //Slice controls
+        private bool showXSlice = false;
+        private bool showYSlice = false;
+        private bool showZSlice = false;
+
+        // Modified method to set individual slice visibility
+        public void SetSliceXEnabled(bool enabled)
+        {
+            showXSlice = enabled;
+            volumeRenderer.ShowXSlice = enabled;
+            volumeRenderer.NeedsRender = true;
+        }
+
+        public void SetSliceYEnabled(bool enabled)
+        {
+            showYSlice = enabled;
+            volumeRenderer.ShowYSlice = enabled;
+            volumeRenderer.NeedsRender = true;
+        }
+
+        public void SetSliceZEnabled(bool enabled)
+        {
+            showZSlice = enabled;
+            volumeRenderer.ShowZSlice = enabled;
+            volumeRenderer.NeedsRender = true;
+        }
+
+        // Method to get visibility state for UI sync
+        public bool GetSliceXEnabled() => showXSlice;
+        public bool GetSliceYEnabled() => showYSlice;
+        public bool GetSliceZEnabled() => showZSlice;
+
+        // Modified method to handle global slice toggle
+        public void SetSlicesEnabled(bool enabled)
+        {
+            if (volumeRenderer != null)
+            {
+                showXSlice = enabled;
+                showYSlice = enabled;
+                showZSlice = enabled;
+
+                volumeRenderer.ShowXSlice = enabled;
+                volumeRenderer.ShowYSlice = enabled;
+                volumeRenderer.ShowZSlice = enabled;
+                volumeRenderer.NeedsRender = true;
+            }
+        }
 
         public SharpDXViewerForm(MainForm main)
         {
@@ -280,12 +336,8 @@ namespace CTSegmenter.SharpDXIntegration
             volumeRenderer.NeedsRender = true;
         }
 
-        // Called by control panel for toggling slices
-        public void SetSlicesEnabled(bool enabled)
-        {
-            volumeRenderer.ShowOrthoslices = enabled;
-            volumeRenderer.NeedsRender = true;
-        }
+        
+        
 
         public void SetSliceIndices(int xSlice, int ySlice, int zSlice)
         {
@@ -426,18 +478,108 @@ namespace CTSegmenter.SharpDXIntegration
                 volumeRenderer.NeedsRender = true;
             }
         }
+        public bool ToggleMeasurementMode()
+        {
+            measurementMode = !measurementMode;
+            isDrawingMeasurement = false;
 
-        // Called by control panel for "Export Model" (OBJ or STL)
-        public async Task ExportModelAsync(bool exportLabels, bool exportGrayscaleSurface,
-                                           string filePath, float isoLevel)
+            // Propagate the measurement mode to the renderer
+            if (volumeRenderer != null)
+            {
+                volumeRenderer.SetMeasurementMode(measurementMode);
+
+                // Make sure the control panel is updated to reflect the measurement mode state
+                if (controlPanel != null)
+                {
+                    controlPanel.UpdateMeasurementUI(measurementMode);
+                }
+
+                Logger.Log($"[SharpDXViewerForm] Measurement mode {(measurementMode ? "enabled" : "disabled")}");
+            }
+
+            return measurementMode;
+        }
+
+        public void SetMeasurementsVisible(bool visible)
+        {
+            foreach (var measurement in measurements)
+            {
+                measurement.Visible = visible;
+            }
+            volumeRenderer.NeedsRender = true;
+        }
+
+        public void SetMeasurementVisibility(int index, bool visible)
+        {
+            if (index >= 0 && index < measurements.Count)
+            {
+                measurements[index].Visible = visible;
+                volumeRenderer.NeedsRender = true;
+            }
+        }
+
+        public void DeleteMeasurement(int index)
+        {
+            if (index >= 0 && index < measurements.Count)
+            {
+                measurements.RemoveAt(index);
+                volumeRenderer.NeedsRender = true;
+            }
+        }
+
+        public List<MeasurementLine> GetMeasurements()
+        {
+            if (volumeRenderer != null)
+            {
+                // Use the renderer's measurements list - it has the most up-to-date version
+                return volumeRenderer.measurements;
+            }
+            return measurements; // Fall back to form's copy if renderer is null
+        }
+
+        public void ExportMeasurementsToCSV(string filePath)
         {
             try
             {
-                Logger.Log("[SharpDXViewerForm] Exporting model...");
+                using (StreamWriter sw = new StreamWriter(filePath))
+                {
+                    // Write header
+                    sw.WriteLine("Label,Distance (voxels),Real Distance,Unit,Start X,Start Y,Start Z,End X,End Y,End Z,On Slice,Slice Type,Slice Position");
+
+                    // Write each measurement
+                    foreach (var m in measurements)
+                    {
+                        sw.WriteLine($"\"{m.Label}\",{m.Distance:F2},{m.RealDistance:F3},\"{m.Unit}\",{m.Start.X:F1},{m.Start.Y:F1},{m.Start.Z:F1},{m.End.X:F1},{m.End.Y:F1},{m.End.Z:F1},{m.IsOnSlice},{m.SliceType},{m.SlicePosition}");
+                    }
+                }
+
+                Logger.Log("[SharpDXViewerForm] Exported measurements to: " + filePath);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[SharpDXViewerForm] Failed to export measurements: " + ex.Message);
+                throw;
+            }
+        }
+        // Called by control panel for "Export Model" (OBJ or STL)
+        public async Task ExportModelAsync(bool exportLabels, bool exportGrayscaleSurface,
+                                   string filePath, float isoLevel, IProgress<int> progress = null)
+        {
+            try
+            {
+                Logger.Log("[SharpDXViewerForm] Starting model export...");
                 this.Enabled = false;
+
                 await Task.Run(() =>
                 {
-                    bool[] labelVisibility = volumeRenderer.GetLabelVisibilityArray(); // must expose this from renderer
+                    bool[] labelVisibility = volumeRenderer.GetLabelVisibilityArray();
+
+                    // Create export callback for progress updates
+                    Action<int> progressCallback = percent => {
+                        progress?.Report(percent);
+                        Logger.Log($"[SharpDXViewerForm] Export progress: {percent}%");
+                    };
+
                     VoxelMeshExporter.ExportVisibleVoxels(
                         filePath,
                         grayVol: mainForm.volumeData,
@@ -450,8 +592,10 @@ namespace CTSegmenter.SharpDXIntegration
                         sliceY: volumeRenderer.SliceY,
                         sliceZ: volumeRenderer.SliceZ,
                         showSlices: volumeRenderer.ShowOrthoslices
+                        
                     );
                 });
+
                 Logger.Log("[SharpDXViewerForm] Export done: " + filePath);
                 MessageBox.Show("Exported to: " + filePath);
             }
@@ -465,7 +609,161 @@ namespace CTSegmenter.SharpDXIntegration
                 this.Enabled = true;
             }
         }
+        public async Task ApplyDownsampling(int downsampleFactor, IProgress<int> progress = null)
+        {
+            if (volumeRenderer == null || mainForm == null)
+                return;
 
+            // Make sure the factor is valid
+            if (downsampleFactor <= 1)
+            {
+                Logger.Log("[SharpDXViewerForm] Invalid downsample factor");
+                return;
+            }
+
+            Logger.Log($"[SharpDXViewerForm] Starting {downsampleFactor}x downsampling");
+
+            try
+            {
+                // Dispose the current renderer to free up memory
+                volumeRenderer.Dispose();
+                volumeRenderer = null;
+
+                // Force garbage collection to free memory
+                GC.Collect();
+
+                await Task.Run(() => {
+                    // Report progress
+                    progress?.Report(10);
+
+                    // Create a downsampled version of the volume data
+                    Logger.Log("[SharpDXViewerForm] Creating downsampled volume...");
+
+                    ChunkedVolume originalVolume = mainForm.volumeData;
+                    if (originalVolume == null)
+                    {
+                        throw new InvalidOperationException("No volume data available to downsample");
+                    }
+
+                    int width = originalVolume.Width;
+                    int height = originalVolume.Height;
+                    int depth = originalVolume.Depth;
+
+                    // Calculate new dimensions
+                    int newWidth = Math.Max(1, width / downsampleFactor);
+                    int newHeight = Math.Max(1, height / downsampleFactor);
+                    int newDepth = Math.Max(1, depth / downsampleFactor);
+
+                    Logger.Log($"[SharpDXViewerForm] Original size: {width}x{height}x{depth}");
+                    Logger.Log($"[SharpDXViewerForm] New size: {newWidth}x{newHeight}x{newDepth}");
+
+                    // Create new volume
+                    ChunkedVolume downsampledVolume = new ChunkedVolume(newWidth, newHeight, newDepth);
+
+                    // Process the data in chunks to avoid memory overflow
+                    int chunkSize = 64; // Process 64³ chunks at a time
+                    int totalChunks = (int)Math.Ceiling((double)newDepth / chunkSize);
+                    int processedChunks = 0;
+
+                    // Downsample the volume data
+                    for (int z = 0; z < newDepth; z += chunkSize)
+                    {
+                        // Calculate progress
+                        processedChunks++;
+                        int progressValue = 10 + (int)(80.0 * processedChunks / totalChunks);
+                        progress?.Report(progressValue);
+
+                        int chunkDepth = Math.Min(chunkSize, newDepth - z);
+
+                        for (int y = 0; y < newHeight; y++)
+                        {
+                            for (int x = 0; x < newWidth; x++)
+                            {
+                                // For each voxel in the downsampled volume
+                                int srcX = x * downsampleFactor;
+                                int srcY = y * downsampleFactor;
+
+                                for (int zOffset = 0; zOffset < chunkDepth; zOffset++)
+                                {
+                                    int srcZ = (z + zOffset) * downsampleFactor;
+
+                                    // Get the value from the original volume
+                                    byte value = originalVolume[srcX, srcY, srcZ];
+
+                                    // Set the value in the downsampled volume
+                                    downsampledVolume[x, y, z + zOffset] = value;
+                                }
+                            }
+                        }
+                    }
+
+                    progress?.Report(90);
+
+                    // Replace the original volume with the downsampled one
+                    Logger.Log("[SharpDXViewerForm] Replacing volume data with downsampled version");
+                    mainForm.volumeData = downsampledVolume;
+
+                    // Update any dimensions that need updating in the main form
+                    //mainForm.UpdateVolumeInfo(downsampledVolume);
+
+                    progress?.Report(95);
+                });
+
+                // Create a new renderer with the downsampled data
+                Logger.Log("[SharpDXViewerForm] Creating new renderer with downsampled data");
+                volumeRenderer = new SharpDXVolumeRenderer(mainForm, renderPanel);
+                volumeRenderer.SetControlPanel(controlPanel);
+
+                // Force initial render
+                volumeRenderer.NeedsRender = true;
+                volumeRenderer.ForceInitialRender();
+
+                progress?.Report(100);
+                Logger.Log("[SharpDXViewerForm] Downsampling complete");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXViewerForm] Error applying downsampling: {ex.Message}");
+
+                // Try to recover
+                if (volumeRenderer == null)
+                {
+                    try
+                    {
+                        volumeRenderer = new SharpDXVolumeRenderer(mainForm, renderPanel);
+                        volumeRenderer.SetControlPanel(controlPanel);
+                    }
+                    catch
+                    {
+                        // Critical failure - cannot recover
+                        MessageBox.Show("Critical rendering error. Please restart the application.",
+                            "Critical Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+
+                throw;
+            }
+        }
+        public void SetStreamingRendererEnabled(bool enabled)
+        {
+            if (volumeRenderer != null)
+            {
+                volumeRenderer.UseStreamingRenderer = enabled;
+                volumeRenderer.NeedsRender = true;
+
+                if (enabled)
+                {
+                    MessageBox.Show(
+                        "Streaming renderer enabled. Volume chunks will load progressively." +
+                        "\n\nNote: The first view may be low-resolution until chunks load.",
+                        "Streaming Mode",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                }
+
+                Logger.Log($"[SharpDXViewerForm] Streaming renderer {(enabled ? "enabled" : "disabled")}");
+            }
+        }
         // Called by control panel for screenshot
         public void TakeScreenshot(string filePath)
         {

@@ -257,6 +257,8 @@
     <Compile Include="CTViewerControlPanel.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="MeasurementLine.cs" />
+    <Compile Include="MeasurementTextRenderer.cs" />
     <Compile Include="MinimalRenderer.cs" />
     <Compile Include="VolumeRenderer.cs" />
     <Compile Include="VolumeRendererSharpDX.cs" />

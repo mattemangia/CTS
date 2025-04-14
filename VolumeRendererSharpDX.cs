@@ -2286,36 +2286,56 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
             try
             {
-                // Apply the same downsampling logic as for the grayscale volume
-                int width = volume.Width;
-                int height = volume.Height;
-                int depth = volume.Depth;
-
-                // Check if dimensions are too large for a single texture
-                bool needsDownsampling = width > 2048 || height > 2048 || depth > 2048;
-
-                // Calculate approximate memory requirements
-                long volumeSizeInBytes = (long)width * height * depth * (format == Format.R32_Float ? 4 : 1);
-                bool exceedsMemoryLimit = volumeSizeInBytes > 2L * 1024L * 1024L * 1024L; // 2GB limit for label data
-
+                // Use the same dimensions as the grayscale volume texture, if available
+                int width, height, depth;
                 int downsampleFactor = 1;
 
-                if (needsDownsampling || exceedsMemoryLimit)
+                // If we have already created the grayscale texture, use its dimensions
+                if (volumeTexture != null)
                 {
-                    // Calculate appropriate downsampling factor
-                    while ((width / downsampleFactor > 1024 || height / downsampleFactor > 1024 ||
-                           depth / downsampleFactor > 1024) ||
-                           ((long)(width / downsampleFactor) * (height / downsampleFactor) *
-                           (depth / downsampleFactor) * (format == Format.R32_Float ? 4 : 1) > 1024L * 1024L * 1024L))
+                    width = volumeTexture.Description.Width;
+                    height = volumeTexture.Description.Height;
+                    depth = volumeTexture.Description.Depth;
+
+                    // Calculate downsample factor based on original dimensions
+                    int factorX = Math.Max(1, volume.Width / width);
+                    int factorY = Math.Max(1, volume.Height / height);
+                    int factorZ = Math.Max(1, volume.Depth / depth);
+                    downsampleFactor = Math.Max(Math.Max(factorX, factorY), factorZ);
+
+                    Logger.Log($"[SharpDXVolumeRenderer] Creating label texture with same dimensions as grayscale: {width}x{height}x{depth} (factor: {downsampleFactor})");
+                }
+                else
+                {
+                    // Fallback to original dimensions logic if volumeTexture doesn't exist yet
+                    width = volume.Width;
+                    height = volume.Height;
+                    depth = volume.Depth;
+
+                    // Check if dimensions are too large for a single texture
+                    bool needsDownsampling = width > 2048 || height > 2048 || depth > 2048;
+
+                    // Calculate approximate memory requirements
+                    long volumeSizeInBytes = (long)width * height * depth * (format == Format.R32_Float ? 4 : 1);
+                    bool exceedsMemoryLimit = volumeSizeInBytes > 2L * 1024L * 1024L * 1024L; // 2GB limit for label data
+
+                    if (needsDownsampling || exceedsMemoryLimit)
                     {
-                        downsampleFactor *= 2;
+                        // Calculate appropriate downsampling factor
+                        while ((width / downsampleFactor > 1024 || height / downsampleFactor > 1024 ||
+                               depth / downsampleFactor > 1024) ||
+                               ((long)(width / downsampleFactor) * (height / downsampleFactor) *
+                               (depth / downsampleFactor) * (format == Format.R32_Float ? 4 : 1) > 1024L * 1024L * 1024L))
+                        {
+                            downsampleFactor *= 2;
+                        }
+
+                        Logger.Log($"[SharpDXVolumeRenderer] Large label volume detected ({width}x{height}x{depth}), creating downsampled version (factor: {downsampleFactor})");
+
+                        width /= downsampleFactor;
+                        height /= downsampleFactor;
+                        depth /= downsampleFactor;
                     }
-
-                    Logger.Log($"[SharpDXVolumeRenderer] Large label volume detected ({width}x{height}x{depth}), creating downsampled version (factor: {downsampleFactor})");
-
-                    width /= downsampleFactor;
-                    height /= downsampleFactor;
-                    depth /= downsampleFactor;
                 }
 
                 // Create the 3D texture with potentially reduced size

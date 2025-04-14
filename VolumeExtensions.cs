@@ -26,7 +26,73 @@ namespace CTSegmenter
                 buffer[x] = vol[x, rowIndex, sliceIndex];
             }
         }
+        public static byte GetVoxel(this ChunkedVolume volume, int x, int y, int z)
+        {
+            return volume[x, y, z];
+        }
 
+        public static void SetVoxel(this ChunkedVolume volume, int x, int y, int z, byte value)
+        {
+            volume[x, y, z] = value;
+        }
+
+        // Get methods for ChunkedLabelVolume
+        public static byte GetVoxel(this ChunkedLabelVolume volume, int x, int y, int z)
+        {
+            return volume[x, y, z];
+        }
+
+        public static void SetVoxel(this ChunkedLabelVolume volume, int x, int y, int z, byte value)
+        {
+            volume[x, y, z] = value;
+        }
+        public static byte[] GetSliceXY(this ChunkedVolume volume, int z)
+        {
+            byte[] slice = new byte[volume.Width * volume.Height];
+            int index = 0;
+
+            for (int y = 0; y < volume.Height; y++)
+            {
+                for (int x = 0; x < volume.Width; x++)
+                {
+                    slice[index++] = volume[x, y, z];
+                }
+            }
+
+            return slice;
+        }
+
+        public static byte[] GetSliceXZ(this ChunkedVolume volume, int y)
+        {
+            byte[] slice = new byte[volume.Width * volume.Depth];
+            int index = 0;
+
+            for (int z = 0; z < volume.Depth; z++)
+            {
+                for (int x = 0; x < volume.Width; x++)
+                {
+                    slice[index++] = volume[x, y, z];
+                }
+            }
+
+            return slice;
+        }
+
+        public static byte[] GetSliceYZ(this ChunkedVolume volume, int x)
+        {
+            byte[] slice = new byte[volume.Height * volume.Depth];
+            int index = 0;
+
+            for (int z = 0; z < volume.Depth; z++)
+            {
+                for (int y = 0; y < volume.Height; y++)
+                {
+                    slice[index++] = volume[x, y, z];
+                }
+            }
+
+            return slice;
+        }
         /// <summary>
         /// Reads a horizontal line in the XZ plane for Y=yFixed at Z=z. 
         /// Fills 'buffer[x]' for x in [0..Width-1].

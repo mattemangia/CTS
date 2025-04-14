@@ -368,6 +368,32 @@ namespace CTSegmenter
                 FilterManager filterManager = new FilterManager(mainForm);
                 filterManager.Show();
             };
+            ToolStripMenuItem transformDatasetMenuItem = new ToolStripMenuItem("Transform Dataset");
+            transformDatasetMenuItem.Click += (s, e) =>
+            {
+                if (mainForm.volumeData == null)
+                {
+                    MessageBox.Show("Please load a dataset first.", "No Data",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                try
+                {
+                    using (TransformDatasetForm transformForm = new TransformDatasetForm(mainForm))
+                    {
+                        transformForm.ShowDialog();
+                    }
+
+                    Logger.Log("[ControlForm] Transform Dataset dialog closed");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[ControlForm] Error opening Transform Dataset form: {ex.Message}");
+                    MessageBox.Show($"Error opening Transform Dataset form: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            };
+            toolsMenu.DropDownItems.Add(transformDatasetMenuItem);
             toolsMenu.DropDownItems.Add(filterManagerMenuItem);
             toolsMenu.DropDownItems.Add(segmentAnythingToolMenuItem);
             toolsMenu.DropDownItems.Add(textureClassifierMenuItem);

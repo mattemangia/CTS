@@ -4169,7 +4169,35 @@ public Bitmap GetSliceBitmap(int z)
 
             Logger.Log("[MainForm] Volume data successfully updated");
         }
+        public void OnDatasetChanged()
+        {
+            // Update UI to reflect the new dataset dimensions
+            width = volumeData.Width;
+            height = volumeData.Height;
+            depth = volumeData.Depth;
 
+            // Make sure the current slice is valid for the new volume
+            CurrentSlice = Math.Min(CurrentSlice, depth - 1);
+
+            // Update XZ and YZ slice positions
+            XzSliceY = Math.Min(XzSliceY, height - 1);
+            YzSliceX = Math.Min(YzSliceX, width - 1);
+
+            // Clear the slice cache to ensure fresh rendering
+            lock (sliceCacheLock)
+            {
+                sliceCache.Clear();
+            }
+
+            // Update the window title with new dimensions
+            this.Text = $"CT Segmentation Suite - {width}x{height}x{depth} (Pixel Size: {pixelSize:0.000000} m)";
+
+            // Refresh all the views
+            RenderViews();
+            _ = RenderOrthoViewsAsync();
+
+            Logger.Log($"[MainForm] Dataset updated: {width}x{height}x{depth}, PixelSize: {pixelSize}");
+        }
 
 
 

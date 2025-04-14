@@ -88,6 +88,7 @@ namespace CTSegmenter
         private ToolStripMenuItem about;
         private bool thresholdMaskEnabled = true;
         private bool isUpdatingHistogram = false;
+        private ToolStripMenuItem simulationMenu;
 
         //Annotations for SAM2
         AnnotationManager sharedAnnotationManager = new AnnotationManager();
@@ -414,7 +415,8 @@ namespace CTSegmenter
             AddLabelOperationsMenu();
 
             helpMenu.DropDownItems.AddRange(new ToolStripItem[] { dbgConsole, about });
-
+            AddSimulationMenu();
+            menuStrip.Items.Add(simulationMenu);
             menuStrip.Items.Add(helpMenu);
             menuStrip.Items.Insert(menuStrip.Items.IndexOf(helpMenu), toolsMenu);
             menuStrip.Dock = DockStyle.Top;
@@ -1349,7 +1351,7 @@ namespace CTSegmenter
         private void AddBrightnessContrastMenu()
         {
             // Create menu item for Brightness/Contrast tool
-            ToolStripMenuItem brightnessContrastMenuItem = new ToolStripMenuItem("Brightness/Contrast");
+            ToolStripMenuItem brightnessContrastMenuItem = new ToolStripMenuItem("Brightness / Contrast");
             brightnessContrastMenuItem.Click += (s, e) =>
             {
                 if (mainForm.volumeData == null)
@@ -1403,7 +1405,29 @@ namespace CTSegmenter
             MaterialStatisticsForm statsForm = new MaterialStatisticsForm(mainForm);
             statsForm.Show();
         }
+        private void AddPoreNetworkModelingMenu()
+        {
+            // Create menu item for Pore Network Modeling
+            ToolStripMenuItem poreNetworkMenuItem = new ToolStripMenuItem("Pore Network Modeling");
 
+            // Set click event handler
+            poreNetworkMenuItem.Click += (s, e) =>
+            {
+                if (mainForm.volumeData == null || mainForm.volumeLabels == null)
+                {
+                    MessageBox.Show("Please load a dataset first.", "No Data",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                // Create and show the pore network modeling form
+                PoreNetworkModelingForm poreNetworkForm = new PoreNetworkModelingForm(mainForm);
+                poreNetworkForm.Show();
+            };
+
+            // Add to Tools menu
+            toolsMenu.DropDownItems.Add(poreNetworkMenuItem);
+        }
         public void RefreshMaterialList()
         {
             lstMaterials.Items.Clear();
@@ -1416,6 +1440,34 @@ namespace CTSegmenter
                 lstMaterials.SelectedIndex = 1;
             else if (lstMaterials.Items.Count > 0)
                 lstMaterials.SelectedIndex = 0;
+        }
+        private void AddSimulationMenu()
+        {
+            // Create the Simulation menu
+            simulationMenu = new ToolStripMenuItem("Simulation");
+
+            // Create Pore Network Modeling menu item
+            ToolStripMenuItem poreNetworkMenuItem = new ToolStripMenuItem("Pore Network Modeling");
+
+            // Set click event handler
+            poreNetworkMenuItem.Click += (s, e) =>
+            {
+                if (mainForm.volumeData == null || mainForm.volumeLabels == null)
+                {
+                    MessageBox.Show("Please load a dataset first.", "No Data",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                // Create and show the pore network modeling form
+                PoreNetworkModelingForm poreNetworkForm = new PoreNetworkModelingForm(mainForm);
+                poreNetworkForm.Show();
+            };
+
+            // Add to Simulation menu
+            simulationMenu.DropDownItems.Add(poreNetworkMenuItem);
+
+            // Don't insert into menuStrip here - we'll do that in InitializeComponent
         }
     }
 }

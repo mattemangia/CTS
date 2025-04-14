@@ -306,6 +306,7 @@ namespace CTSegmenter
             {
                 panMenuItem, eraserMenuItem, brushMenuItem, thresholdingMenuItem
             });
+            AddStatisticsMenu();
             ToolStripSeparator toolsSeparator = new ToolStripSeparator();
             toolsMenu.DropDownItems.Add(toolsSeparator);
             AddBrightnessContrastMenu();
@@ -1341,7 +1342,41 @@ namespace CTSegmenter
             toolsMenu.DropDownItems.Add(brightnessContrastMenuItem);
         }
 
+        /// <summary>
+        /// Adds the Statistics menu to the Tools menu
+        /// </summary>
+        private void AddStatisticsMenu()
+        {
+            // Create Statistics submenu
+            ToolStripMenuItem statisticsMenu = new ToolStripMenuItem("Statistics");
 
+            // Create Material Statistics menu item
+            ToolStripMenuItem materialStatisticsMenuItem = new ToolStripMenuItem("Material Statistics");
+            materialStatisticsMenuItem.Click += (s, e) => OpenMaterialStatistics();
+
+            // Add menu item to submenu
+            statisticsMenu.DropDownItems.Add(materialStatisticsMenuItem);
+
+            // Add submenu to Tools menu
+            toolsMenu.DropDownItems.Add(statisticsMenu);
+        }
+
+        /// <summary>
+        /// Opens the Material Statistics form
+        /// </summary>
+        private void OpenMaterialStatistics()
+        {
+            if (mainForm.volumeData == null || mainForm.volumeLabels == null)
+            {
+                MessageBox.Show("Please load a dataset first.", "No Data",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // Create and show the Material Statistics form
+            MaterialStatisticsForm statsForm = new MaterialStatisticsForm(mainForm);
+            statsForm.Show();
+        }
 
         public void RefreshMaterialList()
         {

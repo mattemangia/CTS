@@ -11,6 +11,16 @@ namespace CTSegmenter.SharpDXIntegration
         private SharpDXViewerForm viewerForm;
         private MainForm mainForm;
         private SharpDXVolumeRenderer volumeRenderer;
+        private Timer thresholdUpdateTimer;
+        private Timer opacityUpdateTimer;
+        private byte pendingMaterialId;
+        private float pendingOpacity;
+        private bool opacityUpdatePending = false;
+        private int pendingMinThreshold;
+        private int pendingMaxThreshold;
+        private int pendingQualityIndex;
+        private bool thresholdUpdatePending = false;
+        private bool isThresholdUpdating = false;
 
         // UI elements
         private TrackBar trkMinThreshold;
@@ -75,6 +85,11 @@ namespace CTSegmenter.SharpDXIntegration
             volumeRenderer = renderer;
 
             InitializeComponent();
+
+            // Initialize debouncing timers
+            InitializeOpacityTimer();
+            InitializeThresholdTimer();
+
             InitializeRenderingTab();
             InitializeMaterialsTab();
             InitializeSlicesTab();
@@ -719,15 +734,20 @@ namespace CTSegmenter.SharpDXIntegration
             tabRendering.Controls.Add(panel);
         }
 
-        private async void OnThresholdChanged()
+        private void OnThresholdChanged()
         {
-            lblStatus.Text = "Updating...";
-            // Just queue up an async call to re-render with new thresholds
-            await viewerForm.ApplyThresholdAndRender(
-                trkMinThreshold.Value,
-                trkMaxThreshold.Value,
-                cmbQuality.SelectedIndex);
-            lblStatus.Text = "Ready.";
+            // Store pending threshold values
+            pendingMinThreshold = trkMinThreshold.Value;
+            pendingMaxThreshold = trkMaxThreshold.Value;
+            pendingQualityIndex = cmbQuality.SelectedIndex;
+            thresholdUpdatePending = true;
+
+            // Update status immediately to show feedback
+            lblStatus.Text = "Waiting to update...";
+
+            // Restart the timer to delay the update
+            thresholdUpdateTimer.Stop();
+            thresholdUpdateTimer.Start();
         }
 
         private void InitializeMaterialsTab()
@@ -841,7 +861,15 @@ namespace CTSegmenter.SharpDXIntegration
 
                 Material mat = (Material)lstMaterials.Items[idx];
                 float alpha = trkOpacity.Value / 100f;
-                viewerForm.SetMaterialOpacity(mat.ID, alpha);
+
+                // Store the pending update values
+                pendingMaterialId = mat.ID;
+                pendingOpacity = alpha;
+                opacityUpdatePending = true;
+
+                // Restart the timer to delay the update
+                opacityUpdateTimer.Stop();
+                opacityUpdateTimer.Start();
             };
             panel.Controls.Add(trkOpacity);
 
@@ -1619,7 +1647,39 @@ namespace CTSegmenter.SharpDXIntegration
                 Logger.Log($"[SharpDXControlPanel] Error updating measurement UI: {ex.Message}");
             }
         }
+        private void InitializeThresholdTimer()
+        {
+            thresholdUpdateTimer = new Timer();
+            thresholdUpdateTimer.Interval = 150; // Update threshold every 150ms during slider drag
+            thresholdUpdateTimer.Tick += async (s, e) => {
+                if (thresholdUpdatePending && !isThresholdUpdating)
+                {
+                    try
+                    {
+                        isThresholdUpdating = true;
+                        lblStatus.Text = "Updating...";
 
+                        await viewerForm.ApplyThresholdAndRender(
+                            pendingMinThreshold,
+                            pendingMaxThreshold,
+                            pendingQualityIndex);
+
+                        lblStatus.Text = "Ready.";
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[SharpDXControlPanel] Error updating threshold: {ex.Message}");
+                        lblStatus.Text = "Update error. Try again.";
+                    }
+                    finally
+                    {
+                        isThresholdUpdating = false;
+                        thresholdUpdatePending = false;
+                        thresholdUpdateTimer.Stop();
+                    }
+                }
+            };
+        }
         public void RefreshMeasurementsList()
         {
             try
@@ -1687,7 +1747,26 @@ namespace CTSegmenter.SharpDXIntegration
                 return $"{meters * 1e6:F3} μm";
             return $"{meters * 1e9:F3} nm";
         }
-
+        private void InitializeOpacityTimer()
+        {
+            opacityUpdateTimer = new Timer();
+            opacityUpdateTimer.Interval = 100; // Update every 100ms during slider drag
+            opacityUpdateTimer.Tick += (s, e) => {
+                if (opacityUpdatePending)
+                {
+                    try
+                    {
+                        viewerForm.SetMaterialOpacity(pendingMaterialId, pendingOpacity);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[SharpDXControlPanel] Error updating opacity: {ex.Message}");
+                    }
+                    opacityUpdatePending = false;
+                }
+                opacityUpdateTimer.Stop();
+            };
+        }
         private void UpdateSlices()
         {
             viewerForm.SetSliceIndices(trkXSlice.Value, trkYSlice.Value, trkZSlice.Value);

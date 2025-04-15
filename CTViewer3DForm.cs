@@ -308,27 +308,36 @@ namespace CTSegmenter.SharpDXIntegration
         {
             if (volumeRenderer == null) return;
 
-            Logger.Log("[SharpDXViewerForm] Starting threshold update...");
-            volumeRenderer.MinThreshold = minThreshold;
-            volumeRenderer.MaxThreshold = maxThreshold;
-
-            // Example approach for LOD or 'quality' slider:
-            // Let's interpret qualityLevel=0 => stepSize=1.5f, qualityLevel=1 => stepSize=1.0f, etc.
-            // Tweak as desired
-            float stepSize = 0.5f;
-            switch (qualityLevel)
+            try
             {
-                case 0: stepSize = 1.5f; break;
-                case 1: stepSize = 1.0f; break;
-                case 2: stepSize = 0.5f; break;
+                // Update the renderer properties
+                volumeRenderer.MinThreshold = minThreshold;
+                volumeRenderer.MaxThreshold = maxThreshold;
+
+                // Set step size based on quality level
+                float stepSize = 0.5f;
+                switch (qualityLevel)
+                {
+                    case 0: stepSize = 1.5f; break;
+                    case 1: stepSize = 1.0f; break;
+                    case 2: stepSize = 0.5f; break;
+                }
+                volumeRenderer.SetRaymarchStepSize(stepSize);
+
+             
+                volumeRenderer.NeedsRender = true;
+
+                // Allow the render timer to handle the actual rendering
+                // This ensures all DirectX calls happen on the UI thread
+                // Just wait a bit to ensure the render happens
+                await Task.Delay(50);
             }
-            volumeRenderer.SetRaymarchStepSize(stepSize);
-
-            // Force a redraw
-            await Task.Run(() => { volumeRenderer.Render(); });
-            Logger.Log("[SharpDXViewerForm] Threshold update complete.");
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXViewerForm] Error applying threshold: {ex.Message}");
+                throw;
+            }
         }
-
         // Called by control panel for show/hide grayscale
         public void SetGrayscaleVisible(bool isVisible)
         {

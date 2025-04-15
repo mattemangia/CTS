@@ -24,6 +24,7 @@ namespace CTSegmenter
     {
         #region Fields
         private bool debugMode = false;
+        private readonly object textureLock = new object();
         private MainForm mainForm;
         private Panel renderPanel;
         private SharpDXControlPanel controlPanel;
@@ -2504,12 +2505,12 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
         #endregion
 
         #region Rendering
+
         public void Render()
         {
-            if (device == null || swapChain == null || renderPanel == null)
+            if (device == null || swapChain == null || renderPanel == null || isRendering)
             {
-                Logger.Log("[SharpDXVolumeRenderer] Cannot render: Device, SwapChain, or Panel is null");
-                return;
+                return; // Skip if already rendering or resources are null
             }
 
             // Check if the panel is minimized or has zero dimensions
@@ -2520,6 +2521,8 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
             try
             {
+                isRendering = true;
+
                 // Ensure valid viewport dimensions
                 int width = Math.Max(1, renderPanel.ClientSize.Width);
                 int height = Math.Max(1, renderPanel.ClientSize.Height);
@@ -2601,47 +2604,14 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     scaleBarPictureBox.Visible = true;
                 }
 
-                // Present the scene
+                // Present the scene with better error handling
                 try
                 {
                     swapChain.Present(isMoving ? 0 : 1, PresentFlags.None);
                 }
                 catch (SharpDXException ex)
                 {
-                    // Handle device errors as before...
-                    if (ex.ResultCode.Code == SharpDX.DXGI.ResultCode.DeviceRemoved.Result.Code)
-                    {
-                        var reason = device.DeviceRemovedReason;
-                        Logger.Log($"[SharpDXVolumeRenderer] Device Removed Error: {reason}");
-                        try
-                        {
-                            RecreateDevice();
-                            renderFailCount = 0;
-                        }
-                        catch (Exception recEx)
-                        {
-                            Logger.Log($"[SharpDXVolumeRenderer] Failed to recover from device removed: {recEx.Message}");
-                            throw;
-                        }
-                    }
-                    else if (ex.ResultCode.Code == SharpDX.DXGI.ResultCode.DeviceReset.Result.Code)
-                    {
-                        Logger.Log("[SharpDXVolumeRenderer] Device Reset detected, recreating device");
-                        try
-                        {
-                            RecreateDevice();
-                        }
-                        catch (Exception recEx)
-                        {
-                            Logger.Log($"[SharpDXVolumeRenderer] Failed to recover from device reset: {recEx.Message}");
-                            throw;
-                        }
-                    }
-                    else
-                    {
-                        Logger.Log("[SharpDXVolumeRenderer] Present error: " + ex.Message);
-                        throw;
-                    }
+                    HandleRenderException(ex);
                 }
 
                 // Reset the needs render flag for infrequent renders when nothing changes
@@ -2650,22 +2620,15 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     // Only clear the flag if we're not in an interactive state
                     NeedsRender = false;
                 }
-                else
-                {
-                    // Always need to render during movement
-                    NeedsRender = true;
-                }
-
-                // Log occasionally
-                if (frameCount++ % 300 == 0)
-                {
-                    Logger.Log("[SharpDXVolumeRenderer] Frame rendered");
-                }
             }
             catch (Exception ex)
             {
-                Logger.Log("[SharpDXVolumeRenderer] Render error: " + ex.Message + "\n" + ex.StackTrace);
-                throw;
+                Logger.Log("[SharpDXVolumeRenderer] Render error: " + ex.Message);
+                // Don't rethrow - let the render loop continue
+            }
+            finally
+            {
+                isRendering = false;
             }
         }
 
@@ -3131,51 +3094,74 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     return;
                 }
 
-                // Update visibility texture
-                DataStream visibilityStream;
-                context.MapSubresource(
-                    labelVisibilityTexture,
-                    0,
-                    MapMode.WriteDiscard,
-                    SharpDX.Direct3D11.MapFlags.None,
-                    out visibilityStream);
-
-                for (int i = 0; i < MAX_LABELS; i++)
+                lock (textureLock)
                 {
-                    float visValue = labelVisible[i] ? 1.0f : 0.0f;
-                    visibilityStream.Write(visValue);
-
-                    // Debug output for troubleshooting
-                    if (i < 10) // Only log the first few to avoid spam
+                    // Update visibility texture
+                    DataStream visibilityStream = null;
+                    try
                     {
-                        Logger.Log($"[SharpDXVolumeRenderer] Material {i} visibility: {(labelVisible[i] ? "visible" : "hidden")}");
+                        context.MapSubresource(
+                            labelVisibilityTexture,
+                            0,
+                            MapMode.WriteDiscard,
+                            SharpDX.Direct3D11.MapFlags.None,
+                            out visibilityStream);
+
+                        for (int i = 0; i < MAX_LABELS; i++)
+                        {
+                            float visValue = labelVisible[i] ? 1.0f : 0.0f;
+                            visibilityStream.Write(visValue);
+                        }
+
+                        context.UnmapSubresource(labelVisibilityTexture, 0);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log("[SharpDXVolumeRenderer] Error updating visibility texture: " + ex.Message);
+                        throw;
+                    }
+                    finally
+                    {
+                        if (visibilityStream != null)
+                        {
+                            visibilityStream.Dispose();
+                        }
+                    }
+
+                    // Update opacity texture
+                    DataStream opacityStream = null;
+                    try
+                    {
+                        context.MapSubresource(
+                            labelOpacityTexture,
+                            0,
+                            MapMode.WriteDiscard,
+                            SharpDX.Direct3D11.MapFlags.None,
+                            out opacityStream);
+
+                        for (int i = 0; i < MAX_LABELS; i++)
+                        {
+                            opacityStream.Write(labelOpacity[i]);
+                        }
+
+                        context.UnmapSubresource(labelOpacityTexture, 0);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log("[SharpDXVolumeRenderer] Error updating opacity texture: " + ex.Message);
+                        throw;
+                    }
+                    finally
+                    {
+                        if (opacityStream != null)
+                        {
+                            opacityStream.Dispose();
+                        }
                     }
                 }
 
-                context.UnmapSubresource(labelVisibilityTexture, 0);
-                visibilityStream.Dispose();
-
-                // Update opacity texture
-                DataStream opacityStream;
-                context.MapSubresource(
-                    labelOpacityTexture,
-                    0,
-                    MapMode.WriteDiscard,
-                    SharpDX.Direct3D11.MapFlags.None,
-                    out opacityStream);
-
-                for (int i = 0; i < MAX_LABELS; i++)
-                {
-                    opacityStream.Write(labelOpacity[i]);
-                }
-
-                context.UnmapSubresource(labelOpacityTexture, 0);
-                opacityStream.Dispose();
-
                 // Force a render after updating textures
                 NeedsRender = true;
-
-                Logger.Log("[SharpDXVolumeRenderer] Label textures updated successfully");
             }
             catch (Exception ex)
             {
@@ -3265,16 +3251,27 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             if (materialId < MAX_LABELS)
             {
                 opacity = Math.Max(0.0f, Math.Min(1.0f, opacity));
-                Logger.Log($"[SharpDXVolumeRenderer] Setting material {materialId} opacity to {opacity:F2}");
 
-                // Update the opacity state
-                labelOpacity[materialId] = opacity;
+                // Only update if the value has changed significantly
+                if (Math.Abs(labelOpacity[materialId] - opacity) > 0.001f)
+                {
+                    // Update the opacity state
+                    labelOpacity[materialId] = opacity;
 
-                // Make sure the visibility textures are updated immediately
-                UpdateLabelTextures();
+                    try
+                    {
+                        // Make sure the visibility textures are updated immediately
+                        UpdateLabelTextures();
 
-                // Force a re-render
-                NeedsRender = true;
+                        // Force a re-render
+                        NeedsRender = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[SharpDXVolumeRenderer] Error setting material opacity: {ex.Message}");
+                        // Don't rethrow - we want the UI to remain responsive even if an update fails
+                    }
+                }
             }
         }
 
@@ -5789,6 +5786,32 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 // If we couldn't create any LOD textures, disable streaming mode
                 Logger.Log("[CreateStreamingLODTexturesAsync] Failed to create any LOD textures");
                 throw new InvalidOperationException("Failed to create any LOD textures for streaming");
+            }
+        }
+        private void HandleRenderException(SharpDXException ex)
+        {
+            try
+            {
+                if (ex.ResultCode.Code == SharpDX.DXGI.ResultCode.DeviceRemoved.Result.Code)
+                {
+                    var reason = device.DeviceRemovedReason;
+                    Logger.Log($"[SharpDXVolumeRenderer] Device Removed Error: {reason}");
+                    RecreateDevice();
+                }
+                else if (ex.ResultCode.Code == SharpDX.DXGI.ResultCode.DeviceReset.Result.Code)
+                {
+                    Logger.Log("[SharpDXVolumeRenderer] Device Reset detected, recreating device");
+                    RecreateDevice();
+                }
+                else
+                {
+                    Logger.Log("[SharpDXVolumeRenderer] Present error: " + ex.Message);
+                }
+            }
+            catch (Exception recEx)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] Failed to recover from device error: {recEx.Message}");
+                // We tried our best to recover, but failed. Let the render loop continue anyway.
             }
         }
 

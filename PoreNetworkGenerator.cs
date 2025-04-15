@@ -86,7 +86,7 @@ namespace CTSegmenter
                     double radius = Math.Pow(3 * volume / (4 * Math.PI), 1.0 / 3.0); // m
 
                     // Use the CPU method for surface area for consistency
-                    double surfaceArea = CalculateSurfaceArea(particle, separationResult.LabelVolume,pixelSize);
+                    double surfaceArea = CalculateSurfaceArea(particle, separationResult.LabelVolume, pixelSize);
 
                     Pore pore = new Pore
                     {

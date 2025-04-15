@@ -16,6 +16,17 @@ namespace CTSegmenter
         private MainForm mainForm;
         private Material selectedMaterial;
         private PoreNetworkModel networkModel = new PoreNetworkModel();
+        private bool viewerMode = false; // New flag to track viewer mode
+
+        // Permeability Simulation
+        private PermeabilitySimulationResult permeabilityResult;
+        private TabPage permeabilityTab;
+        private Button simulateButton;
+        private PictureBox permeabilityPictureBox;
+        private Button savePermeabilityButton;
+        private Button loadPermeabilityButton;
+        private Button exportPermeabilityButton;
+        private Button screenshotPermeabilityButton;
 
         // UI Elements
         private SplitContainer mainSplitContainer;
@@ -34,6 +45,7 @@ namespace CTSegmenter
         private Label statusLabel;
         private Panel visualizationPanel;
         private PictureBox networkPictureBox;
+        private TabControl mainTabControl;
 
         // 3d rotation
         private float rotationX = 30.0f;
@@ -42,6 +54,9 @@ namespace CTSegmenter
         private float viewScale = 1.0f;
         private Point lastMousePosition;
         private bool isDragging = false;
+        private bool isPanning = false;
+        private float panOffsetX = 0.0f;
+        private float panOffsetY = 0.0f;
 
         // Processing data
         private CancellationTokenSource cts;
@@ -49,12 +64,48 @@ namespace CTSegmenter
         private float previewZoom = 1.0f;
         private int currentSlice = 0;
 
+        /// <summary>
+        /// Original constructor for use with an active dataset
+        /// </summary>
         public PoreNetworkModelingForm(MainForm mainForm)
         {
             this.mainForm = mainForm;
+            this.viewerMode = false;
             InitializeComponent();
             PopulateMaterialComboBox();
             EnsureDataGridViewHeadersVisible();
+        }
+
+        /// <summary>
+        /// New constructor for loading a saved pore network model file (viewer mode)
+        /// </summary>
+        public PoreNetworkModelingForm(MainForm mainForm, string filePath)
+        {
+            this.mainForm = mainForm;
+            this.viewerMode = true;
+            InitializeComponent();
+            EnsureDataGridViewHeadersVisible();
+
+            // Load the network model from the file
+            try
+            {
+                LoadNetwork(filePath);
+
+                // Update UI to reflect viewer mode
+                UpdateUIForViewerMode();
+
+                // Set the window title to include the filename
+                this.Text = $"Pore Network Modeling - {Path.GetFileName(filePath)} [Viewer Mode]";
+
+                // Update status
+                statusLabel.Text = $"Loaded network with {networkModel.Pores.Count} pores and {networkModel.Throats.Count} throats";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading pore network model: {ex.Message}",
+                    "Loading Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Logger.Log($"[PoreNetworkModelingForm] Error loading model: {ex.Message}\n{ex.StackTrace}");
+            }
         }
 
         private void InitializeComponent()
@@ -62,27 +113,28 @@ namespace CTSegmenter
             // Form setup with modern style
             this.Text = "Pore Network Modeling";
             this.Size = new Size(1280, 900);
-            this.MinimumSize = new Size(1000, 700);
+            this.MinimumSize = new Size(1280, 700);  // Consistent minimum width
             this.BackColor = Color.FromArgb(240, 240, 240);
             this.Font = new Font("Segoe UI", 9F);
 
             // =====================
-            // TOP RIBBON PANEL
+            // TOP RIBBON PANEL - SIMPLIFIED LAYOUT WITH FEWER, WIDER CONTROLS
             // =====================
             Panel ribbonPanel = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 110,
+                Height = 130,  // Increased height
                 BackColor = Color.FromArgb(230, 230, 230),
                 Padding = new Padding(5),
                 BorderStyle = BorderStyle.FixedSingle
             };
 
+            // FIRST ROW OF CONTROLS - Major functional groups
             // Material Selection Group
             GroupBox materialGroup = new GroupBox
             {
                 Text = "Material",
-                Location = new Point(10, 5),
+                Location = new Point(10, 10),
                 Size = new Size(180, 90),
                 BackColor = Color.Transparent
             };
@@ -107,7 +159,7 @@ namespace CTSegmenter
                 if (materialComboBox.SelectedItem is Material material)
                 {
                     selectedMaterial = material;
-                    UpdatePreviewImage();  // Update the preview when material changes
+                    UpdatePreviewImage();
                 }
             };
             materialGroup.Controls.Add(materialComboBox);
@@ -117,7 +169,7 @@ namespace CTSegmenter
             GroupBox processGroup = new GroupBox
             {
                 Text = "Process",
-                Location = new Point(200, 5),
+                Location = new Point(200, 10),
                 Size = new Size(310, 90),
                 BackColor = Color.Transparent
             };
@@ -160,7 +212,7 @@ namespace CTSegmenter
             GroupBox dataGroup = new GroupBox
             {
                 Text = "Data",
-                Location = new Point(520, 5),
+                Location = new Point(520, 10),
                 Size = new Size(210, 90),
                 BackColor = Color.Transparent
             };
@@ -195,7 +247,7 @@ namespace CTSegmenter
                 Text = "Export Data",
                 Location = new Point(15, 60),
                 Width = 180,
-                Height = 30,
+                Height = 25,
                 FlatStyle = FlatStyle.Flat,
                 BackColor = Color.FromArgb(225, 225, 225),
                 Enabled = false
@@ -204,107 +256,124 @@ namespace CTSegmenter
             dataGroup.Controls.Add(exportButton);
             ribbonPanel.Controls.Add(dataGroup);
 
-            // Settings Group - EXPANDED WIDTH
-            GroupBox settingsGroup = new GroupBox
+            // Permeability Group - Repositioned and made wider
+            GroupBox permeabilityGroup = new GroupBox
             {
-                Text = "Settings",
-                Location = new Point(740, 5),
-                Size = new Size(280, 90),  // Increased width
+                Text = "Permeability",
+                Location = new Point(740, 10),
+                Size = new Size(250, 90),  // Further increased width
                 BackColor = Color.Transparent
             };
 
-            Label markerExtentLabel = new Label
+            simulateButton = new Button
             {
-                Text = "Marker Extent:",
-                Location = new Point(10, 25),
-                AutoSize = true
+                Text = "Simulate Permeability",
+                Location = new Point(15, 25),
+                Width = 220,  // Increased width to fit text
+                Height = 30,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(225, 225, 225),
+                Enabled = false,
+                Image = SystemIcons.Application.ToBitmap(),
+                ImageAlign = ContentAlignment.MiddleLeft,
+                TextImageRelation = TextImageRelation.ImageBeforeText,
+                Padding = new Padding(5, 0, 5, 0)
             };
-            settingsGroup.Controls.Add(markerExtentLabel);
+            simulateButton.Click += SimulatePermeabilityClick;
+            permeabilityGroup.Controls.Add(simulateButton);
 
-            markerExtentNumeric = new NumericUpDown
+            savePermeabilityButton = new Button
             {
-                Location = new Point(95, 23),
-                Width = 50,
-                Minimum = 1,
-                Maximum = 20,
-                Value = 3
+                Text = "Save Results",
+                Location = new Point(15, 60),
+                Width = 105,
+                Height = 25,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(225, 225, 225),
+                Enabled = false
             };
-            settingsGroup.Controls.Add(markerExtentNumeric);
+            savePermeabilityButton.Click += SavePermeabilityResults;
+            permeabilityGroup.Controls.Add(savePermeabilityButton);
 
-            Label minPoreSizeLabel = new Label
+            loadPermeabilityButton = new Button
             {
-                Text = "Min Pore Size:",
-                Location = new Point(10, 55),
-                AutoSize = true
+                Text = "Load Results",
+                Location = new Point(130, 60),
+                Width = 105,
+                Height = 25,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(225, 225, 225)
             };
-            settingsGroup.Controls.Add(minPoreSizeLabel);
+            loadPermeabilityButton.Click += LoadPermeabilityResults;
+            permeabilityGroup.Controls.Add(loadPermeabilityButton);
+            ribbonPanel.Controls.Add(permeabilityGroup);
 
-            NumericUpDown minPoreSizeNumeric = new NumericUpDown
+            // Settings Group
+            GroupBox settingsGroup = new GroupBox
             {
-                Location = new Point(95, 53),
-                Width = 50,
-                Minimum = 5,
-                Maximum = 1000,
-                Value = 20
+                Text = "Settings",
+                Location = new Point(1000, 10),
+                Size = new Size(250, 90),
+                BackColor = Color.Transparent
             };
-            settingsGroup.Controls.Add(minPoreSizeNumeric);
 
-            // Fixed checkbox positioning
             useGpuCheckBox = new CheckBox
             {
                 Text = "Use GPU",
-                Location = new Point(160, 25),
+                Location = new Point(15, 25),
                 AutoSize = true,
                 Checked = true
             };
             settingsGroup.Controls.Add(useGpuCheckBox);
 
-            CheckBox conservativeCheckBox = new CheckBox
+            exportPermeabilityButton = new Button
             {
-                Text = "Conservative",
-                Location = new Point(160, 55),
-                AutoSize = true,
-                Checked = true
+                Text = "Export Permeability",
+                Location = new Point(15, 55),
+                Width = 140,
+                Height = 25,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(225, 225, 225),
+                Enabled = false
             };
-            settingsGroup.Controls.Add(conservativeCheckBox);
+            exportPermeabilityButton.Click += ExportPermeabilityResults;
+            settingsGroup.Controls.Add(exportPermeabilityButton);
             ribbonPanel.Controls.Add(settingsGroup);
 
-            // Status Group - ADJUSTED POSITION
-            GroupBox statusGroup = new GroupBox
+            // Status Bar (placed at the bottom of ribbon panel)
+            Panel statusPanel = new Panel
             {
-                Text = "Status",
-                Location = new Point(1030, 5),
-                Size = new Size(220, 90),  // Slightly reduced width
-                BackColor = Color.Transparent,
-                Anchor = AnchorStyles.Top | AnchorStyles.Right
+                Location = new Point(10, 105),
+                Size = new Size(1240, 20),
+                BackColor = Color.Transparent
             };
 
             progressBar = new ProgressBar
             {
-                Location = new Point(10, 25),
-                Width = 200,
-                Height = 22,
+                Location = new Point(0, 0),
+                Width = 300,
+                Height = 20,
                 Style = ProgressBarStyle.Continuous,
                 Value = 0
             };
-            statusGroup.Controls.Add(progressBar);
+            statusPanel.Controls.Add(progressBar);
 
             statusLabel = new Label
             {
                 Text = "Ready",
-                Location = new Point(10, 55),
-                Width = 200,
-                Height = 30,
+                Location = new Point(310, 2),
+                Width = 930,
+                Height = 20,
                 Font = new Font("Segoe UI", 8F),
                 ForeColor = Color.DarkBlue
             };
-            statusGroup.Controls.Add(statusLabel);
-            ribbonPanel.Controls.Add(statusGroup);
+            statusPanel.Controls.Add(statusLabel);
+            ribbonPanel.Controls.Add(statusPanel);
 
             // =====================
             // MAIN CONTENT AREA
             // =====================
-            TabControl mainTabControl = new TabControl
+            mainTabControl = new TabControl
             {
                 Dock = DockStyle.Fill,
                 Padding = new Point(15, 5)
@@ -411,6 +480,72 @@ namespace CTSegmenter
                 BackColor = Color.Black
             };
 
+            // Create mouse dragging instructions
+            Label instructionsLabel = new Label
+            {
+                Text = "Left-click and drag to rotate | Middle-click and drag to pan | Mouse wheel to zoom",
+                Dock = DockStyle.Bottom,
+                Height = 25,
+                TextAlign = ContentAlignment.MiddleCenter,
+                ForeColor = Color.LightGray,
+                BackColor = Color.FromArgb(20, 20, 20)
+            };
+            visualizationPanel.Controls.Add(instructionsLabel);
+
+            // Create a toolbar for view controls
+            Panel controlPanel = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 40,
+                BackColor = Color.FromArgb(50, 50, 50)
+            };
+
+            Label rotationLabel = new Label
+            {
+                Text = "Rotation:",
+                Location = new Point(10, 12),
+                ForeColor = Color.White,
+                AutoSize = true
+            };
+            controlPanel.Controls.Add(rotationLabel);
+
+            Button resetViewButton = new Button
+            {
+                Text = "Reset View",
+                Location = new Point(150, 8),
+                Width = 100,
+                Height = 25,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(80, 80, 80),
+                ForeColor = Color.White
+            };
+            resetViewButton.Click += (s, e) => {
+                rotationX = 30.0f;
+                rotationY = 30.0f;
+                rotationZ = 0.0f;
+                viewScale = 1.0f;
+                panOffsetX = 0.0f;
+                panOffsetY = 0.0f;
+                RenderNetwork3D();
+            };
+            controlPanel.Controls.Add(resetViewButton);
+
+            Button screenshotButton = new Button
+            {
+                Text = "Save Screenshot",
+                Location = new Point(260, 8),
+                Width = 130,
+                Height = 25,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(80, 80, 80),
+                ForeColor = Color.White
+            };
+            screenshotButton.Click += (s, e) => SaveNetworkScreenshot();
+            controlPanel.Controls.Add(screenshotButton);
+
+            visualizationPanel.Controls.Add(controlPanel);
+
+            // Initial visualization label
             Label visualizationLabel = new Label
             {
                 Text = "3D Pore Network Visualization",
@@ -422,60 +557,189 @@ namespace CTSegmenter
             };
             visualizationPanel.Controls.Add(visualizationLabel);
 
+            // Create PictureBox for 3D rendering (will be initialized during rendering)
+            networkPictureBox = new PictureBox
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.Black,
+                SizeMode = PictureBoxSizeMode.CenterImage
+            };
+
+            // Add mouse handling for rotation and zooming
+            networkPictureBox.MouseDown += (s, e) => {
+                if (e.Button == MouseButtons.Left)
+                {
+                    isDragging = true;
+                    lastMousePosition = e.Location;
+                }
+                else if (e.Button == MouseButtons.Middle)
+                {
+                    isPanning = true;
+                    lastMousePosition = e.Location;
+                }
+            };
+
+            networkPictureBox.MouseMove += (s, e) => {
+                if (isDragging)
+                {
+                    // Calculate delta movement for rotation
+                    float deltaX = (e.X - lastMousePosition.X) * 0.5f;
+                    float deltaY = (e.Y - lastMousePosition.Y) * 0.5f;
+
+                    // Update rotation angles
+                    rotationY += deltaX;
+                    rotationX += deltaY;
+
+                    // Render with new rotation
+                    RenderNetwork3D();
+
+                    lastMousePosition = e.Location;
+                }
+                else if (isPanning)
+                {
+                    // Calculate delta movement for panning
+                    float deltaX = (e.X - lastMousePosition.X) * 0.01f;
+                    float deltaY = (e.Y - lastMousePosition.Y) * 0.01f;
+
+                    // Update pan offsets
+                    panOffsetX += deltaX;
+                    panOffsetY += deltaY;
+
+                    // Render with new pan
+                    RenderNetwork3D();
+
+                    lastMousePosition = e.Location;
+                }
+            };
+
+            networkPictureBox.MouseUp += (s, e) => {
+                if (e.Button == MouseButtons.Left)
+                {
+                    isDragging = false;
+                }
+                else if (e.Button == MouseButtons.Middle)
+                {
+                    isPanning = false;
+                }
+            };
+
+            networkPictureBox.MouseWheel += (s, e) => {
+                // Change zoom level with mouse wheel
+                float zoomFactor = 1.0f + (e.Delta > 0 ? 0.1f : -0.1f);
+                viewScale *= zoomFactor;
+
+                // Limit minimum and maximum zoom
+                viewScale = Math.Max(0.2f, Math.Min(3.0f, viewScale));
+
+                RenderNetwork3D();
+            };
+
             networkViewTab.Controls.Add(visualizationPanel);
             mainTabControl.Controls.Add(networkViewTab);
+
+            // TAB 3: Permeability Results
+            permeabilityTab = new TabPage("Permeability Results");
+            permeabilityTab.Padding = new Padding(3);
+
+            Panel permeabilityPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BorderStyle = BorderStyle.None,
+                BackColor = Color.Black
+            };
+
+            Label permeabilityLabel = new Label
+            {
+                Text = "No permeability simulation results yet.\nUse 'Simulate Permeability' to run a simulation.",
+                TextAlign = ContentAlignment.MiddleCenter,
+                Dock = DockStyle.Fill,
+                Font = new Font("Segoe UI", 16),
+                ForeColor = Color.White,
+                BackColor = Color.Black
+            };
+            permeabilityPanel.Controls.Add(permeabilityLabel);
+
+            permeabilityTab.Controls.Add(permeabilityPanel);
+            mainTabControl.Controls.Add(permeabilityTab);
 
             // =====================
             // BOTTOM DATA PANEL
             // =====================
-            Panel dataPanel = new Panel
+            Panel dataOuterPanel = new Panel
             {
                 Dock = DockStyle.Bottom,
                 Height = 250,
-                Padding = new Padding(5),
-                BorderStyle = BorderStyle.FixedSingle
+                Padding = new Padding(0),
+                BorderStyle = BorderStyle.None
             };
 
-            // Data panel header with collapsible button
-            Panel dataPanelHeader = new Panel
+            // Header panel - this is a separate panel that sits above the grid
+            Panel headerPanel = new Panel
             {
                 Dock = DockStyle.Top,
                 Height = 30,
-                BackColor = Color.FromArgb(230, 230, 230)
+                BackColor = Color.FromArgb(230, 230, 230),
+                BorderStyle = BorderStyle.FixedSingle
             };
 
             Label dataHeaderLabel = new Label
             {
                 Text = "Pore Data",
-                Location = new Point(10, 8),
+                Location = new Point(10, 7),
                 Font = new Font("Segoe UI", 9F, FontStyle.Bold),
                 AutoSize = true
             };
-            dataPanelHeader.Controls.Add(dataHeaderLabel);
+            headerPanel.Controls.Add(dataHeaderLabel);
 
-            // Toggle button to collapse/expand the data panel
+            // Toggle button to collapse/expand the data grid
             Button toggleDataPanelButton = new Button
             {
                 Text = "▲",
                 Size = new Size(25, 23),
-                Location = new Point(80, 4),
+                Location = new Point(80, 3),
                 FlatStyle = FlatStyle.Flat,
                 FlatAppearance = { BorderSize = 0 },
                 BackColor = Color.Transparent
             };
-            toggleDataPanelButton.Click += (s, e) => {
-                dataPanel.Height = dataPanel.Height == 30 ? 250 : 30;
-                toggleDataPanelButton.Text = dataPanel.Height == 30 ? "▼" : "▲";
-            };
-            dataPanelHeader.Controls.Add(toggleDataPanelButton);
-            dataPanel.Controls.Add(dataPanelHeader);
-            Panel gridContainer = new Panel
+
+            // Content panel that holds the DataGridView - separate from the header
+            Panel dataContentPanel = new Panel
             {
                 Dock = DockStyle.Fill,
-                Padding = new Padding(0, 5, 0, 0) // Add top padding to create space below the header
+                BorderStyle = BorderStyle.FixedSingle,
+                Padding = new Padding(5)
             };
 
-            // Data grid
+            // Toggle now only shows/hides the content panel, not the entire outer panel
+            toggleDataPanelButton.Click += (s, e) => {
+                if (dataContentPanel.Visible)
+                {
+                    // Collapse - hide content panel but keep header
+                    dataContentPanel.Visible = false;
+                    toggleDataPanelButton.Text = "▼";
+                    dataOuterPanel.Height = headerPanel.Height;
+                }
+                else
+                {
+                    // Expand - show content panel
+                    dataContentPanel.Visible = true;
+                    toggleDataPanelButton.Text = "▲";
+                    dataOuterPanel.Height = 250;
+
+                    // Force refresh after expansion
+                    this.BeginInvoke(new Action(() => {
+                        if (poreDataGridView != null && !poreDataGridView.IsDisposed)
+                        {
+                            poreDataGridView.Refresh();
+                            poreDataGridView.Update();
+                        }
+                    }));
+                }
+            };
+
+            headerPanel.Controls.Add(toggleDataPanelButton);
+
+            // Data grid with fixed and forced headers
             poreDataGridView = new DataGridView
             {
                 Dock = DockStyle.Fill,
@@ -490,19 +754,15 @@ namespace CTSegmenter
                 BorderStyle = BorderStyle.None,
                 RowsDefaultCellStyle = new DataGridViewCellStyle { BackColor = Color.White },
                 AlternatingRowsDefaultCellStyle = new DataGridViewCellStyle { BackColor = Color.FromArgb(240, 240, 240) },
-                GridColor = Color.FromArgb(220, 220, 220),
-                ColumnHeadersVisible = true,
-                ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize,
-                ColumnHeadersHeight = 30,
-                ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
-                {
-                    BackColor = Color.FromArgb(220, 220, 220),
-                    ForeColor = Color.Black,
-                    Font = new Font("Segoe UI", 9F, FontStyle.Bold),
-                    Alignment = DataGridViewContentAlignment.MiddleCenter
-                }
+                GridColor = Color.FromArgb(220, 220, 220)
             };
+
+            // Critical header settings
+            poreDataGridView.ColumnHeadersVisible = true;
+            poreDataGridView.ColumnHeadersHeight = 30;
             poreDataGridView.EnableHeadersVisualStyles = false;
+            poreDataGridView.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
+
             // Set up the columns for the pore data
             poreDataGridView.Columns.Add("Id", "ID");
             poreDataGridView.Columns.Add("Volume", "Volume (µm³)");
@@ -513,6 +773,25 @@ namespace CTSegmenter
             poreDataGridView.Columns.Add("Z", "Z (µm)");
             poreDataGridView.Columns.Add("Connections", "# Connections");
 
+            // Explicitly set header style with increased padding for better visibility
+            DataGridViewCellStyle headerStyle = new DataGridViewCellStyle
+            {
+                BackColor = Color.FromArgb(210, 210, 210), // Slightly darker for better contrast
+                ForeColor = Color.Black,
+                Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+                Alignment = DataGridViewContentAlignment.MiddleCenter,
+                Padding = new Padding(0, 7, 0, 7) // More vertical padding
+            };
+
+            // Apply header style to all columns
+            foreach (DataGridViewColumn col in poreDataGridView.Columns)
+            {
+                col.HeaderCell.Style = headerStyle;
+            }
+
+            // Set default header style
+            poreDataGridView.ColumnHeadersDefaultCellStyle = headerStyle;
+
             // Setup context menu for DataGridView for exporting
             ContextMenuStrip gridContextMenu = new ContextMenuStrip();
             ToolStripMenuItem exportMenuItem = new ToolStripMenuItem("Export Selected Rows");
@@ -520,26 +799,91 @@ namespace CTSegmenter
             gridContextMenu.Items.Add(exportMenuItem);
             poreDataGridView.ContextMenuStrip = gridContextMenu;
 
-            // Assemble the panel structure
-            gridContainer.Controls.Add(poreDataGridView);
-            dataPanel.Controls.Add(gridContainer);
-            dataPanel.Controls.Add(dataPanelHeader);
+            // Force header visibility on load
+            poreDataGridView.HandleCreated += (s, e) => {
+                poreDataGridView.ColumnHeadersVisible = true;
+                poreDataGridView.Refresh();
+            };
+
+            // Add grid to the content panel
+            dataContentPanel.Controls.Add(poreDataGridView);
+
+            // Add panels to the outer container in correct order
+            dataOuterPanel.Controls.Add(dataContentPanel); // Content first (at the bottom)
+            dataOuterPanel.Controls.Add(headerPanel);      // Header last (at the top)
+
+            // Add the outer panel to the form
+            this.Controls.Add(dataOuterPanel);
 
             // =====================
             // ASSEMBLE FORM
             // =====================
             this.Controls.Add(mainTabControl);
-            this.Controls.Add(dataPanel);
+            this.Controls.Add(dataOuterPanel);  
             this.Controls.Add(ribbonPanel);
 
-            // Force an initial preview update
+            // Select the 3D Network View tab if in viewer mode
+            if (viewerMode)
+            {
+                mainTabControl.SelectedIndex = 1; // Switch to 3D Network View tab
+            }
+
+            // Force an initial preview update and ensure data grid visibility
             this.Load += (s, e) => {
                 UpdatePreviewImage();
+                EnsureDataGridViewHeadersVisible();
+
+                // Additional code to ensure the data grid is properly initialized
+                if (poreDataGridView != null && !poreDataGridView.IsDisposed)
+                {
+                    poreDataGridView.ColumnHeadersVisible = true;
+                    poreDataGridView.Refresh();
+                }
             };
+
+            this.Resize += (s, e) => {
+                if (dataContentPanel.Visible && poreDataGridView != null && !poreDataGridView.IsDisposed)
+                {
+                    poreDataGridView.ColumnHeadersVisible = true;
+                    poreDataGridView.Refresh();
+                }
+            };
+        }
+
+        /// <summary>
+        /// Updates the UI to reflect viewer mode (disable processing options)
+        /// </summary>
+        private void UpdateUIForViewerMode()
+        {
+            // Disable processing-related controls
+            materialComboBox.Enabled = false;
+            generateButton.Enabled = false;
+            useGpuCheckBox.Enabled = false;
+            markerExtentNumeric.Enabled = false;
+
+            // Enable data-related controls
+            exportButton.Enabled = true;
+            saveButton.Enabled = true;
+
+            // Create a mock "Loaded Model" material for display purposes
+            Material viewerMaterial = new Material("Loaded Model", Color.Gray, 0, 255, 1);
+            materialComboBox.Items.Clear();
+            materialComboBox.Items.Add(viewerMaterial);
+            materialComboBox.SelectedIndex = 0;
+
+            // Render the 3D network visualization
+            Render3DVisualization();
+
+            // Update pore table
+            UpdatePoreTable();
         }
 
         private void PopulateMaterialComboBox()
         {
+            // Skip in viewer mode
+            if (viewerMode)
+                return;
+
             materialComboBox.Items.Clear();
             foreach (Material material in mainForm.Materials)
             {
@@ -558,6 +902,10 @@ namespace CTSegmenter
 
         private async Task SeparateParticlesAsync()
         {
+            // Skip in viewer mode
+            if (viewerMode)
+                return;
+
             if (selectedMaterial == null)
             {
                 MessageBox.Show("Please select a material first", "No Material Selected",
@@ -565,26 +913,56 @@ namespace CTSegmenter
                 return;
             }
 
+            // Check if mainForm is initialized
+            if (mainForm == null)
+            {
+                MessageBox.Show("Main form reference is missing", "Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
             progressBar.Value = 0;
             statusLabel.Text = "Separating particles...";
 
             // Cancel any existing operation
-            cts?.Cancel();
+            if (cts != null)
+            {
+                try
+                {
+                    cts.Cancel();
+                    cts.Dispose();
+                }
+                catch { /* Ignore any errors during cancellation */ }
+            }
             cts = new CancellationTokenSource();
 
             try
             {
                 // Create progress reporter
                 Progress<int> progress = new Progress<int>(percent => {
-                    progressBar.Value = percent;
+                    if (!IsDisposed && progressBar != null && !progressBar.IsDisposed)
+                        progressBar.Value = percent;
                 });
 
-                // Create particle separator
-                bool useGpu = useGpuCheckBox.Checked;
-                int markerExtent = (int)markerExtentNumeric.Value;
+                // Create particle separator - with null checks for UI elements
+                bool useGpu = useGpuCheckBox != null && useGpuCheckBox.Checked;
+                int markerExtent = markerExtentNumeric != null ? (int)markerExtentNumeric.Value : 3;
 
-                using (ParticleSeparator separator = new ParticleSeparator(mainForm, selectedMaterial, useGpu))
+                // Make sure we have valid mainForm.volumeLabels
+                if (mainForm.volumeLabels == null)
                 {
+                    MessageBox.Show("No volume data available in the main form", "Error",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    statusLabel.Text = "Error: No volume data";
+                    return;
+                }
+
+                // Safely create and use the separator
+                ParticleSeparator separator = null;
+                try
+                {
+                    separator = new ParticleSeparator(mainForm, selectedMaterial, useGpu);
+
                     // Separate particles (pores)
                     separationResult = await Task.Run(() => separator.SeparateParticles(
                         process3D: true,
@@ -594,30 +972,52 @@ namespace CTSegmenter
                         cancellationToken: cts.Token
                     ), cts.Token);
 
-                    // Update the preview
-                    UpdatePreviewImage();
+                    // Update the preview if we have results
+                    if (separationResult != null)
+                    {
+                        UpdatePreviewImage();
 
-                    // Enable the generate button
-                    generateButton.Enabled = true;
+                        // Enable the generate button
+                        if (generateButton != null && !generateButton.IsDisposed)
+                            generateButton.Enabled = true;
 
-                    statusLabel.Text = $"Identified {separationResult.Particles.Count} potential pores";
+                        if (statusLabel != null && !statusLabel.IsDisposed)
+                            statusLabel.Text = $"Identified {separationResult.Particles.Count} potential pores";
+                    }
+                    else
+                    {
+                        statusLabel.Text = "Error: No separation results returned";
+                    }
+                }
+                finally
+                {
+                    // Ensure separator is disposed
+                    separator?.Dispose();
                 }
             }
             catch (OperationCanceledException)
             {
-                statusLabel.Text = "Operation cancelled";
+                if (statusLabel != null && !statusLabel.IsDisposed)
+                    statusLabel.Text = "Operation cancelled";
             }
             catch (Exception ex)
             {
                 MessageBox.Show($"Error separating particles: {ex.Message}",
                     "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                statusLabel.Text = "Error separating particles";
+
+                if (statusLabel != null && !statusLabel.IsDisposed)
+                    statusLabel.Text = "Error separating particles";
+
                 Logger.Log($"[PoreNetworkModelingForm] Error: {ex.Message}\n{ex.StackTrace}");
             }
         }
 
         private async Task GenerateNetworkAsync()
         {
+            // Skip in viewer mode
+            if (viewerMode)
+                return;
+
             if (separationResult == null)
             {
                 MessageBox.Show("Please separate particles first", "No Data",
@@ -654,6 +1054,7 @@ namespace CTSegmenter
                 // Enable export and save buttons
                 exportButton.Enabled = true;
                 saveButton.Enabled = true;
+                simulateButton.Enabled = true;
 
                 statusLabel.Text = $"Generated network with {networkModel.Pores.Count} pores and " +
                     $"{networkModel.Throats.Count} throats. Porosity: {networkModel.Porosity:P2}";
@@ -667,169 +1068,14 @@ namespace CTSegmenter
             }
         }
 
-        private void ConvertParticlesToPores()
-        {
-            networkModel.Pores.Clear();
-
-            // Get the pixel size (in meters)
-            double pixelSize = mainForm.pixelSize;
-
-            // Convert each particle to a pore
-            foreach (var particle in separationResult.Particles)
-            {
-                // Calculate pore properties
-                double volume = particle.VoxelCount * Math.Pow(pixelSize, 3); // in cubic meters
-
-                // Calculate surface area using boundary voxels
-                double surfaceArea = CalculateSurfaceArea(particle, separationResult.LabelVolume);
-
-                // Calculate equivalent radius from volume (sphere approximation)
-                double radius = Math.Pow(3 * volume / (4 * Math.PI), 1.0 / 3.0);
-
-                Pore pore = new Pore
-                {
-                    Id = particle.Id,
-                    Volume = volume * 1e18, // Convert to cubic micrometers
-                    Area = surfaceArea * 1e12, // Convert to square micrometers
-                    Radius = radius * 1e6, // Convert to micrometers
-                    Center = new Point3D
-                    {
-                        X = particle.Center.X * pixelSize * 1e6, // Convert to micrometers
-                        Y = particle.Center.Y * pixelSize * 1e6,
-                        Z = particle.Center.Z * pixelSize * 1e6
-                    }
-                };
-
-                networkModel.Pores.Add(pore);
-            }
-        }
-
-        private double CalculateSurfaceArea(ParticleSeparator.Particle particle, object labelVolume)
-        {
-            // Count boundary voxels for surface area calculation
-            int width = LabelVolumeHelper.GetWidth(labelVolume);
-            int height = LabelVolumeHelper.GetHeight(labelVolume);
-            int depth = LabelVolumeHelper.GetDepth(labelVolume);
-            double pixelSize = mainForm.pixelSize;
-
-            int boundaryVoxelCount = 0;
-
-            // Check the particle's bounding box only
-            for (int z = Math.Max(0, particle.Bounds.MinZ); z <= Math.Min(depth - 1, particle.Bounds.MaxZ); z++)
-            {
-                for (int y = Math.Max(0, particle.Bounds.MinY); y <= Math.Min(height - 1, particle.Bounds.MaxY); y++)
-                {
-                    for (int x = Math.Max(0, particle.Bounds.MinX); x <= Math.Min(width - 1, particle.Bounds.MaxX); x++)
-                    {
-                        if (LabelVolumeHelper.GetLabel(labelVolume, x, y, z) == particle.Id)
-                        {
-                            // Check 6-connected neighbors
-                            bool isBoundary = false;
-
-                            // Check X direction
-                            if (x > 0 && LabelVolumeHelper.GetLabel(labelVolume, x - 1, y, z) != particle.Id) isBoundary = true;
-                            else if (x < width - 1 && LabelVolumeHelper.GetLabel(labelVolume, x + 1, y, z) != particle.Id) isBoundary = true;
-
-                            // Check Y direction
-                            else if (y > 0 && LabelVolumeHelper.GetLabel(labelVolume, x, y - 1, z) != particle.Id) isBoundary = true;
-                            else if (y < height - 1 && LabelVolumeHelper.GetLabel(labelVolume, x, y + 1, z) != particle.Id) isBoundary = true;
-
-                            // Check Z direction
-                            else if (z > 0 && LabelVolumeHelper.GetLabel(labelVolume, x, y, z - 1) != particle.Id) isBoundary = true;
-                            else if (z < depth - 1 && LabelVolumeHelper.GetLabel(labelVolume, x, y, z + 1) != particle.Id) isBoundary = true;
-
-                            if (isBoundary)
-                                boundaryVoxelCount++;
-                        }
-                    }
-                }
-            }
-
-            // Average of 1.5 faces per boundary voxel
-            return boundaryVoxelCount * 1.5 * pixelSize * pixelSize;
-        }
-
-        private void GenerateThroats()
-        {
-            networkModel.Throats.Clear();
-
-            // Skip if we have too few pores
-            if (networkModel.Pores.Count < 2)
-                return;
-
-            // For each pore, find closest neighbors to create throats
-            int maxConnections = Math.Min(6, networkModel.Pores.Count - 1);
-
-            for (int i = 0; i < networkModel.Pores.Count; i++)
-            {
-                Pore pore1 = networkModel.Pores[i];
-
-                // Find closest pores by distance
-                var closestPores = networkModel.Pores
-                    .Where(p => p.Id != pore1.Id)
-                    .OrderBy(p => Distance(pore1.Center, p.Center))
-                    .Take(maxConnections);
-
-                foreach (var pore2 in closestPores)
-                {
-                    // Avoid duplicate throats (only add if pore1.Id < pore2.Id)
-                    if (pore1.Id < pore2.Id)
-                    {
-                        // Calculate throat radius (weighted average of the two pore radii)
-                        double radius = (pore1.Radius + pore2.Radius) * 0.25; // 25% of average
-
-                        // Calculate throat length
-                        double distance = Distance(pore1.Center, pore2.Center);
-                        double length = Math.Max(0.1, distance - pore1.Radius - pore2.Radius);
-
-                        // Calculate throat volume (cylinder approximation)
-                        double volume = Math.PI * radius * radius * length;
-
-                        Throat throat = new Throat
-                        {
-                            Id = networkModel.Throats.Count + 1,
-                            PoreId1 = pore1.Id,
-                            PoreId2 = pore2.Id,
-                            Radius = radius,
-                            Length = length,
-                            Volume = volume
-                        };
-
-                        networkModel.Throats.Add(throat);
-
-                        // Update connection counts
-                        pore1.ConnectionCount++;
-                        pore2.ConnectionCount++;
-                    }
-                }
-            }
-        }
-
-        private double Distance(Point3D p1, Point3D p2)
-        {
-            return Math.Sqrt(
-                Math.Pow(p2.X - p1.X, 2) +
-                Math.Pow(p2.Y - p1.Y, 2) +
-                Math.Pow(p2.Z - p1.Z, 2)
-            );
-        }
-
-        private void CalculateNetworkProperties()
-        {
-            // Calculate total volumes
-            networkModel.TotalPoreVolume = networkModel.Pores.Sum(p => p.Volume);
-            networkModel.TotalThroatVolume = networkModel.Throats.Sum(t => t.Volume);
-
-            // Calculate porosity (rough estimate)
-            double totalVolume = mainForm.GetWidth() * mainForm.GetHeight() * mainForm.GetDepth() *
-                Math.Pow(mainForm.pixelSize * 1e6, 3);
-
-            networkModel.Porosity = (networkModel.TotalPoreVolume + networkModel.TotalThroatVolume) / totalVolume;
-        }
         private void UpdatePreviewImage()
         {
             try
             {
+                // Skip preview update if in viewer mode
+                if (viewerMode)
+                    return;
+
                 // Case 1: No separation result yet, show raw material
                 if (separationResult == null || separationResult.LabelVolume == null)
                 {
@@ -959,10 +1205,6 @@ namespace CTSegmenter
             }
         }
 
-
-
-
-
         private void PreviewPictureBox_MouseWheel(object sender, MouseEventArgs e)
         {
             // Adjust zoom with mouse wheel
@@ -1071,6 +1313,8 @@ namespace CTSegmenter
                 rotationY = 30.0f;
                 rotationZ = 0.0f;
                 viewScale = 1.0f;
+                panOffsetX = 0.0f; // Reset panning
+                panOffsetY = 0.0f; // Reset panning
                 RenderNetwork3D();
             };
             controlPanel.Controls.Add(resetViewButton);
@@ -1082,12 +1326,17 @@ namespace CTSegmenter
                     isDragging = true;
                     lastMousePosition = e.Location;
                 }
+                else if (e.Button == MouseButtons.Middle)
+                {
+                    isPanning = true;
+                    lastMousePosition = e.Location;
+                }
             };
 
             networkPictureBox.MouseMove += (s, e) => {
                 if (isDragging)
                 {
-                    // Calculate the delta movement
+                    // Calculate the delta movement for rotation
                     float deltaX = (e.X - lastMousePosition.X) * 0.5f;
                     float deltaY = (e.Y - lastMousePosition.Y) * 0.5f;
 
@@ -1100,12 +1349,32 @@ namespace CTSegmenter
 
                     lastMousePosition = e.Location;
                 }
+                else if (isPanning)
+                {
+                    // Calculate the delta movement for panning
+                    float deltaX = (e.X - lastMousePosition.X) * 0.01f;
+                    float deltaY = (e.Y - lastMousePosition.Y) * 0.01f;
+
+                    // Update pan offsets (add these as class members)
+                    panOffsetX += deltaX;
+                    panOffsetY += deltaY;
+
+                    // Render with new pan
+                    RenderNetwork3D();
+
+                    lastMousePosition = e.Location;
+                }
             };
+
 
             networkPictureBox.MouseUp += (s, e) => {
                 if (e.Button == MouseButtons.Left)
                 {
                     isDragging = false;
+                }
+                else if (e.Button == MouseButtons.Middle)
+                {
+                    isPanning = false;
                 }
             };
 
@@ -1139,6 +1408,7 @@ namespace CTSegmenter
             // Initial rendering
             RenderNetwork3D();
         }
+
         private void SaveNetworkScreenshot()
         {
             if (networkPictureBox?.Image == null)
@@ -1187,6 +1457,7 @@ namespace CTSegmenter
                 }
             }
         }
+
         private void RenderNetwork3D()
         {
             if (networkPictureBox == null) return;
@@ -1247,12 +1518,13 @@ namespace CTSegmenter
 
                         // Calculate projected points
                         Point p1 = new Point(
-                            (int)(width / 2 + transformedP1.x * scaleFactor),
-                            (int)(height / 2 - transformedP1.y * scaleFactor));
+                            (int)(width / 2 + transformedP1.x * scaleFactor + panOffsetX * width),
+                            (int)(height / 2 - transformedP1.y * scaleFactor + panOffsetY * height));
 
                         Point p2 = new Point(
-                            (int)(width / 2 + transformedP2.x * scaleFactor),
-                            (int)(height / 2 - transformedP2.y * scaleFactor));
+                            (int)(width / 2 + transformedP2.x * scaleFactor + panOffsetX * width),
+                            (int)(height / 2 - transformedP2.y * scaleFactor + panOffsetY * height));
+
 
                         // Calculate throat thickness
                         float thickness = (float)(throat.Radius * scaleFactor * 0.25);
@@ -1294,8 +1566,8 @@ namespace CTSegmenter
                         rotationMatrix);
 
                     // Calculate projected point
-                    int x = (int)(width / 2 + transformed.x * scaleFactor);
-                    int y = (int)(height / 2 - transformed.y * scaleFactor);
+                    int x = (int)(width / 2 + transformed.x * scaleFactor + panOffsetX * width);
+                    int y = (int)(height / 2 - transformed.y * scaleFactor + panOffsetY * height);
 
                     // Calculate pore radius in screen space
                     int radius = Math.Max(3, (int)(pore.Radius * scaleFactor * 0.5));
@@ -1362,8 +1634,8 @@ namespace CTSegmenter
         // Helper method to draw coordinate axes
         private void DrawCoordinateAxes(Graphics g, int width, int height, double scale, double[,] rotationMatrix)
         {
-            // Move origin point to bottom right instead of bottom left to avoid overlaps with labels
-            Point origin = new Point(width - 80, height - 80);
+            // Move origin point to bottom right but adjust to prevent overlap with legend
+            Point origin = new Point(width - 120, height - 120); // Moved further from edges
 
             // X-axis (red)
             var transformedX = Transform3DPoint(scale, 0, 0, rotationMatrix);
@@ -1371,7 +1643,7 @@ namespace CTSegmenter
                 (int)(origin.X + transformedX.x * 50),
                 (int)(origin.Y - transformedX.y * 50));
             g.DrawLine(new Pen(Color.Red, 2), origin, xPoint);
-            g.DrawString("X", new Font("Arial", 8), Brushes.Red, xPoint);
+            g.DrawString("X", new Font("Arial", 8, FontStyle.Bold), Brushes.Red, xPoint);
 
             // Y-axis (green)
             var transformedY = Transform3DPoint(0, scale, 0, rotationMatrix);
@@ -1379,7 +1651,7 @@ namespace CTSegmenter
                 (int)(origin.X + transformedY.x * 50),
                 (int)(origin.Y - transformedY.y * 50));
             g.DrawLine(new Pen(Color.Green, 2), origin, yPoint);
-            g.DrawString("Y", new Font("Arial", 8), Brushes.Green, yPoint);
+            g.DrawString("Y", new Font("Arial", 8, FontStyle.Bold), Brushes.Green, yPoint);
 
             // Z-axis (blue)
             var transformedZ = Transform3DPoint(0, 0, scale, rotationMatrix);
@@ -1387,7 +1659,7 @@ namespace CTSegmenter
                 (int)(origin.X + transformedZ.x * 50),
                 (int)(origin.Y - transformedZ.y * 50));
             g.DrawLine(new Pen(Color.Blue, 2), origin, zPoint);
-            g.DrawString("Z", new Font("Arial", 8), Brushes.Blue, zPoint);
+            g.DrawString("Z", new Font("Arial", 8, FontStyle.Bold), Brushes.Blue, zPoint);
         }
 
 
@@ -1400,12 +1672,12 @@ namespace CTSegmenter
             double avgRadius = networkModel.Pores.Count > 0 ? networkModel.Pores.Average(p => p.Radius) : 0;
 
             string[] stats = {
-        $"Pores: {networkModel.Pores.Count}",
-        $"Throats: {networkModel.Throats.Count}",
-        $"Porosity: {networkModel.Porosity:P2}",
-        $"Avg. Radius: {avgRadius:F2} µm",
-        $"Connectivity: {avgConnections:F1} (max: {maxConnections})"
-    };
+                $"Pores: {networkModel.Pores.Count}",
+                $"Throats: {networkModel.Throats.Count}",
+                $"Porosity: {networkModel.Porosity:P2}",
+                $"Avg. Radius: {avgRadius:F2} µm",
+                $"Connectivity: {avgConnections:F1} (max: {maxConnections})"
+            };
 
             Font font = new Font("Arial", 10, FontStyle.Bold);
             int yPos = height - 140;
@@ -1420,11 +1692,11 @@ namespace CTSegmenter
 
             // Add color legend
             string[] legends = {
-        "Red: 0-1 connections",
-        "Yellow: 2 connections",
-        "Green: 3-4 connections",
-        "Blue: 5+ connections"
-    };
+                "Red: 0-1 connections",
+                "Yellow: 2 connections",
+                "Green: 3-4 connections",
+                "Blue: 5+ connections"
+            };
 
             yPos = 15;
             foreach (string text in legends)
@@ -1487,14 +1759,6 @@ namespace CTSegmenter
                 (int)(color.B * intensity)
             );
         }
-        // Helper method to create 3D rotation matrix
-        
-
-        // Helper method to transform a 3D point using rotation matrix
-        
-
-        // Helper method to adjust color intensity based on depth
-        
 
         private void ExportData()
         {
@@ -1538,16 +1802,18 @@ namespace CTSegmenter
                 }
             }
         }
+
         private void EnsureDataGridViewHeadersVisible()
         {
             // Force the DataGridView to properly render its headers
-            if (poreDataGridView != null)
+            if (poreDataGridView != null && !poreDataGridView.IsDisposed)
             {
                 poreDataGridView.ColumnHeadersVisible = true;
                 poreDataGridView.ColumnHeadersHeight = 30;
+                poreDataGridView.EnableHeadersVisualStyles = false;
 
                 // Apply explicit styling to headers
-                poreDataGridView.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
+                DataGridViewCellStyle headerStyle = new DataGridViewCellStyle
                 {
                     BackColor = Color.FromArgb(220, 220, 220),
                     ForeColor = Color.Black,
@@ -1556,16 +1822,29 @@ namespace CTSegmenter
                     Padding = new Padding(0, 5, 0, 5)
                 };
 
-                // Ensure each column has its header text set
+                poreDataGridView.ColumnHeadersDefaultCellStyle = headerStyle;
+
+                // Ensure each column has its header text set with style
                 foreach (DataGridViewColumn col in poreDataGridView.Columns)
                 {
                     if (string.IsNullOrEmpty(col.HeaderText))
                     {
                         col.HeaderText = col.Name;
                     }
+                    col.HeaderCell.Style = headerStyle;
+                }
+
+                // Force a refresh via invalidation
+                poreDataGridView.Invalidate(true);
+
+                // Also refresh the grid container if available
+                if (poreDataGridView.Parent != null)
+                {
+                    poreDataGridView.Parent.Invalidate(true);
                 }
             }
         }
+
         private void ExportToCsv(string filename)
         {
             using (StreamWriter writer = new StreamWriter(filename))
@@ -1728,7 +2007,7 @@ namespace CTSegmenter
             {
                 using (OpenFileDialog openDialog = new OpenFileDialog())
                 {
-                    openDialog.Filter = "DAT files (*.dat)|*.dat";
+                    openDialog.Filter = "DAT files (*.dat)|*.dat|All files (*.*)|*.*";
                     openDialog.Title = "Load Pore Network";
 
                     if (openDialog.ShowDialog() != DialogResult.OK)
@@ -1740,72 +2019,162 @@ namespace CTSegmenter
 
             try
             {
+                // First, analyze the file to determine if we need special handling
+                byte[] headerBytes = new byte[20];
+                using (FileStream fsRead = new FileStream(filename, FileMode.Open))
+                {
+                    fsRead.Read(headerBytes, 0, Math.Min(headerBytes.Length, (int)fsRead.Length));
+                }
+
+                // Log the hex values to help diagnose byte-level issues
+                string hexDump = BitConverter.ToString(headerBytes);
+                Logger.Log($"[PoreNetworkModelingForm] File header (hex): {hexDump}");
+
+                // Also log the characters to see what's actually in the file
+                string charDump = string.Join("", headerBytes.Select(b => b >= 32 && b < 127 ? (char)b : '.'));
+                Logger.Log($"[PoreNetworkModelingForm] File header (chars): {charDump}");
+
+                // Look for known patterns in the hex dump
+                bool hasControlCharPrefix = headerBytes.Length > 0 && (headerBytes[0] == 0x0B || headerBytes[0] < 32);
+                int headerOffset = hasControlCharPrefix ? 1 : 0;
+
+                if (hasControlCharPrefix)
+                {
+                    Logger.Log($"[PoreNetworkModelingForm] Detected control character prefix (0x{headerBytes[0]:X2}), using offset {headerOffset}");
+                }
+
+                // Now open for actual parsing
                 using (FileStream fs = new FileStream(filename, FileMode.Open))
                 using (BinaryReader reader = new BinaryReader(fs))
                 {
-                    // Read and verify file header
-                    string magic = new string(reader.ReadChars(11));
-                    if (magic != "PORENETWORK")
-                        throw new Exception("Invalid file format");
-
-                    int version = reader.ReadInt32();
-                    if (version != 1)
-                        throw new Exception($"Unsupported version: {version}");
-
-                    // Read metadata
-                    int poreCount = reader.ReadInt32();
-                    int throatCount = reader.ReadInt32();
-                    double pixelSize = reader.ReadDouble();
-                    double porosity = reader.ReadDouble();
-
-                    // Create new network model
-                    networkModel = new PoreNetworkModel
+                    // Check if file has enough content
+                    if (fs.Length < 15 + headerOffset)
                     {
-                        PixelSize = pixelSize,
-                        Porosity = porosity,
-                        Pores = new List<Pore>(poreCount),
-                        Throats = new List<Throat>(throatCount)
-                    };
+                        throw new Exception("File is too small to be a valid pore network model");
+                    }
 
-                    // Read pores
-                    for (int i = 0; i < poreCount; i++)
+                    try
                     {
-                        Pore pore = new Pore
+                        // Skip the control character if needed
+                        if (headerOffset > 0)
                         {
-                            Id = reader.ReadInt32(),
-                            Volume = reader.ReadDouble(),
-                            Area = reader.ReadDouble(),
-                            Radius = reader.ReadDouble(),
-                            Center = new Point3D
+                            fs.Position = headerOffset;
+                        }
+
+                        // Read the magic string
+                        char[] magicChars = reader.ReadChars(11);
+                        string magic = new string(magicChars);
+                        Logger.Log($"[PoreNetworkModelingForm] File header at offset {headerOffset}: '{magic}'");
+
+                        // Check for expected header
+                        if (magic != "PORENETWORK")
+                        {
+                            // Try loading as raw data
+                            DialogResult result = MessageBox.Show(
+                                "The file doesn't have the expected format. Would you like to attempt to load it as raw data?",
+                                "Format Mismatch",
+                                MessageBoxButtons.YesNo,
+                                MessageBoxIcon.Warning);
+
+                            if (result == DialogResult.No)
+                                throw new Exception($"Invalid file format: '{magic}' (expected 'PORENETWORK')");
+
+                            // Reset position to beginning for raw data loading
+                            fs.Position = 0;
+                            Logger.Log("[PoreNetworkModelingForm] Attempting to load as raw data");
+                            LoadNetworkAsRawData(fs);
+                            return;
+                        }
+
+                        // Continue with normal parsing
+                        int version = reader.ReadInt32();
+                        Logger.Log($"[PoreNetworkModelingForm] File version: {version}");
+
+                        if (version != 1)
+                            throw new Exception($"Unsupported version: {version}");
+
+                        // Read metadata
+                        int poreCount = reader.ReadInt32();
+                        int throatCount = reader.ReadInt32();
+                        double pixelSize = reader.ReadDouble();
+                        double porosity = reader.ReadDouble();
+
+                        Logger.Log($"[PoreNetworkModelingForm] Metadata: {poreCount} pores, {throatCount} throats, pixelSize={pixelSize}, porosity={porosity}");
+
+                        if (poreCount <= 0 || poreCount > 1000000 || throatCount < 0 || throatCount > 10000000)
+                        {
+                            throw new Exception($"Suspicious data values: poreCount={poreCount}, throatCount={throatCount}");
+                        }
+
+                        // Create new network model
+                        networkModel = new PoreNetworkModel
+                        {
+                            PixelSize = pixelSize,
+                            Porosity = porosity,
+                            Pores = new List<Pore>(poreCount),
+                            Throats = new List<Throat>(throatCount)
+                        };
+
+                        // Read pores
+                        for (int i = 0; i < poreCount; i++)
+                        {
+                            try
                             {
-                                X = reader.ReadDouble(),
-                                Y = reader.ReadDouble(),
-                                Z = reader.ReadDouble()
-                            },
-                            ConnectionCount = reader.ReadInt32()
-                        };
-                        networkModel.Pores.Add(pore);
-                    }
+                                Pore pore = new Pore
+                                {
+                                    Id = reader.ReadInt32(),
+                                    Volume = reader.ReadDouble(),
+                                    Area = reader.ReadDouble(),
+                                    Radius = reader.ReadDouble(),
+                                    Center = new Point3D
+                                    {
+                                        X = reader.ReadDouble(),
+                                        Y = reader.ReadDouble(),
+                                        Z = reader.ReadDouble()
+                                    },
+                                    ConnectionCount = reader.ReadInt32()
+                                };
+                                networkModel.Pores.Add(pore);
+                            }
+                            catch (EndOfStreamException)
+                            {
+                                Logger.Log($"[PoreNetworkModelingForm] Reached end of stream while reading pore {i + 1}/{poreCount}");
+                                break;
+                            }
+                        }
 
-                    // Read throats
-                    double totalThroatVolume = 0;
-                    for (int i = 0; i < throatCount; i++)
-                    {
-                        Throat throat = new Throat
+                        // Read throats
+                        double totalThroatVolume = 0;
+                        for (int i = 0; i < throatCount; i++)
                         {
-                            Id = reader.ReadInt32(),
-                            PoreId1 = reader.ReadInt32(),
-                            PoreId2 = reader.ReadInt32(),
-                            Radius = reader.ReadDouble(),
-                            Length = reader.ReadDouble(),
-                            Volume = reader.ReadDouble()
-                        };
-                        networkModel.Throats.Add(throat);
-                        totalThroatVolume += throat.Volume;
-                    }
+                            try
+                            {
+                                Throat throat = new Throat
+                                {
+                                    Id = reader.ReadInt32(),
+                                    PoreId1 = reader.ReadInt32(),
+                                    PoreId2 = reader.ReadInt32(),
+                                    Radius = reader.ReadDouble(),
+                                    Length = reader.ReadDouble(),
+                                    Volume = reader.ReadDouble()
+                                };
+                                networkModel.Throats.Add(throat);
+                                totalThroatVolume += throat.Volume;
+                            }
+                            catch (EndOfStreamException)
+                            {
+                                Logger.Log($"[PoreNetworkModelingForm] Reached end of stream while reading throat {i + 1}/{throatCount}");
+                                break;
+                            }
+                        }
 
-                    networkModel.TotalPoreVolume = networkModel.Pores.Sum(p => p.Volume);
-                    networkModel.TotalThroatVolume = totalThroatVolume;
+                        networkModel.TotalPoreVolume = networkModel.Pores.Sum(p => p.Volume);
+                        networkModel.TotalThroatVolume = totalThroatVolume;
+                    }
+                    catch (EndOfStreamException ex)
+                    {
+                        throw new Exception($"Unexpected end of file while reading. File may be truncated. {ex.Message}");
+                    }
                 }
 
                 // Update UI
@@ -1816,16 +2185,1291 @@ namespace CTSegmenter
                 exportButton.Enabled = true;
                 saveButton.Enabled = true;
 
+                // Update form title if in viewer mode
+                if (viewerMode)
+                {
+                    this.Text = $"Pore Network Modeling - {Path.GetFileName(filename)} [Viewer Mode]";
+                }
+
                 statusLabel.Text = $"Loaded network with {networkModel.Pores.Count} pores and {networkModel.Throats.Count} throats";
-                MessageBox.Show("Network loaded successfully", "Load Complete",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                if (!viewerMode)
+                {
+                    MessageBox.Show("Network loaded successfully", "Load Complete",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error loading network: {ex.Message}",
-                    "Load Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                string errorMessage = $"Error loading network: {ex.Message}";
+                Logger.Log($"[PoreNetworkModelingForm] {errorMessage}\n{ex.StackTrace}");
+
+                MessageBox.Show(errorMessage, "Load Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+
+                if (viewerMode)
+                {
+                    // In viewer mode, this error is critical - create an empty network
+                    networkModel = new PoreNetworkModel
+                    {
+                        Pores = new List<Pore>(),
+                        Throats = new List<Throat>()
+                    };
+
+                    // Still update UI to show empty state
+                    UpdatePoreTable();
+                    Render3DVisualization();
+                }
+
+                throw; // Re-throw to allow caller to handle the error
+            }
+        }
+        private async void SimulatePermeabilityClick(object sender, EventArgs e)
+        {
+            if (networkModel?.Pores == null || networkModel.Pores.Count == 0 ||
+                networkModel.Throats == null || networkModel.Throats.Count == 0)
+            {
+                MessageBox.Show("Please generate a pore network first", "No Data",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            try
+            {
+                // Show dialog to get parameters
+                using (var dialog = new PermeabilitySimulationDialog())
+                {
+                    if (dialog.ShowDialog() != DialogResult.OK)
+                        return;
+
+                    // Show progress
+                    progressBar.Value = 0;
+                    statusLabel.Text = "Simulating permeability...";
+
+                    // Run simulation
+                    using (var simulator = new PermeabilitySimulator())
+                    {
+                        Progress<int> progress = new Progress<int>(percent => {
+                            progressBar.Value = percent;
+                        });
+
+                        permeabilityResult = await simulator.SimulatePermeabilityAsync(
+                            networkModel,
+                            dialog.SelectedAxis,
+                            dialog.Viscosity,
+                            dialog.InputPressure,
+                            dialog.OutputPressure,
+                            useGpuCheckBox.Checked,
+                            progress);
+                    }
+
+                    // Update UI with results
+                    RenderPermeabilityResults();
+
+                    // Switch to permeability tab
+                    if (mainTabControl != null && permeabilityTab != null)
+                    {
+                        mainTabControl.SelectedTab = permeabilityTab;
+                    }
+
+                    // Update status
+                    statusLabel.Text = $"Permeability: {permeabilityResult.PermeabilityDarcy:F3} Darcy ({permeabilityResult.PermeabilityMilliDarcy:F1} mD)";
+
+                    // Enable save and export buttons
+                    if (savePermeabilityButton != null) savePermeabilityButton.Enabled = true;
+                    if (exportPermeabilityButton != null) exportPermeabilityButton.Enabled = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error simulating permeability: {ex.Message}",
+                    "Simulation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                statusLabel.Text = "Error simulating permeability";
+                Logger.Log($"[PoreNetworkModelingForm] Error: {ex.Message}\n{ex.StackTrace}");
             }
         }
 
+
+        private void RenderPermeabilityResults()
+        {
+            if (permeabilityResult == null || permeabilityTab == null)
+                return;
+
+            // First, clear the tab
+            permeabilityTab.Controls.Clear();
+
+            // Create layout matching the 3D Network View tab
+            Panel visualizationPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BorderStyle = BorderStyle.None,
+                BackColor = Color.Black
+            };
+
+            // Control panel at top (similar to 3D Network View)
+            Panel controlPanel = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 40,
+                BackColor = Color.FromArgb(50, 50, 50)
+            };
+
+            // Add rotation label
+            Label rotationLabel = new Label
+            {
+                Text = "Rotation:",
+                Location = new Point(10, 12),
+                ForeColor = Color.White,
+                AutoSize = true
+            };
+            controlPanel.Controls.Add(rotationLabel);
+
+            // Add reset view button
+            // In the RenderPermeabilityResults method, update the resetViewButton click handler to include panning reset:
+
+            // Add reset view button
+            Button resetViewButton = new Button
+            {
+                Text = "Reset View",
+                Location = new Point(150, 8),
+                Width = 100,
+                Height = 25,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(80, 80, 80),
+                ForeColor = Color.White
+            };
+            resetViewButton.Click += (s, e) => {
+                rotationX = 30.0f;
+                rotationY = 30.0f;
+                rotationZ = 0.0f;
+                viewScale = 1.0f;
+                panOffsetX = 0.0f; // Reset panning offset X
+                panOffsetY = 0.0f; // Reset panning offset Y
+                permeabilityPictureBox.Image = RenderPressureField();
+            };
+            controlPanel.Controls.Add(resetViewButton);
+
+            // Add screenshot button in the control panel (not in the top ribbon)
+            Button screenshotButton = new Button
+            {
+                Text = "Save Screenshot",
+                Location = new Point(260, 8),
+                Width = 130,
+                Height = 25,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(80, 80, 80),
+                ForeColor = Color.White
+            };
+            screenshotButton.Click += SavePermeabilityScreenshot;
+            controlPanel.Controls.Add(screenshotButton);
+
+            visualizationPanel.Controls.Add(controlPanel);
+
+            // Create the results panel at the top for key permeability info
+            Panel resultsPanel = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 60,
+                BackColor = Color.FromArgb(30, 30, 30),
+                Padding = new Padding(5)
+            };
+
+            // Create a table layout for the results with 3 columns, 2 rows
+            TableLayoutPanel tableLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 3,
+                RowCount = 2,
+                BackColor = Color.Transparent
+            };
+
+            // Column styles - evenly distribute space
+            tableLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
+            tableLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
+            tableLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
+
+            // Row styles
+            tableLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+            tableLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+
+            // Add labels with permeability information
+            // Row 1
+            tableLayout.Controls.Add(new Label
+            {
+                Text = $"Flow Axis: {permeabilityResult.FlowAxis}",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                Anchor = AnchorStyles.Left
+            }, 0, 0);
+
+            tableLayout.Controls.Add(new Label
+            {
+                Text = $"Pressure Drop: {permeabilityResult.InputPressure - permeabilityResult.OutputPressure:F2} Pa",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                Anchor = AnchorStyles.Left
+            }, 1, 0);
+
+            tableLayout.Controls.Add(new Label
+            {
+                Text = $"Total Flow Rate: {permeabilityResult.TotalFlowRate:G4} m³/s",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                Anchor = AnchorStyles.Left
+            }, 2, 0);
+
+            // Row 2
+            tableLayout.Controls.Add(new Label
+            {
+                Text = $"Fluid Viscosity: {permeabilityResult.Viscosity:G4} Pa·s",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                Anchor = AnchorStyles.Left
+            }, 0, 1);
+
+            tableLayout.Controls.Add(new Label
+            {
+                Text = $"Permeability: {permeabilityResult.PermeabilityDarcy:F3} Darcy ({permeabilityResult.PermeabilityMilliDarcy:F1} mD)",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                Anchor = AnchorStyles.Left
+            }, 1, 1);
+
+            tableLayout.Controls.Add(new Label
+            {
+                Text = $"Sample: L={permeabilityResult.ModelLength * 1000:F2} mm, A={permeabilityResult.ModelArea * 1e6:F2} mm²",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                Anchor = AnchorStyles.Left
+            }, 2, 1);
+
+            resultsPanel.Controls.Add(tableLayout);
+            visualizationPanel.Controls.Add(resultsPanel);
+
+            // Create pressure visualization PictureBox
+            permeabilityPictureBox = new PictureBox
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.Black,
+                SizeMode = PictureBoxSizeMode.CenterImage
+            };
+            visualizationPanel.Controls.Add(permeabilityPictureBox);
+
+            // Render the pressure field
+            permeabilityPictureBox.Image = RenderPressureField();
+
+            // Add mouse handling for rotation and zooming (same as the 3D network viewer)
+            permeabilityPictureBox.MouseDown += (s, e) => {
+                if (e.Button == MouseButtons.Left)
+                {
+                    isDragging = true;
+                    lastMousePosition = e.Location;
+                }
+                else if (e.Button == MouseButtons.Middle)
+                {
+                    isPanning = true;
+                    lastMousePosition = e.Location;
+                }
+            };
+
+
+            permeabilityPictureBox.MouseMove += (s, e) => {
+                if (isDragging)
+                {
+                    // Calculate the delta movement for rotation
+                    float deltaX = (e.X - lastMousePosition.X) * 0.5f;
+                    float deltaY = (e.Y - lastMousePosition.Y) * 0.5f;
+
+                    // Update rotation angles
+                    rotationY += deltaX;
+                    rotationX += deltaY;
+
+                    // Render with new rotation
+                    permeabilityPictureBox.Image = RenderPressureField();
+
+                    lastMousePosition = e.Location;
+                }
+                else if (isPanning)
+                {
+                    // Calculate the delta movement for panning
+                    float deltaX = (e.X - lastMousePosition.X) * 0.01f;
+                    float deltaY = (e.Y - lastMousePosition.Y) * 0.01f;
+
+                    // Update pan offsets
+                    panOffsetX += deltaX;
+                    panOffsetY += deltaY;
+
+                    // Render with new pan
+                    permeabilityPictureBox.Image = RenderPressureField();
+
+                    lastMousePosition = e.Location;
+                }
+            };
+
+            permeabilityPictureBox.MouseUp += (s, e) => {
+                if (e.Button == MouseButtons.Left)
+                {
+                    isDragging = false;
+                }
+                else if (e.Button == MouseButtons.Middle)
+                {
+                    isPanning = false;
+                }
+            };
+
+            permeabilityPictureBox.MouseWheel += (s, e) => {
+                // Change zoom level with mouse wheel
+                float zoomFactor = 1.0f + (e.Delta > 0 ? 0.1f : -0.1f);
+                viewScale *= zoomFactor;
+
+                // Limit minimum and maximum zoom
+                viewScale = Math.Max(0.2f, Math.Min(3.0f, viewScale));
+
+                permeabilityPictureBox.Image = RenderPressureField();
+            };
+
+            // Add color legend for pressure
+            Panel legendPanel = new Panel
+            {
+                Dock = DockStyle.Right,
+                Width = 80,
+                BackColor = Color.FromArgb(30, 30, 30)
+            };
+
+            // Create pressure gradient legend
+            PictureBox legendPictureBox = new PictureBox
+            {
+                Width = 20,
+                Height = 200,
+                Location = new Point(30, 50),
+                BorderStyle = BorderStyle.FixedSingle
+            };
+
+            // Generate the gradient image
+            Bitmap gradientBitmap = new Bitmap(1, 200);
+            for (int y = 0; y < 200; y++)
+            {
+                // Create gradient from red (high pressure) to blue (low pressure)
+                double t = (double)y / 199;
+                Color color = GetPressureColor(1.0 - t);
+                gradientBitmap.SetPixel(0, y, color);
+            }
+
+            // Scale to proper width
+            Bitmap scaledGradient = new Bitmap(20, 200);
+            using (Graphics g = Graphics.FromImage(scaledGradient))
+            {
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                g.DrawImage(gradientBitmap, 0, 0, 20, 200);
+            }
+
+            legendPictureBox.Image = scaledGradient;
+            legendPanel.Controls.Add(legendPictureBox);
+
+            // Add labels for pressure legend
+            Label pressureLegendLabel = new Label
+            {
+                Text = "Pressure",
+                ForeColor = Color.White,
+                Location = new Point(10, 10),
+                Size = new Size(60, 20),
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold)
+            };
+            legendPanel.Controls.Add(pressureLegendLabel);
+
+            // Add labels for high and low pressure
+            Label highLabel = new Label
+            {
+                Text = $"{permeabilityResult.InputPressure:F0} Pa",
+                ForeColor = Color.White,
+                Location = new Point(10, 30),
+                Size = new Size(60, 20),
+                TextAlign = ContentAlignment.MiddleCenter
+            };
+            legendPanel.Controls.Add(highLabel);
+
+            Label lowLabel = new Label
+            {
+                Text = $"{permeabilityResult.OutputPressure:F0} Pa",
+                ForeColor = Color.White,
+                Location = new Point(10, 250),
+                Size = new Size(60, 20),
+                TextAlign = ContentAlignment.MiddleCenter
+            };
+            legendPanel.Controls.Add(lowLabel);
+
+            visualizationPanel.Controls.Add(legendPanel);
+
+            // Add instructions label at the bottom (matches 3D Network View)
+            Label instructionsLabel = new Label
+            {
+                Text = "Left-click and drag to rotate | Middle-click and drag to pan | Mouse wheel to zoom",
+                Dock = DockStyle.Bottom,
+                Height = 25,
+                TextAlign = ContentAlignment.MiddleCenter,
+                ForeColor = Color.LightGray,
+                BackColor = Color.FromArgb(20, 20, 20)
+            };
+            visualizationPanel.Controls.Add(instructionsLabel);
+
+            // Add the visualization panel to the tab
+            permeabilityTab.Controls.Add(visualizationPanel);
+
+            // Enable the export button but we'll handle the screenshot button differently
+            if (exportPermeabilityButton != null) exportPermeabilityButton.Enabled = true;
+        }
+
+
+        private Bitmap RenderPressureField()
+        {
+            if (permeabilityResult == null)
+                return null;
+
+            int width = 800;
+            int height = 600;
+
+            Bitmap pressureImage = new Bitmap(width, height);
+
+            using (Graphics g = Graphics.FromImage(pressureImage))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.Clear(Color.Black);
+
+                // Find model bounds and center point
+                double minX = permeabilityResult.Model.Pores.Min(p => p.Center.X);
+                double maxX = permeabilityResult.Model.Pores.Max(p => p.Center.X);
+                double minY = permeabilityResult.Model.Pores.Min(p => p.Center.Y);
+                double maxY = permeabilityResult.Model.Pores.Max(p => p.Center.Y);
+                double minZ = permeabilityResult.Model.Pores.Min(p => p.Center.Z);
+                double maxZ = permeabilityResult.Model.Pores.Max(p => p.Center.Z);
+
+                double centerX = (minX + maxX) / 2;
+                double centerY = (minY + maxY) / 2;
+                double centerZ = (minZ + maxZ) / 2;
+
+                // Calculate scale factor based on the model size
+                double maxRange = Math.Max(maxX - minX, Math.Max(maxY - minY, maxZ - minZ));
+                double scaleFactor = Math.Min(width, height) * 0.4 / maxRange * viewScale;
+
+                // Create rotation matrices
+                var rotationMatrix = Create3DRotationMatrix(rotationX, rotationY, rotationZ);
+
+                // Find pressure range
+                double minPressure = permeabilityResult.PressureField.Values.Min();
+                double maxPressure = permeabilityResult.PressureField.Values.Max();
+                double pressureRange = maxPressure - minPressure;
+
+                // Project and render throats first (draw from back to front)
+                var throatsWithDepth = new List<(double depth, Point p1, Point p2, float thickness, Color color)>();
+
+                foreach (var throat in permeabilityResult.Model.Throats)
+                {
+                    var pore1 = permeabilityResult.Model.Pores.FirstOrDefault(p => p.Id == throat.PoreId1);
+                    var pore2 = permeabilityResult.Model.Pores.FirstOrDefault(p => p.Id == throat.PoreId2);
+
+                    if (pore1 != null && pore2 != null)
+                    {
+                        // Get pressure for both pores
+                        if (!permeabilityResult.PressureField.TryGetValue(pore1.Id, out double pressure1))
+                            pressure1 = 0;
+
+                        if (!permeabilityResult.PressureField.TryGetValue(pore2.Id, out double pressure2))
+                            pressure2 = 0;
+
+                        // Average pressure for throat color
+                        double avgPressure = (pressure1 + pressure2) / 2;
+                        double normalizedPressure = pressureRange > 0 ? (avgPressure - minPressure) / pressureRange : 0.5;
+
+                        // Transform 3D coordinates to project to 2D
+                        var transformedP1 = Transform3DPoint(
+                            pore1.Center.X - centerX,
+                            pore1.Center.Y - centerY,
+                            pore1.Center.Z - centerZ,
+                            rotationMatrix);
+
+                        var transformedP2 = Transform3DPoint(
+                            pore2.Center.X - centerX,
+                            pore2.Center.Y - centerY,
+                            pore2.Center.Z - centerZ,
+                            rotationMatrix);
+
+                        // Calculate projected points
+                        Point p1 = new Point(
+                            (int)(width / 2 + transformedP1.x * scaleFactor + panOffsetX * width),
+                            (int)(height / 2 - transformedP1.y * scaleFactor + panOffsetY * height));
+
+                        Point p2 = new Point(
+                            (int)(width / 2 + transformedP2.x * scaleFactor + panOffsetX * width),
+                            (int)(height / 2 - transformedP2.y * scaleFactor + panOffsetY * height));
+
+                        // Calculate throat thickness
+                        float thickness = (float)(throat.Radius * scaleFactor * 0.25);
+                        thickness = Math.Max(1, thickness);
+
+                        // Average Z for depth sorting (to draw back-to-front)
+                        double avgZ = (transformedP1.z + transformedP2.z) / 2;
+
+                        // Create pressure-based color
+                        Color throatColor = GetPressureColor(normalizedPressure);
+
+                        throatsWithDepth.Add((avgZ, p1, p2, thickness, throatColor));
+                    }
+                }
+
+                // Sort throats by depth (Z) to implement basic painter's algorithm
+                throatsWithDepth = throatsWithDepth.OrderBy(t => t.depth).ToList();
+
+                // Draw sorted throats
+                foreach (var (_, p1, p2, thickness, color) in throatsWithDepth)
+                {
+                    using (Pen pen = new Pen(color, thickness))
+                    {
+                        g.DrawLine(pen, p1, p2);
+                    }
+                }
+
+                // Project and render pores
+                var poresWithDepth = new List<(double depth, int x, int y, int radius, Color color, Pore pore)>();
+
+                foreach (var pore in permeabilityResult.Model.Pores)
+                {
+                    // Get pressure for pore
+                    if (!permeabilityResult.PressureField.TryGetValue(pore.Id, out double pressure))
+                        pressure = 0;
+
+                    double normalizedPressure = pressureRange > 0 ? (pressure - minPressure) / pressureRange : 0.5;
+
+                    // Transform 3D coordinates to project to 2D
+                    var transformed = Transform3DPoint(
+                        pore.Center.X - centerX,
+                        pore.Center.Y - centerY,
+                        pore.Center.Z - centerZ,
+                        rotationMatrix);
+
+                    // Calculate projected point
+                    int x = (int)(width / 2 + transformed.x * scaleFactor + panOffsetX * width);
+                    int y = (int)(height / 2 - transformed.y * scaleFactor + panOffsetY * height);
+
+
+                    // Calculate pore radius in screen space
+                    int radius = Math.Max(3, (int)(pore.Radius * scaleFactor * 0.5));
+
+                    // Assign color based on pressure
+                    Color poreColor = GetPressureColor(normalizedPressure);
+
+                    // Highlight inlet and outlet pores
+                    bool isInlet = permeabilityResult.InletPores.Contains(pore.Id);
+                    bool isOutlet = permeabilityResult.OutletPores.Contains(pore.Id);
+
+                    if (isInlet)
+                        poreColor = Color.White;
+                    else if (isOutlet)
+                        poreColor = Color.DarkGray;
+
+                    // Adjust color intensity based on Z position (depth)
+                    float intensity = (float)Math.Max(0.5f, Math.Min(1.0f, (transformed.z + 500) / 1000));
+                    poreColor = AdjustColorIntensity(poreColor, intensity);
+
+                    poresWithDepth.Add((transformed.z, x, y, radius, poreColor, pore));
+                }
+
+                // Sort pores by depth (Z) to implement basic painter's algorithm
+                poresWithDepth = poresWithDepth.OrderBy(p => p.depth).ToList();
+
+                // Draw pores from back to front
+                foreach (var (_, x, y, radius, color, pore) in poresWithDepth)
+                {
+                    g.FillEllipse(new SolidBrush(color), x - radius, y - radius, radius * 2, radius * 2);
+
+                    // Highlight inlet and outlet pores with different border colors
+                    Pen borderPen;
+                    if (permeabilityResult.InletPores.Contains(pore.Id))
+                        borderPen = new Pen(Color.Red, 2);
+                    else if (permeabilityResult.OutletPores.Contains(pore.Id))
+                        borderPen = new Pen(Color.Blue, 2);
+                    else
+                        borderPen = Pens.White;
+
+                    g.DrawEllipse(borderPen, x - radius, y - radius, radius * 2, radius * 2);
+
+                    if (borderPen != Pens.White)
+                        borderPen.Dispose();
+                }
+
+                // Draw coordinate axes for orientation
+                DrawCoordinateAxes(g, width, height, scaleFactor * 0.2, rotationMatrix);
+
+                // Add legend title
+                string axisText = permeabilityResult.FlowAxis.ToString();
+                g.DrawString($"Flow Direction: {axisText}-Axis",
+                    new Font("Arial", 12, FontStyle.Bold), Brushes.White, 20, 20);
+
+                g.DrawString($"Permeability: {permeabilityResult.PermeabilityDarcy:F3} Darcy ({permeabilityResult.PermeabilityMilliDarcy:F1} mD)",
+                    new Font("Arial", 12, FontStyle.Bold), Brushes.White, 20, 50);
+
+                // Add inlet/outlet legend
+                g.FillEllipse(new SolidBrush(Color.White), width - 150, 20, 12, 12);
+                g.DrawEllipse(new Pen(Color.Red, 2), width - 150, 20, 12, 12);
+                g.DrawString("Inlet Pores", new Font("Arial", 10), Brushes.White, width - 130, 20);
+
+                g.FillEllipse(new SolidBrush(Color.DarkGray), width - 150, 40, 12, 12);
+                g.DrawEllipse(new Pen(Color.Blue, 2), width - 150, 40, 12, 12);
+                g.DrawString("Outlet Pores", new Font("Arial", 10), Brushes.White, width - 130, 40);
+            }
+
+            return pressureImage;
+        }
+        private Color GetPressureColor(double normalizedPressure)
+        {
+            // Red (high pressure) to Blue (low pressure) gradient
+            normalizedPressure = Math.Max(0, Math.Min(1, normalizedPressure));
+
+            if (normalizedPressure < 0.5)
+            {
+                // Blue to green (0 to 0.5)
+                double t = normalizedPressure * 2;
+                int r = 0;
+                int g = (int)(255 * t);
+                int b = (int)(255 * (1 - t));
+                return Color.FromArgb(r, g, b);
+            }
+            else
+            {
+                // Green to red (0.5 to 1)
+                double t = (normalizedPressure - 0.5) * 2;
+                int r = (int)(255 * t);
+                int g = (int)(255 * (1 - t));
+                int b = 0;
+                return Color.FromArgb(r, g, b);
+            }
+        }
+        // New method to handle loading raw data without header validation
+        private void LoadNetworkAsRawData(FileStream fs)
+        {
+            try
+            {
+                fs.Position = 0;
+                using (BinaryReader reader = new BinaryReader(fs))
+                {
+                    // Create a simple dialog to let user specify the number of pores and throats
+                    using (Form inputForm = new Form
+                    {
+                        Width = 300,
+                        Height = 200,
+                        FormBorderStyle = FormBorderStyle.FixedDialog,
+                        Text = "Raw Data Import",
+                        StartPosition = FormStartPosition.CenterParent,
+                        MaximizeBox = false,
+                        MinimizeBox = false
+                    })
+                    {
+                        Label lblPores = new Label { Left = 20, Top = 20, Text = "Number of Pores:" };
+                        NumericUpDown numPores = new NumericUpDown { Left = 150, Top = 18, Width = 100, Minimum = 1, Maximum = 100000, Value = 100 };
+
+                        Label lblThroats = new Label { Left = 20, Top = 50, Text = "Number of Throats:" };
+                        NumericUpDown numThroats = new NumericUpDown { Left = 150, Top = 48, Width = 100, Minimum = 0, Maximum = 1000000, Value = 300 };
+
+                        Label lblPixelSize = new Label { Left = 20, Top = 80, Text = "Pixel Size (m):" };
+                        TextBox txtPixelSize = new TextBox { Left = 150, Top = 78, Width = 100, Text = "1.0E-6" };
+
+                        Button btnOk = new Button { Text = "OK", Left = 90, Width = 100, Top = 120, DialogResult = DialogResult.OK };
+
+                        inputForm.Controls.Add(lblPores);
+                        inputForm.Controls.Add(numPores);
+                        inputForm.Controls.Add(lblThroats);
+                        inputForm.Controls.Add(numThroats);
+                        inputForm.Controls.Add(lblPixelSize);
+                        inputForm.Controls.Add(txtPixelSize);
+                        inputForm.Controls.Add(btnOk);
+
+                        inputForm.AcceptButton = btnOk;
+
+                        if (inputForm.ShowDialog() != DialogResult.OK)
+                            return;
+
+                        int poreCount = (int)numPores.Value;
+                        int throatCount = (int)numThroats.Value;
+                        double pixelSize = 1.0E-6; // default
+
+                        try
+                        {
+                            pixelSize = Convert.ToDouble(txtPixelSize.Text);
+                        }
+                        catch
+                        {
+                            // Use default if parsing fails
+                        }
+
+                        // Create new network model
+                        networkModel = new PoreNetworkModel
+                        {
+                            PixelSize = pixelSize,
+                            Porosity = 0.5, // Default value
+                            Pores = new List<Pore>(),
+                            Throats = new List<Throat>()
+                        };
+
+                        // Now determine the correct offset to start reading
+                        long estimatedHeaderSize = 0; // Skip header entirely
+                        fs.Position = estimatedHeaderSize;
+
+                        // Read pores
+                        try
+                        {
+                            for (int i = 0; i < poreCount; i++)
+                            {
+                                if (fs.Position >= fs.Length - 32) // Check if we have enough data for at least one pore
+                                    break;
+
+                                Pore pore = new Pore
+                                {
+                                    Id = i + 1, // Generate sequential ID
+                                    Volume = reader.ReadDouble(),
+                                    Area = reader.ReadDouble(),
+                                    Radius = reader.ReadDouble(),
+                                    Center = new Point3D
+                                    {
+                                        X = reader.ReadDouble(),
+                                        Y = reader.ReadDouble(),
+                                        Z = reader.ReadDouble()
+                                    },
+                                    ConnectionCount = 0 // Will update later
+                                };
+
+                                // Skip one more value that might be there
+                                try { reader.ReadInt32(); } catch { }
+
+                                networkModel.Pores.Add(pore);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[PoreNetworkModelingForm] Exception during raw pore reading: {ex.Message}");
+                            // Continue with the throats even if pore reading fails
+                        }
+
+                        // Read throats if we have any pores
+                        if (networkModel.Pores.Count > 0)
+                        {
+                            double totalThroatVolume = 0;
+                            try
+                            {
+                                for (int i = 0; i < throatCount; i++)
+                                {
+                                    if (fs.Position >= fs.Length - 24) // Check if we have enough data
+                                        break;
+
+                                    Throat throat = new Throat
+                                    {
+                                        Id = i + 1,
+                                        PoreId1 = reader.ReadInt32(),
+                                        PoreId2 = reader.ReadInt32(),
+                                        Radius = reader.ReadDouble(),
+                                        Length = reader.ReadDouble(),
+                                        Volume = reader.ReadDouble()
+                                    };
+
+                                    // Validate pore references
+                                    if (networkModel.Pores.Any(p => p.Id == throat.PoreId1) &&
+                                        networkModel.Pores.Any(p => p.Id == throat.PoreId2))
+                                    {
+                                        networkModel.Throats.Add(throat);
+                                        totalThroatVolume += throat.Volume;
+
+                                        // Update connection counts
+                                        var pore1 = networkModel.Pores.First(p => p.Id == throat.PoreId1);
+                                        var pore2 = networkModel.Pores.First(p => p.Id == throat.PoreId2);
+                                        pore1.ConnectionCount++;
+                                        pore2.ConnectionCount++;
+                                    }
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Log($"[PoreNetworkModelingForm] Exception during raw throat reading: {ex.Message}");
+                            }
+
+                            networkModel.TotalPoreVolume = networkModel.Pores.Sum(p => p.Volume);
+                            networkModel.TotalThroatVolume = totalThroatVolume;
+
+                            // Calculate porosity (use default if calculation fails)
+                            try
+                            {
+                                double totalVolume = networkModel.Pores.Max(p =>
+                                    p.Center.X + p.Radius - networkModel.Pores.Min(p2 => p2.Center.X - p2.Radius)) *
+                                    networkModel.Pores.Max(p =>
+                                    p.Center.Y + p.Radius - networkModel.Pores.Min(p2 => p2.Center.Y - p2.Radius)) *
+                                    networkModel.Pores.Max(p =>
+                                    p.Center.Z + p.Radius - networkModel.Pores.Min(p2 => p2.Center.Z - p2.Radius));
+
+                                if (totalVolume > 0)
+                                    networkModel.Porosity = Math.Min(1.0, (networkModel.TotalPoreVolume + networkModel.TotalThroatVolume) / totalVolume);
+                            }
+                            catch
+                            {
+                                // Use default porosity if calculation fails
+                            }
+                        }
+                    }
+
+                    // Update UI
+                    UpdatePoreTable();
+                    Render3DVisualization();
+
+                    // Enable export and save buttons
+                    exportButton.Enabled = true;
+                    saveButton.Enabled = true;
+
+                    // Update form title if in viewer mode
+                    if (viewerMode)
+                    {
+                        this.Text = $"Pore Network Modeling - Raw Import [Viewer Mode]";
+                    }
+
+                    statusLabel.Text = $"Loaded raw data: {networkModel.Pores.Count} pores and {networkModel.Throats.Count} throats";
+                }
+            }
+            catch (Exception ex)
+            {
+                string errorMessage = $"Error loading raw data: {ex.Message}";
+                Logger.Log($"[PoreNetworkModelingForm] {errorMessage}\n{ex.StackTrace}");
+                MessageBox.Show(errorMessage, "Raw Data Import Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+
+                if (viewerMode)
+                {
+                    // In viewer mode, create an empty network
+                    networkModel = new PoreNetworkModel
+                    {
+                        Pores = new List<Pore>(),
+                        Throats = new List<Throat>()
+                    };
+                }
+            }
+        }
+        private void SavePermeabilityResults(object sender, EventArgs e)
+        {
+            if (permeabilityResult == null)
+            {
+                MessageBox.Show("No permeability results to save.",
+                    "Save Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            using (SaveFileDialog saveDialog = new SaveFileDialog())
+            {
+                saveDialog.Filter = "DAT files (*.dat)|*.dat";
+                saveDialog.Title = "Save Permeability Results";
+                saveDialog.DefaultExt = "dat";
+
+                if (saveDialog.ShowDialog() == DialogResult.OK)
+                {
+                    try
+                    {
+                        using (FileStream fs = new FileStream(saveDialog.FileName, FileMode.Create))
+                        using (BinaryWriter writer = new BinaryWriter(fs))
+                        {
+                            // Write file header
+                            writer.Write("PERMEABILITY"); // Magic string
+                            writer.Write((int)1); // Version number
+
+                            // Write basic simulation parameters
+                            writer.Write((int)permeabilityResult.FlowAxis);
+                            writer.Write(permeabilityResult.Viscosity);
+                            writer.Write(permeabilityResult.InputPressure);
+                            writer.Write(permeabilityResult.OutputPressure);
+                            writer.Write(permeabilityResult.PermeabilityDarcy);
+                            writer.Write(permeabilityResult.PermeabilityMilliDarcy);
+                            writer.Write(permeabilityResult.TotalFlowRate);
+                            writer.Write(permeabilityResult.ModelLength);
+                            writer.Write(permeabilityResult.ModelArea);
+
+                            // Write inlet/outlet pores count
+                            writer.Write(permeabilityResult.InletPores.Count);
+                            foreach (var poreId in permeabilityResult.InletPores)
+                            {
+                                writer.Write(poreId);
+                            }
+
+                            writer.Write(permeabilityResult.OutletPores.Count);
+                            foreach (var poreId in permeabilityResult.OutletPores)
+                            {
+                                writer.Write(poreId);
+                            }
+
+                            // Write pressure field
+                            writer.Write(permeabilityResult.PressureField.Count);
+                            foreach (var pair in permeabilityResult.PressureField)
+                            {
+                                writer.Write(pair.Key);
+                                writer.Write(pair.Value);
+                            }
+
+                            // Write throat flow rates
+                            writer.Write(permeabilityResult.ThroatFlowRates.Count);
+                            foreach (var pair in permeabilityResult.ThroatFlowRates)
+                            {
+                                writer.Write(pair.Key);
+                                writer.Write(pair.Value);
+                            }
+
+                            // Write timestamp
+                            writer.Write(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                        }
+
+                        statusLabel.Text = "Permeability results saved successfully";
+                        MessageBox.Show("Permeability results saved successfully", "Save Complete",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"Error saving permeability results: {ex.Message}",
+                            "Save Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        Logger.Log($"[PoreNetworkModelingForm] Error saving permeability: {ex.Message}\n{ex.StackTrace}");
+                    }
+                }
+            }
+        }
+        private void LoadPermeabilityResults(object sender, EventArgs e)
+        {
+            using (OpenFileDialog openDialog = new OpenFileDialog())
+            {
+                openDialog.Filter = "DAT files (*.dat)|*.dat|All files (*.*)|*.*";
+                openDialog.Title = "Load Permeability Results";
+
+                if (openDialog.ShowDialog() == DialogResult.OK)
+                {
+                    try
+                    {
+                        using (FileStream fs = new FileStream(openDialog.FileName, FileMode.Open))
+                        using (BinaryReader reader = new BinaryReader(fs))
+                        {
+                            // Read and verify file header
+                            string magic = new string(reader.ReadChars(11));
+                            if (magic != "PERMEABILITY")
+                            {
+                                throw new Exception($"Invalid file format: '{magic}' (expected 'PERMEABILITY')");
+                            }
+
+                            int version = reader.ReadInt32();
+                            if (version != 1)
+                            {
+                                throw new Exception($"Unsupported version: {version}");
+                            }
+
+                            // Create new result object
+                            permeabilityResult = new PermeabilitySimulationResult
+                            {
+                                Model = networkModel,  // Use the currently loaded model
+                                FlowAxis = (PermeabilitySimulator.FlowAxis)reader.ReadInt32(),
+                                Viscosity = reader.ReadDouble(),
+                                InputPressure = reader.ReadDouble(),
+                                OutputPressure = reader.ReadDouble(),
+                                PermeabilityDarcy = reader.ReadDouble(),
+                                PermeabilityMilliDarcy = reader.ReadDouble(),
+                                TotalFlowRate = reader.ReadDouble(),
+                                ModelLength = reader.ReadDouble(),
+                                ModelArea = reader.ReadDouble()
+                            };
+
+                            // Read inlet/outlet pores
+                            int inletCount = reader.ReadInt32();
+                            permeabilityResult.InletPores = new List<int>(inletCount);
+                            for (int i = 0; i < inletCount; i++)
+                            {
+                                permeabilityResult.InletPores.Add(reader.ReadInt32());
+                            }
+
+                            int outletCount = reader.ReadInt32();
+                            permeabilityResult.OutletPores = new List<int>(outletCount);
+                            for (int i = 0; i < outletCount; i++)
+                            {
+                                permeabilityResult.OutletPores.Add(reader.ReadInt32());
+                            }
+
+                            // Read pressure field
+                            int pressureCount = reader.ReadInt32();
+                            permeabilityResult.PressureField = new Dictionary<int, double>(pressureCount);
+                            for (int i = 0; i < pressureCount; i++)
+                            {
+                                int key = reader.ReadInt32();
+                                double value = reader.ReadDouble();
+                                permeabilityResult.PressureField[key] = value;
+                            }
+
+                            // Read throat flow rates
+                            int flowRateCount = reader.ReadInt32();
+                            permeabilityResult.ThroatFlowRates = new Dictionary<int, double>(flowRateCount);
+                            for (int i = 0; i < flowRateCount; i++)
+                            {
+                                int key = reader.ReadInt32();
+                                double value = reader.ReadDouble();
+                                permeabilityResult.ThroatFlowRates[key] = value;
+                            }
+
+                            // Read timestamp if available
+                            string timestamp = "Unknown";
+                            if (fs.Position < fs.Length - 5)
+                            {
+                                try { timestamp = reader.ReadString(); }
+                                catch { /* Ignore if timestamp isn't available */ }
+                            }
+
+                            Logger.Log($"[PoreNetworkModelingForm] Loaded permeability results from {timestamp}");
+                        }
+
+                        // Update UI with loaded results
+                        RenderPermeabilityResults();
+
+                        // Switch to permeability tab
+                        mainTabControl.SelectedTab = permeabilityTab;
+
+                        // Update status
+                        statusLabel.Text = $"Loaded permeability: {permeabilityResult.PermeabilityDarcy:F3} Darcy";
+                        MessageBox.Show("Permeability results loaded successfully", "Load Complete",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"Error loading permeability results: {ex.Message}",
+                            "Load Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        Logger.Log($"[PoreNetworkModelingForm] Error loading permeability: {ex.Message}\n{ex.StackTrace}");
+                    }
+                }
+            }
+        }
+        private void ExportPermeabilityResults(object sender, EventArgs e)
+        {
+            if (permeabilityResult == null)
+            {
+                MessageBox.Show("No permeability results to export.",
+                    "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            using (SaveFileDialog saveDialog = new SaveFileDialog())
+            {
+                saveDialog.Filter = "CSV files (*.csv)|*.csv|Excel files (*.xlsx)|*.xlsx";
+                saveDialog.Title = "Export Permeability Results";
+                saveDialog.DefaultExt = "csv";
+
+                if (saveDialog.ShowDialog() == DialogResult.OK)
+                {
+                    try
+                    {
+                        string extension = Path.GetExtension(saveDialog.FileName).ToLower();
+
+                        // For now, use CSV for both options
+                        ExportPermeabilityCsv(saveDialog.FileName);
+
+                        statusLabel.Text = "Permeability results exported successfully";
+                        MessageBox.Show("Permeability results exported successfully", "Export Complete",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"Error exporting permeability results: {ex.Message}",
+                            "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        Logger.Log($"[PoreNetworkModelingForm] Error exporting permeability: {ex.Message}\n{ex.StackTrace}");
+                    }
+                }
+            }
+        }
+
+        private void ExportPermeabilityCsv(string filename)
+        {
+            using (StreamWriter writer = new StreamWriter(filename))
+            {
+                // Write simulation parameters
+                writer.WriteLine("# Permeability Simulation Results");
+                writer.WriteLine($"Date,{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")}");
+                writer.WriteLine($"Flow Axis,{permeabilityResult.FlowAxis}");
+                writer.WriteLine($"Fluid Viscosity (Pa·s),{permeabilityResult.Viscosity:G8}");
+                writer.WriteLine($"Input Pressure (Pa),{permeabilityResult.InputPressure:F2}");
+                writer.WriteLine($"Output Pressure (Pa),{permeabilityResult.OutputPressure:F2}");
+                writer.WriteLine($"Permeability (Darcy),{permeabilityResult.PermeabilityDarcy:G8}");
+                writer.WriteLine($"Permeability (mD),{permeabilityResult.PermeabilityMilliDarcy:G8}");
+                writer.WriteLine($"Total Flow Rate (m³/s),{permeabilityResult.TotalFlowRate:G8}");
+                writer.WriteLine($"Model Length (m),{permeabilityResult.ModelLength:G8}");
+                writer.WriteLine($"Model Area (m²),{permeabilityResult.ModelArea:G8}");
+                writer.WriteLine();
+
+                // Write pressure field
+                writer.WriteLine("# Pressure Field");
+                writer.WriteLine("Pore ID,Pressure (Pa),Is Inlet,Is Outlet");
+                foreach (var pore in permeabilityResult.Model.Pores)
+                {
+                    bool isInlet = permeabilityResult.InletPores.Contains(pore.Id);
+                    bool isOutlet = permeabilityResult.OutletPores.Contains(pore.Id);
+                    double pressure = permeabilityResult.PressureField.TryGetValue(pore.Id, out double p) ? p : 0;
+                    writer.WriteLine($"{pore.Id},{pressure:F4},{isInlet},{isOutlet}");
+                }
+                writer.WriteLine();
+
+                // Write throat flow rates
+                writer.WriteLine("# Throat Flow Rates");
+                writer.WriteLine("Throat ID,Pore 1,Pore 2,Flow Rate (m³/s),Radius (μm),Length (μm)");
+                foreach (var throat in permeabilityResult.Model.Throats)
+                {
+                    double flowRate = permeabilityResult.ThroatFlowRates.TryGetValue(throat.Id, out double fr) ? fr : 0;
+                    writer.WriteLine($"{throat.Id},{throat.PoreId1},{throat.PoreId2},{flowRate:G8},{throat.Radius:F4},{throat.Length:F4}");
+                }
+                writer.WriteLine();
+
+                // Write inlet/outlet pores
+                writer.WriteLine("# Boundary Pores");
+                writer.WriteLine("Type,Pore ID");
+                foreach (var poreId in permeabilityResult.InletPores)
+                {
+                    writer.WriteLine($"Inlet,{poreId}");
+                }
+                foreach (var poreId in permeabilityResult.OutletPores)
+                {
+                    writer.WriteLine($"Outlet,{poreId}");
+                }
+            }
+        }
+
+        private void SavePermeabilityScreenshot(object sender, EventArgs e)
+        {
+            if (permeabilityPictureBox?.Image == null)
+            {
+                MessageBox.Show("No permeability visualization to save.",
+                    "Screenshot Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            using (SaveFileDialog saveDialog = new SaveFileDialog())
+            {
+                saveDialog.Filter = "PNG Image|*.png|JPEG Image|*.jpg|Bitmap Image|*.bmp";
+                saveDialog.Title = "Save Permeability Visualization";
+                saveDialog.DefaultExt = "png";
+
+                if (saveDialog.ShowDialog() == DialogResult.OK)
+                {
+                    try
+                    {
+                        // Create a copy of the current visualization with added scalebar
+                        using (Bitmap originalImage = new Bitmap(permeabilityPictureBox.Image))
+                        {
+                            // Create a new bitmap with space for the scale bar
+                            Bitmap screenshotWithScale = new Bitmap(
+                                originalImage.Width,
+                                originalImage.Height + 50);
+
+                            using (Graphics g = Graphics.FromImage(screenshotWithScale))
+                            {
+                                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+
+                                // Draw the original image
+                                g.DrawImage(originalImage, 0, 0, originalImage.Width, originalImage.Height);
+
+                                // Draw a black background for the scale bar area
+                                g.FillRectangle(new SolidBrush(Color.Black),
+                                    0, originalImage.Height, originalImage.Width, 50);
+
+                                // Draw pressure scale bar
+                                DrawPressureScaleBar(g,
+                                    new Rectangle(50, originalImage.Height + 5, originalImage.Width - 100, 40),
+                                    permeabilityResult.InputPressure,
+                                    permeabilityResult.OutputPressure);
+
+                                // Draw timestamp
+                                g.DrawString($"Date: {DateTime.Now:yyyy-MM-dd HH:mm:ss}",
+                                    new Font("Arial", 8),
+                                    Brushes.White,
+                                    new Point(originalImage.Width - 200, originalImage.Height + 5));
+
+                                // Draw permeability value
+                                g.DrawString($"Permeability: {permeabilityResult.PermeabilityDarcy:F3} Darcy " +
+                                            $"({permeabilityResult.PermeabilityMilliDarcy:F1} mD)",
+                                    new Font("Arial", 8, FontStyle.Bold),
+                                    Brushes.White,
+                                    new Point(50, originalImage.Height + 5));
+                            }
+
+                            // Save the image with the scale bar
+                            string extension = Path.GetExtension(saveDialog.FileName).ToLower();
+                            System.Drawing.Imaging.ImageFormat format = System.Drawing.Imaging.ImageFormat.Png; // Default
+
+                            if (extension == ".jpg" || extension == ".jpeg")
+                                format = System.Drawing.Imaging.ImageFormat.Jpeg;
+                            else if (extension == ".bmp")
+                                format = System.Drawing.Imaging.ImageFormat.Bmp;
+
+                            screenshotWithScale.Save(saveDialog.FileName, format);
+                        }
+
+                        statusLabel.Text = "Permeability visualization saved successfully.";
+                        MessageBox.Show("Visualization screenshot saved successfully.",
+                            "Save Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"Error saving screenshot: {ex.Message}",
+                            "Screenshot Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        Logger.Log($"[PoreNetworkModelingForm] Error saving screenshot: {ex.Message}\n{ex.StackTrace}");
+                    }
+                }
+            }
+        }
+
+        private void DrawPressureScaleBar(Graphics g, Rectangle rect, double maxPressure, double minPressure)
+        {
+            // Draw gradient bar
+            int width = rect.Width;
+            int height = 20;
+
+            // Create gradient brush from red to blue
+            using (System.Drawing.Drawing2D.LinearGradientBrush gradientBrush =
+                new System.Drawing.Drawing2D.LinearGradientBrush(
+                    new Point(rect.X, rect.Y),
+                    new Point(rect.X + width, rect.Y),
+                    Color.Red,   // High pressure
+                    Color.Blue)) // Low pressure
+            {
+                // Create custom color blend for red-green-blue gradient
+                System.Drawing.Drawing2D.ColorBlend colorBlend = new System.Drawing.Drawing2D.ColorBlend(3);
+                colorBlend.Colors = new Color[] { Color.Red, Color.Green, Color.Blue };
+                colorBlend.Positions = new float[] { 0.0f, 0.5f, 1.0f };
+                gradientBrush.InterpolationColors = colorBlend;
+
+                // Draw gradient rectangle
+                g.FillRectangle(gradientBrush, rect.X, rect.Y, width, height);
+            }
+
+            // Draw border around gradient
+            g.DrawRectangle(Pens.White, rect.X, rect.Y, width, height);
+
+            // Draw tick marks and labels
+            int numTicks = 5;
+            using (Font font = new Font("Arial", 8))
+            {
+                for (int i = 0; i < numTicks; i++)
+                {
+                    float x = rect.X + (width * i / (numTicks - 1));
+
+                    // Draw tick mark
+                    g.DrawLine(Pens.White, x, rect.Y + height, x, rect.Y + height + 5);
+
+                    // Calculate pressure value for this position
+                    double pressure = maxPressure - (i * (maxPressure - minPressure) / (numTicks - 1));
+                    string label = $"{pressure:F0} Pa";
+
+                    // Measure text and center it under the tick
+                    SizeF textSize = g.MeasureString(label, font);
+                    g.DrawString(label, font, Brushes.White, x - textSize.Width / 2, rect.Y + height + 6);
+                }
+            }
+
+            // Draw title
+            g.DrawString("Pressure", new Font("Arial", 9, FontStyle.Bold),
+                Brushes.White, rect.X + width / 2 - 30, rect.Y - 15);
+        }
     }
 }

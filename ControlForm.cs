@@ -1449,25 +1449,54 @@ namespace CTSegmenter
             // Create Pore Network Modeling menu item
             ToolStripMenuItem poreNetworkMenuItem = new ToolStripMenuItem("Pore Network Modeling");
 
-            // Set click event handler
+            // Set click event handler with updated logic
             poreNetworkMenuItem.Click += (s, e) =>
             {
                 if (mainForm.volumeData == null || mainForm.volumeLabels == null)
                 {
-                    MessageBox.Show("Please load a dataset first.", "No Data",
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
+                    // Instead of showing an error, ask if the user wants to load a saved model
+                    DialogResult result = MessageBox.Show(
+                        "No dataset is currently loaded. Would you like to load a saved pore network model file?",
+                        "Load Pore Network Model",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question);
 
-                // Create and show the pore network modeling form
-                PoreNetworkModelingForm poreNetworkForm = new PoreNetworkModelingForm(mainForm);
-                poreNetworkForm.Show();
+                    if (result == DialogResult.Yes)
+                    {
+                        // Show file dialog to select a .dat file
+                        using (OpenFileDialog openDialog = new OpenFileDialog())
+                        {
+                            openDialog.Filter = "Pore Network Model|*.dat";
+                            openDialog.Title = "Load Pore Network Model";
+
+                            if (openDialog.ShowDialog() == DialogResult.OK)
+                            {
+                                try
+                                {
+                                    // Create and show the pore network modeling form with the selected file
+                                    PoreNetworkModelingForm poreNetworkForm = new PoreNetworkModelingForm(mainForm, openDialog.FileName);
+                                    poreNetworkForm.Show();
+                                }
+                                catch (Exception ex)
+                                {
+                                    MessageBox.Show($"Error loading pore network model: {ex.Message}",
+                                        "Loading Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                                    Logger.Log($"[ControlForm] Error loading pore network model: {ex.Message}");
+                                }
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    // Create and show the pore network modeling form with dataset as before
+                    PoreNetworkModelingForm poreNetworkForm = new PoreNetworkModelingForm(mainForm);
+                    poreNetworkForm.Show();
+                }
             };
 
             // Add to Simulation menu
             simulationMenu.DropDownItems.Add(poreNetworkMenuItem);
-
-            // Don't insert into menuStrip here - we'll do that in InitializeComponent
         }
     }
 }

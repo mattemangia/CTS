@@ -970,3 +970,56 @@ namespace CTSegmenter
         public List<int> OutletPores { get; set; }
     }
 }
+/*
+Recommended Values by Rock Type
+Rock Type	Max Throat Length Factor	Min Overlap Factor	Enforce Flow Path
+Sandstone (high permeability)	3.0 - 4.0	0.05 - 0.10	True
+Sandstone (tight)	2.5 - 3.0	0.10 - 0.15	True
+Limestone	3.0 - 5.0	0.10 - 0.20	True
+Shale/Mudstone	2.0 - 2.5	0.15 - 0.25	True
+Fractured rock	5.0 - 8.0	0.01 - 0.05	True
+Explanation of Parameters
+
+Max Throat Length Factor (multiplier of average pore radius):
+
+Lower values (2.0-3.0): Creates more isolated pores, better for tight formations
+Medium values (3.0-4.0): Balanced connectivity for typical reservoir rocks
+Higher values (4.0-8.0): Creates longer connections, good for fractured/vuggy rocks
+
+Min Overlap Factor (fraction of smaller pore radius):
+
+Lower values (0.01-0.05): More connections, higher permeability
+Medium values (0.05-0.15): Standard for most reservoir rocks
+Higher values (0.15-0.25): More restrictive, better for tight formations
+
+Enforce Flow Path:
+
+Almost always keep this True for permeability simulations
+Only set to False if studying isolated pore networks specifically
+
+Fluid Viscosity Values (Pa·s)
+Fluid Type	Viscosity (Pa·s)	Notes
+Water (20°C)	0.001	Standard reference fluid
+Water (80°C)	0.00035	For high-temperature reservoirs
+Light oil	0.005 - 0.05	Typical reservoir oils
+Medium oil	0.05 - 0.5	Thicker oils
+Heavy oil	0.5 - 10	Bitumen, tar sands
+Air	0.000018	For gas flow studies
+CO₂ (supercritical)	0.00005	For carbon sequestration studies
+Brine (20°C)	0.0012 - 0.0015	Saline formation water
+Pressure Settings
+Standard Laboratory Conditions:
+
+Input pressure: 10,000 - 100,000 Pa (10-100 kPa)
+
+Output pressure: 0 - 10,000 Pa (0-10 kPa)
+
+Differential: Typically 10,000 - 90,000 Pa (10-90 kPa)
+
+By Rock Type:
+Rock Type	Suggested Pressure Differential	Notes
+High-perm sandstone (>1D)	10,000 - 30,000 Pa	Lower differential for high-perm samples
+Medium-perm sandstone	30,000 - 50,000 Pa	Balanced for most reservoir rocks
+Tight sandstone (<1mD)	50,000 - 100,000 Pa	Higher differential for tight rocks
+Carbonates	20,000 - 70,000 Pa	Varies with pore structure
+Shale/Tight formations	100,000 - 500,000 Pa	Very high differential needed*/

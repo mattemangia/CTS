@@ -46,6 +46,13 @@ namespace CTSegmenter
         private Panel visualizationPanel;
         private PictureBox networkPictureBox;
         private TabControl mainTabControl;
+        private NumericUpDown maxThroatLengthFactorNumeric;
+        private NumericUpDown minOverlapFactorNumeric;
+        private CheckBox enforceFlowPathCheckBox;
+        private double maxThroatLengthFactor = 3.0;
+        private double minOverlapFactor = 0.1;
+        private bool enforceFlowPath = true;
+
 
         // 3d rotation
         private float rotationX = 30.0f;
@@ -274,7 +281,6 @@ namespace CTSegmenter
                 FlatStyle = FlatStyle.Flat,
                 BackColor = Color.FromArgb(225, 225, 225),
                 Enabled = false,
-                Image = SystemIcons.Application.ToBitmap(),
                 ImageAlign = ContentAlignment.MiddleLeft,
                 TextImageRelation = TextImageRelation.ImageBeforeText,
                 Padding = new Padding(5, 0, 5, 0)
@@ -338,6 +344,18 @@ namespace CTSegmenter
             };
             exportPermeabilityButton.Click += ExportPermeabilityResults;
             settingsGroup.Controls.Add(exportPermeabilityButton);
+            Button poreConnectivityButton = new Button
+            {
+                Text = "Pore Connectivity",
+                Location = new Point(100, 20), // Adjust position to fit under Export Permeability
+                Width = 140,
+                Height = 25,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(225, 225, 225)
+            };
+            poreConnectivityButton.Click += OpenPoreConnectivityDialog;
+            settingsGroup.Controls.Add(poreConnectivityButton);
+
             ribbonPanel.Controls.Add(settingsGroup);
 
             // Status Bar (placed at the bottom of ribbon panel)
@@ -1034,17 +1052,21 @@ namespace CTSegmenter
                     progressBar.Value = percent;
                 });
 
+                // Use stored values instead of accessing controls directly
                 bool useGpu = useGpuCheckBox.Checked;
 
                 // Use the new generator class
                 using (PoreNetworkGenerator generator = new PoreNetworkGenerator())
                 {
-                    // Generate the network model
+                    // Generate the network model with petrophysical connectivity controls
                     networkModel = await generator.GenerateNetworkFromSeparationResult(
                         separationResult,
                         mainForm.pixelSize,
                         progress,
-                        useGpu);
+                        useGpu,
+                        maxThroatLengthFactor,  // Class field
+                        minOverlapFactor,       // Class field
+                        enforceFlowPath);       // Class field
                 }
 
                 // Update UI
@@ -3418,7 +3440,27 @@ namespace CTSegmenter
                 }
             }
         }
+        private void OpenPoreConnectivityDialog(object sender, EventArgs e)
+        {
+            using (var dialog = new PoreConnectivityDialog())
+            {
+                // Set initial values
+                dialog.MaxThroatLengthFactor = maxThroatLengthFactor;
+                dialog.MinOverlapFactor = minOverlapFactor;
+                dialog.EnforceFlowPath = enforceFlowPath;
 
+                if (dialog.ShowDialog() == DialogResult.OK)
+                {
+                    // Save the settings after dialog closes
+                    maxThroatLengthFactor = dialog.MaxThroatLengthFactor;
+                    minOverlapFactor = dialog.MinOverlapFactor;
+                    enforceFlowPath = dialog.EnforceFlowPath;
+
+                    // Update status
+                    statusLabel.Text = $"Pore connectivity settings updated. Max Length: {maxThroatLengthFactor:F1}×, Min Overlap: {minOverlapFactor:F2}";
+                }
+            }
+        }
         private void DrawPressureScaleBar(Graphics g, Rectangle rect, double maxPressure, double minPressure)
         {
             // Draw gradient bar

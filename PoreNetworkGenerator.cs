@@ -67,7 +67,10 @@ namespace CTSegmenter
     ParticleSeparator.SeparationResult separationResult,
     double pixelSize,
     IProgress<int> progress,
-    bool useGpu)
+    bool useGpu,
+    double maxThroatLengthFactor = 3.0,
+    double minOverlapFactor = 0.1,
+    bool enforceFlowPath = true)
         {
             PoreNetworkModel model = new PoreNetworkModel();
             model.PixelSize = pixelSize;
@@ -109,10 +112,14 @@ namespace CTSegmenter
             progress?.Report(50);
             await Task.Run(() =>
             {
-                // IMPORTANT: Always use the same algorithm regardless of GPU flag
-                // for consistent results
+                // Calculate average pore radius for scaling connections
+                double avgPoreRadius = model.Pores.Count > 0 ? model.Pores.Average(p => p.Radius) : 10.0;
+                // Maximum throat length based on petrophysical factor
+                double maxThroatLength = avgPoreRadius * maxThroatLengthFactor;
+
                 int maxConnections = Math.Min(6, model.Pores.Count - 1);
-                GenerateConsistentThroats(model, maxConnections, random); // Passing random parameter
+                GeneratePetrophysicalThroats(model, maxConnections, random, maxThroatLength,
+                    minOverlapFactor, enforceFlowPath);
 
                 // Calculate network properties
                 CalculateNetworkProperties(model);
@@ -121,7 +128,289 @@ namespace CTSegmenter
             progress?.Report(100);
             return model;
         }
+        private void GeneratePetrophysicalThroats(PoreNetworkModel model, int maxConnections, Random random,
+    double maxThroatLength, double minOverlapFactor, bool enforceFlowPath)
+        {
+            model.Throats.Clear();
 
+            // Skip if we have too few pores
+            if (model.Pores.Count < 2)
+                return;
+
+            // Calculate all pore distances once and store them
+            var distances = new Dictionary<(int, int), double>();
+            var canConnect = new Dictionary<(int, int), bool>();
+
+            for (int i = 0; i < model.Pores.Count; i++)
+            {
+                for (int j = i + 1; j < model.Pores.Count; j++)
+                {
+                    Pore pore1 = model.Pores[i];
+                    Pore pore2 = model.Pores[j];
+
+                    // Calculate center-to-center distance
+                    double distance = Distance(pore1.Center, pore2.Center);
+                    distances[(pore1.Id, pore2.Id)] = distance;
+
+                    // Calculate if pores can connect based on petrophysical criteria
+                    bool connectible = CanPoresConnect(pore1, pore2, distance, maxThroatLength, minOverlapFactor);
+                    canConnect[(pore1.Id, pore2.Id)] = connectible;
+                }
+            }
+
+            // For each pore, find valid connected neighbors
+            foreach (var pore1 in model.Pores)
+            {
+                // Get all potentially connected pores with their distances
+                var connectiblePores = model.Pores
+                    .Where(p => p.Id != pore1.Id)
+                    .Select(p => (
+                        Pore: p,
+                        Distance: distances.ContainsKey((Math.Min(pore1.Id, p.Id), Math.Max(pore1.Id, p.Id))) ?
+                            distances[(Math.Min(pore1.Id, p.Id), Math.Max(pore1.Id, p.Id))] :
+                            distances[(Math.Max(pore1.Id, p.Id), Math.Min(pore1.Id, p.Id))],
+                        CanConnect: canConnect.ContainsKey((Math.Min(pore1.Id, p.Id), Math.Max(pore1.Id, p.Id))) ?
+                            canConnect[(Math.Min(pore1.Id, p.Id), Math.Max(pore1.Id, p.Id))] :
+                            canConnect[(Math.Max(pore1.Id, p.Id), Math.Min(pore1.Id, p.Id))]
+                    ))
+                    .Where(pair => pair.CanConnect)  // Only include pores that can connect petrophysically
+                    .OrderBy(pair => pair.Distance)
+                    .Take(maxConnections);
+
+                foreach (var (pore2, distance, _) in connectiblePores)
+                {
+                    // Avoid duplicate throats (only add if pore1.Id < pore2.Id)
+                    if (pore1.Id < pore2.Id)
+                    {
+                        // Calculate throat properties
+                        double radius = CalculateThroatRadius(pore1.Radius, pore2.Radius);
+                        double length = Math.Max(0.1, distance - pore1.Radius - pore2.Radius);
+                        double volume = Math.PI * radius * radius * length;
+
+                        Throat throat = new Throat
+                        {
+                            Id = model.Throats.Count + 1,
+                            PoreId1 = pore1.Id,
+                            PoreId2 = pore2.Id,
+                            Radius = radius,
+                            Length = length,
+                            Volume = volume
+                        };
+
+                        model.Throats.Add(throat);
+
+                        // Update connection counts
+                        pore1.ConnectionCount++;
+                        pore2.ConnectionCount++;
+                    }
+                }
+            }
+
+            // When enforceFlowPath is enabled, ensure connectivity along main flow axis
+            if (enforceFlowPath && model.Pores.Count > 0)
+            {
+                EnsureFlowPathConnectivity(model, distances);
+            }
+        }
+        private bool CanPoresConnect(Pore pore1, Pore pore2, double distance, double maxThroatLength, double minOverlapFactor)
+        {
+            // Check if distance is within maximum throat length
+            if (distance > maxThroatLength)
+                return false;
+
+            // Calculate connectivity based on pore size and distance
+            double sumOfRadii = pore1.Radius + pore2.Radius;
+            double overlap = Math.Max(0, sumOfRadii - distance);
+            double overlapFactor = overlap / Math.Min(pore1.Radius, pore2.Radius);
+
+            // Must have minimum overlap to connect
+            return overlapFactor >= minOverlapFactor;
+        }
+        private void EnsureFlowPathConnectivity(PoreNetworkModel model, Dictionary<(int, int), double> distances)
+        {
+            // Sort pores by Z coordinate (typical flow direction)
+            var sortedPores = model.Pores.OrderBy(p => p.Center.Z).ToList();
+
+            // No need to process if fewer than 2 pores
+            if (sortedPores.Count < 2)
+                return;
+
+            // Create a simple graph representation
+            Dictionary<int, List<int>> graph = new Dictionary<int, List<int>>();
+            foreach (var pore in model.Pores)
+            {
+                graph[pore.Id] = new List<int>();
+            }
+
+            // Fill in existing connections
+            foreach (var throat in model.Throats)
+            {
+                graph[throat.PoreId1].Add(throat.PoreId2);
+                graph[throat.PoreId2].Add(throat.PoreId1);
+            }
+
+            // Find inlet and outlet zones (top 10% and bottom 10% of pores)
+            int boundaryCount = Math.Max(1, (int)(sortedPores.Count * 0.1));
+            var inletPores = sortedPores.Take(boundaryCount).ToList();
+            var outletPores = sortedPores.Skip(sortedPores.Count - boundaryCount).ToList();
+
+            // Check if any inlet pore can reach any outlet pore
+            bool isConnected = false;
+            foreach (var inlet in inletPores)
+            {
+                // Simple BFS to check connectivity
+                HashSet<int> visited = new HashSet<int>();
+                Queue<int> queue = new Queue<int>();
+                queue.Enqueue(inlet.Id);
+                visited.Add(inlet.Id);
+
+                while (queue.Count > 0)
+                {
+                    int current = queue.Dequeue();
+
+                    // Check if we've reached an outlet
+                    if (outletPores.Any(p => p.Id == current))
+                    {
+                        isConnected = true;
+                        break;
+                    }
+
+                    // Add all unvisited neighbors
+                    foreach (int neighbor in graph[current])
+                    {
+                        if (!visited.Contains(neighbor))
+                        {
+                            visited.Add(neighbor);
+                            queue.Enqueue(neighbor);
+                        }
+                    }
+                }
+
+                if (isConnected)
+                    break;
+            }
+
+            // If not connected, create necessary connections
+            if (!isConnected)
+            {
+                // Identify the largest clusters
+                var clusters = FindDisconnectedClusters(model, graph);
+                ConnectLargestClusters(model, clusters, distances);
+            }
+        }
+        private List<List<int>> FindDisconnectedClusters(PoreNetworkModel model, Dictionary<int, List<int>> graph)
+        {
+            HashSet<int> visited = new HashSet<int>();
+            List<List<int>> clusters = new List<List<int>>();
+
+            foreach (var pore in model.Pores)
+            {
+                if (!visited.Contains(pore.Id))
+                {
+                    // New cluster found
+                    List<int> cluster = new List<int>();
+                    Queue<int> queue = new Queue<int>();
+                    queue.Enqueue(pore.Id);
+                    visited.Add(pore.Id);
+
+                    while (queue.Count > 0)
+                    {
+                        int current = queue.Dequeue();
+                        cluster.Add(current);
+
+                        foreach (int neighbor in graph[current])
+                        {
+                            if (!visited.Contains(neighbor))
+                            {
+                                visited.Add(neighbor);
+                                queue.Enqueue(neighbor);
+                            }
+                        }
+                    }
+
+                    clusters.Add(cluster);
+                }
+            }
+
+            // Sort clusters by size (largest first)
+            return clusters.OrderByDescending(c => c.Count).ToList();
+        }
+
+        // Connects the largest clusters to ensure flow path
+        private void ConnectLargestClusters(PoreNetworkModel model, List<List<int>> clusters, Dictionary<(int, int), double> distances)
+        {
+            // Need at least 2 clusters to connect
+            if (clusters.Count < 2)
+                return;
+
+            // Find the closest pair of pores between the two largest clusters
+            var largestCluster = clusters[0];
+            var secondCluster = clusters[1];
+
+            double minDistance = double.MaxValue;
+            Pore bestPore1 = null;
+            Pore bestPore2 = null;
+
+            foreach (int id1 in largestCluster)
+            {
+                Pore pore1 = model.Pores.First(p => p.Id == id1);
+
+                foreach (int id2 in secondCluster)
+                {
+                    Pore pore2 = model.Pores.First(p => p.Id == id2);
+
+                    var key = (Math.Min(id1, id2), Math.Max(id1, id2));
+                    if (distances.ContainsKey(key) && distances[key] < minDistance)
+                    {
+                        minDistance = distances[key];
+                        bestPore1 = pore1;
+                        bestPore2 = pore2;
+                    }
+                }
+            }
+
+            // Create a throat connecting the clusters
+            if (bestPore1 != null && bestPore2 != null)
+            {
+                double radius = CalculateThroatRadius(bestPore1.Radius, bestPore2.Radius);
+                double length = Math.Max(0.1, minDistance - bestPore1.Radius - bestPore2.Radius);
+                double volume = Math.PI * radius * radius * length;
+
+                Throat throat = new Throat
+                {
+                    Id = model.Throats.Count + 1,
+                    PoreId1 = bestPore1.Id,
+                    PoreId2 = bestPore2.Id,
+                    Radius = radius,
+                    Length = length,
+                    Volume = volume
+                };
+
+                model.Throats.Add(throat);
+
+                // Update connection counts
+                bestPore1.ConnectionCount++;
+                bestPore2.ConnectionCount++;
+            }
+
+            // Recursively connect additional clusters if necessary
+            if (clusters.Count > 2)
+            {
+                // After connecting the two largest, treat them as one
+                var mergedCluster = largestCluster.Concat(secondCluster).ToList();
+                var remainingClusters = clusters.Skip(2).ToList();
+                remainingClusters.Insert(0, mergedCluster);
+
+                ConnectLargestClusters(model, remainingClusters, distances);
+            }
+        }
+        private double CalculateThroatRadius(double radius1, double radius2)
+        {
+            // Use the petrophysical relationship for throat radius
+            // Typically 0.3-0.7 times the smaller pore radius in real rocks
+            double minRadius = Math.Min(radius1, radius2);
+            return minRadius * 0.4; // Standard factor in petrophysical models
+        }
         private void GenerateConsistentThroats(PoreNetworkModel model, int maxConnections, Random random)
         {
             model.Throats.Clear();

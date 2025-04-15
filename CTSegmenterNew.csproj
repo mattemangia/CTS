@@ -291,6 +291,9 @@
     </Compile>
     <Compile Include="PermeabilitySimulator.cs" />
     <Compile Include="Pore.cs" />
+    <Compile Include="PoreConnectivityDialog.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="PoreNetworkGenerator.cs" />
     <Compile Include="PoreNetworkModeling.cs">
       <SubType>Form</SubType>

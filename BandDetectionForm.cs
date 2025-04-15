@@ -690,10 +690,19 @@ namespace CTSegmenter
                 Location = new Point(10, 40),
                 Width = 100
             };
+            Button createCompositeButton = new Button
+            {
+                Text = "Create Composite",
+                Location = new Point(10, 70),
+                Width = 100
+            };
+
+            createCompositeButton.Click += CreateCompositeButton_Click;
+            
 
             progressBar = new ProgressBar
             {
-                Location = new Point(10, 70),
+                Location = new Point(10, 100),
                 Width = 100,
                 Height = 20
             };
@@ -726,6 +735,7 @@ namespace CTSegmenter
 
             buttonsPanel.Controls.Add(processButton);
             buttonsPanel.Controls.Add(exportButton);
+            buttonsPanel.Controls.Add(createCompositeButton);
             buttonsPanel.Controls.Add(progressBar);
             parametersPanel.Controls.Add(buttonsPanel, 2, 0);
 
@@ -1118,8 +1128,54 @@ namespace CTSegmenter
 
         private void ExportButton_Click(object sender, EventArgs e)
         {
-            Task.Run(() => ExportResults());
+            // Disable the button to prevent multiple clicks
+            exportButton.Enabled = false;
+            progressBar.Value = 0;
+            progressBar.Visible = true;
+
+            try
+            {
+                // Run the export operation in a background task
+                Task.Run(async () =>
+                {
+                    try
+                    {
+                        await ExportResults();
+
+                        // Update UI on the main thread
+                        this.Invoke(new Action(() =>
+                        {
+                            progressBar.Value = 100;
+                            exportButton.Enabled = true;
+                           // MessageBox.Show("Export completed successfully!", "Export Results",
+                           //     MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            progressBar.Value = 0;
+                        }));
+                    }
+                    catch (Exception ex)
+                    {
+                        // Show error on the main thread
+                        this.Invoke(new Action(() =>
+                        {
+                            Logger.Log($"[BandDetectionForm] Error exporting results: {ex.Message}");
+                            MessageBox.Show($"Error exporting results: {ex.Message}",
+                                "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            exportButton.Enabled = true;
+                            progressBar.Value = 0;
+                        }));
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[BandDetectionForm] Error initiating export: {ex.Message}");
+                MessageBox.Show($"Error initiating export: {ex.Message}",
+                    "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                exportButton.Enabled = true;
+                progressBar.Value = 0;
+            }
         }
+
 
         #endregion
 
@@ -2134,49 +2190,64 @@ namespace CTSegmenter
         #endregion
 
         #region Export Methods
-
         private async Task ExportResults()
         {
+            // Show save file dialog on UI thread
+            SaveFileDialog saveDialog = new SaveFileDialog
+            {
+                Filter = "Excel Files|*.xlsx|CSV Files|*.csv|All Files|*.*",
+                Title = "Export Results",
+                FileName = "band_detection_results.xlsx"
+            };
+
+            bool dialogResult = false;
+            string fileName = string.Empty;
+
+            // Show the dialog on UI thread
+            this.Invoke(new Action(() => {
+                dialogResult = saveDialog.ShowDialog() == DialogResult.OK;
+                if (dialogResult)
+                    fileName = saveDialog.FileName;
+            }));
+
+            if (!dialogResult)
+                return; // User cancelled
+
             try
             {
-                // Show save file dialog
-                SaveFileDialog saveDialog = new SaveFileDialog
+                // Create export folder for images
+                string folderPath = Path.GetDirectoryName(fileName);
+                string baseFileName = Path.GetFileNameWithoutExtension(fileName);
+                string extension = Path.GetExtension(fileName);
+
+                // Update progress
+                UpdateProgressBar(20);
+
+                // Export data
+                if (extension.ToLower() == ".xlsx")
                 {
-                    Filter = "Excel Files|*.xlsx|CSV Files|*.csv|All Files|*.*",
-                    Title = "Export Results",
-                    FileName = "band_detection_results.xlsx"
-                };
-
-                if (saveDialog.ShowDialog() == DialogResult.OK)
-                {
-                    // Create export folder for images
-                    string folderPath = Path.GetDirectoryName(saveDialog.FileName);
-                    string baseFileName = Path.GetFileNameWithoutExtension(saveDialog.FileName);
-                    string extension = Path.GetExtension(saveDialog.FileName);
-
-                    // Export data
-                    if (extension.ToLower() == ".xlsx")
-                    {
-                        await ExportToExcel(saveDialog.FileName);
-                    }
-                    else
-                    {
-                        await ExportToCSV(saveDialog.FileName);
-                    }
-
-                    // Export composite images
-                    await ExportCompositeImages(folderPath, baseFileName);
-
-                    MessageBox.Show("Export completed successfully!", "Export Results", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    await ExportToExcel(fileName);
                 }
+                else
+                {
+                    await ExportToCSV(fileName);
+                }
+
+                // Update progress
+                UpdateProgressBar(50);
+
+                // Export composite images
+                await ExportCompositeImages(folderPath, baseFileName);
+
+                // Update progress
+                UpdateProgressBar(100);
             }
             catch (Exception ex)
             {
-                Logger.Log($"[BandDetectionForm] Error exporting results: {ex.Message}");
-                MessageBox.Show($"Error exporting results: {ex.Message}", "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Logger.Log($"[BandDetectionForm] Error in ExportResults: {ex.Message}");
+                throw; // Re-throw to be caught by the caller
             }
         }
-
         private async Task ExportToExcel(string fileName)
         {
             await Task.Run(() =>
@@ -2821,74 +2892,93 @@ namespace CTSegmenter
                 }
             });
         }
-
         private Bitmap CreateCompositeImage(Bitmap image, double[] profile, int[] darkPeaks, int[] brightPeaks, string viewLabel)
         {
             int imageWidth = image.Width;
             int imageHeight = image.Height;
-            int chartHeight = imageHeight;
-            int chartWidth = 300;
+            int chartWidth = 200;  // Reduced chart width
+            int infoWidth = 150;   // Width for text information
 
-            // Create composite bitmap
-            Bitmap composite = new Bitmap(imageWidth + chartWidth, imageHeight);
+            // Create composite bitmap with three sections: image, chart, info text
+            Bitmap composite = new Bitmap(imageWidth + chartWidth + infoWidth, imageHeight);
 
             using (Graphics g = Graphics.FromImage(composite))
             {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
                 // Draw background
                 g.Clear(Color.Black);
 
-                // Draw image
+                // Draw original image
                 g.DrawImage(image, 0, 0, imageWidth, imageHeight);
 
-                // Draw chart
-                Rectangle chartRect = new Rectangle(imageWidth, 0, chartWidth, chartHeight);
+                // Define chart rectangle - DIRECTLY adjacent to the image
+                Rectangle chartRect = new Rectangle(imageWidth, 0, chartWidth, imageHeight);
 
-                // Draw chart background
+                // Define info rectangle - right of the chart
+                Rectangle infoRect = new Rectangle(imageWidth + chartWidth, 0, infoWidth, imageHeight);
+
+                // Fill chart background
                 g.FillRectangle(Brushes.White, chartRect);
+
+                // Fill info area with light gray
+                g.FillRectangle(Brushes.WhiteSmoke, infoRect);
 
                 // Compute min/max for scaling
                 double min = profile.Min();
                 double max = profile.Max();
                 double range = max - min;
+                if (range < 0.0001) range = 1.0; // Prevent division by zero
 
-                // Draw chart grid
-                int gridLines = 5;
+                // Draw grid lines
                 using (Pen gridPen = new Pen(Color.LightGray, 1))
                 {
-                    for (int i = 0; i <= gridLines; i++)
+                    gridPen.DashStyle = DashStyle.Dash;
+
+                    // Horizontal grid lines - exactly matching image rows
+                    int numGridLines = 5;
+                    for (int i = 0; i <= numGridLines; i++)
                     {
-                        int y = chartRect.Top + (i * chartHeight / gridLines);
+                        int y = (i * imageHeight) / numGridLines;
                         g.DrawLine(gridPen, chartRect.Left, y, chartRect.Right, y);
+                    }
+
+                    // Vertical grid lines
+                    int numVerticalLines = 4;
+                    for (int i = 0; i <= numVerticalLines; i++)
+                    {
+                        int x = chartRect.Left + (i * chartRect.Width) / numVerticalLines;
+                        g.DrawLine(gridPen, x, 0, x, imageHeight);
                     }
                 }
 
-                // Draw chart data
-                using (Pen profilePen = new Pen(Color.Blue, 2))
+                // Draw profile line - PERFECTLY ALIGNED with image rows
+                if (profile.Length > 1)
                 {
-                    Point[] points = new Point[profile.Length];
-                    for (int i = 0; i < profile.Length; i++)
+                    using (Pen profilePen = new Pen(Color.Blue, 2))
                     {
-                        double normalizedValue = (profile[i] - min) / range;
-                        int x = chartRect.Left + 10;
-                        int y = chartRect.Bottom - (int)(normalizedValue * chartHeight);
-                        points[i] = new Point(x, y);
+                        Point[] points = new Point[profile.Length];
 
-                        // Draw horizontal line from image to chart
-                        int imageY = i;
-                        if (imageY < imageHeight)
+                        for (int i = 0; i < profile.Length; i++)
                         {
-                            g.DrawLine(new Pen(Color.LightGray, 1), imageWidth - 1, imageY, x, y);
-                        }
-                    }
+                            // Calculate Y position - DIRECT MAPPING to image pixels
+                            int y = (int)((double)i / profile.Length * imageHeight);
 
-                    // Draw the profile line
-                    if (points.Length > 1)
-                    {
+                            // Calculate X position based on profile value
+                            float xRatio = 0;
+                            if (range > 0)
+                                xRatio = (float)((profile[i] - min) / range);
+                            int x = chartRect.Left + (int)(xRatio * chartRect.Width);
+
+                            points[i] = new Point(x, y);
+                        }
+
                         g.DrawLines(profilePen, points);
                     }
                 }
 
-                // Draw dark peaks
+                // Draw dark peaks - exactly aligned with image rows
                 if (darkPeaks != null)
                 {
                     using (Pen darkPeakPen = new Pen(Color.Red, 2))
@@ -2897,26 +2987,27 @@ namespace CTSegmenter
                         {
                             if (peak < profile.Length)
                             {
-                                double normalizedValue = (profile[peak] - min) / range;
-                                int x = chartRect.Left + 10;
-                                int y = chartRect.Bottom - (int)(normalizedValue * chartHeight);
+                                // Direct mapping to image pixel position
+                                int y = (int)((double)peak / profile.Length * imageHeight);
 
-                                // Draw peak marker
-                                g.DrawLine(darkPeakPen, x - 5, y, x + 5, y);
-                                g.DrawLine(darkPeakPen, x, y - 5, x, y + 5);
+                                // X position based on profile value
+                                float xRatio = 0;
+                                if (range > 0)
+                                    xRatio = (float)((profile[peak] - min) / range);
+                                int x = chartRect.Left + (int)(xRatio * chartRect.Width);
 
-                                // Draw horizontal line from image to chart
-                                int imageY = peak;
-                                if (imageY < imageHeight)
-                                {
-                                    g.DrawLine(darkPeakPen, 0, imageY, imageWidth, imageY);
-                                }
+                                // Draw peak marker (X shape)
+                                g.DrawLine(darkPeakPen, x - 5, y - 5, x + 5, y + 5);
+                                g.DrawLine(darkPeakPen, x - 5, y + 5, x + 5, y - 5);
+
+                                // Draw horizontal line across image
+                                g.DrawLine(darkPeakPen, 0, y, imageWidth, y);
                             }
                         }
                     }
                 }
 
-                // Draw bright peaks
+                // Draw bright peaks - exactly aligned with image rows
                 if (brightPeaks != null)
                 {
                     using (Pen brightPeakPen = new Pen(Color.Green, 2))
@@ -2925,124 +3016,180 @@ namespace CTSegmenter
                         {
                             if (peak < profile.Length)
                             {
-                                double normalizedValue = (profile[peak] - min) / range;
-                                int x = chartRect.Left + 10;
-                                int y = chartRect.Bottom - (int)(normalizedValue * chartHeight);
+                                // Direct mapping to image pixel position
+                                int y = (int)((double)peak / profile.Length * imageHeight);
+
+                                // X position based on profile value
+                                float xRatio = 0;
+                                if (range > 0)
+                                    xRatio = (float)((profile[peak] - min) / range);
+                                int x = chartRect.Left + (int)(xRatio * chartRect.Width);
 
                                 // Draw peak marker (triangle)
                                 Point[] triangle = new Point[]
                                 {
-                                    new Point(x, y - 5),
-                                    new Point(x - 5, y + 5),
-                                    new Point(x + 5, y + 5)
+                            new Point(x, y - 5),
+                            new Point(x - 5, y + 5),
+                            new Point(x + 5, y + 5)
                                 };
                                 g.DrawPolygon(brightPeakPen, triangle);
 
-                                // Draw horizontal line from image to chart
-                                int imageY = peak;
-                                if (imageY < imageHeight)
-                                {
-                                    g.DrawLine(brightPeakPen, 0, imageY, imageWidth, imageY);
-                                }
+                                // Draw horizontal line across image
+                                g.DrawLine(brightPeakPen, 0, y, imageWidth, y);
                             }
                         }
                     }
                 }
 
-                // Draw chart labels
-                using (Font labelFont = new Font("Arial", 10))
+                // Draw title in the info area
+                using (Font titleFont = new Font("Arial", 12, FontStyle.Bold))
                 {
-                    // Y-axis labels
-                    for (int i = 0; i <= gridLines; i++)
-                    {
-                        double value = max - (i * range / gridLines);
-                        int y = chartRect.Top + (i * chartHeight / gridLines);
-                        string label = value.ToString("F2");
-                        SizeF labelSize = g.MeasureString(label, labelFont);
-                        g.DrawString(label, labelFont, Brushes.Black, chartRect.Right - labelSize.Width - 5, y - labelSize.Height / 2);
-                    }
+                    string title = viewLabel + " Row Profile";
+                    g.DrawString(title, titleFont, Brushes.Black, infoRect.Left + 5, infoRect.Top + 10);
+                }
 
-                    // Title
-                    using (Font titleFont = new Font("Arial", 12, FontStyle.Bold))
-                    {
-                        string title = viewLabel + " Row Profile";
-                        SizeF titleSize = g.MeasureString(title, titleFont);
-                        g.DrawString(title, titleFont, Brushes.Black, chartRect.Left + (chartRect.Width - titleSize.Width) / 2, chartRect.Top + 10);
-                    }
+                // Draw parameters in the info area
+                using (Font paramFont = new Font("Arial", 9))
+                {
+                    int paramY = infoRect.Top + 40;
+                    g.DrawString("Parameters:", paramFont, Brushes.Black, infoRect.Left + 5, paramY);
+                    paramY += 15;
+                    g.DrawString($"Disk radius: {diskRadius}px", paramFont, Brushes.Black, infoRect.Left + 5, paramY);
+                    paramY += 15;
+                    g.DrawString($"Gaussian sigma: {gaussianSigma:F1}", paramFont, Brushes.Black, infoRect.Left + 5, paramY);
+                    paramY += 15;
+                    g.DrawString($"Peak distance: {peakDistance}px", paramFont, Brushes.Black, infoRect.Left + 5, paramY);
+                    paramY += 15;
+                    g.DrawString($"Prominence: {peakProminence:F3}", paramFont, Brushes.Black, infoRect.Left + 5, paramY);
+                }
 
-                    // Draw legend
-                    int legendY = chartRect.Bottom - 60;
-                    g.DrawLine(new Pen(Color.Blue, 2), chartRect.Left + 10, legendY, chartRect.Left + 30, legendY);
-                    g.DrawString("Profile", labelFont, Brushes.Black, chartRect.Left + 35, legendY - 7);
+                // Draw legend in the info area
+                using (Font legendFont = new Font("Arial", 9))
+                {
+                    int legendY = infoRect.Top + 130;
+
+                    g.DrawLine(new Pen(Color.Blue, 2), infoRect.Left + 10, legendY, infoRect.Left + 30, legendY);
+                    g.DrawString("Profile", legendFont, Brushes.Black, infoRect.Left + 35, legendY - 7);
 
                     legendY += 20;
-                    g.DrawLine(new Pen(Color.Red, 2), chartRect.Left + 10, legendY, chartRect.Left + 30, legendY);
-                    g.DrawLine(new Pen(Color.Red, 2), chartRect.Left + 15, legendY - 5, chartRect.Left + 25, legendY + 5);
-                    g.DrawLine(new Pen(Color.Red, 2), chartRect.Left + 15, legendY + 5, chartRect.Left + 25, legendY - 5);
-                    g.DrawString("Dark Bands", labelFont, Brushes.Black, chartRect.Left + 35, legendY - 7);
+                    // X marker for dark peaks
+                    g.DrawLine(new Pen(Color.Red, 2), infoRect.Left + 10, legendY - 5, infoRect.Left + 30, legendY + 5);
+                    g.DrawLine(new Pen(Color.Red, 2), infoRect.Left + 10, legendY + 5, infoRect.Left + 30, legendY - 5);
+                    g.DrawString("Dark Bands", legendFont, Brushes.Black, infoRect.Left + 35, legendY - 7);
 
                     legendY += 20;
                     Point[] triangle = new Point[]
                     {
-                        new Point(chartRect.Left + 20, legendY - 5),
-                        new Point(chartRect.Left + 15, legendY + 5),
-                        new Point(chartRect.Left + 25, legendY + 5)
+                new Point(infoRect.Left + 20, legendY - 5),
+                new Point(infoRect.Left + 10, legendY + 5),
+                new Point(infoRect.Left + 30, legendY + 5)
                     };
                     g.DrawPolygon(new Pen(Color.Green, 2), triangle);
-                    g.DrawString("Bright Bands", labelFont, Brushes.Black, chartRect.Left + 35, legendY - 7);
-                }
-
-                // Draw processing parameters
-                using (Font paramFont = new Font("Arial", 9))
-                {
-                    int paramY = chartRect.Top + 40;
-                    g.DrawString($"Parameters:", paramFont, Brushes.Black, chartRect.Left + 10, paramY);
-                    paramY += 15;
-                    g.DrawString($"Disk radius: {diskRadius}px", paramFont, Brushes.Black, chartRect.Left + 10, paramY);
-                    paramY += 15;
-                    g.DrawString($"Gaussian sigma: {gaussianSigma:F1}", paramFont, Brushes.Black, chartRect.Left + 10, paramY);
-                    paramY += 15;
-                    g.DrawString($"Peak distance: {peakDistance}px", paramFont, Brushes.Black, chartRect.Left + 10, paramY);
-                    paramY += 15;
-                    g.DrawString($"Prominence: {peakProminence:F3}", paramFont, Brushes.Black, chartRect.Left + 10, paramY);
+                    g.DrawString("Bright Bands", legendFont, Brushes.Black, infoRect.Left + 35, legendY - 7);
                 }
 
                 // Draw scale bar
                 double pixelSize = mainForm.GetPixelSize(); // in meters
                 if (pixelSize > 0)
                 {
-                    // Calculate a nice round scale bar length in millimeters
-                    double desiredWidthInPixels = imageWidth * 0.2; // 20% of the image width
-                    double widthInMeters = desiredWidthInPixels * pixelSize;
-                    double widthInMm = widthInMeters * 1000; // convert to mm
+                    // Choose appropriate scale bar length
+                    int scaleBarPixels = (int)(imageWidth * 0.2); // 20% of image width
+                    double realWorldLength = scaleBarPixels * pixelSize; // in meters
 
-                    // Round to a nice number
-                    double niceWidthInMm;
-                    if (widthInMm >= 10)
-                        niceWidthInMm = Math.Round(widthInMm / 10) * 10; // Round to nearest 10mm
-                    else if (widthInMm >= 1)
-                        niceWidthInMm = Math.Round(widthInMm); // Round to nearest 1mm
+                    string scaleLabel;
+                    if (realWorldLength >= 0.001) // 1mm or larger
+                    {
+                        // Use millimeters
+                        double lengthInMm = realWorldLength * 1000;
+                        // Round to a nice value, but ensure we never show "0 mm"
+                        double niceMm = Math.Max(0.1, Math.Round(lengthInMm * 10) / 10);
+                        scaleLabel = $"{niceMm:G4} mm";
+                    }
                     else
-                        niceWidthInMm = Math.Round(widthInMm * 10) / 10; // Round to nearest 0.1mm
-
-                    // Calculate the pixel width of the scale bar
-                    double niceWidthInMeters = niceWidthInMm / 1000; // back to meters
-                    int scaleBarWidth = (int)(niceWidthInMeters / pixelSize);
+                    {
+                        // Use micrometers
+                        double lengthInUm = realWorldLength * 1000000;
+                        // Round to a nice value, but ensure we never show "0 µm"
+                        double niceUm = Math.Max(1, Math.Round(lengthInUm));
+                        scaleLabel = $"{niceUm:G4} µm";
+                    }
 
                     // Draw the scale bar
-                    int scaleBarY = imageHeight - 30;
+                    int scaleBarY = imageHeight - 20; // Position near bottom
                     int scaleBarX = 20;
                     int scaleBarHeight = 5;
 
-                    g.FillRectangle(Brushes.White, scaleBarX, scaleBarY, scaleBarWidth, scaleBarHeight);
+                    using (SolidBrush whiteBrush = new SolidBrush(Color.White))
+                    {
+                        g.FillRectangle(whiteBrush, scaleBarX, scaleBarY, scaleBarPixels, scaleBarHeight);
 
-                    // Draw label
-                    string scaleLabel = $"{niceWidthInMm:G4} mm";
-                    g.DrawString(scaleLabel, new Font("Arial", 9), Brushes.White, scaleBarX, scaleBarY + scaleBarHeight + 2);
+                        // Draw label with background to ensure visibility
+                        SizeF labelSize = g.MeasureString(scaleLabel, new Font("Arial", 9));
+
+                        // Draw semi-transparent background behind text
+                        using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(180, Color.Black)))
+                        {
+                            g.FillRectangle(bgBrush, scaleBarX, scaleBarY + scaleBarHeight + 2,
+                                labelSize.Width, labelSize.Height);
+                        }
+
+                        g.DrawString(scaleLabel, new Font("Arial", 9), whiteBrush,
+                            scaleBarX, scaleBarY + scaleBarHeight + 2);
+                    }
                 }
             }
-
             return composite;
+        }
+
+        private void CreateCompositeButton_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                // Show save dialog
+                SaveFileDialog saveDialog = new SaveFileDialog
+                {
+                    Filter = "PNG Files|*.png|All Files|*.*",
+                    Title = "Save Composite Image",
+                    FileName = "composite_image.png"
+                };
+
+                if (saveDialog.ShowDialog() == DialogResult.OK)
+                {
+                    string folderPath = Path.GetDirectoryName(saveDialog.FileName);
+                    string baseFileName = Path.GetFileNameWithoutExtension(saveDialog.FileName);
+
+                    // Determine which view is active/selected (can be improved with radio buttons)
+                    if (xyProcessedImage != null && xyRowProfile != null)
+                    {
+                        using (Bitmap composite = CreateCompositeImage(xyProcessedImage, xyRowProfile, xyDarkPeaks, xyBrightPeaks, "XY"))
+                        {
+                            composite.Save(Path.Combine(folderPath, baseFileName + "_xy.png"), ImageFormat.Png);
+                        }
+                    }
+
+                    if (xzProcessedImage != null && xzRowProfile != null)
+                    {
+                        using (Bitmap composite = CreateCompositeImage(xzProcessedImage, xzRowProfile, xzDarkPeaks, xzBrightPeaks, "XZ"))
+                        {
+                            composite.Save(Path.Combine(folderPath, baseFileName + "_xz.png"), ImageFormat.Png);
+                        }
+                    }
+
+                    if (yzProcessedImage != null && yzRowProfile != null)
+                    {
+                        using (Bitmap composite = CreateCompositeImage(yzProcessedImage, yzRowProfile, yzDarkPeaks, yzBrightPeaks, "YZ"))
+                        {
+                            composite.Save(Path.Combine(folderPath, baseFileName + "_yz.png"), ImageFormat.Png);
+                        }
+                    }
+
+                    MessageBox.Show("Composite images created successfully!", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Error creating composite image: " + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
     }
     public class BandDetectionTool : ToolStripMenuItem

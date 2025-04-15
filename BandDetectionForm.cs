@@ -13,6 +13,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Windows.Forms.DataVisualization.Charting;
+using ILGPU;
+using ILGPU.Runtime;
+using ILGPU.Runtime.CPU;
+using ILGPU.Runtime.Cuda;
 
 namespace CTSegmenter
 {
@@ -59,7 +63,7 @@ namespace CTSegmenter
             mainForm = form;
             cancellationTokenSource = new CancellationTokenSource();
             InitializeComponents();
-
+            InitializeVarianceDetection();
             // Set initial slice values with proper order to avoid ArgumentOutOfRangeException
             int depth = mainForm.GetDepth();
             int height = mainForm.GetHeight();
@@ -93,7 +97,7 @@ namespace CTSegmenter
             xySliceTrackBar.Value = xyValue;
             xzSliceTrackBar.Value = xzValue;
             yzSliceTrackBar.Value = yzValue;
-
+            
             // Initial processing
             Task.Run(() => ProcessAllViews());
         }
@@ -101,7 +105,7 @@ namespace CTSegmenter
         private void InitializeComponents()
         {
             this.Text = "Band Detection";
-            this.Size = new Size(1200, 800);
+            this.Size = new Size(1200, 900);
             this.FormBorderStyle = FormBorderStyle.Sizable;
             this.StartPosition = FormStartPosition.CenterScreen;
             xyChart = new Chart();
@@ -116,8 +120,9 @@ namespace CTSegmenter
                 Padding = new Padding(5)
             };
 
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 85F));  // Views row
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 15F));  // Parameters row
+            mainLayout.RowStyles.Clear();
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 80F));  // Views row - reduced from 85%
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 20F));
 
             // Top row: Panel containing all views side by side
             TableLayoutPanel viewsPanel = new TableLayoutPanel
@@ -1192,19 +1197,23 @@ namespace CTSegmenter
             {
                 UpdateProgressBar(0);
 
-                // Process all three views concurrently
-                var xyTask = ProcessXYView(token);
-                UpdateProgressBar(20);
+                // Process all three views truly concurrently
+                var tasks = new List<Task>();
 
-                var xzTask = ProcessXZView(token);
-                UpdateProgressBar(40);
+                // Instead of sequentially adding tasks one after another,
+                // create all tasks at once and let them run in parallel
+                tasks.Add(ProcessXYView(token));
+                tasks.Add(ProcessXZView(token));
+                tasks.Add(ProcessYZView(token));
 
-                var yzTask = ProcessYZView(token);
-                UpdateProgressBar(60);
-
-                // Wait for all to complete
-                await Task.WhenAll(xyTask, xzTask, yzTask);
-                UpdateProgressBar(80);
+                // Wait for all tasks to complete
+                int completedTasks = 0;
+                foreach (var task in tasks)
+                {
+                    await task;
+                    completedTasks++;
+                    UpdateProgressBar(completedTasks * 30); // Update progress proportionally
+                }
 
                 // Update all charts on UI thread
                 this.Invoke(new Action(() => {
@@ -1399,9 +1408,7 @@ namespace CTSegmenter
         {
             return await Task.Run(() =>
             {
-                // Check if operations should be cancelled
                 token.ThrowIfCancellationRequested();
-
                 int width = sourceImage.Width;
                 int height = sourceImage.Height;
 
@@ -1417,9 +1424,10 @@ namespace CTSegmenter
                 Marshal.Copy(sourceData.Scan0, pixels, 0, pixels.Length);
                 sourceImage.UnlockBits(sourceData);
 
-                // Convert to grayscale float array
+                // Convert to grayscale float array - PARALLEL!
                 float[,] grayImage = new float[width, height];
-                for (int y = 0; y < height; y++)
+
+                Parallel.For(0, height, y =>
                 {
                     for (int x = 0; x < width; x++)
                     {
@@ -1431,15 +1439,16 @@ namespace CTSegmenter
                         // Convert to grayscale using luminance formula
                         grayImage[x, y] = (0.299f * r + 0.587f * g + 0.114f * b) / 255.0f;
                     }
-                }
+                });
 
-                // Crop top (remove air) if enabled
+                // Crop top (remove air) if enabled - PARALLEL row sum calculation
                 int cropRow = 0;
                 if (cropAir)
                 {
-                    // Compute row sums to detect top boundary
+                    // Compute row sums to detect top boundary - in parallel
                     double[] rowSums = new double[height];
-                    for (int y = 0; y < height; y++)
+
+                    Parallel.For(0, height, y =>
                     {
                         double sum = 0;
                         for (int x = 0; x < width; x++)
@@ -1447,7 +1456,7 @@ namespace CTSegmenter
                             sum += grayImage[x, y];
                         }
                         rowSums[y] = sum;
-                    }
+                    });
 
                     // Find the first row with significant content
                     double maxSum = rowSums.Max();
@@ -1465,25 +1474,25 @@ namespace CTSegmenter
                 // Adjust height after cropping
                 int newHeight = height - cropRow;
 
-                // Invert if requested
+                // Invert if requested - PARALLEL!
                 if (invertImage)
                 {
-                    for (int y = 0; y < height; y++)
+                    Parallel.For(0, height, y =>
                     {
                         for (int x = 0; x < width; x++)
                         {
                             grayImage[x, y] = 1.0f - grayImage[x, y];
                         }
-                    }
+                    });
                 }
 
-                // Apply morphological top-hat filtering
+                // Apply morphological top-hat filtering - PARALLEL IMPLEMENTATION
                 token.ThrowIfCancellationRequested();
-                float[,] topHatImage = WhiteTopHat(grayImage, diskRadius, cropRow, token);
+                float[,] topHatImage = WhiteTopHatParallel(grayImage, diskRadius, cropRow, token);
 
-                // Apply horizontal Gaussian filter
+                // Apply horizontal Gaussian filter - PARALLEL IMPLEMENTATION
                 token.ThrowIfCancellationRequested();
-                float[,] smoothedImage = HorizontalGaussianFilter(topHatImage, (float)gaussianSigma, token);
+                float[,] smoothedImage = HorizontalGaussianFilterParallel(topHatImage, (float)gaussianSigma, token);
 
                 // Create result bitmap
                 token.ThrowIfCancellationRequested();
@@ -1496,21 +1505,33 @@ namespace CTSegmenter
                 // Prepare output array
                 byte[] resultPixels = new byte[resultData.Stride * newHeight];
 
-                // Find min/max values for normalization
+                // Find min/max values for normalization - PARALLEL!
                 float min = float.MaxValue;
                 float max = float.MinValue;
-                for (int y = 0; y < newHeight; y++)
+
+                // Use parallel reduction to find min/max values
+                object lockObj = new object();
+                Parallel.For(0, newHeight, y =>
                 {
+                    float localMin = float.MaxValue;
+                    float localMax = float.MinValue;
+
                     for (int x = 0; x < width; x++)
                     {
                         float val = smoothedImage[x, y];
-                        if (val < min) min = val;
-                        if (val > max) max = val;
+                        if (val < localMin) localMin = val;
+                        if (val > localMax) localMax = val;
                     }
-                }
 
-                // Create normalized output image
-                for (int y = 0; y < newHeight; y++)
+                    lock (lockObj)
+                    {
+                        if (localMin < min) min = localMin;
+                        if (localMax > max) max = localMax;
+                    }
+                });
+
+                // Create normalized output image - PARALLEL!
+                Parallel.For(0, newHeight, y =>
                 {
                     for (int x = 0; x < width; x++)
                     {
@@ -1523,16 +1544,17 @@ namespace CTSegmenter
                         resultPixels[offset + 1] = pixelValue; // Green
                         resultPixels[offset + 2] = pixelValue; // Red
                     }
-                }
+                });
 
                 // Copy the result pixels to the bitmap
                 Marshal.Copy(resultPixels, 0, resultData.Scan0, resultPixels.Length);
                 resultImage.UnlockBits(resultData);
 
-                // Calculate row profile (sum each row)
+                // Calculate row profile (sum each row) - PARALLEL!
                 token.ThrowIfCancellationRequested();
                 double[] rowProfile = new double[newHeight];
-                for (int y = 0; y < newHeight; y++)
+
+                Parallel.For(0, newHeight, y =>
                 {
                     double sum = 0;
                     for (int x = 0; x < width; x++)
@@ -1540,7 +1562,7 @@ namespace CTSegmenter
                         sum += smoothedImage[x, y];
                     }
                     rowProfile[y] = sum;
-                }
+                });
 
                 // Apply Gaussian smoothing to the row profile
                 double[] smoothRowProfile = GaussianSmoothArray(rowProfile, (float)gaussianSigma);
@@ -1552,6 +1574,171 @@ namespace CTSegmenter
 
                 return new Tuple<Bitmap, double[], int[], int[]>(resultImage, smoothRowProfile, darkPeaks, brightPeaks);
             }, token);
+        }
+        private float[,] WhiteTopHatParallel(float[,] image, int radius, int cropRow, CancellationToken token)
+        {
+            int width = image.GetLength(0);
+            int height = image.GetLength(1);
+            int newHeight = height - cropRow;
+
+            // Create output image
+            float[,] result = new float[width, newHeight];
+
+            // Create disk structuring element
+            bool[,] disk = CreateDiskStructuringElement(radius);
+            int diskWidth = disk.GetLength(0);
+            int diskHeight = disk.GetLength(1);
+            int halfDiskWidth = diskWidth / 2;
+            int halfDiskHeight = diskHeight / 2;
+
+            // Apply morphological opening
+            float[,] opened = new float[width, newHeight];
+
+            // Initialize with maximum value - PARALLEL!
+            Parallel.For(0, newHeight, y =>
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    opened[x, y] = float.MaxValue;
+                }
+            });
+
+            // Perform dilation on the inverted image (erosion on original) - PARALLEL!
+            Parallel.For(0, newHeight, y =>
+            {
+                if (token.IsCancellationRequested) return;
+
+                for (int x = 0; x < width; x++)
+                {
+                    float minVal = float.MaxValue;
+
+                    for (int dy = -halfDiskHeight; dy <= halfDiskHeight; dy++)
+                    {
+                        for (int dx = -halfDiskWidth; dx <= halfDiskWidth; dx++)
+                        {
+                            int nx = x + dx;
+                            int ny = y + dy + cropRow;
+
+                            if (nx >= 0 && nx < width && ny >= 0 && ny < height &&
+                                disk[dx + halfDiskWidth, dy + halfDiskHeight])
+                            {
+                                minVal = Math.Min(minVal, image[nx, ny]);
+                            }
+                        }
+                    }
+
+                    opened[x, y] = minVal;
+                }
+            });
+
+            // Copy opened to temp - PARALLEL for better memory access pattern
+            float[,] temp = new float[width, newHeight];
+
+            Parallel.For(0, newHeight, y =>
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    temp[x, y] = opened[x, y];
+                }
+            });
+
+            // Perform erosion on the result (dilation on original) - PARALLEL!
+            Parallel.For(0, newHeight, y =>
+            {
+                if (token.IsCancellationRequested) return;
+
+                for (int x = 0; x < width; x++)
+                {
+                    float maxVal = float.MinValue;
+
+                    for (int dy = -halfDiskHeight; dy <= halfDiskHeight; dy++)
+                    {
+                        for (int dx = -halfDiskWidth; dx <= halfDiskWidth; dx++)
+                        {
+                            int nx = x + dx;
+                            int ny = y + dy;
+
+                            if (nx >= 0 && nx < width && ny >= 0 && ny < newHeight &&
+                                disk[dx + halfDiskWidth, dy + halfDiskHeight])
+                            {
+                                maxVal = Math.Max(maxVal, temp[nx, ny]);
+                            }
+                        }
+                    }
+
+                    opened[x, y] = maxVal;
+                }
+            });
+
+            // Compute top-hat: original - opening - PARALLEL!
+            Parallel.For(0, newHeight, y =>
+            {
+                if (token.IsCancellationRequested) return;
+
+                for (int x = 0; x < width; x++)
+                {
+                    result[x, y] = image[x, y + cropRow] - opened[x, y];
+                }
+            });
+
+            return result;
+        }
+
+        // Optimized parallel implementation of HorizontalGaussianFilter
+        private float[,] HorizontalGaussianFilterParallel(float[,] image, float sigma, CancellationToken token)
+        {
+            int width = image.GetLength(0);
+            int height = image.GetLength(1);
+
+            // Create output image
+            float[,] result = new float[width, height];
+
+            // Create 1D Gaussian kernel
+            int kernelSize = (int)(6.0 * sigma);
+            if (kernelSize % 2 == 0) kernelSize++; // Make sure kernel size is odd
+            float[] kernel = new float[kernelSize];
+            float sum = 0;
+            int halfKernelSize = kernelSize / 2;
+
+            for (int i = 0; i < kernelSize; i++)
+            {
+                float x = i - halfKernelSize;
+                kernel[i] = (float)Math.Exp(-(x * x) / (2 * sigma * sigma));
+                sum += kernel[i];
+            }
+
+            // Normalize kernel
+            for (int i = 0; i < kernelSize; i++)
+            {
+                kernel[i] /= sum;
+            }
+
+            // Apply horizontal Gaussian filter - PARALLEL!
+            Parallel.For(0, height, y =>
+            {
+                if (token.IsCancellationRequested) return;
+
+                for (int x = 0; x < width; x++)
+                {
+                    float sum2 = 0;
+                    float weightSum = 0;
+
+                    for (int i = 0; i < kernelSize; i++)
+                    {
+                        int xpos = x + i - halfKernelSize;
+
+                        if (xpos >= 0 && xpos < width)
+                        {
+                            sum2 += image[xpos, y] * kernel[i];
+                            weightSum += kernel[i];
+                        }
+                    }
+
+                    result[x, y] = sum2 / weightSum;
+                }
+            });
+
+            return result;
         }
 
         private float[,] WhiteTopHat(float[,] image, int radius, int cropRow, CancellationToken token)
@@ -3192,29 +3379,6 @@ namespace CTSegmenter
             }
         }
     }
-    public class BandDetectionTool : ToolStripMenuItem
-    {
-        private MainForm mainForm;
-
-        public BandDetectionTool(MainForm form)
-        {
-            mainForm = form;
-            this.Text = "Band Detection";
-            this.Click += OnBandDetectionClick;
-        }
-
-        private void OnBandDetectionClick(object sender, EventArgs e)
-        {
-            if (mainForm.volumeData == null)
-            {
-                MessageBox.Show("Please load a dataset first.", "No Data",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            BandDetectionForm bandDetectionForm = new BandDetectionForm(mainForm);
-            bandDetectionForm.Show();
-        }
-    }
+    
     #endregion
 }

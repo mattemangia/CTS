@@ -250,6 +250,9 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Annotations.cs" />
+    <Compile Include="BandDetectionForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Binning.cs" />
     <Compile Include="BrightnessContrastForm.cs">
       <SubType>Form</SubType>

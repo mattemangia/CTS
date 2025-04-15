@@ -394,6 +394,21 @@ namespace CTSegmenter
                     MessageBox.Show($"Error opening Transform Dataset form: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             };
+            ToolStripMenuItem bandDetectionMenuItem = new ToolStripMenuItem("Band Detection");
+            bandDetectionMenuItem.Click += (s, e) =>
+            {
+                if (mainForm.volumeData == null)
+                {
+                    MessageBox.Show("Please load a dataset first.", "No Data",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                Logger.Log("[ControlForm] Opening Band Detection tool");
+                BandDetectionForm bandDetectionForm = new BandDetectionForm(mainForm);
+                bandDetectionForm.Show();
+            };
+            toolsMenu.DropDownItems.Add(bandDetectionMenuItem);
             toolsMenu.DropDownItems.Add(transformDatasetMenuItem);
             toolsMenu.DropDownItems.Add(filterManagerMenuItem);
             toolsMenu.DropDownItems.Add(segmentAnythingToolMenuItem);

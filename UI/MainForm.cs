@@ -72,8 +72,40 @@ namespace CTSegmenter
             }
         }
 
-        public int XzSliceY { get; set; }
-        public int YzSliceX { get; set; }
+        private int xzSliceY;
+        public int XzSliceY
+        {
+            get => xzSliceY;
+            set
+            {
+                if (xzSliceY != value)
+                {
+                    xzSliceY = Math.Max(0, Math.Min(value, height - 1));
+                    RenderViews(ViewType.XZ);
+                    NotifyXZRowChangeCallbacks(xzSliceY);
+                    if (orthogonalView != null)
+                        orthogonalView.UpdatePosition(YzSliceX, xzSliceY, currentSlice);
+                }
+            }
+        }
+
+        private int yzSliceX;
+        public int YzSliceX
+        {
+            get => yzSliceX;
+            set
+            {
+                if (yzSliceX != value)
+                {
+                    yzSliceX = Math.Max(0, Math.Min(value, width - 1));
+                    RenderViews(ViewType.YZ);
+                    NotifyYZColChangeCallbacks(yzSliceX);
+                    if (orthogonalView != null)
+                        orthogonalView.UpdatePosition(yzSliceX, xzSliceY, currentSlice);
+                }
+            }
+        }
+
 
         // Render options
         public bool ShowMask { get; set; } = false;

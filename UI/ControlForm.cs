@@ -311,6 +311,7 @@ namespace CTSegmenter
             ToolStripSeparator toolsSeparator = new ToolStripSeparator();
             toolsMenu.DropDownItems.Add(toolsSeparator);
             AddBrightnessContrastMenu();
+            ToolStripMenuItem aiSubmenu = new ToolStripMenuItem("Artificial Intelligence");
             ToolStripMenuItem segmentAnythingToolMenuItem = new ToolStripMenuItem("Segment Anything");
             segmentAnythingToolMenuItem.Click += (s, e) =>
             {
@@ -342,6 +343,7 @@ namespace CTSegmenter
                 segmentAnything.Show();
             };
             ToolStripMenuItem integrateResampleMenuItem = new ToolStripMenuItem("Integrate / Resample");
+            aiSubmenu.DropDownItems.Add(segmentAnythingToolMenuItem);
             integrateResampleMenuItem.Click += (s, e) =>
             {
                 if (mainForm.volumeData == null)
@@ -411,7 +413,7 @@ namespace CTSegmenter
             toolsMenu.DropDownItems.Add(bandDetectionMenuItem);
             toolsMenu.DropDownItems.Add(transformDatasetMenuItem);
             toolsMenu.DropDownItems.Add(filterManagerMenuItem);
-            toolsMenu.DropDownItems.Add(segmentAnythingToolMenuItem);
+            toolsMenu.DropDownItems.Add(aiSubmenu);
             toolsMenu.DropDownItems.Add(textureClassifierMenuItem);
             dbgConsole.Click += (s, e) =>
             {

@@ -13,7 +13,7 @@ using System.Drawing.Drawing2D;
 
 namespace CTSegmenter
 {
-    internal class SegmentAnythingCT
+    public partial class SegmentAnythingCT
     {
         // Main form components
         private Form samForm;
@@ -99,8 +99,14 @@ namespace CTSegmenter
 
         // Slice change callback
         private Action<int> sliceChangeCallback;
-
-        public SegmentAnythingCT(MainForm mainForm, Material selectedMaterial, AnnotationManager annotationManager)
+        /// <summary>
+        /// Constructor that allows using SegmentAnythingCT without showing the UI
+        /// </summary>
+        /// <param name="mainForm">Reference to the main application form</param>
+        /// <param name="selectedMaterial">The material to use for segmentation</param>
+        /// <param name="annotationManager">The annotation manager for storing points</param>
+        /// <param name="showUI">Whether to show the user interface (default: true)</param>
+        public SegmentAnythingCT(MainForm mainForm, Material selectedMaterial, AnnotationManager annotationManager, bool showUI = true)
         {
             Logger.Log("[SegmentAnythingCT] Creating SAM interface");
             this.mainForm = mainForm;
@@ -117,31 +123,51 @@ namespace CTSegmenter
             xzSliceCache = new LRUCache<int, Bitmap>(CACHE_SIZE);
             yzSliceCache = new LRUCache<int, Bitmap>(CACHE_SIZE);
 
-            // Initialize form and UI
-            InitializeForm();
+            if (showUI)
+            {
+                // Initialize form and UI
+                InitializeForm();
+
+                // Register for slice changes from MainForm
+                sliceChangeCallback = UpdateSliceFromMainForm;
+                mainForm.RegisterSliceChangeCallback(sliceChangeCallback);
+            }
 
             // Set default model paths
             string onnxDirectory = Path.Combine(Application.StartupPath, "ONNX");
             encoderPath = Path.Combine(onnxDirectory, "sam2.1_large.encoder.onnx");
             decoderPath = Path.Combine(onnxDirectory, "sam2.1_large.decoder.onnx");
-            modelPathTextBox.Text = onnxDirectory;
 
-            // Register for slice changes from MainForm
-            sliceChangeCallback = UpdateSliceFromMainForm;
-            mainForm.RegisterSliceChangeCallback(sliceChangeCallback);
+            if (showUI)
+            {
+                modelPathTextBox.Text = onnxDirectory;
+            }
 
             // Try to load models automatically
             try
             {
                 Logger.Log("[SegmentAnythingCT] Attempting to load ONNX models");
                 LoadONNXModels();
-                statusLabel.Text = "Models loaded successfully";
+
+                if (showUI)
+                {
+                    statusLabel.Text = "Models loaded successfully";
+                }
             }
             catch (Exception ex)
             {
                 Logger.Log($"[SegmentAnythingCT] Error loading models: {ex.Message}");
-                statusLabel.Text = $"Error loading models: {ex.Message}";
+
+                if (showUI)
+                {
+                    statusLabel.Text = $"Error loading models: {ex.Message}";
+                }
             }
+        }
+        public SegmentAnythingCT(MainForm mainForm, Material selectedMaterial, AnnotationManager annotationManager)
+     : this(mainForm, selectedMaterial, annotationManager, true)
+        {
+            
         }
 
         private void InitializeForm()
@@ -1476,20 +1502,28 @@ namespace CTSegmenter
                 // Verify files exist
                 if (!File.Exists(encoderPath))
                 {
-                    MessageBox.Show($"Encoder model not found at: {encoderPath}");
-                    Logger.Log($"[SegmentAnythingCT] Encoder model not found at: {encoderPath}");
+                    string errorMsg = $"Encoder model not found at: {encoderPath}";
+                    if (samForm != null)
+                    {
+                        MessageBox.Show(errorMsg);
+                    }
+                    Logger.Log($"[SegmentAnythingCT] {errorMsg}");
                     return;
                 }
 
                 if (!File.Exists(decoderPath))
                 {
-                    MessageBox.Show($"Decoder model not found at: {decoderPath}");
-                    Logger.Log($"[SegmentAnythingCT] Decoder model not found at: {decoderPath}");
+                    string errorMsg = $"Decoder model not found at: {decoderPath}";
+                    if (samForm != null)
+                    {
+                        MessageBox.Show(errorMsg);
+                    }
+                    Logger.Log($"[SegmentAnythingCT] {errorMsg}");
                     return;
                 }
 
                 // Create session options with enhanced performance settings
-                useGPU = rbGPU.Checked;
+                useGPU = rbGPU != null ? rbGPU.Checked : false;
                 SessionOptions options = new SessionOptions();
 
                 // Set graph optimization level to maximum
@@ -1519,13 +1553,26 @@ namespace CTSegmenter
                 decoderSession = new InferenceSession(decoderPath, options);
 
                 Logger.Log("[SegmentAnythingCT] Models loaded successfully with optimized settings");
-                statusLabel.Text = "Models loaded successfully";
+
+                if (statusLabel != null)
+                {
+                    statusLabel.Text = "Models loaded successfully";
+                }
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error loading models: {ex.Message}");
-                statusLabel.Text = $"Error: {ex.Message}";
+                if (samForm != null)
+                {
+                    MessageBox.Show($"Error loading models: {ex.Message}");
+                }
+
+                if (statusLabel != null)
+                {
+                    statusLabel.Text = $"Error: {ex.Message}";
+                }
+
                 Logger.Log($"[SegmentAnythingCT] Error loading models: {ex.Message}");
+                throw; // Re-throw to allow caller to handle
             }
         }
 

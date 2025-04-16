@@ -13,7 +13,7 @@ namespace CTSegmenter
         /// Reads a single row (y=rowIndex) from the XY plane at Z=sliceIndex 
         /// into 'buffer' of length = volume width.
         /// </summary>
-        public static void ReadRow(this ChunkedVolume vol, int sliceIndex, int rowIndex, byte[] buffer)
+        public static void ReadRow(this IGrayscaleVolumeData vol, int sliceIndex, int rowIndex, byte[] buffer)
         {
             // We'll do naive indexing from the volume indexer.
             // data = volume[x, y, z]
@@ -26,27 +26,19 @@ namespace CTSegmenter
                 buffer[x] = vol[x, rowIndex, sliceIndex];
             }
         }
-        public static byte GetVoxel(this ChunkedVolume volume, int x, int y, int z)
-        {
-            return volume[x, y, z];
-        }
-
-        public static void SetVoxel(this ChunkedVolume volume, int x, int y, int z, byte value)
-        {
-            volume[x, y, z] = value;
-        }
+        
 
         // Get methods for ChunkedLabelVolume
-        public static byte GetVoxel(this ChunkedLabelVolume volume, int x, int y, int z)
+        public static byte GetVoxel(this IVolumeData volume, int x, int y, int z)
         {
             return volume[x, y, z];
         }
 
-        public static void SetVoxel(this ChunkedLabelVolume volume, int x, int y, int z, byte value)
+        public static void SetVoxel(this IVolumeData volume, int x, int y, int z, byte value)
         {
             volume[x, y, z] = value;
         }
-        public static byte[] GetSliceXY(this ChunkedVolume volume, int z)
+        public static byte[] GetSliceXY(this IVolumeData volume, int z)
         {
             byte[] slice = new byte[volume.Width * volume.Height];
             int index = 0;
@@ -62,7 +54,7 @@ namespace CTSegmenter
             return slice;
         }
 
-        public static byte[] GetSliceXZ(this ChunkedVolume volume, int y)
+        public static byte[] GetSliceXZ(this IVolumeData volume, int y)
         {
             byte[] slice = new byte[volume.Width * volume.Depth];
             int index = 0;
@@ -78,7 +70,7 @@ namespace CTSegmenter
             return slice;
         }
 
-        public static byte[] GetSliceYZ(this ChunkedVolume volume, int x)
+        public static byte[] GetSliceYZ(this IVolumeData volume, int x)
         {
             byte[] slice = new byte[volume.Height * volume.Depth];
             int index = 0;
@@ -113,7 +105,7 @@ namespace CTSegmenter
         /// Reads a horizontal line in the YZ plane for X=xFixed at Y=y. 
         /// Fills 'buffer[z]' for z in [0..Depth-1].
         /// </summary>
-        public static void ReadLineYZ(this ChunkedVolume vol, int xFixed, int y, byte[] buffer)
+        public static void ReadLineYZ(this IGrayscaleVolumeData vol, int xFixed, int y, byte[] buffer)
         {
             if (buffer == null) throw new ArgumentNullException(nameof(buffer));
             if (buffer.Length != vol.Depth)
@@ -136,7 +128,7 @@ namespace CTSegmenter
         /// Reads the entire XY plane at Z=sliceIndex into dataOut of length (width*height).
         /// dataOut is row-major: row=Y, col=X => index = y*width + x.
         /// </summary>
-        public static void ReadSliceZ(this ChunkedLabelVolume vol, int sliceIndex, byte[] dataOut)
+        public static void ReadSliceZ(this ILabelVolumeData vol, int sliceIndex, byte[] dataOut)
         {
             if (dataOut == null) throw new ArgumentNullException(nameof(dataOut));
             if (dataOut.Length != vol.Width * vol.Height)
@@ -163,7 +155,7 @@ namespace CTSegmenter
         /// Reads a horizontal line in the XZ plane for Y=yFixed at Z=z,
         /// filling buffer[x].
         /// </summary>
-        public static void ReadLineXZ(this ChunkedLabelVolume vol, int yFixed, int z, byte[] buffer)
+        public static void ReadLineXZ(this ILabelVolumeData vol, int yFixed, int z, byte[] buffer)
         {
             if (buffer == null) throw new ArgumentNullException(nameof(buffer));
             if (buffer.Length != vol.Width)
@@ -180,7 +172,7 @@ namespace CTSegmenter
         /// Reads a horizontal line in the YZ plane for X=xFixed, Y=y in [0..Height-1], 
         /// filling buffer[z] for z in [0..Depth-1].
         /// </summary>
-        public static void ReadLineYZ(this ChunkedLabelVolume vol, int xFixed, int y, byte[] buffer)
+        public static void ReadLineYZ(this ILabelVolumeData vol, int xFixed, int y, byte[] buffer)
         {
             if (buffer == null) throw new ArgumentNullException(nameof(buffer));
             if (buffer.Length != vol.Depth)

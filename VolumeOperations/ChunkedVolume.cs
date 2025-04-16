@@ -10,7 +10,7 @@ using System.Threading.Tasks;
 
 namespace CTSegmenter
 {
-    public class ChunkedVolume : IDisposable
+    public class ChunkedVolume : IDisposable, IGrayscaleVolumeData
     {
         #region Fields and Properties
         public int Width { get; }

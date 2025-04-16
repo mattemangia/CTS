@@ -279,8 +279,8 @@ namespace CTSegmenter
                     g.Clear(Color.Black);
 
                     // Access the volume data and label data
-                    ChunkedVolume volumeData = mainForm.volumeData;
-                    ChunkedLabelVolume labelData = mainForm.volumeLabels;
+                    ChunkedVolume volumeData = (ChunkedVolume)mainForm.volumeData;
+                    ChunkedLabelVolume labelData = (ChunkedLabelVolume)mainForm.volumeLabels;
 
                     // Make sure data is available
                     if (volumeData == null && labelData == null)
@@ -490,8 +490,8 @@ namespace CTSegmenter
         private void RenderXYSlice(byte[] rgbValues, int stride, int width, int height, int z)
         {
             const int bytesPerPixel = 4; // BGRA format
-            ChunkedVolume volumeData = mainForm.volumeData;
-            ChunkedLabelVolume volumeLabels = mainForm.volumeLabels;
+            ChunkedVolume volumeData = (ChunkedVolume)mainForm.volumeData;
+            ChunkedLabelVolume volumeLabels = (ChunkedLabelVolume)mainForm.volumeLabels;
 
             // Process each pixel
             for (int y = 0; y < height; y++)
@@ -551,8 +551,8 @@ namespace CTSegmenter
         private void RenderXZSlice(byte[] rgbValues, int stride, int width, int depth, int y)
         {
             const int bytesPerPixel = 4; // BGRA format
-            ChunkedVolume volumeData = mainForm.volumeData;
-            ChunkedLabelVolume volumeLabels = mainForm.volumeLabels;
+            ChunkedVolume volumeData = (ChunkedVolume)mainForm.volumeData;
+            ChunkedLabelVolume volumeLabels = (ChunkedLabelVolume)mainForm.volumeLabels;
 
             // Process each pixel
             for (int z = 0; z < depth; z++)
@@ -612,8 +612,8 @@ namespace CTSegmenter
         private void RenderYZSlice(byte[] rgbValues, int stride, int height, int depth, int x)
         {
             const int bytesPerPixel = 4; // BGRA format
-            ChunkedVolume volumeData = mainForm.volumeData;
-            ChunkedLabelVolume volumeLabels = mainForm.volumeLabels;
+            ChunkedVolume volumeData = (ChunkedVolume)mainForm.volumeData;
+            ChunkedLabelVolume volumeLabels = (ChunkedLabelVolume)mainForm.volumeLabels;
 
             // Process each pixel
             for (int z = 0; z < depth; z++)
@@ -2250,7 +2250,7 @@ namespace CTSegmenter
             const int alphaOffset = 3;
 
             // Get the grayscale data from the main form if available
-            ChunkedVolume volumeData = mainForm.volumeData;
+            ChunkedVolume volumeData = (ChunkedVolume)mainForm.volumeData;
 
             // Get list of all selected particle IDs
             List<int> selectedParticleIds = particleListView.Tag as List<int> ?? new List<int>();
@@ -2395,7 +2395,7 @@ namespace CTSegmenter
             const int alphaOffset = 3;
 
             // Get the grayscale data from the main form if available
-            ChunkedVolume volumeData = mainForm.volumeData;
+            ChunkedVolume volumeData = (ChunkedVolume)mainForm.volumeData;
 
             // Original dimensions
             int origWidth = 0, origHeight = 0;
@@ -2633,7 +2633,7 @@ namespace CTSegmenter
             const int alphaOffset = 3;
 
             // Get the grayscale data from the main form if available
-            ChunkedVolume volumeData = mainForm.volumeData;
+            ChunkedVolume volumeData = (ChunkedVolume)mainForm.volumeData;
 
             for (int y = 0; y < rowsInBatch; y++)
             {
@@ -2750,7 +2750,7 @@ namespace CTSegmenter
             const int alphaOffset = 3;
 
             // Get the grayscale data from the main form if available
-            ChunkedVolume volumeData = mainForm.volumeData;
+            ChunkedVolume volumeData = (ChunkedVolume)mainForm.volumeData;
 
             // Get list of all selected particle IDs
             List<int> selectedParticleIds = particleListView.Tag as List<int> ?? new List<int>();

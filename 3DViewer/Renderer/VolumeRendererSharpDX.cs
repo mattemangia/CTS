@@ -263,7 +263,7 @@ namespace CTSegmenter
                                 Utilities.Dispose(ref volumeTexture);
 
                                 // Create new volume texture from the volume data
-                                volumeTexture = CreateTexture3DFromChunkedVolume(mainForm.volumeData, Format.R8_UNorm);
+                                volumeTexture = CreateTexture3DFromChunkedVolume((ChunkedVolume)mainForm.volumeData, Format.R8_UNorm);
 
                                 if (volumeTexture != null)
                                 {
@@ -1440,7 +1440,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 // For standard rendering, create the full volume texture
                 else if (mainForm.volumeData != null && !useStreamingRenderer)
                 {
-                    volumeTexture = CreateTexture3DFromChunkedVolume(mainForm.volumeData, Format.R8_UNorm);
+                    volumeTexture = CreateTexture3DFromChunkedVolume((ChunkedVolume)mainForm.volumeData, Format.R8_UNorm);
                     if (volumeTexture != null)
                     {
                         ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
@@ -1463,7 +1463,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 if (mainForm.volumeLabels != null)
                 {
                     // Change from R8_UInt to R32_Float
-                    labelTexture = CreateTexture3DFromChunkedLabelVolume(mainForm.volumeLabels, Format.R32_Float);
+                    labelTexture = CreateTexture3DFromChunkedLabelVolume((ChunkedLabelVolume)mainForm.volumeLabels, Format.R32_Float);
                     if (labelTexture != null)
                     {
                         ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
@@ -1654,7 +1654,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 lodVolumeSRVs[0] = volumeSRV;
 
                 // Create LOD textures with progressively lower resolution
-                ChunkedVolume originalVolume = mainForm.volumeData;
+                ChunkedVolume originalVolume = (ChunkedVolume)mainForm.volumeData;
                 bool anyLodCreated = false;
 
                 for (int i = 1; i <= MAX_LOD_LEVELS; i++)
@@ -4622,7 +4622,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 return;
             }
 
-            ChunkedVolume volume = mainForm.volumeData;
+            ChunkedVolume volume = (ChunkedVolume)mainForm.volumeData;
             bool anyLodCreated = false;
 
             // Create a series of downsampled textures at different resolutions
@@ -5221,7 +5221,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 Texture3D texture = new Texture3D(device, desc);
 
                 // Extract the data for this chunk
-                byte[] chunkData = ExtractChunkData(mainForm.volumeData, startX, startY, startZ, width, height, depth);
+                byte[] chunkData = ExtractChunkData((ChunkedVolume)mainForm.volumeData, startX, startY, startZ, width, height, depth);
 
                 // Upload the data
                 context.UpdateSubresource(chunkData, texture, 0);
@@ -5665,7 +5665,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 throw new InvalidOperationException("No volume data available to create streaming LODs");
             }
 
-            ChunkedVolume volume = mainForm.volumeData;
+            ChunkedVolume volume = (ChunkedVolume)mainForm.volumeData;
             bool anyLodCreated = false;
 
             // Report initial progress

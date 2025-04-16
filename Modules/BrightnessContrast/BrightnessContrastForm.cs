@@ -53,7 +53,7 @@ namespace CTSegmenter
         public BrightnessContrastForm(MainForm form)
         {
             mainForm = form;
-            volumeData = form.volumeData;
+            volumeData = (ChunkedVolume)form.volumeData;
             currentSlice = form.CurrentSlice;
             InitializeComponent();
             LoadCurrentSlice();

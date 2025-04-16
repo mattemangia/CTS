@@ -146,8 +146,8 @@ namespace CTSegmenter
             _mainForm = mainForm;
 
             // Store reference to original volume data
-            _originalVolume = mainForm.volumeData;
-            _originalLabels = mainForm.volumeLabels;
+            _originalVolume = (ChunkedVolume)mainForm.volumeData;
+            _originalLabels = (ChunkedLabelVolume)mainForm.volumeLabels;
 
             // Store original dimensions
             _origWidth = _originalVolume.Width;

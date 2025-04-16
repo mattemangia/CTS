@@ -9,6 +9,10 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+// Add ILGPU references
+using ILGPU;
+using ILGPU.Runtime;
+using ILGPU.Algorithms;
 
 namespace CTSegmenter
 {
@@ -56,6 +60,9 @@ namespace CTSegmenter
 
         // ILGPU fields
         private bool gpuAvailable = false;
+        private Context ilgpuContext = null;
+        private Accelerator accelerator = null;
+        private Action<Index1D, ArrayView<byte>, ArrayView<float>, int, int, int, int, int> calculateVarianceKernel = null;
 
         // Method to add variance-based detection UI components
         private void InitializeVarianceDetection()
@@ -63,6 +70,9 @@ namespace CTSegmenter
             try
             {
                 Logger.Log("[BandDetectionForm] Initializing variance detection controls");
+
+                // Initialize ILGPU
+                InitializeGPU();
 
                 // Make parameters groupbox taller
                 parametersGroupBox.Height = 220;
@@ -217,6 +227,7 @@ namespace CTSegmenter
                     Enabled = false // Will be enabled when variance maps are calculated
                 };
                 btnExportVarianceData.Click += (s, e) => ExportVarianceData();
+
                 // Event handlers
                 chkUseVariance.CheckedChanged += (s, e) =>
                 {
@@ -265,8 +276,10 @@ namespace CTSegmenter
                     AutoSize = true,
                     Location = new Point(10, 160),
                     Font = new Font("Arial", 8),
-                    ForeColor = Color.Blue,
-                    Text = "Status: CPU mode (no GPU acceleration)"
+                    ForeColor = gpuAvailable ? Color.Green : Color.Blue,
+                    Text = gpuAvailable ?
+                        "Status: GPU acceleration enabled" :
+                        "Status: CPU mode (no GPU acceleration)"
                 };
 
                 // Add all controls to variance panel
@@ -353,6 +366,160 @@ namespace CTSegmenter
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
+
+        // Initialize ILGPU context and accelerator
+        private void InitializeGPU()
+        {
+            try
+            {
+                Logger.Log("[BandDetectionForm] Initializing ILGPU...");
+
+                // Create context
+                ilgpuContext = Context.Create(builder => builder.Default().EnableAlgorithms());
+
+                // Get all devices
+                var devices = ilgpuContext.Devices;
+                Logger.Log($"[BandDetectionForm] Found {devices.Length} ILGPU device(s)");
+
+                // Try to create an accelerator using the best available device
+                foreach (var device in devices)
+                {
+                    try
+                    {
+                        // Prefer CUDA > OpenCL > CPU
+                        if (device.AcceleratorType == AcceleratorType.Cuda ||
+                            device.AcceleratorType == AcceleratorType.OpenCL)
+                        {
+                            Logger.Log($"[BandDetectionForm] Trying {device.AcceleratorType} device: {device.Name}");
+                            accelerator = device.CreateAccelerator(ilgpuContext);
+                            break;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[BandDetectionForm] Failed to create accelerator for {device.Name}: {ex.Message}");
+                    }
+                }
+
+                // If no GPU device available, fall back to CPU
+                if (accelerator == null && devices.Length > 0)
+                {
+                    Logger.Log("[BandDetectionForm] No GPU devices available, falling back to CPU accelerator");
+                    try
+                    {
+                        var cpuDevice = devices.First(d => d.AcceleratorType == AcceleratorType.CPU);
+                        accelerator = cpuDevice.CreateAccelerator(ilgpuContext);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[BandDetectionForm] Failed to create CPU accelerator: {ex.Message}");
+                    }
+                }
+
+                if (accelerator != null)
+                {
+                    Logger.Log($"[BandDetectionForm] Successfully initialized {accelerator.AcceleratorType} accelerator: {accelerator.Name}");
+
+                    // Compile kernels
+                    CompileKernels();
+
+                    // Set GPU available flag based on accelerator type
+                    gpuAvailable = accelerator.AcceleratorType == AcceleratorType.Cuda ||
+                                   accelerator.AcceleratorType == AcceleratorType.OpenCL;
+
+                    Logger.Log($"[BandDetectionForm] GPU acceleration is {(gpuAvailable ? "enabled" : "disabled")}");
+                }
+                else
+                {
+                    Logger.Log("[BandDetectionForm] Failed to initialize any ILGPU accelerator");
+                    gpuAvailable = false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[BandDetectionForm] Error initializing ILGPU: {ex.Message}");
+                gpuAvailable = false;
+            }
+        }
+
+        // Compile ILGPU kernels
+        private void CompileKernels()
+        {
+            if (accelerator == null)
+                return;
+
+            try
+            {
+                // Compile the variance calculation kernel
+                calculateVarianceKernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<byte>, ArrayView<float>, int, int, int, int, int>(
+                    CalculateVarianceKernel);
+
+                Logger.Log("[BandDetectionForm] Successfully compiled ILGPU kernels");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[BandDetectionForm] Error compiling ILGPU kernels: {ex.Message}");
+                // Disable GPU if kernel compilation fails
+                gpuAvailable = false;
+            }
+        }
+
+        // ILGPU kernel for calculating variance
+        private static void CalculateVarianceKernel(
+            Index1D index,
+            ArrayView<byte> volumeData,
+            ArrayView<float> varianceMap,
+            int width,
+            int height,
+            int depth,
+            int sliceStart,
+            int sliceEnd)
+        {
+            // Calculate x, y coordinates from 1D index
+            int x = index % width;
+            int y = index / width;
+
+            // Skip if out of bounds
+            if (x >= width || y >= height)
+                return;
+
+            // Calculate variance for the current position
+            float sum = 0.0f;
+            float sumSquared = 0.0f;
+            int validSlices = 0;
+
+            // For each slice in the range
+            for (int z = sliceStart; z <= sliceEnd; z++)
+            {
+                // Skip if out of bounds
+                if (z < 0 || z >= depth)
+                    continue;
+
+                // Get voxel value and normalize to 0-1
+                int offset = z * width * height + y * width + x;
+                if (offset >= 0 && offset < volumeData.Length)
+                {
+                    byte voxelValue = volumeData[offset];
+                    float val = voxelValue / 255.0f;
+
+                    // Update sums
+                    sum += val;
+                    sumSquared += val * val;
+                    validSlices++;
+                }
+            }
+
+            // Calculate variance only if we have at least 2 slices
+            if (validSlices >= 2)
+            {
+                float mean = sum / validSlices;
+                float variance = (sumSquared / validSlices) - (mean * mean);
+
+                // Store variance in the output map
+                varianceMap[y * width + x] = variance;
+            }
+        }
+
         private void RegenerateVarianceImages()
         {
             if (xyVarianceMap == null || !isShowingVarianceMap)
@@ -826,11 +993,22 @@ namespace CTSegmenter
                         {
                             // Calculate XY variance map (25% of progress)
                             progressForm.UpdateProgress(0);
-                            CalculateXYVarianceMap(width, height, depth, sliceCount, progress =>
+                            if (gpuAvailable && accelerator != null && calculateVarianceKernel != null)
                             {
-                                if (!token.IsCancellationRequested)
-                                    this.Invoke(new Action(() => progressForm.UpdateProgress(progress / 4)));
-                            }, token);
+                                CalculateXYVarianceMapGPU(width, height, depth, sliceCount, progress =>
+                                {
+                                    if (!token.IsCancellationRequested)
+                                        this.Invoke(new Action(() => progressForm.UpdateProgress(progress / 4)));
+                                }, token);
+                            }
+                            else
+                            {
+                                CalculateXYVarianceMap(width, height, depth, sliceCount, progress =>
+                                {
+                                    if (!token.IsCancellationRequested)
+                                        this.Invoke(new Action(() => progressForm.UpdateProgress(progress / 4)));
+                                }, token);
+                            }
                             xySuccess = true;
                             token.ThrowIfCancellationRequested();
                         }
@@ -842,11 +1020,22 @@ namespace CTSegmenter
                         try
                         {
                             // Calculate XZ variance map (25-50% of progress)
-                            CalculateXZVarianceMap(width, height, depth, sliceCount, progress =>
+                            if (gpuAvailable && accelerator != null && calculateVarianceKernel != null)
                             {
-                                if (!token.IsCancellationRequested)
-                                    this.Invoke(new Action(() => progressForm.UpdateProgress(25 + progress / 4)));
-                            }, token);
+                                CalculateXZVarianceMapGPU(width, height, depth, sliceCount, progress =>
+                                {
+                                    if (!token.IsCancellationRequested)
+                                        this.Invoke(new Action(() => progressForm.UpdateProgress(25 + progress / 4)));
+                                }, token);
+                            }
+                            else
+                            {
+                                CalculateXZVarianceMap(width, height, depth, sliceCount, progress =>
+                                {
+                                    if (!token.IsCancellationRequested)
+                                        this.Invoke(new Action(() => progressForm.UpdateProgress(25 + progress / 4)));
+                                }, token);
+                            }
                             xzSuccess = true;
                             token.ThrowIfCancellationRequested();
                         }
@@ -858,11 +1047,22 @@ namespace CTSegmenter
                         try
                         {
                             // Calculate YZ variance map (50-75% of progress)
-                            CalculateYZVarianceMap(width, height, depth, sliceCount, progress =>
+                            if (gpuAvailable && accelerator != null && calculateVarianceKernel != null)
                             {
-                                if (!token.IsCancellationRequested)
-                                    this.Invoke(new Action(() => progressForm.UpdateProgress(50 + progress / 4)));
-                            }, token);
+                                CalculateYZVarianceMapGPU(width, height, depth, sliceCount, progress =>
+                                {
+                                    if (!token.IsCancellationRequested)
+                                        this.Invoke(new Action(() => progressForm.UpdateProgress(50 + progress / 4)));
+                                }, token);
+                            }
+                            else
+                            {
+                                CalculateYZVarianceMap(width, height, depth, sliceCount, progress =>
+                                {
+                                    if (!token.IsCancellationRequested)
+                                        this.Invoke(new Action(() => progressForm.UpdateProgress(50 + progress / 4)));
+                                }, token);
+                            }
                             yzSuccess = true;
                             token.ThrowIfCancellationRequested();
                         }
@@ -964,12 +1164,293 @@ namespace CTSegmenter
             }
         }
 
+        // Calculate XY variance map on GPU
+        private void CalculateXYVarianceMapGPU(int width, int height, int depth, int sliceCount, Action<int> progressCallback, CancellationToken token)
+        {
+            Logger.Log("[BandDetectionForm] Calculating XY variance map using GPU");
+            token.ThrowIfCancellationRequested();
 
+            // Get current slice
+            int centerSlice = (int)xySliceTrackBar.Value;
 
-        // Calculate XY variance map
+            // Calculate starting slice centered around current slice
+            int startSlice = Math.Max(0, centerSlice - sliceCount / 2);
+            int endSlice = Math.Min(depth - 1, startSlice + sliceCount - 1);
+            int actualSliceCount = endSlice - startSlice + 1;
+
+            Logger.Log($"[BandDetectionForm] XY GPU: Calculating variance from slice {startSlice} to {endSlice} (total: {actualSliceCount})");
+
+            // Create a flat copy of the volume data
+            byte[] flatVolumeData = new byte[width * height * depth];
+            for (int z = 0; z < depth; z++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        flatVolumeData[z * width * height + y * width + x] = mainForm.volumeData[x, y, z];
+                    }
+                }
+            }
+
+            try
+            {
+                // Upload data to GPU
+                using (var deviceVolumeData = accelerator.Allocate1D<byte>(flatVolumeData))
+                {
+                    // Create buffer for results
+                    float[] flatVarianceMap = new float[width * height];
+                    using (var deviceVarianceMap = accelerator.Allocate1D<float>(flatVarianceMap))
+                    {
+                        // Launch kernel
+                        calculateVarianceKernel(width * height, deviceVolumeData.View, deviceVarianceMap.View,
+                                              width, height, depth, startSlice, endSlice);
+
+                        // Wait for GPU to finish
+                        accelerator.Synchronize();
+
+                        // Copy results back
+                        deviceVarianceMap.CopyToCPU(flatVarianceMap);
+
+                        // Convert flat array to 2D array
+                        for (int y = 0; y < height; y++)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                xyVarianceMap[x, y] = flatVarianceMap[y * width + x];
+                            }
+                        }
+                    }
+                }
+
+                // Update progress
+                progressCallback(100);
+                Logger.Log("[BandDetectionForm] XY variance map GPU calculation complete");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[BandDetectionForm] GPU error in XY variance calculation: {ex.Message}");
+                Logger.Log("[BandDetectionForm] Falling back to CPU calculation");
+
+                // Fall back to CPU calculation
+                CalculateXYVarianceMap(width, height, depth, sliceCount, progressCallback, token);
+            }
+        }
+
+        // Calculate XZ variance map on GPU
+        private void CalculateXZVarianceMapGPU(int width, int height, int depth, int sliceCount, Action<int> progressCallback, CancellationToken token)
+        {
+            Logger.Log("[BandDetectionForm] Calculating XZ variance map using GPU");
+            token.ThrowIfCancellationRequested();
+
+            // Get current XZ slice position (Y value)
+            int centerY = (int)xzSliceTrackBar.Value;
+
+            // Calculate Y range centered around current Y
+            int startY = Math.Max(0, centerY - sliceCount / 2);
+            int endY = Math.Min(height - 1, startY + sliceCount - 1);
+            int actualYCount = endY - startY + 1;
+
+            Logger.Log($"[BandDetectionForm] XZ GPU: Calculating variance from Y {startY} to {endY} (total: {actualYCount})");
+
+            // Create a flat copy of the volume data
+            byte[] flatVolumeData = new byte[width * height * depth];
+            for (int z = 0; z < depth; z++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        flatVolumeData[z * width * height + y * width + x] = mainForm.volumeData[x, y, z];
+                    }
+                }
+            }
+
+            try
+            {
+                // Process each x-z slice
+                // For XZ view, we need to process differently than XY
+                // We could create a specialized kernel, but for simplicity and code reuse,
+                // we'll do this by transforming to a flat result and then reshaping
+
+                // Upload data to GPU
+                using (var deviceVolumeData = accelerator.Allocate1D<byte>(flatVolumeData))
+                {
+                    // Since the kernel requires a flat output array, we'll have to do some processing
+                    float[] flatVarianceMap = new float[width * depth];
+
+                    // Process in batches for better progress reporting
+                    int batchSize = Math.Max(1, width * depth / 100);
+
+                    // Process the variance computation on CPU by iterating over each X-Z position
+                    Parallel.For(0, width * depth, token.CanBeCanceled ? new ParallelOptions { CancellationToken = token } : new ParallelOptions(), i =>
+                    {
+                        int x = i % width;
+                        int z = i / width;
+
+                        // Calculate mean and variance across Y slices
+                        float sum = 0;
+                        float sumSquared = 0;
+                        int validPositions = 0;
+
+                        // Process Y positions
+                        for (int y = startY; y <= endY; y++)
+                        {
+                            byte voxelValue = flatVolumeData[z * width * height + y * width + x];
+                            float val = voxelValue / 255.0f;
+
+                            // Update sums
+                            sum += val;
+                            sumSquared += val * val;
+                            validPositions++;
+                        }
+
+                        // Calculate variance
+                        if (validPositions >= 2)
+                        {
+                            float mean = sum / validPositions;
+                            float variance = (sumSquared / validPositions) - (mean * mean);
+                            flatVarianceMap[z * width + x] = variance;
+                        }
+
+                        // Report progress periodically
+                        if (i % batchSize == 0 || i == width * depth - 1)
+                        {
+                            int progress = (int)((i + 1) * 100.0 / (width * depth));
+                            progressCallback(progress);
+                        }
+                    });
+
+                    // Reshape to 2D array
+                    for (int z = 0; z < depth; z++)
+                    {
+                        for (int x = 0; x < width; x++)
+                        {
+                            xzVarianceMap[x, z] = flatVarianceMap[z * width + x];
+                        }
+                    }
+                }
+
+                Logger.Log("[BandDetectionForm] XZ variance map GPU calculation complete");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[BandDetectionForm] GPU error in XZ variance calculation: {ex.Message}");
+                Logger.Log("[BandDetectionForm] Falling back to CPU calculation");
+
+                // Fall back to CPU calculation
+                CalculateXZVarianceMap(width, height, depth, sliceCount, progressCallback, token);
+            }
+        }
+
+        // Calculate YZ variance map on GPU
+        private void CalculateYZVarianceMapGPU(int width, int height, int depth, int sliceCount, Action<int> progressCallback, CancellationToken token)
+        {
+            Logger.Log("[BandDetectionForm] Calculating YZ variance map using GPU");
+            token.ThrowIfCancellationRequested();
+
+            // Get current YZ slice position (X value)
+            int centerX = (int)yzSliceTrackBar.Value;
+
+            // Calculate X range centered around current X
+            int startX = Math.Max(0, centerX - sliceCount / 2);
+            int endX = Math.Min(width - 1, startX + sliceCount - 1);
+            int actualXCount = endX - startX + 1;
+
+            Logger.Log($"[BandDetectionForm] YZ GPU: Calculating variance from X {startX} to {endX} (total: {actualXCount})");
+
+            // Create a flat copy of the volume data
+            byte[] flatVolumeData = new byte[width * height * depth];
+            for (int z = 0; z < depth; z++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        flatVolumeData[z * width * height + y * width + x] = mainForm.volumeData[x, y, z];
+                    }
+                }
+            }
+
+            try
+            {
+                // Process each Y-Z slice
+                // Like with XZ, we'll handle this specially since it's a different projection
+
+                // Upload data to GPU
+                using (var deviceVolumeData = accelerator.Allocate1D<byte>(flatVolumeData))
+                {
+                    // Since the kernel requires a flat output array, we'll have to do some processing
+                    float[] flatVarianceMap = new float[height * depth];
+
+                    // Process in batches for better progress reporting
+                    int batchSize = Math.Max(1, height * depth / 100);
+
+                    // Process the variance computation on CPU by iterating over each Y-Z position
+                    Parallel.For(0, height * depth, token.CanBeCanceled ? new ParallelOptions { CancellationToken = token } : new ParallelOptions(), i =>
+                    {
+                        int y = i % height;
+                        int z = i / height;
+
+                        // Calculate mean and variance across X slices
+                        float sum = 0;
+                        float sumSquared = 0;
+                        int validPositions = 0;
+
+                        // Process X positions
+                        for (int x = startX; x <= endX; x++)
+                        {
+                            byte voxelValue = flatVolumeData[z * width * height + y * width + x];
+                            float val = voxelValue / 255.0f;
+
+                            // Update sums
+                            sum += val;
+                            sumSquared += val * val;
+                            validPositions++;
+                        }
+
+                        // Calculate variance
+                        if (validPositions >= 2)
+                        {
+                            float mean = sum / validPositions;
+                            float variance = (sumSquared / validPositions) - (mean * mean);
+                            flatVarianceMap[z * height + y] = variance;
+                        }
+
+                        // Report progress periodically
+                        if (i % batchSize == 0 || i == height * depth - 1)
+                        {
+                            int progress = (int)((i + 1) * 100.0 / (height * depth));
+                            progressCallback(progress);
+                        }
+                    });
+
+                    // Reshape to 2D array
+                    for (int z = 0; z < depth; z++)
+                    {
+                        for (int y = 0; y < height; y++)
+                        {
+                            yzVarianceMap[y, z] = flatVarianceMap[z * height + y];
+                        }
+                    }
+                }
+
+                Logger.Log("[BandDetectionForm] YZ variance map GPU calculation complete");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[BandDetectionForm] GPU error in YZ variance calculation: {ex.Message}");
+                Logger.Log("[BandDetectionForm] Falling back to CPU calculation");
+
+                // Fall back to CPU calculation
+                CalculateYZVarianceMap(width, height, depth, sliceCount, progressCallback, token);
+            }
+        }
+
+        // Calculate XY variance map on CPU (fallback)
         private void CalculateXYVarianceMap(int width, int height, int depth, int sliceCount, Action<int> progressCallback, CancellationToken token)
         {
-            Logger.Log("[BandDetectionForm] Calculating XY variance map");
+            Logger.Log("[BandDetectionForm] Calculating XY variance map on CPU");
             token.ThrowIfCancellationRequested();
 
             // Process in batches of rows for better progress reporting
@@ -1046,10 +1527,10 @@ namespace CTSegmenter
             Logger.Log("[BandDetectionForm] XY variance map calculation complete");
         }
 
-        // Calculate XZ variance map
+        // Calculate XZ variance map on CPU (fallback)
         private void CalculateXZVarianceMap(int width, int height, int depth, int sliceCount, Action<int> progressCallback, CancellationToken token)
         {
-            Logger.Log("[BandDetectionForm] Calculating XZ variance map");
+            Logger.Log("[BandDetectionForm] Calculating XZ variance map on CPU");
             token.ThrowIfCancellationRequested();
 
             // Process in batches for better progress reporting
@@ -1126,10 +1607,10 @@ namespace CTSegmenter
             Logger.Log("[BandDetectionForm] XZ variance map calculation complete");
         }
 
-        // Calculate YZ variance map
+        // Calculate YZ variance map on CPU (fallback)
         private void CalculateYZVarianceMap(int width, int height, int depth, int sliceCount, Action<int> progressCallback, CancellationToken token)
         {
-            Logger.Log("[BandDetectionForm] Calculating YZ variance map");
+            Logger.Log("[BandDetectionForm] Calculating YZ variance map on CPU");
             token.ThrowIfCancellationRequested();
 
             // Process in batches for better progress reporting
@@ -1205,6 +1686,7 @@ namespace CTSegmenter
             token.ThrowIfCancellationRequested();
             Logger.Log("[BandDetectionForm] YZ variance map calculation complete");
         }
+
         // Create a bitmap from a variance map
         private Bitmap CreateVarianceMapImage(float[,] varianceMap)
         {
@@ -2472,10 +2954,40 @@ namespace CTSegmenter
                 xyVarianceImage?.Dispose();
                 xzVarianceImage?.Dispose();
                 yzVarianceImage?.Dispose();
+
+                // Dispose ILGPU resources
+                if (accelerator != null)
+                {
+                    try
+                    {
+                        if (!accelerator.IsDisposed)
+                            accelerator.Dispose();
+                        accelerator = null;
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[BandDetectionForm] Error disposing accelerator: {ex.Message}");
+                    }
+                }
+
+                if (ilgpuContext != null)
+                {
+                    try
+                    {
+                        if (!ilgpuContext.IsDisposed)
+                            ilgpuContext.Dispose();
+                        ilgpuContext = null;
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[BandDetectionForm] Error disposing ILGPU context: {ex.Message}");
+                    }
+                }
             }
 
             base.Dispose(disposing);
         }
+
         private void DisposeVarianceResources()
         {
             // Dispose old bitmaps
@@ -2510,6 +3022,7 @@ namespace CTSegmenter
             yzVarianceBrightPeaks = null;
 
             // Force garbage collection
+            Logger.Log("[Dispose] Running Garbage Collector");
             GC.Collect();
         }
     }

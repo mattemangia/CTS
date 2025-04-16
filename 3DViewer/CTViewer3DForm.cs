@@ -670,8 +670,8 @@ namespace CTSegmenter.SharpDXIntegration
 
                     VoxelMeshExporter.ExportVisibleVoxels(
                         filePath,
-                        grayVol: mainForm.volumeData,
-                        labelVol: exportLabels ? mainForm.volumeLabels : null,
+                        grayVol: (ChunkedVolume)mainForm.volumeData,
+                        labelVol: (ChunkedLabelVolume)(exportLabels ? mainForm.volumeLabels : null),
                         minThreshold: volumeRenderer.MinThreshold,
                         maxThreshold: volumeRenderer.MaxThreshold,
                         showGrayscale: volumeRenderer.ShowGrayscale,
@@ -727,7 +727,7 @@ namespace CTSegmenter.SharpDXIntegration
                     // Create a downsampled version of the volume data
                     Logger.Log("[SharpDXViewerForm] Creating downsampled volume...");
 
-                    ChunkedVolume originalVolume = mainForm.volumeData;
+                    ChunkedVolume originalVolume = (ChunkedVolume)mainForm.volumeData;
                     if (originalVolume == null)
                     {
                         throw new InvalidOperationException("No volume data available to downsample");

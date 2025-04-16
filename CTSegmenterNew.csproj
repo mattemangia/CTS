@@ -261,7 +261,12 @@
     </None>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Interfaces\IMaterialOperations.cs" />
+    <Compile Include="MaterialOperations\MaterialOperations.cs" />
     <Compile Include="Misc\Annotations.cs" />
+    <Compile Include="Misc\OrthogonalViewPanel.cs">
+      <SubType>Component</SubType>
+    </Compile>
     <Compile Include="Modules\BandDetection\BandDetectionForm.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -328,7 +333,7 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="IO\SliceCache\LRUCache.cs" />
-    <Compile Include="UI\MainLoop.cs">
+    <Compile Include="UI\MainForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Logger\Logger.cs" />
@@ -371,8 +376,8 @@
     <Content Include="favicon.ico" />
   </ItemGroup>
   <ItemGroup>
-    <EmbeddedResource Include="UI\MainLoop.resx">
-      <DependentUpon>MainLoop.cs</DependentUpon>
+    <EmbeddedResource Include="UI\MainForm.resx">
+      <DependentUpon>MainForm.cs</DependentUpon>
     </EmbeddedResource>
     <EmbeddedResource Include="UI\LogWindow.resx">
       <DependentUpon>LogWindow.cs</DependentUpon>

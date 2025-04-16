@@ -617,9 +617,7 @@ namespace CTSegmenter
                 }
                 else
                 {
-                    // Fallback: use your brush-based subtraction routines.
-                    mainForm.SubtractCurrentSelection();
-                    mainForm.SubtractOrthoSelections();
+                    mainForm.RemoveThresholdSelection(mat.Min, mat.Max, (byte)mat.ID);
                 }
                 mainForm.SaveLabelsChk();
             };
@@ -1078,13 +1076,13 @@ namespace CTSegmenter
                     string name = Prompt.ShowDialog("Enter material name:", "New Material");
                     if (string.IsNullOrWhiteSpace(name))
                         name = "MaterialX";
+
+                    // Get the next available material ID from MaterialOperations
                     byte newID = mainForm.GetNextMaterialID();
                     Material mat = new Material(name, dlg.Color, 0, 0, newID);
                     mainForm.Materials.Add(mat);
                     RefreshMaterialList();
                     lstMaterials.SelectedIndex = lstMaterials.Items.Count - 1;
-
-                    
                 }
             }
             mainForm.SaveLabelsChk();
@@ -1125,12 +1123,8 @@ namespace CTSegmenter
 
             try
             {
-                // Perform the material removal in a background thread
-                await Task.Run(() =>
-                {
-                    // Call the material removal method
-                    mainForm.RemoveMaterialAndReindex(mat.ID);
-                });
+                // Use MaterialOperations to remove the material through MainForm
+                await Task.Run(() => mainForm.RemoveMaterialAndReindex(mat.ID));
 
                 // Update UI after successful removal
                 RefreshMaterialList();
@@ -1236,7 +1230,7 @@ namespace CTSegmenter
             if (mainForm.currentTool == SegmentationTool.Brush)
             {
                 mainForm.ApplyCurrentSelection();     // Apply XY selection.
-                mainForm.ApplyOrthoSelections();        // Apply selections from XZ and YZ views.
+                mainForm.ApplyOrthoSelections();      // Apply selections from XZ and YZ views.
             }
             else
             {

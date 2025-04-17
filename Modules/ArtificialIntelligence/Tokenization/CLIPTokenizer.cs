@@ -1,7 +1,7 @@
 ﻿#region CLIP Tokenizer Implementation
+using System;
 using System.Collections.Generic;
 using System.Linq;
-
 using System.Text.RegularExpressions;
 
 /// <summary>
@@ -13,7 +13,7 @@ public class TokenizerConfig
     public string BosToken { get; set; } = "<|startoftext|>";
     public string EosToken { get; set; } = "<|endoftext|>";
     public string PadToken { get; set; } = "!";
-    public int ModelMaxLength { get; set; } = 77;
+    public int ModelMaxLength { get; set; } = 16;
     public bool DoLowerCase { get; set; } = true;
     public Dictionary<string, TokenConfig> AddedTokensDecoder { get; set; } = new Dictionary<string, TokenConfig>();
 
@@ -36,10 +36,10 @@ public class CLIPTokenizer
     private readonly Regex patternSplit;
     private readonly Regex patternByteLevel;
 
-    // Default token IDs
-    private readonly int bosTokenId = 49406;
-    private readonly int eosTokenId = 49407;
-    private readonly int padTokenId = 0;
+    // Token IDs based on config or defaults
+    private readonly int bosTokenId;
+    private readonly int eosTokenId;
+    private readonly int padTokenId;
 
     /// <summary>
     /// Constructor for CLIPTokenizer
@@ -53,6 +53,33 @@ public class CLIPTokenizer
 
         // Create reverse mapping
         this.idToToken = vocab.ToDictionary(kv => kv.Value, kv => kv.Key);
+
+        // Set up token IDs from vocabulary if possible
+        if (config != null)
+        {
+            // Get token IDs from vocab using the config's token strings
+            if (!string.IsNullOrEmpty(config.BosToken) && vocab.TryGetValue(config.BosToken, out int bos))
+                bosTokenId = bos;
+            else
+                bosTokenId = 49406; // Default CLIP BOS token ID
+
+            if (!string.IsNullOrEmpty(config.EosToken) && vocab.TryGetValue(config.EosToken, out int eos))
+                eosTokenId = eos;
+            else
+                eosTokenId = 49407; // Default CLIP EOS token ID
+
+            if (!string.IsNullOrEmpty(config.PadToken) && vocab.TryGetValue(config.PadToken, out int pad))
+                padTokenId = pad;
+            else
+                padTokenId = 0; // Default padding token ID
+        }
+        else
+        {
+            // Use defaults if no config
+            bosTokenId = 49406;
+            eosTokenId = 49407;
+            padTokenId = 0;
+        }
 
         // Set up special tokens
         this.specialTokens = new Dictionary<string, bool>();
@@ -82,13 +109,24 @@ public class CLIPTokenizer
     }
 
     /// <summary>
+    /// Gets the model's maximum sequence length
+    /// </summary>
+    public int GetModelMaxLength()
+    {
+        return config?.ModelMaxLength ?? 16;
+    }
+
+    /// <summary>
     /// Encodes text to token IDs and attention mask
     /// </summary>
     /// <param name="text">The input text</param>
-    /// <param name="maxLength">Maximum sequence length</param>
+    /// <param name="maxLength">Maximum sequence length (if not specified, uses config)</param>
     /// <returns>Encoding with input IDs and attention mask</returns>
-    public Encoding Encode(string text, int maxLength = 77)
+    public Encoding Encode(string text, int? maxLength = null)
     {
+        // Use provided maxLength or fall back to config's ModelMaxLength
+        int actualMaxLength = maxLength ?? config?.ModelMaxLength ?? 16;
+
         // Normalize and preprocess text
         if (config.DoLowerCase)
             text = text.ToLower();
@@ -111,18 +149,22 @@ public class CLIPTokenizer
             // Process the token with ByteLevel encoding
             List<int> tokenIds = ByteLevelEncode(token);
             ids.AddRange(tokenIds);
+
+            // Early stop if we're exceeding max length (account for EOS token)
+            if (ids.Count >= actualMaxLength - 1)
+                break;
         }
 
         // Add EOS token
         ids.Add(eosTokenId);
 
         // Truncate if needed
-        if (ids.Count > maxLength)
+        if (ids.Count > actualMaxLength)
         {
-            ids = ids.Take(maxLength).ToList();
+            ids = ids.Take(actualMaxLength).ToList();
 
             // Ensure last token is EOS if we truncated
-            if (ids.Count > 0 && maxLength > 0)
+            if (ids.Count > 0 && actualMaxLength > 0)
                 ids[ids.Count - 1] = eosTokenId;
         }
 
@@ -130,7 +172,7 @@ public class CLIPTokenizer
         List<int> attentionMask = Enumerable.Repeat(1, ids.Count).ToList();
 
         // Pad sequences if needed
-        while (ids.Count < maxLength)
+        while (ids.Count < actualMaxLength)
         {
             ids.Add(padTokenId);
             attentionMask.Add(0);  // 0 for padding in attention mask
@@ -139,7 +181,7 @@ public class CLIPTokenizer
         return new Encoding
         {
             InputIds = ids,
-            AttentionMask = attentionMask
+            AttentionMask = attentionMask.Select(i => (long)i).ToList()
         };
     }
 
@@ -159,22 +201,56 @@ public class CLIPTokenizer
             return result;
         }
 
-        // Byte-level encoding for unknown tokens
-        byte[] bytes = System.Text.Encoding.UTF8.GetBytes(token);
-        foreach (byte b in bytes)
-        {
-            // Convert each byte to its token representation
-            // CLIP uses a specific format for bytes
-            string byteToken = "Ġ" + b.ToString("X2").ToLower();
+        // Check if token starts with space
+        bool startsWithSpace = token.StartsWith(" ");
+        string tokenWithoutSpace = startsWithSpace ? token.Substring(1) : token;
 
-            if (vocab.TryGetValue(byteToken, out int byteId))
+        // Check if full token with space prefix is in vocabulary
+        if (startsWithSpace && vocab.TryGetValue("Ġ" + tokenWithoutSpace, out id))
+        {
+            result.Add(id);
+            return result;
+        }
+
+        // If token not in vocabulary, try splitting into characters
+        foreach (char c in token)
+        {
+            string charToken = c.ToString();
+
+            // CLIP tokenizer has special prefix "Ġ" for characters after space
+            if (startsWithSpace && result.Count == 0)
             {
-                result.Add(byteId);
+                charToken = "Ġ" + charToken;
+                startsWithSpace = false;
             }
-            else if (vocab.TryGetValue("<|endoftext|>", out int unkId))
+
+            if (vocab.TryGetValue(charToken, out id))
             {
-                // Use EOS as unknown token if byte token not found
-                result.Add(unkId);
+                result.Add(id);
+            }
+            else
+            {
+                // Fallback to byte-level encoding for individual chars
+                byte[] bytes = System.Text.Encoding.UTF8.GetBytes(charToken);
+                foreach (byte b in bytes)
+                {
+                    // Format is different for first byte after space
+                    string byteToken;
+                    if (charToken.StartsWith("Ġ"))
+                        byteToken = "Ġ" + b.ToString("X2").ToLower();
+                    else
+                        byteToken = "<|byte" + b.ToString() + "|>";
+
+                    if (vocab.TryGetValue(byteToken, out int byteId))
+                    {
+                        result.Add(byteId);
+                    }
+                    else if (vocab.TryGetValue("<|endoftext|>", out int unkId))
+                    {
+                        // Use unknown token if byte token not found
+                        result.Add(unkId);
+                    }
+                }
             }
         }
 
@@ -187,7 +263,7 @@ public class CLIPTokenizer
     public class Encoding
     {
         public List<int> InputIds { get; set; } = new List<int>();
-        public List<int> AttentionMask { get; set; } = new List<int>();
+        public List<long> AttentionMask { get; set; } = new List<long>();
     }
 }
 #endregion

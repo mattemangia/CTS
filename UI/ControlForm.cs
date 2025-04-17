@@ -342,6 +342,21 @@ namespace CTSegmenter
 
                 segmentAnything.Show();
             };
+            ToolStripMenuItem owlVitDetectorMenuItem = new ToolStripMenuItem("OWL‑ViT Detector");
+            owlVitDetectorMenuItem.Click += (s, e) =>
+            {
+                if (mainForm.volumeData == null)
+                {
+                    MessageBox.Show("Please load a dataset first.", "No Data",
+                                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                // pass MainForm and the shared AnnotationManager to the detector UI
+                OwlVitDetector detector = new OwlVitDetector(mainForm, sharedAnnotationManager);
+                detector.Show();      // non‑modal (like the other AI tools)
+            };
+            aiSubmenu.DropDownItems.Add(owlVitDetectorMenuItem);
             ToolStripMenuItem integrateResampleMenuItem = new ToolStripMenuItem("Integrate / Resample");
             aiSubmenu.DropDownItems.Add(segmentAnythingToolMenuItem);
             integrateResampleMenuItem.Click += (s, e) =>

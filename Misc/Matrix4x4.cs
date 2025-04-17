@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Numerics;
 using SharpDX;
+using Vector4 = SharpDX.Vector4;
 
 namespace CTSegmenter
 {

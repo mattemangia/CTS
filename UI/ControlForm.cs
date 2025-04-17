@@ -342,21 +342,42 @@ namespace CTSegmenter
 
                 segmentAnything.Show();
             };
-            ToolStripMenuItem owlVitDetectorMenuItem = new ToolStripMenuItem("OWL‑ViT Detector");
-            owlVitDetectorMenuItem.Click += (s, e) =>
+            ToolStripMenuItem microSamToolMenuItem = new ToolStripMenuItem("MicroSAM");
+
+            // Set click event handler
+            microSamToolMenuItem.Click += (s, e) =>
             {
                 if (mainForm.volumeData == null)
                 {
                     MessageBox.Show("Please load a dataset first.", "No Data",
-                                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
 
-                // pass MainForm and the shared AnnotationManager to the detector UI
-                OwlVitDetector detector = new OwlVitDetector(mainForm, sharedAnnotationManager);
-                detector.Show();      // non‑modal (like the other AI tools)
+                // Get the selected material
+                Material selectedMaterial;
+                if (lstMaterials.SelectedIndex > 0 && lstMaterials.SelectedIndex < mainForm.Materials.Count)
+                {
+                    selectedMaterial = mainForm.Materials[lstMaterials.SelectedIndex];
+                }
+                else
+                {
+                    // Default to the first non-exterior material
+                    selectedMaterial = mainForm.Materials.Count > 1 ? mainForm.Materials[1] : mainForm.Materials[0];
+                }
+
+                Logger.Log("[ControlForm] Opening MicroSAM tool");
+                CTSegmenter.Modules.ArtificialIntelligence.MicroSAM.MicroSAM microSam =
+                    new CTSegmenter.Modules.ArtificialIntelligence.MicroSAM.MicroSAM(
+                        mainForm,
+                        selectedMaterial,
+                        sharedAnnotationManager);
+
+                microSam.Show();
             };
-            aiSubmenu.DropDownItems.Add(owlVitDetectorMenuItem);
+
+            // Add the MicroSAM menu item to the AI submenu
+            aiSubmenu.DropDownItems.Add(microSamToolMenuItem);
             ToolStripMenuItem integrateResampleMenuItem = new ToolStripMenuItem("Integrate / Resample");
             aiSubmenu.DropDownItems.Add(segmentAnythingToolMenuItem);
             integrateResampleMenuItem.Click += (s, e) =>

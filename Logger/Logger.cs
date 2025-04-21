@@ -47,7 +47,7 @@ namespace CTSegmenter
 
         public static void Log(string message, int severity)
         {
-            // Map severity to your log levels
+            // Map severity to log levels
             LogLevel level = LogLevel.Information;
 
             switch (severity)

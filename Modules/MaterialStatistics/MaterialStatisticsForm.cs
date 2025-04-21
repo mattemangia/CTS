@@ -10,7 +10,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Windows.Forms.DataVisualization.Charting;
 using System.Globalization;
-// Make sure to add reference to System.Windows.Forms.DataVisualization.dll in your project
+// Make sure to add reference to System.Windows.Forms.DataVisualization.dll in project
 
 namespace CTSegmenter
 {

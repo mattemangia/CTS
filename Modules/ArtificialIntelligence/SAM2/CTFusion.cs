@@ -125,7 +125,7 @@ namespace CTSegmenter
 
         /// <summary>
         /// Simple CRF-like smoothing on a single grayscale mask, not a full multi-label CRF.
-        /// Typically you would do a more advanced approach, but here's a placeholder.
+        /// 
         /// </summary>
         public static Bitmap CRFSmoothing(Bitmap inputMask, int iterations = 1)
         {

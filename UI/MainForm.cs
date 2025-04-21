@@ -11,15 +11,20 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Krypton.Toolkit;                     
+using Krypton.Docking;
+using Krypton.Navigator;
 
 namespace CTSegmenter
 {
     // ------------------------------------------------------------------------
     // MainForm – main viewer and controller of segmentation with optimized rendering
     // ------------------------------------------------------------------------
-    public partial class MainForm : Form
+    public partial class MainForm : KryptonForm
     {
         #region Fields
+        private KryptonManager _kryptonManager;                
+        private KryptonDockingManager _dockingManager;
         // Volume metadata
         private int width, height, depth;
         public double pixelSize = 1e-6;
@@ -168,6 +173,12 @@ namespace CTSegmenter
         public enum Axis { X, Y, Z }
 
         public enum OrthogonalView { XZ, YZ }
+
+        //Dark theme
+        
+        private readonly KryptonManager _km = new KryptonManager();     // one per application
+        private KryptonDockingManager _dock;           
+        
         #endregion
 
         #region Initialization and Setup
@@ -186,12 +197,14 @@ namespace CTSegmenter
                 catch { }
                 // Set basic form properties
                 this.Text = "CT Segmentation Suite - Main Viewer";
-                this.Size = new Size(1000, 800);
+                this.Size = new Size(1700, 800);
                 this.DoubleBuffered = true;
-
+                var km=new KryptonManager();
+                km.GlobalPaletteMode = PaletteMode.Office2010BlackDarkMode;
+                
                 // Create and configure the main layout
                 SetupMainLayout();
-
+                InitializeDocking();
                 // Initialize materials
                 InitializeMaterials();
 
@@ -200,7 +213,7 @@ namespace CTSegmenter
                 {
                     _ = LoadDatasetAsync(args[0]);
                 }
-
+                
                 Logger.Log("[MainForm] Constructor end.");
             }
             catch (Exception ex)
@@ -209,21 +222,213 @@ namespace CTSegmenter
                                "Constructor Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
+        private void EnsureSquareLayout()
+        {
+            // This method ensures that cells in the TableLayoutPanel stay square
+            // by adjusting the form size if necessary
+
+            if (mainLayout == null) return;
+
+            // Get the actual size of the layout panel
+            int layoutWidth = mainLayout.Width;
+            int layoutHeight = mainLayout.Height;
+
+            // Calculate the ideal size for square cells
+            int cellSize = Math.Min(layoutWidth / 2, layoutHeight / 2);
+
+            // Update row and column styles to maintain equal sizing
+            // This should help maintain square viewers
+            for (int i = 0; i < mainLayout.ColumnStyles.Count; i++)
+            {
+                mainLayout.ColumnStyles[i] = new ColumnStyle(SizeType.Percent, 50F);
+            }
+
+            for (int i = 0; i < mainLayout.RowStyles.Count; i++)
+            {
+                mainLayout.RowStyles[i] = new RowStyle(SizeType.Percent, 50F);
+            }
+        }
+        private void InitializeDocking()
+        {
+            //--------------------------------------------------------------
+            // Global dark palette
+            //--------------------------------------------------------------
+            _kryptonManager = new KryptonManager();
+            _kryptonManager.GlobalPaletteMode = PaletteMode.Office2010Black; // dark
+
+            //--------------------------------------------------------------
+            // Host panel (acts like a "document" workspace)
+            //--------------------------------------------------------------
+            var hostPanel = new KryptonPanel { Dock = DockStyle.Fill };
+            Controls.Add(hostPanel);
+            hostPanel.Controls.Add(mainLayout); // mainLayout is your 2×2 grid
+            hostPanel.BringToFront();
+
+            //--------------------------------------------------------------
+            // Docking manager
+            //--------------------------------------------------------------
+            _dockingManager = new KryptonDockingManager();
+            _dockingManager.ManageControl("MainHost", hostPanel);
+
+            //--------------------------------------------------------------
+            // Create ControlForm as dockable page on the right
+            //--------------------------------------------------------------
+            var ctrlForm = new ControlForm(this)
+            {
+                TopLevel = false,
+                FormBorderStyle = FormBorderStyle.None,
+                Dock = DockStyle.Fill
+            };
+
+            // Create a KryptonPage to host the ControlForm
+            var page = new KryptonPage
+            {
+                Text = "Controls",
+                UniqueName = "ControlsPage",
+                MinimumSize = new Size(700, 0),  // Set minimum width to 700px
+                TextTitle = "Controls"           // Set the page title correctly
+            };
+
+            // Configure page flags to allow floating and docking
+            // First clear any existing flags that might interfere
+            page.ClearFlags(KryptonPageFlags.DockingAllowClose);
+
+            // Then set the flags we want
+            page.SetFlags(KryptonPageFlags.DockingAllowFloating |
+                         KryptonPageFlags.DockingAllowDocked);
+
+            // Handle form closing to exit the application
+            ctrlForm.FormClosing += (s, e) => {
+                Application.Exit();
+            };
+
+            page.Controls.Add(ctrlForm);
+            ctrlForm.Show();
+
+            // Create the dockspace on the right with this page
+            var dockspace = _dockingManager.AddDockspace("MainHost", DockingEdge.Right, new[] { page });
+
+            // Ensure the dockspace has adequate width
+            if (dockspace?.DockspaceControl != null)
+            {
+                dockspace.DockspaceControl.Width = 700;
+                dockspace.DockspaceControl.MinimumSize = new Size(700, 0);
+            }
+
+            // Add a custom handler to the docking manager to handle page removal
+            _dockingManager.PageCloseRequest += (s, e) => {
+                // When any page is requested to close, exit the application
+                Application.Exit();
+            };
+
+            // Subscribe to the application exit event to ensure clean shutdown
+            Application.ApplicationExit += (s, e) =>
+            {
+                try
+                {
+                    if (!IsDisposed)
+                    {
+                        Dispose();
+                    }
+                }
+                catch { }
+            };
+
+            // Handle form closing to properly exit the application
+            this.FormClosing += (s, e) =>
+            {
+                Application.Exit();
+            };
+        }
+
+        public void DockExternalControlForm(ControlForm ctrl)
+        {
+            //----------------------------------------------------------------------
+            // 1) prepare the already‑created ControlForm
+            //----------------------------------------------------------------------
+            ctrl.TopLevel = false;
+            ctrl.FormBorderStyle = FormBorderStyle.None; // kills old title‑bar
+            ctrl.Dock = DockStyle.Fill;
+
+            // wrap it in a KryptonPage
+            KryptonPage page = new KryptonPage
+            {
+                Text = "Controls",
+                MinimumSize = new Size(700, 0),  // keeps a nice width
+                TextTitle = "Controls"
+            };
+
+            // Configure page flags to allow floating and docking
+            page.ClearFlags(KryptonPageFlags.DockingAllowClose);
+
+            page.SetFlags(KryptonPageFlags.DockingAllowFloating |
+                         KryptonPageFlags.DockingAllowDocked);
+
+            // Handle form closing to exit the application
+            ctrl.FormClosing += (s, e) => {
+                Application.Exit();
+            };
+
+            page.Controls.Add(ctrl);
+
+            //----------------------------------------------------------------------
+            // 2) create the docking manager and register this MainForm as host
+            //----------------------------------------------------------------------
+            _dock = new KryptonDockingManager();
+            _dock.ManageControl("MainHost", this);
+
+            // Add a custom handler to the docking manager to handle page removal
+            _dock.PageCloseRequest += (s, e) => {
+                // When any page is requested to close, exit the application
+                Application.Exit();
+            };
+
+            //----------------------------------------------------------------------
+            // 3) add a RIGHT‑hand dock‑space and drop the page into it
+            //    (the overload in *all* Krypton builds is: AddDockspace(path, edge, pages[])
+            //----------------------------------------------------------------------
+            KryptonDockingDockspace dockElem = _dock.AddDockspace(
+                "MainHost",
+                DockingEdge.Right,
+                new KryptonPage[] { page });   // MUST be an array
+
+            //----------------------------------------------------------------------
+            // 4) make the pane wider by default – tweak the real Dockspace control
+            //----------------------------------------------------------------------
+            if (dockElem?.DockspaceControl != null)
+            {
+                dockElem.DockspaceControl.Width = 700;  // default width
+                dockElem.DockspaceControl.MinimumSize = new Size(700, 0);
+            }
+
+            //----------------------------------------------------------------------
+            // 5) finally show the embedded form
+            //----------------------------------------------------------------------
+            ctrl.Show();
+
+            // Handle the form closing event to ensure clean shutdown
+            this.FormClosing += (s, e) =>
+            {
+                Application.Exit();
+            };
+        }
         private void SetupMainLayout()
         {
             try
             {
                 this.BackColor = Color.Black;
+
                 // Create the main 2x2 grid layout
                 mainLayout = new TableLayoutPanel
                 {
                     Dock = DockStyle.Fill,
                     ColumnCount = 2,
                     RowCount = 2,
-                    CellBorderStyle = TableLayoutPanelCellBorderStyle.Single
+                    CellBorderStyle = TableLayoutPanelCellBorderStyle.Single,
+                    BackColor = Color.Black
                 };
 
-                // Configure column and row styles
+                // Configure column and row styles to maintain strict 50/50 splits
                 mainLayout.ColumnStyles.Clear();
                 mainLayout.RowStyles.Clear();
                 mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
@@ -231,16 +436,33 @@ namespace CTSegmenter
                 mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
                 mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
 
-                // Create simple panels for the PictureBoxes
+                // Create panels for the PictureBoxes
                 xyPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.Black };
                 xzPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.Black };
                 yzPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.Black };
                 infoPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.Black };
 
-                // Create the PictureBoxes
-                xyView = new ScrollablePictureBox { Dock = DockStyle.Fill, BackColor = Color.Black };
-                xzView = new ScrollablePictureBox { Dock = DockStyle.Fill, BackColor = Color.Black };
-                yzView = new ScrollablePictureBox { Dock = DockStyle.Fill, BackColor = Color.Black };
+                // Create the PictureBoxes with specific settings for maintaining aspect ratio
+                xyView = new ScrollablePictureBox
+                {
+                    Dock = DockStyle.Fill,
+                    BackColor = Color.Black,
+                    SizeMode = PictureBoxSizeMode.Zoom  // This helps maintain aspect ratio
+                };
+
+                xzView = new ScrollablePictureBox
+                {
+                    Dock = DockStyle.Fill,
+                    BackColor = Color.Black,
+                    SizeMode = PictureBoxSizeMode.Zoom
+                };
+
+                yzView = new ScrollablePictureBox
+                {
+                    Dock = DockStyle.Fill,
+                    BackColor = Color.Black,
+                    SizeMode = PictureBoxSizeMode.Zoom
+                };
 
                 // Create labels
                 xyLabel = new Label
@@ -290,9 +512,6 @@ namespace CTSegmenter
                 orthogonalView = new OrthogonalViewPanel(this) { Dock = DockStyle.Fill };
                 infoPanel.Controls.Add(orthogonalView);
 
-                // Add the main layout to the form
-                this.Controls.Add(mainLayout);
-
                 // Set up event handlers
                 xyView.MouseDown += (s, e) => ViewMouseDown(ViewType.XY, e);
                 xyView.MouseMove += (s, e) => ViewMouseMove(ViewType.XY, e);
@@ -314,6 +533,7 @@ namespace CTSegmenter
 
                 // Set resize handler for the form
                 this.Resize += (s, e) => {
+                    // Clamp pan values when resizing
                     foreach (ViewType viewType in Enum.GetValues(typeof(ViewType)))
                     {
                         if (viewType != ViewType.All)
@@ -3411,6 +3631,19 @@ namespace CTSegmenter
                 {
                     volumeLabels.ReleaseFileLock();
                     volumeLabels.Dispose();
+                }
+
+                // Dispose docking managers
+                if (_dockingManager != null)
+                {
+                    _dockingManager.Dispose();
+                    _dockingManager = null;
+                }
+
+                if (_dock != null)
+                {
+                    _dock.Dispose();
+                    _dock = null;
                 }
             }
 

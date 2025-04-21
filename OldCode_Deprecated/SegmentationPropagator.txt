@@ -133,7 +133,7 @@ namespace CTSegmenter
             }
             else
             {
-                // If you want to do e.g. majority voting across XY/XZ/YZ results, do it here.
+                
                 // We'll just return XY if present, else the first key
                 if (directionResults.ContainsKey("XY")) return directionResults["XY"];
                 return directionResults.Values.First();

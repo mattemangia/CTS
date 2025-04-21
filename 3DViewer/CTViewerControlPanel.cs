@@ -791,7 +791,7 @@ namespace CTSegmenter.SharpDXIntegration
                 {
                     Material mat = mainForm.Materials[i];
 
-                    // For visibility, you can ask the viewer if the material is currently visible:
+                    // For visibility, can ask the viewer if the material is currently visible:
                     bool currentlyVisible = viewerForm.GetMaterialVisibility(mat.ID);
 
                     // Add the actual 'Material' object as the item

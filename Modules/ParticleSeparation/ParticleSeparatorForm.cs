@@ -1513,7 +1513,7 @@ namespace CTSegmenter
 
         private void ParticleListView_CacheVirtualItems(object sender, CacheVirtualItemsEventArgs e)
         {
-            // This is where you would implement caching for virtual items
+            
             // For our purposes, we're already caching everything in memory
         }
 

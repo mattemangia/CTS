@@ -2639,7 +2639,7 @@ namespace CTSegmenter
 
         private void GaussianFilter3D_CPU(byte[,,] vol, int w, int h, int d, int kSize, float sigma, ProgressForm pForm)
         {
-            // Similar concept to 2D, but now you do 3 passes or directly 3D.
+            // Similar concept to 2D, but now do 3 passes or directly 3D.
             // For simplicity, do a naive 3D convolution. This can be large for big volumes.
 
             int radius = kSize / 2;
@@ -3062,7 +3062,7 @@ namespace CTSegmenter
         private byte[] MedianFilter2D_GPU(byte[] src, int width, int height, int kSize)
         {
             byte[] dst = new byte[src.Length];
-            // In a real scenario, you'd implement the median kernel in ILGPU
+            // Implement the median kernel in ILGPU
             using (var bufferSrc = accelerator.Allocate1D<byte>(src.Length))
             using (var bufferDst = accelerator.Allocate1D<byte>(dst.Length))
             {
@@ -3077,7 +3077,7 @@ namespace CTSegmenter
         }
 
         // Example kernel that just copies data. 
-        // Replace with real convolution/memory pattern for GPU filtering.
+        // Replace with convolution/memory pattern for GPU filtering.
         static void CopyKernel(Index1D idx, ArrayView<byte> src, ArrayView<byte> dst)
         {
             if (idx < src.Length)
@@ -4205,8 +4205,8 @@ namespace CTSegmenter
             }
 
             // Sort the local array. ILGPU supports 'XMath.Sort', but it's easier to do bubble or
-            // do a naive approach. We'll do a simple insertion sort in place. 
-            // For big kSize, you'd want something more optimized, but here's a direct approach:
+            
+            
             for (int i = 1; i < idx; i++)
             {
                 byte key = window[i];

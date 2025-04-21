@@ -1,5 +1,6 @@
 ﻿using CTSegmenter;
 using System;
+using System.Windows.Controls;
 using System.Windows.Forms;
 
 static class Program
@@ -17,9 +18,9 @@ static class Program
 
         MainForm mainForm = new MainForm(args);
         ControlForm controlForm = new ControlForm(mainForm);
-        controlForm.Show();
+        
         Application.Run(mainForm);
-
+        mainForm.DockExternalControlForm(controlForm);
         Logger.Log("Application ended.");
     }
 }

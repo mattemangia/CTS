@@ -76,7 +76,7 @@ namespace CTSegmenter
         {
             string message = Marshal.PtrToStringAnsi(messagePtr);
 
-            // Map severity to your log levels
+            // Map severity to log levels
             switch (severity)
             {
                 case 0: // Info

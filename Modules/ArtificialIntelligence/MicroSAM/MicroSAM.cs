@@ -98,6 +98,11 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
         private enum PromptMode { Positive, Negative, ZeroShot }
         private PromptMode currentMode = PromptMode.Positive;
 
+        // candidate masks produced by zero‑shot
+        private List<byte[,]> zeroShotMasks = null;
+        private List<Rectangle> zeroShotBoxes = null;
+        private List<int> zeroShotActive = null;
+
         // Slice change callback
         private Action<int> sliceChangeCallback;
 
@@ -826,6 +831,32 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             bool isPanning = false;
 
             xyViewer.MouseDown += (s, e) => {
+                if (currentMode == PromptMode.ZeroShot && zeroShotBoxes != null)
+                {
+                    int hit = PickZeroShotBox(e.X, e.Y, currentActiveView);
+                    if (hit >= 0)
+                    {
+                        if (zeroShotActive.Contains(hit))
+                            zeroShotActive.Remove(hit);   // toggle OFF
+                        else
+                            zeroShotActive.Add(hit);      // toggle ON
+
+                        // Union of all active masks (or null if none)
+                        segmentationMask = BuildMergedMask(zeroShotActive);
+
+                        // Outline only the boxes that are still OFF
+                        boundingBoxes = zeroShotBoxes
+                                        .Where((_, idx) => !zeroShotActive.Contains(idx))
+                                        .ToList();
+
+                        UpdateViewers();
+
+                        statusLabel.Text = zeroShotActive.Count == 0
+                            ? "No mask selected – click boxes to add"
+                            : $"{zeroShotActive.Count} mask(s) selected – click boxes to add/remove";
+                        return; // suppress point‑adding logic
+                    }
+                }
                 if (e.Button == MouseButtons.Left)
                 {
                     // If in zero-shot mode, don't add points, but perform segmentation
@@ -1023,6 +1054,32 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             bool isPanning = false;
 
             xzViewer.MouseDown += (s, e) => {
+                if (currentMode == PromptMode.ZeroShot && zeroShotBoxes != null)
+                {
+                    int hit = PickZeroShotBox(e.X, e.Y, currentActiveView);
+                    if (hit >= 0)
+                    {
+                        if (zeroShotActive.Contains(hit))
+                            zeroShotActive.Remove(hit);   // toggle OFF
+                        else
+                            zeroShotActive.Add(hit);      // toggle ON
+
+                        // Union of all active masks (or null if none)
+                        segmentationMask = BuildMergedMask(zeroShotActive);
+
+                        // Outline only the boxes that are still OFF
+                        boundingBoxes = zeroShotBoxes
+                                        .Where((_, idx) => !zeroShotActive.Contains(idx))
+                                        .ToList();
+
+                        UpdateViewers();
+
+                        statusLabel.Text = zeroShotActive.Count == 0
+                            ? "No mask selected – click boxes to add"
+                            : $"{zeroShotActive.Count} mask(s) selected – click boxes to add/remove";
+                        return; // suppress point‑adding logic
+                    }
+                }
                 if (e.Button == MouseButtons.Left)
                 {
                     // If in zero-shot mode, don't add points, but perform segmentation
@@ -1223,6 +1280,32 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             bool isPanning = false;
 
             yzViewer.MouseDown += (s, e) => {
+                if (currentMode == PromptMode.ZeroShot && zeroShotBoxes != null)
+                {
+                    int hit = PickZeroShotBox(e.X, e.Y, currentActiveView);
+                    if (hit >= 0)
+                    {
+                        if (zeroShotActive.Contains(hit))
+                            zeroShotActive.Remove(hit);   // toggle OFF
+                        else
+                            zeroShotActive.Add(hit);      // toggle ON
+
+                        // Union of all active masks (or null if none)
+                        segmentationMask = BuildMergedMask(zeroShotActive);
+
+                        // Outline only the boxes that are still OFF
+                        boundingBoxes = zeroShotBoxes
+                                        .Where((_, idx) => !zeroShotActive.Contains(idx))
+                                        .ToList();
+
+                        UpdateViewers();
+
+                        statusLabel.Text = zeroShotActive.Count == 0
+                            ? "No mask selected – click boxes to add"
+                            : $"{zeroShotActive.Count} mask(s) selected – click boxes to add/remove";
+                        return; // suppress point‑adding logic
+                    }
+                }
                 if (e.Button == MouseButtons.Left)
                 {
                     // If in zero-shot mode, don't add points, but perform segmentation
@@ -1449,7 +1532,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                     float z = point.Z * xzZoom + xzPan.Y; // Z is Y in the XZ view
 
                     // Use the pointTypes dictionary to determine if positive or negative
-                    bool isPositive = pointTypes.ContainsKey(point.ID) && pointTypes[point.ID];
+                    bool isPositive = !pointTypes.ContainsKey(point.ID) || pointTypes[point.ID];
 
                     // Use different colors based on point type
                     Color pointColor = isPositive ? Color.Green : Color.Red;
@@ -1484,7 +1567,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                     float y = point.Y * yzZoom + yzPan.Y;
 
                     // Use the pointTypes dictionary to determine if positive or negative
-                    bool isPositive = pointTypes.ContainsKey(point.ID) && pointTypes[point.ID];
+                    bool isPositive = !pointTypes.ContainsKey(point.ID) || pointTypes[point.ID];
 
                     // Use different colors based on point type
                     Color pointColor = isPositive ? Color.Green : Color.Red;
@@ -1579,7 +1662,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 float y = point.Y * xyZoom + xyPan.Y;
 
                 // Use the pointTypes dictionary to determine if positive or negative
-                bool isPositive = pointTypes.ContainsKey(point.ID) && pointTypes[point.ID];
+                bool isPositive = !pointTypes.ContainsKey(point.ID) || pointTypes[point.ID];
 
                 // Use different colors based on point type
                 Color pointColor = isPositive ? Color.Green : Color.Red;
@@ -1669,15 +1752,28 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
 
                 if (useGPU)
                 {
-                    // Configure for GPU with optimized settings
-                    options.AppendExecutionProvider_CUDA();
-                    Logger.Log("[MicroSAM] Using GPU execution provider with optimized settings");
-                }
-                else
-                {
-                    Logger.Log("[MicroSAM] Using optimized CPU execution provider");
-                }
+                    try
+                    {
+                        // Prefer DirectML on Windows
+                        options.AppendExecutionProvider_DML();   // deviceId = 0 by default
+                        Logger.Log("[MicroSAM] Using DirectML execution provider");
+                    }
+                    catch (Exception dmlEx)
+                    {
+                        Logger.Log($"[MicroSAM] DirectML not available: {dmlEx.Message}");
 
+                        try
+                        {
+                            options.AppendExecutionProvider_CUDA();   // likewise, device 0
+                            Logger.Log("[MicroSAM] Using CUDA execution provider");
+                        }
+                        catch (Exception cudaEx)
+                        {
+                            Logger.Log($"[MicroSAM] CUDA not available, falling back to CPU: {cudaEx.Message}");
+                            // nothing more to do – session will run on the default CPU EP
+                        }
+                    }
+                }
                 // Create sessions with optimized settings
                 encoderSession = new InferenceSession(encoderPath, options);
                 decoderSession = new InferenceSession(decoderPath, options);
@@ -2010,389 +2106,195 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
 
             return bmp;
         }
+        /// <summary>Returns the union of the masks whose indices are in
+        /// <paramref name="active"/>.  If none are active, returns null.</summary>
+        private byte[,] BuildMergedMask(IEnumerable<int> active)
+        {
+            if (zeroShotMasks == null) return null;
 
+            int[] ids = active.ToArray();
+            if (ids.Length == 0) return null;
+
+            // assume all masks share the same size as the first one
+            int w = zeroShotMasks[0].GetLength(0);
+            int h = zeroShotMasks[0].GetLength(1);
+            var merged = new byte[w, h];
+
+            foreach (int id in ids)
+            {
+                byte[,] m = zeroShotMasks[id];
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                        if (m[x, y] > 0) merged[x, y] = selectedMaterial.ID;
+            }
+            return merged;
+        }
         private async Task PerformSegmentation()
         {
+            zeroShotBoxes = null;
+            zeroShotMasks = null;
+            zeroShotActive = null;
             if (encoderSession == null || decoderSession == null)
             {
                 MessageBox.Show("Models not loaded. Please load models first.");
                 return;
             }
 
-            // Get relevant points based on active view
-            var relevantPoints = GetRelevantPointsForCurrentView();
+            /* ---------- gather annotation points --------------------------------- */
+            List<AnnotationPoint> relevantPoints = GetRelevantPointsForCurrentView();
 
-            if (relevantPoints.Count == 0 && currentMode != PromptMode.ZeroShot)
-            {
-                string viewName;
-                switch (currentActiveView)
-                {
-                    case ActiveView.XY: viewName = "XY"; break;
-                    case ActiveView.XZ: viewName = "XZ"; break;
-                    case ActiveView.YZ: viewName = "YZ"; break;
-                    default: viewName = "current"; break;
-                }
-
-                MessageBox.Show($"Please add at least one annotation point on the {viewName} view, or switch to Zero-Shot mode.");
+             if (currentMode == PromptMode.ZeroShot)
+                     return;          // zero‑shot needs no auto‑refresh
+            
+             if (relevantPoints.Count == 0)
                 return;
-            }
 
-            // Ensure UI is updated from the UI thread
-            Action updateStatus = () => statusLabel.Text = "Segmenting...";
-            if (samForm.InvokeRequired)
-                samForm.Invoke(updateStatus);
-            else
-                updateStatus();
+            // UI feedback
+            Action setBusy = () => statusLabel.Text = "Segmenting...";
+            if (samForm.InvokeRequired) samForm.Invoke(setBusy); else setBusy();
 
-            Logger.Log($"[MicroSAM] Starting segmentation on {currentActiveView} view");
+            Logger.Log($"[MicroSAM] Starting segmentation on {currentActiveView}");
 
             try
             {
-                // Create a tensor with the image data
+                /* ---------- encoder ----------------------------------------------- */
                 Tensor<float> imageInput = await Task.Run(() => PreprocessImage());
 
-                // Create input and run the encoder on a background thread
-                var encoderInputs = new List<NamedOnnxValue> {
-                    NamedOnnxValue.CreateFromTensor("image", imageInput)
-                };
+                DenseTensor<float> imageEmbed;
 
-                var encoderOutputs = await Task.Run(() => encoderSession.Run(encoderInputs));
-
-                try
+                using (var encOut = await Task.Run(() =>
+                    encoderSession.Run(new[] { NamedOnnxValue.CreateFromTensor("image", imageInput) })))
                 {
-                    // Extract encoder outputs
-                    var imageEmbed = encoderOutputs.First(x => x.Name == "image_embeddings").AsTensor<float>();
+                    var encTensor = encOut.First(o => o.Name == "image_embeddings").AsTensor<float>();
 
-                    // Cache the image embeddings
-                    // Create a new tensor to store cached values
-                    cachedImageEmbed = new DenseTensor<float>(imageEmbed.Dimensions);
-                    CopyTensorData(imageEmbed, cachedImageEmbed);
-                    cachedFeatureSlice = currentActiveView == ActiveView.XY ? xySlice :
-                                         currentActiveView == ActiveView.XZ ? xzRow : yzCol;
+                    cachedImageEmbed = new DenseTensor<float>(encTensor.Dimensions);
+                    CopyTensorData(encTensor, cachedImageEmbed);
+                    cachedFeatureSlice = currentActiveView == ActiveView.XY ? xySlice
+                                         : currentActiveView == ActiveView.XZ ? xzRow : yzCol;
 
-                    // Prepare point tensors
-                    int numPoints = relevantPoints.Count;
+                    imageEmbed = cachedImageEmbed;
+                }
 
-                    // Scale factors depend on the active view
-                    float scaleX, scaleY;
-                    switch (currentActiveView)
+                /* ---------- build point tensors ----------------------------------- */
+                int numPoints = relevantPoints.Count == 0 ? 1 : relevantPoints.Count;
+                var pointCoords = new DenseTensor<float>(new[] { 1, numPoints, 2 });
+                var pointLabels = new DenseTensor<float>(new[] { 1, numPoints });
+
+                float scaleX, scaleY;
+                switch (currentActiveView)
+                {
+                    case ActiveView.XY:
+                        scaleX = 1024f / mainForm.GetWidth();
+                        scaleY = 1024f / mainForm.GetHeight();
+                        break;
+                    case ActiveView.XZ:
+                        scaleX = 1024f / mainForm.GetWidth();
+                        scaleY = 1024f / mainForm.GetDepth();
+                        break;
+                    default: /* YZ */
+                        scaleX = 1024f / mainForm.GetDepth();
+                        scaleY = 1024f / mainForm.GetHeight();
+                        break;
+                }
+
+                if (relevantPoints.Count == 0)   // zero‑shot fallback
+                {
+                    pointCoords[0, 0, 0] = 512;
+                    pointCoords[0, 0, 1] = 512;
+                    pointLabels[0, 0] = 0f;
+                }
+                else
+                {
+                    for (int i = 0; i < relevantPoints.Count; i++)
                     {
-                        case ActiveView.XY:
-                            scaleX = 1024.0f / mainForm.GetWidth();
-                            scaleY = 1024.0f / mainForm.GetHeight();
-                            break;
-                        case ActiveView.XZ:
-                            scaleX = 1024.0f / mainForm.GetWidth();
-                            scaleY = 1024.0f / mainForm.GetDepth();
-                            break;
-                        case ActiveView.YZ:
-                            scaleX = 1024.0f / mainForm.GetDepth();
-                            scaleY = 1024.0f / mainForm.GetHeight();
-                            break;
-                        default:
-                            scaleX = scaleY = 1.0f;
-                            break;
-                    }
+                        AnnotationPoint p = relevantPoints[i];
+                        float px, py;
 
-                    DenseTensor<float> pointCoords = new DenseTensor<float>(new[] { 1, numPoints, 2 });
-                    DenseTensor<float> pointLabels = new DenseTensor<float>(new[] { 1, numPoints });
-
-                    for (int i = 0; i < numPoints; i++)
-                    {
-                        var point = relevantPoints[i];
-                        float x, y;
-
-                        // Transform point coordinates based on active view
                         switch (currentActiveView)
                         {
-                            case ActiveView.XY:
-                                x = point.X;
-                                y = point.Y;
-                                break;
-                            case ActiveView.XZ:
-                                x = point.X;
-                                y = point.Z;
-                                break;
-                            case ActiveView.YZ:
-                                x = point.Z;
-                                y = point.Y;
-                                break;
-                            default:
-                                // Fallback default case to avoid unassigned variables
-                                x = point.X;
-                                y = point.Y;
-                                break;
+                            case ActiveView.XY: px = p.X; py = p.Y; break;
+                            case ActiveView.XZ: px = p.X; py = p.Z; break;
+                            default: px = p.Z; py = p.Y; break;
                         }
 
-                        // Scale to image size
-                        x = x * scaleX;
-                        y = y * scaleY;
-
-                        pointCoords[0, i, 0] = x;
-                        pointCoords[0, i, 1] = y;
-
-                        // Use pointTypes dictionary to determine if point is positive
-                        bool isPositive = pointTypes.ContainsKey(point.ID) && pointTypes[point.ID];
-                        pointLabels[0, i] = isPositive ? 1.0f : 0.0f;
-                    }
-
-                    // Empty mask input
-                    DenseTensor<float> maskInput = new DenseTensor<float>(new[] { 1, 1, 256, 256 });
-                    DenseTensor<float> hasMaskInput = new DenseTensor<float>(new[] { 1 });
-                    hasMaskInput[0] = 0;
-
-                    // Original image size depends on active view
-                    int origWidth, origHeight;
-                    switch (currentActiveView)
-                    {
-                        case ActiveView.XY:
-                            origWidth = mainForm.GetWidth();
-                            origHeight = mainForm.GetHeight();
-                            break;
-                        case ActiveView.XZ:
-                            origWidth = mainForm.GetWidth();
-                            origHeight = mainForm.GetDepth();
-                            break;
-                        case ActiveView.YZ:
-                            origWidth = mainForm.GetDepth();
-                            origHeight = mainForm.GetHeight();
-                            break;
-                        default:
-                            origWidth = mainForm.GetWidth();
-                            origHeight = mainForm.GetHeight();
-                            break;
-                    }
-
-                    // For MicroSAM, we need to pass orig_im_size as a float tensor
-                    DenseTensor<float> origImSize = new DenseTensor<float>(new[] { 2 });
-                    origImSize[0] = origHeight;
-                    origImSize[1] = origWidth;
-
-                    // Run decoder on background thread
-                    var decoderInputs = new List<NamedOnnxValue> {
-                        NamedOnnxValue.CreateFromTensor("image_embeddings", imageEmbed),
-                        NamedOnnxValue.CreateFromTensor("point_coords", pointCoords),
-                        NamedOnnxValue.CreateFromTensor("point_labels", pointLabels),
-                        NamedOnnxValue.CreateFromTensor("mask_input", maskInput),
-                        NamedOnnxValue.CreateFromTensor("has_mask_input", hasMaskInput),
-                        NamedOnnxValue.CreateFromTensor("orig_im_size", origImSize)
-                    };
-
-                    var decoderOutputs = await Task.Run(() => decoderSession.Run(decoderInputs));
-
-                    try
-                    {
-                        // Process decoder outputs
-                        byte[,] tempMask = null;
-                        float bestIoU = 0;
-                        boundingBoxes.Clear();
-
-                        await Task.Run(() => {
-                            var masks = decoderOutputs.First(x => x.Name == "masks").AsTensor<float>();
-                            var iouPredictions = decoderOutputs.First(x => x.Name == "iou_predictions").AsTensor<float>();
-
-                            int bestMaskIdx = 0;
-                            bestIoU = iouPredictions[0, 0];
-
-                            for (int i = 1; i < iouPredictions.Dimensions[0]; i++)
-                            {
-                                if (iouPredictions[i, 0] > bestIoU)
-                                {
-                                    bestIoU = iouPredictions[i, 0];
-                                    bestMaskIdx = i;
-                                }
-                            }
-
-                            Logger.Log($"[MicroSAM] Best mask IoU: {bestIoU}");
-
-                            // Get the actual dimensions from the masks tensor
-                            int maskDim0 = masks.Dimensions[0]; // Batch/mask index
-                            int maskDim1 = masks.Dimensions[1]; // First dimension (height or channels)
-                            int maskDim2 = masks.Dimensions.Length > 2 ? masks.Dimensions[2] : 1;  // Second dimension if it exists
-
-                            // Convert ReadOnlySpan<int> to array before using string.Join
-                            int[] maskDimArray = masks.Dimensions.ToArray();
-                            Logger.Log($"[MicroSAM] Mask tensor dimensions: [{string.Join(", ", maskDimArray)}]");
-                            Logger.Log($"[MicroSAM] MainForm dimensions: {mainForm.GetWidth()}x{mainForm.GetHeight()}");
-
-                            // Handle cases where mask dimensions don't match expectations
-                            int viewWidth, viewHeight;
-
-                            switch (currentActiveView)
-                            {
-                                case ActiveView.XY:
-                                    viewWidth = mainForm.GetWidth();
-                                    viewHeight = mainForm.GetHeight();
-                                    tempMask = new byte[viewWidth, viewHeight];
-
-                                    // Check if we're dealing with flat output or mismatched dimensions
-                                    if (maskDim2 == 1 || maskDim1 == 1)
-                                    {
-                                        // Handle flat output - we need to reshape the data
-                                        Logger.Log("[MicroSAM] Detected flat mask output, reshaping to match view dimensions");
-
-                                        // Determine if we have a row or column vector
-                                        bool isRowVector = maskDim1 == 1;
-                                        int vectorLength = isRowVector ? maskDim2 : maskDim1;
-
-                                        // Calculate scaling to match the view dimensions
-                                        float scaleFactorXY = (float)viewWidth / vectorLength;
-
-                                        // Create binary mask from the flat vector
-                                        for (int y = 0; y < viewHeight; y++)
-                                        {
-                                            for (int x = 0; x < viewWidth; x++)
-                                            {
-                                                // Map x to the vector index
-                                                int idx = (int)(x / scaleFactorXY);
-                                                idx = Math.Min(idx, vectorLength - 1);
-
-                                                // Get the value from the vector
-                                                float value = isRowVector ? masks[bestMaskIdx, 0, idx] :
-                                                                            masks[bestMaskIdx, idx, 0];
-
-                                                tempMask[x, y] = value > 0.0f ? selectedMaterial.ID : (byte)0;
-                                            }
-                                        }
-                                    }
-                                    else
-                                    {
-                                        // Normal 2D mask processing with bounds checking
-                                        for (int y = 0; y < viewHeight; y++)
-                                        {
-                                            for (int x = 0; x < viewWidth; x++)
-                                            {
-                                                // Access mask with bounds checking
-                                                bool isInMask = y < maskDim1 && x < maskDim2;
-                                                float value = isInMask ? masks[bestMaskIdx, y, x] : 0.0f;
-                                                tempMask[x, y] = value > 0.0f ? selectedMaterial.ID : (byte)0;
-                                            }
-                                        }
-                                    }
-                                    break;
-
-                                case ActiveView.XZ:
-                                    viewWidth = mainForm.GetWidth();
-                                    viewHeight = mainForm.GetDepth();
-                                    tempMask = new byte[viewWidth, viewHeight];
-
-                                    // Similar handling for XZ view with flat output
-                                    if (maskDim2 == 1 || maskDim1 == 1)
-                                    {
-                                        Logger.Log("[MicroSAM] Detected flat mask output, reshaping to match XZ view dimensions");
-
-                                        bool isRowVector = maskDim1 == 1;
-                                        int vectorLength = isRowVector ? maskDim2 : maskDim1;
-
-                                        float scaleFactorXZ = (float)viewWidth / vectorLength;
-
-                                        for (int z = 0; z < viewHeight; z++)
-                                        {
-                                            for (int x = 0; x < viewWidth; x++)
-                                            {
-                                                int idx = (int)(x / scaleFactorXZ);
-                                                idx = Math.Min(idx, vectorLength - 1);
-
-                                                float value = isRowVector ? masks[bestMaskIdx, 0, idx] :
-                                                                            masks[bestMaskIdx, idx, 0];
-
-                                                tempMask[x, z] = value > 0.0f ? selectedMaterial.ID : (byte)0;
-                                            }
-                                        }
-                                    }
-                                    else
-                                    {
-                                        // Normal 2D mask processing with bounds checking
-                                        for (int z = 0; z < viewHeight; z++)
-                                        {
-                                            for (int x = 0; x < viewWidth; x++)
-                                            {
-                                                bool isInMask = z < maskDim1 && x < maskDim2;
-                                                float value = isInMask ? masks[bestMaskIdx, z, x] : 0.0f;
-                                                tempMask[x, z] = value > 0.0f ? selectedMaterial.ID : (byte)0;
-                                            }
-                                        }
-                                    }
-                                    break;
-
-                                case ActiveView.YZ:
-                                    viewWidth = mainForm.GetDepth();
-                                    viewHeight = mainForm.GetHeight();
-                                    tempMask = new byte[viewWidth, viewHeight];
-
-                                    // Similar handling for YZ view with flat output
-                                    if (maskDim2 == 1 || maskDim1 == 1)
-                                    {
-                                        Logger.Log("[MicroSAM] Detected flat mask output, reshaping to match YZ view dimensions");
-
-                                        bool isRowVector = maskDim1 == 1;
-                                        int vectorLength = isRowVector ? maskDim2 : maskDim1;
-
-                                        float scaleFactorYZ = (float)viewWidth / vectorLength;
-
-                                        for (int y = 0; y < viewHeight; y++)
-                                        {
-                                            for (int z = 0; z < viewWidth; z++)
-                                            {
-                                                int idx = (int)(z / scaleFactorYZ);
-                                                idx = Math.Min(idx, vectorLength - 1);
-
-                                                float value = isRowVector ? masks[bestMaskIdx, 0, idx] :
-                                                                            masks[bestMaskIdx, idx, 0];
-
-                                                tempMask[z, y] = value > 0.0f ? selectedMaterial.ID : (byte)0;
-                                            }
-                                        }
-                                    }
-                                    else
-                                    {
-                                        // Normal 2D mask processing with bounds checking
-                                        for (int y = 0; y < viewHeight; y++)
-                                        {
-                                            for (int z = 0; z < viewWidth; z++)
-                                            {
-                                                bool isInMask = y < maskDim1 && z < maskDim2;
-                                                float value = isInMask ? masks[bestMaskIdx, y, z] : 0.0f;
-                                                tempMask[z, y] = value > 0.0f ? selectedMaterial.ID : (byte)0;
-                                            }
-                                        }
-                                    }
-                                    break;
-                            }
-
-                            // Detect bounding boxes
-                            DetectBoundingBoxes(tempMask, currentActiveView);
-                        });
-
-                        // Update UI on the UI thread
-                        samForm.Invoke(new Action(() => {
-                            segmentationMask = tempMask;
-                            UpdateViewers();
-                            statusLabel.Text = $"Segmentation complete (IoU: {bestIoU:F3})";
-                        }));
-
-                        Logger.Log("[MicroSAM] Segmentation complete");
-                    }
-                    finally
-                    {
-                        decoderOutputs.Dispose();
+                        pointCoords[0, i, 0] = px * scaleX;
+                        pointCoords[0, i, 1] = py * scaleY;
+                        pointLabels[0, i] = (pointTypes.TryGetValue(p.ID, out bool pos) && pos) ? 1f : 0f;
                     }
                 }
-                finally
+
+                /* ---------- empty mask input for SAM ------------------------------ */
+                var maskInput = new DenseTensor<float>(new[] { 1, 1, 256, 256 });
+                var hasMaskInput = new DenseTensor<float>(new[] { 1 });
+                hasMaskInput[0] = 0f;
+
+                /* ---------- original image size ----------------------------------- */
+                int origW, origH;
+                if (currentActiveView == ActiveView.XY)
                 {
-                    encoderOutputs.Dispose();
+                    origW = mainForm.GetWidth(); origH = mainForm.GetHeight();
                 }
+                else if (currentActiveView == ActiveView.XZ)
+                {
+                    origW = mainForm.GetWidth(); origH = mainForm.GetDepth();
+                }
+                else
+                {
+                    origW = mainForm.GetDepth(); origH = mainForm.GetHeight();
+                }
+
+                var origImSize = new DenseTensor<float>(new[] { 2 });
+                origImSize[0] = origH; origImSize[1] = origW;
+
+                /* ---------- decoder ----------------------------------------------- */
+                byte[,] tempMask = null;
+                float bestIoU = 0f;
+
+                using (var decOut = await Task.Run(() => decoderSession.Run(new[]
+                {
+            NamedOnnxValue.CreateFromTensor("image_embeddings", imageEmbed),
+            NamedOnnxValue.CreateFromTensor("point_coords",       pointCoords),
+            NamedOnnxValue.CreateFromTensor("point_labels",       pointLabels),
+            NamedOnnxValue.CreateFromTensor("mask_input",         maskInput),
+            NamedOnnxValue.CreateFromTensor("has_mask_input",     hasMaskInput),
+            NamedOnnxValue.CreateFromTensor("orig_im_size",       origImSize)
+        })))
+                {
+                    var masks = decOut.First(o => o.Name == "masks").AsTensor<float>();
+                    var iouPredictions = decOut.First(o => o.Name == "iou_predictions").AsTensor<float>();
+
+                    int bestIdx = GetBestMaskIndex(iouPredictions);
+                    bestIoU = iouPredictions[bestIdx, 0];
+
+                    tempMask = ConvertSamMaskToByteMask(masks, bestIdx, currentActiveView);
+
+                    DetectBoundingBoxes(tempMask, currentActiveView);
+                }
+
+                /* ---------- update UI --------------------------------------------- */
+                Action finish = () =>
+                {
+                    segmentationMask = tempMask;
+                    UpdateViewers();
+                    statusLabel.Text = $"Segmentation complete (IoU {bestIoU:F3})";
+                };
+                if (samForm.InvokeRequired) samForm.Invoke(finish); else finish();
+
+                Logger.Log("[MicroSAM] Segmentation complete");
             }
             catch (Exception ex)
             {
-                samForm.Invoke(new Action(() => {
+                if (samForm.InvokeRequired)
+                    samForm.Invoke(new Action(() =>
+                        MessageBox.Show($"Error during segmentation: {ex.Message}")));
+                else
                     MessageBox.Show($"Error during segmentation: {ex.Message}");
-                    statusLabel.Text = $"Error: {ex.Message}";
-                }));
 
+                statusLabel.Text = "Error";
                 Logger.Log($"[MicroSAM] Segmentation error: {ex.Message}");
             }
         }
+
 
         // Zero-shot prompt mode - performs segmentation without any points
         private async Task PerformZeroShotSegmentation()
@@ -2443,7 +2345,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                     // Use center point (just as a placeholder)
                     pointCoords[0, 0, 0] = 512; // center x (1024/2)
                     pointCoords[0, 0, 1] = 512; // center y (1024/2)
-                    pointLabels[0, 0] = 0; // zero-shot mode 
+                    pointLabels[0, 0] = -1; // zero-shot mode 
 
                     // Empty mask input 
                     DenseTensor<float> maskInput = new DenseTensor<float>(new[] { 1, 1, 256, 256 });
@@ -2491,108 +2393,88 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
 
                     try
                     {
-                        // Process decoder outputs
-                        byte[,] tempMask = null;
-                        boundingBoxes.Clear();
+                        /* ---------- collect best masks ----------------------------------- */
+                        var masks = decoderOutputs.First(x => x.Name == "masks").AsTensor<float>();
+                        var iouPredictions = decoderOutputs.First(x => x.Name == "iou_predictions").AsTensor<float>();
+                        int nMasks = iouPredictions.Dimensions[0];
+                        var lowRes = decoderOutputs.First(x => x.Name == "low_res_masks").AsTensor<float>();
 
-                        await Task.Run(() => {
-                            var masks = decoderOutputs.First(x => x.Name == "masks").AsTensor<float>();
-                            var iouPredictions = decoderOutputs.First(x => x.Name == "iou_predictions").AsTensor<float>();
+                        /* take up to 5 masks with the highest IoU --------------------------- */
+                        var ranked = Enumerable.Range(0, nMasks)
+                                       .Select(i => (score: iouPredictions[i, 0], idx: i))
+                                       .OrderByDescending(t => t.score)
+                                       .Take(5)
+                                       .ToArray();
 
-                            // Find the top masks (up to 3 most confident masks)
-                            int numMasks = Math.Min(3, iouPredictions.Dimensions[0]);
-                            List<int> bestMaskIndices = new List<int>();
+                        /* keep those ≥ 0.40 … */
+                        int[] best = ranked.Where(t => t.score >= 0.40f)
+                                           .Select(t => t.idx)
+                                           .ToArray();
 
-                            // Sort masks by IoU prediction score
-                            var maskScores = new List<(int index, float score)>();
-                            for (int i = 0; i < iouPredictions.Dimensions[0]; i++)
+                        /* … but if none pass, fall back to the single best one               */
+                        if (best.Length == 0)
+                            best = new[] { ranked[0].idx };        // always at least one mask
+                        zeroShotMasks = new List<byte[,]>();
+                        zeroShotBoxes = new List<Rectangle>();
+                        zeroShotActive = new List<int>();          // will start empty
+
+                        foreach (int i in best)
+                        {
+                            var m = ConvertSamMaskToByteMask(masks, i, currentActiveView);
+                            zeroShotMasks.Add(m);
+
+                            DetectBoundingBoxes(m, currentActiveView);
+
+                            /*  keep all boxes, not only the last one                     */
+                            if (boundingBoxes.Count > 0)
+                                zeroShotBoxes.AddRange(boundingBoxes);
+                        }
+                        if (zeroShotBoxes.Count == 0)
+                        {
+                            Logger.Log("[MicroSAM] Hi‑res mask empty – using low‑res logits");
+
+                            int nLow = lowRes.Dimensions[0];          // batch size (same as nMasks)
+                            int h = lowRes.Dimensions[2];
+                            int w = lowRes.Dimensions[3];
+
+                            // pick the best *k* low‑res masks (same indices we already ranked)
+                            foreach (int i in best)
                             {
-                                maskScores.Add((i, iouPredictions[i, 0]));
+                                // build byte[,] directly from the  low‑res 256×256 logits
+                                byte[,] small = new byte[w, h];
+                                for (int y = 0; y < h; y++)
+                                    for (int x = 0; x < w; x++)
+                                        if (lowRes[i, 0, y, x] > 0)       // threshold at 0
+                                            small[x, y] = selectedMaterial.ID;
+
+                                // upscale to the view resolution
+                                var up = ResizeByteMask(small, currentActiveView);
+                                zeroShotMasks.Add(up);
+
+                                DetectBoundingBoxes(up, currentActiveView);
+                                zeroShotBoxes.AddRange(boundingBoxes);    // keep every box
                             }
+                        }
 
-                            // Get top masks
-                            foreach (var (index, score) in maskScores.OrderByDescending(x => x.score).Take(numMasks))
-                            {
-                                if (score > 0.7f) // Only use masks with decent confidence
-                                {
-                                    bestMaskIndices.Add(index);
-                                    Logger.Log($"[MicroSAM] Using mask {index} with score {score:F3}");
-                                }
-                            }
+                        // Show only boxes for now – user must click one to choose
+                        segmentationMask = null;
+                        boundingBoxes = zeroShotBoxes;
 
-                            // Create combined mask with dimensions appropriate for the active view
-                            switch (currentActiveView)
-                            {
-                                case ActiveView.XY:
-                                    tempMask = new byte[mainForm.GetWidth(), mainForm.GetHeight()];
-                                    // Combine all best masks
-                                    foreach (int maskIdx in bestMaskIndices)
-                                    {
-                                        for (int y = 0; y < mainForm.GetHeight(); y++)
-                                        {
-                                            for (int x = 0; x < mainForm.GetWidth(); x++)
-                                            {
-                                                if (masks[maskIdx, y, x] > 0.0f)
-                                                {
-                                                    tempMask[x, y] = selectedMaterial.ID;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    DetectBoundingBoxes(tempMask, ActiveView.XY);
-                                    break;
-
-                                case ActiveView.XZ:
-                                    tempMask = new byte[mainForm.GetWidth(), mainForm.GetDepth()];
-                                    foreach (int maskIdx in bestMaskIndices)
-                                    {
-                                        for (int z = 0; z < mainForm.GetDepth(); z++)
-                                        {
-                                            for (int x = 0; x < mainForm.GetWidth(); x++)
-                                            {
-                                                if (masks[maskIdx, z, x] > 0.0f)
-                                                {
-                                                    tempMask[x, z] = selectedMaterial.ID;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    DetectBoundingBoxes(tempMask, ActiveView.XZ);
-                                    break;
-
-                                case ActiveView.YZ:
-                                    tempMask = new byte[mainForm.GetDepth(), mainForm.GetHeight()];
-                                    foreach (int maskIdx in bestMaskIndices)
-                                    {
-                                        for (int y = 0; y < mainForm.GetHeight(); y++)
-                                        {
-                                            for (int z = 0; z < mainForm.GetDepth(); z++)
-                                            {
-                                                if (masks[maskIdx, y, z] > 0.0f)
-                                                {
-                                                    tempMask[z, y] = selectedMaterial.ID;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    DetectBoundingBoxes(tempMask, ActiveView.YZ);
-                                    break;
-                            }
-                        });
-
-                        // Update UI on the UI thread
-                        samForm.Invoke(new Action(() => {
-                            segmentationMask = tempMask;
-                            UpdateViewers();
-                            statusLabel.Text = $"Zero-shot segmentation complete";
+                        samForm.Invoke(new Action(() =>
+                        {
+                            UpdateViewers();                       // refresh the three viewers
+                            statusLabel.Text = zeroShotBoxes.Count == 0
+                                ? "Zero‑shot: no confident masks"
+    : "Zero‑shot: click boxes to add them to the selection";
                         }));
 
-                        Logger.Log("[MicroSAM] Zero-shot segmentation complete");
+                        Logger.Log($"[MicroSAM] Zero‑shot produced {zeroShotBoxes.Count} boxes");
                     }
                     finally
                     {
                         decoderOutputs.Dispose();
                     }
+
                 }
                 finally
                 {
@@ -2608,6 +2490,56 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
 
                 Logger.Log($"[MicroSAM] Zero-shot segmentation error: {ex.Message}");
             }
+        }
+        /// <summary>Upscales a small 256×256 byte mask to the current view size.</summary>
+        private byte[,] ResizeByteMask(byte[,] src, ActiveView view)
+        {
+            int srcW = src.GetLength(0), srcH = src.GetLength(1);
+            int dstW, dstH;
+
+            switch (view)
+            {
+                case ActiveView.XY: dstW = mainForm.GetWidth(); dstH = mainForm.GetHeight(); break;
+                case ActiveView.XZ: dstW = mainForm.GetWidth(); dstH = mainForm.GetDepth(); break;
+                default: dstW = mainForm.GetDepth(); dstH = mainForm.GetHeight(); break;
+            }
+
+            var dst = new byte[dstW, dstH];
+            double sx = (double)srcW / dstW;
+            double sy = (double)srcH / dstH;
+
+            for (int y = 0; y < dstH; y++)
+            {
+                int syi = Math.Min((int)(y * sy), srcH - 1);
+                for (int x = 0; x < dstW; x++)
+                {
+                    int sxi = Math.Min((int)(x * sx), srcW - 1);
+                    if (src[sxi, syi] > 0) dst[x, y] = selectedMaterial.ID;
+                }
+            }
+            return dst;
+        }
+        /// <summary>Returns the index of the zero‑shot box that contains (x,y)
+        /// in *viewer‑space*, or –1 if none.</summary>
+        private int PickZeroShotBox(int vx, int vy, ActiveView view)
+        {
+            if (zeroShotBoxes == null) return -1;
+
+            float zoom = view == ActiveView.XY ? xyZoom : view == ActiveView.XZ ? xzZoom : yzZoom;
+            Point pan = view == ActiveView.XY ? xyPan : view == ActiveView.XZ ? xzPan : yzPan;
+
+            for (int i = 0; i < zeroShotBoxes.Count; i++)
+            {
+                Rectangle box = zeroShotBoxes[i];
+                Rectangle scr = new Rectangle(
+                    (int)(box.X * zoom) + pan.X,
+                    (int)(box.Y * zoom) + pan.Y,
+                    (int)(box.Width * zoom),
+                    (int)(box.Height * zoom));
+
+                if (scr.Contains(vx, vy)) return i;
+            }
+            return -1;
         }
 
         // Detect bounding boxes from a segmentation mask
@@ -3633,345 +3565,223 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
         }
 
         // Zero-shot segmentation for a single slice
+        // Zero‑shot segmentation for a single XY slice
         private async Task<byte[,]> SegmentSliceZeroShot(int sliceZ)
         {
             try
             {
-                // Need to run the encoder for this slice
+                /* ---------- run encoder ------------------------------------------- */
                 Tensor<float> imageInput = await Task.Run(() => PreprocessSliceImage(sliceZ));
 
-                var encoderInputs = new List<NamedOnnxValue> {
-                    NamedOnnxValue.CreateFromTensor("image", imageInput)
-                };
+                byte[,] finalMask = null;   // will be assigned in the using‑block
 
-                var encoderOutputs = await Task.Run(() => encoderSession.Run(encoderInputs));
-
-                try
+                using (var encOut = await Task.Run(() =>
+                    encoderSession.Run(new[] { NamedOnnxValue.CreateFromTensor("image", imageInput) })))
                 {
-                    // Extract encoder outputs
-                    var imageEmbed = encoderOutputs.First(x => x.Name == "image_embeddings").AsTensor<float>();
+                    var imageEmbed = encOut.First(o => o.Name == "image_embeddings").AsTensor<float>();
 
-                    // For zero-shot, we create a single point in the center (won't be used)
-                    DenseTensor<float> pointCoords = new DenseTensor<float>(new[] { 1, 1, 2 });
-                    DenseTensor<float> pointLabels = new DenseTensor<float>(new[] { 1, 1 });
+                    /* ---------- dummy prompt tensors ------------------------------ */
+                    var pointCoords = new DenseTensor<float>(new[] { 1, 1, 2 });
+                    var pointLabels = new DenseTensor<float>(new[] { 1, 1 });
+                    pointCoords[0, 0, 0] = 512;   // centre point (ignored)
+                    pointCoords[0, 0, 1] = 512;
+                    pointLabels[0, 0] = 0;
 
-                    // Use center point (just as a placeholder)
-                    pointCoords[0, 0, 0] = 512; // center x (1024/2)
-                    pointCoords[0, 0, 1] = 512; // center y (1024/2)
-                    pointLabels[0, 0] = 0; // ignored in zero-shot
+                    var maskInput = new DenseTensor<float>(new[] { 1, 1, 256, 256 });
+                    var hasMaskInput = new DenseTensor<float>(new[] { 1 });   // zero‑shot
+                    hasMaskInput[0] = 0;
 
-                    // Empty mask input
-                    DenseTensor<float> maskInput = new DenseTensor<float>(new[] { 1, 1, 256, 256 });
-                    DenseTensor<float> hasMaskInput = new DenseTensor<float>(new[] { 1 });
-                    hasMaskInput[0] = 0; // No input mask
+                    var origImSize = new DenseTensor<float>(new[] { 2 });
+                    origImSize[0] = mainForm.GetHeight();
+                    origImSize[1] = mainForm.GetWidth();
 
-                    // Original image size
-                    int origWidth = mainForm.GetWidth();
-                    int origHeight = mainForm.GetHeight();
-
-                    // For MicroSAM, we need to pass orig_im_size as a float tensor
-                    DenseTensor<float> origImSize = new DenseTensor<float>(new[] { 2 });
-                    origImSize[0] = origHeight;
-                    origImSize[1] = origWidth;
-
-                    // Run decoder with zero-shot configuration
-                    var decoderInputs = new List<NamedOnnxValue> {
-                        NamedOnnxValue.CreateFromTensor("image_embeddings", imageEmbed),
-                        NamedOnnxValue.CreateFromTensor("point_coords", pointCoords),
-                        NamedOnnxValue.CreateFromTensor("point_labels", pointLabels),
-                        NamedOnnxValue.CreateFromTensor("mask_input", maskInput),
-                        NamedOnnxValue.CreateFromTensor("has_mask_input", hasMaskInput),
-                        NamedOnnxValue.CreateFromTensor("orig_im_size", origImSize)
-                    };
-
-                    var decoderOutputs = await Task.Run(() => decoderSession.Run(decoderInputs));
-
-                    try
+                    /* ---------- run decoder -------------------------------------- */
+                    using (var decOut = await Task.Run(() => decoderSession.Run(new[]
                     {
-                        byte[,] resultMask = null;
-
-                        await Task.Run(() => {
-                            var masks = decoderOutputs.First(x => x.Name == "masks").AsTensor<float>();
-                            var iouPredictions = decoderOutputs.First(x => x.Name == "iou_predictions").AsTensor<float>();
-
-                            // Find the top masks (up to 3 most confident masks)
-                            int numMasks = Math.Min(3, iouPredictions.Dimensions[0]);
-                            List<int> bestMaskIndices = new List<int>();
-
-                            // Sort masks by IoU prediction score
-                            var maskScores = new List<(int index, float score)>();
-                            for (int i = 0; i < iouPredictions.Dimensions[0]; i++)
-                            {
-                                maskScores.Add((i, iouPredictions[i, 0]));
-                            }
-
-                            // Get top masks
-                            foreach (var (index, score) in maskScores.OrderByDescending(x => x.score).Take(numMasks))
-                            {
-                                if (score > 0.7f) // Only use masks with decent confidence
-                                {
-                                    bestMaskIndices.Add(index);
-                                    Logger.Log($"[MicroSAM] Using mask {index} with score {score:F3}");
-                                }
-                            }
-
-                            // If we didn't find any good masks, try using the best one anyway
-                            if (bestMaskIndices.Count == 0 && iouPredictions.Dimensions[0] > 0)
-                            {
-                                int bestIndex = maskScores.OrderByDescending(x => x.score).First().index;
-                                bestMaskIndices.Add(bestIndex);
-                                Logger.Log($"[MicroSAM] Using best available mask {bestIndex} with low score {iouPredictions[bestIndex, 0]:F3}");
-                            }
-
-                            // Create mask
-                            resultMask = new byte[origWidth, origHeight];
-
-                            // Combine all best masks
-                            foreach (int maskIdx in bestMaskIndices)
-                            {
-                                for (int y = 0; y < origHeight; y++)
-                                {
-                                    for (int x = 0; x < origWidth; x++)
-                                    {
-                                        if (masks[maskIdx, y, x] > 0.0f)
-                                        {
-                                            resultMask[x, y] = selectedMaterial.ID;
-                                        }
-                                    }
-                                }
-                            }
-                        });
-
-                        return resultMask;
-                    }
-                    finally
+                NamedOnnxValue.CreateFromTensor("image_embeddings", imageEmbed),
+                NamedOnnxValue.CreateFromTensor("point_coords",       pointCoords),
+                NamedOnnxValue.CreateFromTensor("point_labels",       pointLabels),
+                NamedOnnxValue.CreateFromTensor("mask_input",         maskInput),
+                NamedOnnxValue.CreateFromTensor("has_mask_input",     hasMaskInput),
+                NamedOnnxValue.CreateFromTensor("orig_im_size",       origImSize)
+            })))
                     {
-                        // Dispose decoder outputs
-                        foreach (var output in decoderOutputs)
-                        {
-                            output.Dispose();
-                        }
+                        var masks = decOut.First(o => o.Name == "masks").AsTensor<float>();
+                        var iouPredictions = decOut.First(o => o.Name == "iou_predictions").AsTensor<float>();
+
+                        int bestIdx = GetBestMaskIndex(iouPredictions);
+                        float bestIoU = iouPredictions[bestIdx, 0];
+                        Logger.Log($"[MicroSAM] Zero‑shot slice {sliceZ} IoU {bestIoU:F3}");
+
+                        finalMask = ConvertSamMaskToByteMask(masks, bestIdx, currentActiveView);
                     }
                 }
-                finally
-                {
-                    foreach (var output in encoderOutputs)
-                    {
-                        output.Dispose();
-                    }
-                }
+
+                return finalMask;
             }
             catch (Exception ex)
             {
-                Logger.Log($"[MicroSAM] Error in zero-shot segmentation for slice {sliceZ}: {ex.Message}");
+                Logger.Log($"[MicroSAM] Zero‑shot error on slice {sliceZ}: {ex.Message}");
                 return null;
             }
         }
 
+
         // Guided segmentation for a single slice
-        private async Task<byte[,]> SegmentSliceWithMask(int sliceZ, byte[,] previousMask, List<AnnotationPoint> relevantPoints)
+        // Guided propagation (previous mask + annotation points)
+        private async Task<byte[,]> SegmentSliceWithMask(
+            int sliceZ, byte[,] prevMask, List<AnnotationPoint> relevantPoints)
         {
             try
             {
-                // Check if we can reuse cached features from a nearby slice
+                /* ---------- encoder with caching --------------------------------- */
                 bool useCache = Math.Abs(sliceZ - cachedFeatureSlice) <= featureCacheRadius &&
                                 cachedImageEmbed != null;
 
                 DenseTensor<float> imageEmbed;
 
-                if (!useCache)
+                if (useCache)
                 {
-                    // Need to run the encoder for this slice
+                    imageEmbed = cachedImageEmbed;
+                    Logger.Log($"[MicroSAM] Using cached features for slice {sliceZ}");
+                }
+                else
+                {
                     Tensor<float> imageInput = await Task.Run(() => PreprocessSliceImage(sliceZ));
 
-                    var encoderInputs = new List<NamedOnnxValue> {
-                        NamedOnnxValue.CreateFromTensor("image", imageInput)
-                    };
-
-                    var encoderOutputs = await Task.Run(() => encoderSession.Run(encoderInputs));
-
-                    try
+                    using (var encOut = await Task.Run(() =>
+                        encoderSession.Run(new[] { NamedOnnxValue.CreateFromTensor("image", imageInput) })))
                     {
-                        // Extract encoder outputs
-                        var imageEmbedTensor = encoderOutputs.First(x => x.Name == "image_embeddings").AsTensor<float>();
+                        var encTensor = encOut.First(o => o.Name == "image_embeddings").AsTensor<float>();
 
-                        // Create new tensors to store cached values
-                        cachedImageEmbed = new DenseTensor<float>(imageEmbedTensor.Dimensions);
-
-                        // Copy tensor data - manual copy since we don't have Buffer access
-                        CopyTensorData(imageEmbedTensor, cachedImageEmbed);
-
+                        cachedImageEmbed = new DenseTensor<float>(encTensor.Dimensions);
+                        CopyTensorData(encTensor, cachedImageEmbed);
                         cachedFeatureSlice = sliceZ;
-
-                        // Use the cached tensors for this run
                         imageEmbed = cachedImageEmbed;
                     }
-                    finally
+                }
+
+                /* ---------- build mask_input ------------------------------------- */
+                var maskInput = new DenseTensor<float>(new[] { 1, 1, 256, 256 });
+                float sx, sy;
+                switch (currentActiveView)
+                {
+                    case ActiveView.XY:
+                        sx = 256f / mainForm.GetWidth();
+                        sy = 256f / mainForm.GetHeight();
+                        break;
+                    case ActiveView.XZ:
+                        sx = 256f / mainForm.GetWidth();
+                        sy = 256f / mainForm.GetDepth();
+                        break;
+                    default:       /* YZ */
+                        sx = 256f / mainForm.GetDepth();
+                        sy = 256f / mainForm.GetHeight();
+                        break;
+                }
+
+                for (int y = 0; y < prevMask.GetLength(1); y++)
+                    for (int x = 0; x < prevMask.GetLength(0); x++)
                     {
-                        // Make sure to dispose of the encoder outputs
-                        foreach (var output in encoderOutputs)
+                        if (prevMask[x, y] > 0)
                         {
-                            output.Dispose();
+                            int tx = Math.Min((int)(x * sx), 255);
+                            int ty = Math.Min((int)(y * sy), 255);
+                            maskInput[0, 0, ty, tx] = 1f;
                         }
                     }
-                }
-                else
+
+                var hasMaskInput = new DenseTensor<float>(new[] { 1 });
+                hasMaskInput[0] = 1f;
+
+                /* ---------- annotation points ------------------------------------ */
+                int nPts = Math.Max(1, relevantPoints.Count);
+                var pCoords = new DenseTensor<float>(new[] { 1, nPts, 2 });
+                var pLabels = new DenseTensor<float>(new[] { 1, nPts });
+
+                float scaleX, scaleY;
+                switch (currentActiveView)
                 {
-                    // Use cached features
-                    imageEmbed = cachedImageEmbed;
-                    Logger.Log($"[MicroSAM] Using cached features for slice {sliceZ} from slice {cachedFeatureSlice}");
+                    case ActiveView.XY:
+                        scaleX = 1024f / mainForm.GetWidth();
+                        scaleY = 1024f / mainForm.GetHeight();
+                        break;
+                    case ActiveView.XZ:
+                        scaleX = 1024f / mainForm.GetWidth();
+                        scaleY = 1024f / mainForm.GetDepth();
+                        break;
+                    default:       /* YZ */
+                        scaleX = 1024f / mainForm.GetDepth();
+                        scaleY = 1024f / mainForm.GetHeight();
+                        break;
                 }
 
-                // Prepare mask input from previous result (256x256)
-                DenseTensor<float> maskInput = new DenseTensor<float>(new[] { 1, 1, 256, 256 });
-
-                // Resize previous mask to 256x256
-                int width = mainForm.GetWidth();
-                int height = mainForm.GetHeight();
-                float scaleX = 256.0f / width;
-                float scaleY = 256.0f / height;
-
-                // Convert previous mask to proper size for mask_input
-                for (int y = 0; y < height; y++)
+                for (int i = 0; i < relevantPoints.Count; i++)
                 {
-                    for (int x = 0; x < width; x++)
-                    {
-                        if (x < previousMask.GetLength(0) && y < previousMask.GetLength(1) && previousMask[x, y] > 0)
-                        {
-                            int targetX = (int)(x * scaleX);
-                            int targetY = (int)(y * scaleY);
-
-                            if (targetX < 256 && targetY < 256)
-                            {
-                                maskInput[0, 0, targetY, targetX] = 1.0f;
-                            }
-                        }
-                    }
+                    AnnotationPoint pt = relevantPoints[i];
+                    pCoords[0, i, 0] = pt.X * scaleX;
+                    pCoords[0, i, 1] = pt.Y * scaleY;
+                    pLabels[0, i] = (pointTypes.TryGetValue(pt.ID, out bool pos) && pos) ? 1f : 0f;
                 }
 
-                // Set has_mask_input to 1 to indicate we're using a mask
-                DenseTensor<float> hasMaskInput = new DenseTensor<float>(new[] { 1 });
-                hasMaskInput[0] = 1.0f;
-
-                // Prepare point data (for MicroSAM, we need to include at least one point)
-                int numPoints = Math.Max(1, relevantPoints.Count);
-                float inputScaleX = 1024.0f / width;
-                float inputScaleY = 1024.0f / height;
-
-                DenseTensor<float> pointCoords = new DenseTensor<float>(new[] { 1, numPoints, 2 });
-                DenseTensor<float> pointLabels = new DenseTensor<float>(new[] { 1, numPoints });
-
-                if (relevantPoints.Count > 0)
+                if (relevantPoints.Count == 0)
                 {
-                    // Use actual points
-                    for (int i = 0; i < relevantPoints.Count; i++)
-                    {
-                        var point = relevantPoints[i];
-                        pointCoords[0, i, 0] = point.X * inputScaleX;
-                        pointCoords[0, i, 1] = point.Y * inputScaleY;
-
-                        bool isPositive = pointTypes.ContainsKey(point.ID) && pointTypes[point.ID];
-                        pointLabels[0, i] = isPositive ? 1.0f : 0.0f;
-                    }
+                    pCoords[0, 0, 0] = 512; pCoords[0, 0, 1] = 512;
+                    pLabels[0, 0] = 0f;
                 }
-                else
+
+                /* ---------- decoder ---------------------------------------------- */
+                var origImSize = new DenseTensor<float>(new[] { 2 });
+                switch (currentActiveView)
                 {
-                    // Add a center point if no points are provided (this should be ignored due to mask input)
-                    pointCoords[0, 0, 0] = 512;
-                    pointCoords[0, 0, 1] = 512;
-                    pointLabels[0, 0] = 1.0f;
+                    case ActiveView.XY:
+                        origImSize[0] = mainForm.GetHeight();
+                        origImSize[1] = mainForm.GetWidth();
+                        break;
+                    case ActiveView.XZ:
+                        origImSize[0] = mainForm.GetDepth();
+                        origImSize[1] = mainForm.GetWidth();
+                        break;
+                    default:       /* YZ */
+                        origImSize[0] = mainForm.GetHeight();
+                        origImSize[1] = mainForm.GetDepth();
+                        break;
                 }
 
-                // Image size tensor
-                DenseTensor<float> origImSize = new DenseTensor<float>(new[] { 2 });
-                origImSize[0] = height;
-                origImSize[1] = width;
+                byte[,] finalMask = null;
 
-                // Run decoder with mask input
-                var decoderInputs = new List<NamedOnnxValue> {
-                    NamedOnnxValue.CreateFromTensor("image_embeddings", imageEmbed),
-                    NamedOnnxValue.CreateFromTensor("point_coords", pointCoords),
-                    NamedOnnxValue.CreateFromTensor("point_labels", pointLabels),
-                    NamedOnnxValue.CreateFromTensor("mask_input", maskInput),
-                    NamedOnnxValue.CreateFromTensor("has_mask_input", hasMaskInput),
-                    NamedOnnxValue.CreateFromTensor("orig_im_size", origImSize)
-                };
-
-                var decoderOutputs = await Task.Run(() => decoderSession.Run(decoderInputs));
-
-                try
+                using (var decOut = await Task.Run(() => decoderSession.Run(new[]
                 {
-                    byte[,] resultMask = null;
-
-                    await Task.Run(() => {
-                        var masks = decoderOutputs.First(x => x.Name == "masks").AsTensor<float>();
-                        var iouPredictions = decoderOutputs.First(x => x.Name == "iou_predictions").AsTensor<float>();
-
-                        // Find best mask
-                        int bestMaskIdx = 0;
-                        float bestIoU = iouPredictions[0, 0];
-
-                        for (int i = 1; i < iouPredictions.Dimensions[0]; i++)
-                        {
-                            if (iouPredictions[i, 0] > bestIoU)
-                            {
-                                bestIoU = iouPredictions[i, 0];
-                                bestMaskIdx = i;
-                            }
-                        }
-
-                        // For boundary slices, reduce the IoU threshold
-                        // This helps ensure processing of the extreme slices
-                        float minIoU = 0.5f;
-
-                        // If we're at the beginning or end of the volume, use lower threshold
-                        int maxSlice = mainForm.GetDepth() - 1;
-                        if (sliceZ <= 3 || sliceZ >= maxSlice - 3)
-                        {
-                            minIoU = 0.3f;  // Lower threshold for boundary slices
-                            Logger.Log($"[MicroSAM] Using reduced IoU threshold ({minIoU}) for boundary slice {sliceZ}");
-                        }
-
-                        // If IoU is too low, stop propagation (with adjusted threshold for boundary cases)
-                        if (bestIoU < minIoU)
-                        {
-                            Logger.Log($"[MicroSAM] Stopping at slice {sliceZ} due to low IoU ({bestIoU:F3})");
-                            return;
-                        }
-
-                        Logger.Log($"[MicroSAM] Slice {sliceZ} mask IoU: {bestIoU:F3}");
-
-                        // Convert mask to byte array
-                        resultMask = new byte[width, height];
-                        for (int y = 0; y < height; y++)
-                        {
-                            for (int x = 0; x < width; x++)
-                            {
-                                if (masks[bestMaskIdx, y, x] > 0.0f)
-                                {
-                                    resultMask[x, y] = selectedMaterial.ID;
-                                }
-                            }
-                        }
-                    });
-
-                    return resultMask;
-                }
-                finally
+            NamedOnnxValue.CreateFromTensor("image_embeddings", imageEmbed),
+            NamedOnnxValue.CreateFromTensor("point_coords",       pCoords),
+            NamedOnnxValue.CreateFromTensor("point_labels",       pLabels),
+            NamedOnnxValue.CreateFromTensor("mask_input",         maskInput),
+            NamedOnnxValue.CreateFromTensor("has_mask_input",     hasMaskInput),
+            NamedOnnxValue.CreateFromTensor("orig_im_size",       origImSize)
+        })))
                 {
-                    // Dispose decoder outputs
-                    foreach (var output in decoderOutputs)
-                    {
-                        output.Dispose();
-                    }
+                    var masks = decOut.First(o => o.Name == "masks").AsTensor<float>();
+                    var iouPredictions = decOut.First(o => o.Name == "iou_predictions").AsTensor<float>();
+
+                    int bestIdx = GetBestMaskIndex(iouPredictions);
+                    float bestIoU = iouPredictions[bestIdx, 0];
+                    Logger.Log($"[MicroSAM] Guided slice {sliceZ} IoU {bestIoU:F3}");
+
+                    if (bestIoU < 0.30f)
+                        return null;  // stop propagation
+
+                    finalMask = ConvertSamMaskToByteMask(masks, bestIdx, currentActiveView);
                 }
+
+                return finalMask;
             }
             catch (Exception ex)
             {
-                Logger.Log($"[MicroSAM] Error segmenting slice {sliceZ}: {ex.Message}");
+                Logger.Log($"[MicroSAM] Propagation error on slice {sliceZ}: {ex.Message}");
                 return null;
             }
         }
+
 
         // Export cropped dataset based on segmentation
         private async Task ExportCroppedDataset(int sliceRange, string outputFolder, ProgressForm progressForm, bool useZeroShot)
@@ -4309,7 +4119,104 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 }
             }
         }
+        /// <summary>Returns the index of the mask with the highest IoU prediction.</summary>
+        private static int GetBestMaskIndex(Tensor<float> iouPredictions)
+        {
+            int best = 0;
+            float bestVal = iouPredictions[0, 0];
 
+            for (int i = 1; i < iouPredictions.Dimensions[0]; i++)
+            {
+                if (iouPredictions[i, 0] > bestVal)
+                {
+                    bestVal = iouPredictions[i, 0];
+                    best = i;
+                }
+            }
+            return best;
+        }
+
+        /// <summary>
+        /// Converts the SAM decoder tensor into a byte[,] mask that is the same
+        /// size as the currently active view (XY, XZ or YZ).
+        /// Works with any SAM layout:
+        ///   • [N,1,H,W]  (MicroSAM default)
+        ///   • [N,H,W]
+        ///   • [N,1,L] or [N,L,1] – will be stretched over the long side
+        /// </summary>
+        private byte[,] ConvertSamMaskToByteMask(Tensor<float> masks, int maskIdx, ActiveView view)
+        {
+            /* ---------- source tensor size ---------- */
+            bool channelFirst = masks.Rank == 4;                 // [N,1,H,W]
+            int srcH, srcW;
+
+            if (channelFirst)
+            {
+                srcH = masks.Dimensions[2];
+                srcW = masks.Dimensions[3];
+            }
+            else if (masks.Rank == 3)                            // [N,H,W]  or  degenerate
+            {
+                srcH = masks.Dimensions[1];
+                srcW = masks.Dimensions[2];
+            }
+            else
+                throw new InvalidOperationException($"Unexpected mask tensor rank {masks.Rank}");
+
+            /* vector output → square image ---------------------------------------- */
+            if (srcH == 1 || srcW == 1)
+            {
+                if (srcH == 1 && srcW == 1)
+                    throw new InvalidOperationException("SAM returned a 1 × 1 mask.");
+                if (srcH == 1) srcH = srcW;
+                if (srcW == 1) srcW = srcH;
+            }
+
+            /* ---------- destination size ---------- */
+            int dstW, dstH;
+            switch (view)
+            {
+                case ActiveView.XY:
+                    dstW = mainForm.GetWidth();
+                    dstH = mainForm.GetHeight();
+                    break;
+                case ActiveView.XZ:
+                    dstW = mainForm.GetWidth();
+                    dstH = mainForm.GetDepth();
+                    break;
+                case ActiveView.YZ:
+                    dstW = mainForm.GetDepth();
+                    dstH = mainForm.GetHeight();
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(view));
+            }
+
+            byte[,] dst = new byte[dstW, dstH];
+
+            /* ---------- scale copy ---------- */
+            double scaleX = (double)srcW / dstW;
+            double scaleY = (double)srcH / dstH;
+
+            for (int y = 0; y < dstH; y++)
+            {
+                int sy = Math.Min((int)(y * scaleY), srcH - 1);
+
+                for (int x = 0; x < dstW; x++)
+                {
+                    int sx = Math.Min((int)(x * scaleX), srcW - 1);
+
+                    float v = channelFirst
+                              ? masks[maskIdx, 0, sy, sx]          // [N,1,H,W]
+                              : masks[maskIdx, sy, sx];            // [N,H,W]
+
+                    if (v > 0f)
+                        dst[x, y] = selectedMaterial.ID;
+                }
+            }
+
+            return dst;
+        }
         private void ClearCaches()
         {
             // Clear XY cache

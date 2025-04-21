@@ -26,6 +26,11 @@ namespace CTSegmenter
         private readonly bool _useMemoryMapping;
         public int TotalChunks => _chunks.Length;
         public byte[][] Chunks => _chunks;
+
+        // Supported image extensions
+        private static readonly string[] SupportedImageExtensions = {
+            ".bmp", ".jpg", ".jpeg", ".png", ".tiff", ".tif", ".gif"
+        };
         #endregion
 
         #region Constructors
@@ -116,7 +121,26 @@ namespace CTSegmenter
                 Logger.Log(useMemoryMapping
                     ? "[FromFolder] Loading volume with memory mapping."
                     : "[FromFolder] Loading full volume into RAM.");
-                var slicePaths = GetValidImagePaths(folder);
+
+                // First, get all supported image paths in the folder
+                var allImagePaths = GetAllSupportedImagePaths(folder);
+                if (allImagePaths.Count == 0)
+                {
+                    throw new FileNotFoundException("[FromFolder] No supported image files found in the folder.");
+                }
+
+                // Determine the file type of the first image and filter by that type
+                string firstImageExtension = Path.GetExtension(allImagePaths[0]).ToLower();
+                Logger.Log($"[FromFolder] First image has extension: {firstImageExtension}. Using only this format for consistency.");
+
+                // Filter images to only include the type of the first image found
+                var slicePaths = allImagePaths
+                    .Where(path => Path.GetExtension(path).ToLower() == firstImageExtension)
+                    .OrderBy(path => path)
+                    .ToList();
+
+                Logger.Log($"[FromFolder] Found {slicePaths.Count} images of type {firstImageExtension} (from {allImagePaths.Count} total supported images)");
+
                 ValidateImageSet(slicePaths);
                 var dimensions = GetVolumeDimensions(slicePaths);
                 Logger.Log($"[FromFolder] Volume dimensions: {dimensions.Width}x{dimensions.Height}x{dimensions.Depth}");
@@ -362,6 +386,14 @@ namespace CTSegmenter
         {
             if (paths.Count == 0)
                 throw new FileNotFoundException("[ValidateImageSet] No valid images found.");
+
+            // Check that all images are the same extension
+            string firstExtension = Path.GetExtension(paths[0]).ToLower();
+            bool allSameFormat = paths.All(p => Path.GetExtension(p).ToLower() == firstExtension);
+
+            if (!allSameFormat)
+                throw new InvalidOperationException("[ValidateImageSet] Inconsistent image formats detected.");
+
             using (var first = new Bitmap(paths[0]))
             {
                 if (first.Width <= 0 || first.Height <= 0)
@@ -369,12 +401,13 @@ namespace CTSegmenter
             }
         }
 
-        private static List<string> GetValidImagePaths(string folder)
+        /// <summary>
+        /// Get all supported image files from a folder
+        /// </summary>
+        private static List<string> GetAllSupportedImagePaths(string folder)
         {
             return Directory.GetFiles(folder)
-                .Where(f => new[] { ".bmp", ".tif", ".tiff", ".png", ".jpg" }
-                    .Contains(Path.GetExtension(f).ToLower()))
-                .OrderBy(f => f)
+                .Where(f => SupportedImageExtensions.Contains(Path.GetExtension(f).ToLower()))
                 .ToList();
         }
 
@@ -493,7 +526,7 @@ namespace CTSegmenter
         #endregion
 
         #region ChunkIndexing
-        // Add these members to the ChunkedVolume class:
+
         public int ChunkDim => _chunkDim;
         public int ChunkCountX => _chunkCountX;
         public int ChunkCountY => _chunkCountY;

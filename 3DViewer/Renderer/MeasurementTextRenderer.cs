@@ -1,5 +1,4 @@
-﻿// Add this class to your project to handle drawing text labels in a safer way than using PictureBox
-// This would typically go in a separate file
+﻿// This would typically go in a separate file
 
 using System;
 using System.Drawing;

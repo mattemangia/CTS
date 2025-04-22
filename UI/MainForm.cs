@@ -3982,7 +3982,32 @@ namespace CTSegmenter
                 Z = z;
             }
         }
-    }
+    
     #endregion
+    #region Material Merging
+    public void MergeMaterials(byte targetID, byte sourceID)
+        {
+            Logger.Log($"[MainForm] Merging material {sourceID} into {targetID}");
+            int w = width, h = height, d = depth;
 
+            // Reassign all voxels labeled sourceID → targetID
+            for (int z = 0; z < d; z++)
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                        if (volumeLabels[x, y, z] == sourceID)
+                            volumeLabels[x, y, z] = targetID;
+
+            // Remove the material entry
+            var mat = Materials.FirstOrDefault(m => m.ID == sourceID);
+            if (mat != null)
+                Materials.Remove(mat);
+
+            // Persist the updated materials list
+            SaveLabelsChk();
+
+            // Refresh all views so the change is visible immediately
+            RenderViews(ViewType.All);
+        }
+        #endregion
+    }
 }

@@ -70,6 +70,7 @@ namespace CTSegmenter
         private ToolStripMenuItem closeDatasetMenuItem;
         private ToolStripMenuItem exitMenuItem;
         private ToolStripMenuItem editMenu;
+        private ToolStripMenuItem mergeMaterialMenuItem;
         private ToolStripMenuItem addMaterialMenuItem;
         private ToolStripMenuItem deleteMaterialMenuItem;
         private ToolStripMenuItem renameMaterialMenuItem;
@@ -227,6 +228,8 @@ namespace CTSegmenter
             deleteMaterialMenuItem.Click += (s, e) => OnRemoveMaterial();
             renameMaterialMenuItem = new ToolStripMenuItem("Rename Material");
             renameMaterialMenuItem.Click += (s, e) => OnRenameMaterial();
+            mergeMaterialMenuItem = new ToolStripMenuItem("Merge Material");
+            mergeMaterialMenuItem.Click += (s, e) => OnMergeMaterial();
             editSep1 = new ToolStripSeparator();
             addThresholdedMenuItem = new ToolStripMenuItem("Add Thresholded");
             addThresholdedMenuItem.Click += (s, e) => AddThresholdedSelection();
@@ -267,7 +270,7 @@ namespace CTSegmenter
 
             editMenu.DropDownItems.AddRange(new ToolStripItem[]
             {
-                addMaterialMenuItem, deleteMaterialMenuItem, renameMaterialMenuItem, editSep1,
+                addMaterialMenuItem, deleteMaterialMenuItem, renameMaterialMenuItem,mergeMaterialMenuItem, editSep1,
                 addThresholdedMenuItem, subtractThresholdedMenuItem, editSep2, segmentAnythingMenuItem
             });
             menuStrip.Items.Add(editMenu);
@@ -1546,5 +1549,51 @@ namespace CTSegmenter
             // Add to Simulation menu
             simulationMenu.DropDownItems.Add(poreNetworkMenuItem);
         }
+        private void OnMergeMaterial()
+        {
+            int idxTarget = lstMaterials.SelectedIndex;
+            if (idxTarget <= 0 || idxTarget >= mainForm.Materials.Count)
+            {
+                MessageBox.Show("Select a valid material (not the Exterior) to merge into.", "Invalid Selection",
+                                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            var targetMat = mainForm.Materials[idxTarget];
+
+            // Build a simple dialog with a ComboBox for the source material
+            using (Form dlg = new Form { Text = $"Merge into '{targetMat.Name}'", Width = 350, Height = 150, FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent })
+            {
+                var lbl = new Label { Text = "Merge material:", Left = 10, Top = 10, AutoSize = true };
+                var cb = new ComboBox { Left = 110, Top = 8, Width = 200, DropDownStyle = ComboBoxStyle.DropDownList };
+                // Populate with all other materials
+                foreach (var m in mainForm.Materials.Where((m, i) => i != idxTarget))
+                    cb.Items.Add(m);
+                if (cb.Items.Count == 0)
+                {
+                    MessageBox.Show("No other materials available to merge.", "Nothing to Merge",
+                                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                cb.SelectedIndex = 0;
+
+                var btnOK = new Button { Text = "OK", DialogResult = DialogResult.OK, Left = 150, Width = 80, Top = 50 };
+                dlg.Controls.AddRange(new Control[] { lbl, cb, btnOK });
+                dlg.AcceptButton = btnOK;
+
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                {
+                    var sourceMat = (Material)cb.SelectedItem;
+                    // perform the merge
+                    mainForm.MergeMaterials(targetMat.ID, sourceMat.ID);
+                    Logger.Log($"[ControlForm] Merged material '{sourceMat.Name}' into '{targetMat.Name}'");
+                    mainForm.SaveLabelsChk();
+                    RefreshMaterialList();
+                    // re‑select the target in the refreshed list
+                    lstMaterials.SelectedIndex = mainForm.Materials.FindIndex(m => m.ID == targetMat.ID);
+                }
+            }
+        }
+
     }
 }

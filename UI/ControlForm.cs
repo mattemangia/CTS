@@ -91,6 +91,7 @@ namespace CTSegmenter
         private bool thresholdMaskEnabled = true;
         private bool isUpdatingHistogram = false;
         private ToolStripMenuItem simulationMenu;
+        private ToolStripMenuItem stressAnalysisMenuItem;
 
         //Annotations for SAM2
         AnnotationManager sharedAnnotationManager = new AnnotationManager();
@@ -506,6 +507,7 @@ namespace CTSegmenter
 
             helpMenu.DropDownItems.AddRange(new ToolStripItem[] { dbgConsole, about });
             AddSimulationMenu();
+            AddStressAnalysisToMenu();
             menuStrip.Items.Add(simulationMenu);
             menuStrip.Items.Add(helpMenu);
             menuStrip.Items.Insert(menuStrip.Items.IndexOf(helpMenu), toolsMenu);
@@ -1548,6 +1550,42 @@ namespace CTSegmenter
 
             // Add to Simulation menu
             simulationMenu.DropDownItems.Add(poreNetworkMenuItem);
+        }
+        private void AddStressAnalysisToMenu()
+        {
+            // Create Stress Analysis menu item
+            stressAnalysisMenuItem = new ToolStripMenuItem("Stress Analysis");
+
+            // Set click event handler
+            stressAnalysisMenuItem.Click += (s, e) =>
+            {
+                if (mainForm.volumeData == null || mainForm.volumeLabels == null)
+                {
+                    MessageBox.Show("Please load a dataset first to perform stress analysis.",
+                        "No Dataset", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                try
+                {
+                    // Create and show the stress analysis form
+                    StressAnalysisForm stressAnalysisForm = new StressAnalysisForm(mainForm);
+                    stressAnalysisForm.Show();
+                    Logger.Log("[ControlForm] Opened Stress Analysis form");
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Error opening Stress Analysis form: {ex.Message}",
+                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    Logger.Log($"[ControlForm] Error opening Stress Analysis form: {ex.Message}");
+                }
+            };
+
+            // Add to Simulation menu (make sure simulationMenu exists)
+            if (simulationMenu != null)
+            {
+                simulationMenu.DropDownItems.Add(stressAnalysisMenuItem);
+            }
         }
         private void OnMergeMaterial()
         {

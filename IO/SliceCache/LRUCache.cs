@@ -29,7 +29,10 @@ namespace CTSegmenter
             }
             return default;
         }
-
+        public List<TKey> GetKeys()
+        {
+            return new List<TKey>(_cacheMap.Keys);
+        }
         public void Add(TKey key, TValue val)
         {
             if (_cacheMap.Count >= _capacity)

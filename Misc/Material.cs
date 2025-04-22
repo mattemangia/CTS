@@ -18,14 +18,16 @@ namespace CTSegmenter
         public byte Min { get; set; }
         public byte Max { get; set; }
         public bool IsExterior { get; set; } = false;
+        public double Density { get; set; } = 0.0;
 
-        public Material(string name, Color color, byte min, byte max, byte id)
+        public Material(string name, Color color, byte min, byte max, byte id, double density = 0.0)
         {
             Name = name;
             Color = color;
             Min = min;
             Max = max;
             ID = id;
+            Density = density;
         }
 
         public override string ToString() => Name;

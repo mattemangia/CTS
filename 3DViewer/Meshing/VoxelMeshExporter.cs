@@ -17,7 +17,19 @@ namespace CTSegmenter.SharpDXIntegration
             bool showGrayscale,
             bool[] labelVisibility,
             int sliceX, int sliceY, int sliceZ,
-            bool showSlices)
+            bool showSlices,
+            // Add cutting plane parameters
+            bool cutXEnabled = false,
+            bool cutYEnabled = false,
+            bool cutZEnabled = false,
+            float cutXDirection = 1.0f,
+            float cutYDirection = 1.0f,
+            float cutZDirection = 1.0f,
+            float cutXPosition = 0.5f,
+            float cutYPosition = 0.5f,
+            float cutZPosition = 0.5f,
+            bool applyPlaneCut = true,
+            Action<int> progressCallback = null)
         {
             Logger.Log("[VoxelMeshExporter] Starting export...");
 
@@ -25,14 +37,40 @@ namespace CTSegmenter.SharpDXIntegration
             var indices = new List<int>();
             int vertIndex = 0;
 
+            // Calculate cut positions in voxel coordinates
+            int cutXPos = (int)(cutXPosition * grayVol.Width);
+            int cutYPos = (int)(cutYPosition * grayVol.Height);
+            int cutZPos = (int)(cutZPosition * grayVol.Depth);
+
+            // Total number of voxels to process for progress reporting
+            long totalVoxels = (long)grayVol.Width * grayVol.Height * grayVol.Depth;
+            long processedVoxels = 0;
+            int lastReportedProgress = 0;
+
             for (int z = 0; z < grayVol.Depth; z++)
             {
                 for (int y = 0; y < grayVol.Height; y++)
                 {
                     for (int x = 0; x < grayVol.Width; x++)
                     {
+                        // Update progress every 5% (more efficient than updating every voxel)
+                        processedVoxels++;
+                        int currentProgress = (int)((processedVoxels * 100) / totalVoxels);
+                        if (currentProgress >= lastReportedProgress + 5)
+                        {
+                            progressCallback?.Invoke(currentProgress);
+                            lastReportedProgress = currentProgress;
+                        }
+
                         // Apply orthoslice clipping
                         if (showSlices && (x > sliceX || y > sliceY || z > sliceZ))
+                            continue;
+
+                        // Apply cutting plane check if enabled and user wants to apply cuts
+                        if (applyPlaneCut && IsCutByPlane(x, y, z,
+                                                         cutXEnabled, cutYEnabled, cutZEnabled,
+                                                         cutXDirection, cutYDirection, cutZDirection,
+                                                         cutXPos, cutYPos, cutZPos))
                             continue;
 
                         bool include = false;
@@ -46,7 +84,7 @@ namespace CTSegmenter.SharpDXIntegration
                         if (labelVol != null)
                         {
                             byte label = labelVol[x, y, z];
-                            if (label > 0 && labelVisibility[label])
+                            if (label > 0 && label < labelVisibility.Length && labelVisibility[label])
                             {
                                 include = true;
                             }
@@ -60,8 +98,58 @@ namespace CTSegmenter.SharpDXIntegration
                 }
             }
 
+            // Ensure 100% progress is reported at the end
+            progressCallback?.Invoke(100);
+
             SaveAsObj(outputPath, vertices, indices);
             Logger.Log("[VoxelMeshExporter] Export completed: " + outputPath);
+        }
+
+        private static bool IsCutByPlane(int x, int y, int z,
+                                         bool cutXEnabled, bool cutYEnabled, bool cutZEnabled,
+                                         float cutXDirection, float cutYDirection, float cutZDirection,
+                                         int cutXPosition, int cutYPosition, int cutZPosition)
+        {
+            // Check X cutting plane
+            if (cutXEnabled)
+            {
+                if (cutXDirection > 0) // Forward cut
+                {
+                    if (x > cutXPosition) return true;
+                }
+                else // Backward cut
+                {
+                    if (x < cutXPosition) return true;
+                }
+            }
+
+            // Check Y cutting plane
+            if (cutYEnabled)
+            {
+                if (cutYDirection > 0) // Forward cut
+                {
+                    if (y > cutYPosition) return true;
+                }
+                else // Backward cut
+                {
+                    if (y < cutYPosition) return true;
+                }
+            }
+
+            // Check Z cutting plane
+            if (cutZEnabled)
+            {
+                if (cutZDirection > 0) // Forward cut
+                {
+                    if (z > cutZPosition) return true;
+                }
+                else // Backward cut
+                {
+                    if (z < cutZPosition) return true;
+                }
+            }
+
+            return false; // Not cut by any plane
         }
 
         private static void AddCube(Vector3 pos, List<Vector3> verts, List<int> inds, ref int vIdx)

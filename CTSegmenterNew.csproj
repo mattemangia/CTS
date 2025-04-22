@@ -109,17 +109,32 @@
     <Compile Include="Interfaces\IMaterialOperations.cs" />
     <Compile Include="MaterialOperations\MaterialOperations.cs" />
     <Compile Include="Misc\Annotations.cs" />
+    <Compile Include="Misc\MaterialDensityLibrary.cs" />
     <Compile Include="Misc\OrthogonalViewPanel.cs">
       <SubType>Component</SubType>
     </Compile>
     <Compile Include="Misc\RangeSlider.cs">
       <SubType>Component</SubType>
     </Compile>
+    <Compile Include="Misc\Triangle.cs" />
     <Compile Include="Modules\ArtificialIntelligence\MicroSAM\MicroSAM.cs" />
     <Compile Include="Modules\BandDetection\BandDetectionForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Modules\BandDetection\BandDetectionFormVariance.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Modules\StressAnalysis\AcousticVelocitySimulation.cs" />
+    <Compile Include="Modules\StressAnalysis\IStressSimulation.cs" />
+    <Compile Include="Modules\StressAnalysis\StressAnalysisForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Modules\StressAnalysis\StressAnalysisFormExtension.cs" />
+    <Compile Include="Modules\StressAnalysis\TriaxialSimulation.cs" />
+    <Compile Include="UI\DensityCalibrationPreviewForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="UI\DensitySettingsForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="VolumeOperations\Binning.cs" />
@@ -256,6 +271,9 @@
       <Version>95.25.4.111</Version>
     </PackageReference>
     <PackageReference Include="Krypton.Navigator">
+      <Version>95.25.4.111</Version>
+    </PackageReference>
+    <PackageReference Include="Krypton.Ribbon">
       <Version>95.25.4.111</Version>
     </PackageReference>
     <PackageReference Include="Krypton.Toolkit">

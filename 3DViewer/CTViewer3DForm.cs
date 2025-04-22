@@ -668,6 +668,32 @@ namespace CTSegmenter.SharpDXIntegration
                         Logger.Log($"[SharpDXViewerForm] Export progress: {percent}%");
                     };
 
+                    // Check if any cutting planes are active
+                    bool anyCuttingPlaneEnabled = volumeRenderer.CutXEnabled ||
+                                                 volumeRenderer.CutYEnabled ||
+                                                 volumeRenderer.CutZEnabled;
+
+                    bool applyPlaneCut = true; // Default to visible part only
+
+                    // If any cutting plane is enabled, ask the user what to export
+                    if (anyCuttingPlaneEnabled)
+                    {
+                        // Must invoke on UI thread since we're in a Task
+                        var dialogResult = DialogResult.Yes; // Default value
+                        this.Invoke((Action)(() => {
+                            dialogResult = MessageBox.Show(
+                                "One or more cutting planes are active. What would you like to export?\n\n" +
+                                "Yes - Export only the visible part (after cuts)\n" +
+                                "No - Export the entire volume (ignore cuts)",
+                                "Export Options",
+                                MessageBoxButtons.YesNo,
+                                MessageBoxIcon.Question);
+                        }));
+
+                        // Set flag based on user's choice
+                        applyPlaneCut = (dialogResult == DialogResult.Yes);
+                    }
+
                     VoxelMeshExporter.ExportVisibleVoxels(
                         filePath,
                         grayVol: (ChunkedVolume)mainForm.volumeData,
@@ -679,8 +705,19 @@ namespace CTSegmenter.SharpDXIntegration
                         sliceX: volumeRenderer.SliceX,
                         sliceY: volumeRenderer.SliceY,
                         sliceZ: volumeRenderer.SliceZ,
-                        showSlices: volumeRenderer.ShowOrthoslices
-                        
+                        showSlices: volumeRenderer.ShowOrthoslices,
+                        // Add cutting plane parameters
+                        cutXEnabled: volumeRenderer.CutXEnabled,
+                        cutYEnabled: volumeRenderer.CutYEnabled,
+                        cutZEnabled: volumeRenderer.CutZEnabled,
+                        cutXDirection: volumeRenderer.CutXDirection,
+                        cutYDirection: volumeRenderer.CutYDirection,
+                        cutZDirection: volumeRenderer.CutZDirection,
+                        cutXPosition: volumeRenderer.CutXPosition,
+                        cutYPosition: volumeRenderer.CutYPosition,
+                        cutZPosition: volumeRenderer.CutZPosition,
+                        applyPlaneCut: applyPlaneCut,
+                        progressCallback: progressCallback
                     );
                 });
 

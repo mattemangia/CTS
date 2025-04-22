@@ -46,7 +46,7 @@ namespace CTSegmenter
         // UI and display elements
         private TableLayoutPanel mainLayout;
         private Panel xyPanel, xzPanel, yzPanel;
-        private ScrollablePictureBox xyView, xzView, yzView;
+        public ScrollablePictureBox xyView, xzView, yzView;
         private Label xyLabel, xzLabel, yzLabel;
 
         // Cached rendered views
@@ -56,8 +56,8 @@ namespace CTSegmenter
         private bool isRenderingOrtho = false;
 
         // Display state for all views
-        private float xyZoom = 1.0f, xzZoom = 1.0f, yzZoom = 1.0f;
-        private PointF xyPan = PointF.Empty, xzPan = PointF.Empty, yzPan = PointF.Empty;
+        public float xyZoom = 1.0f, xzZoom = 1.0f, yzZoom = 1.0f;
+        public PointF xyPan = PointF.Empty, xzPan = PointF.Empty, yzPan = PointF.Empty;
 
         // Current XY slice and orthoview positions
         private int currentSlice;

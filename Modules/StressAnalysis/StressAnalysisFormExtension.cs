@@ -256,14 +256,38 @@ namespace CTSegmenter
             // black panel fills results page -----------------------------------
             mohrCoulombPanel = new Panel { BackColor = Color.Black, Dock = DockStyle.Fill, Visible = false };
             resultsPage.Controls.Add(mohrCoulombPanel);
-            mohrCoulombPanel.Paint += (s, e) => DrawMohrCoulombPlaceholder(e.Graphics);
+
+            // Replace the placeholder with proper renderer
+            mohrCoulombPanel.Paint += (s, e) => {
+                if (currentTriaxial != null && currentTriaxial.Status == SimulationStatus.Completed)
+                    currentTriaxial.RenderMohrCoulombDiagram(e.Graphics, mohrCoulombPanel.Width, mohrCoulombPanel.Height);
+                else
+                {
+                    // Only show message when no simulation data is available
+                    e.Graphics.Clear(Color.Black);
+                    using (Font font = new Font("Arial", 12))
+                    using (SolidBrush brush = new SolidBrush(Color.White))
+                    {
+                        e.Graphics.DrawString("Run a simulation to view the Mohr-Coulomb diagram",
+                            font, brush, 20, 20);
+                    }
+                }
+            };
 
             // add button to existing "Visualization" ribbon group -------------
             var visGroup = resultsTab.Groups.FirstOrDefault(g => g.TextLine1 == "Visualization");
             if (visGroup != null)
             {
                 var triple = new KryptonRibbonGroupTriple();
-                mcGraphButton = new KryptonRibbonGroupButton { TextLine1 = "Mohr‑Coulomb", TextLine2 = "Graph", ImageLarge = CreateStressIcon(32), ImageSmall = CreateStressIcon(16), Checked = false, ButtonType = GroupButtonType.Check }; // acts like toggle
+                mcGraphButton = new KryptonRibbonGroupButton
+                {
+                    TextLine1 = "Mohr‑Coulomb",
+                    TextLine2 = "Graph",
+                    ImageLarge = CreateStressIcon(32),
+                    ImageSmall = CreateStressIcon(16),
+                    Checked = false,
+                    ButtonType = GroupButtonType.Check
+                };
                 mcGraphButton.Click += (s, e) => {
                     mcGraphButton.Checked = !mcGraphButton.Checked;
                     mohrCoulombPanel.Visible = mcGraphButton.Checked;
@@ -346,58 +370,7 @@ namespace CTSegmenter
             currentTriaxial.RenderResults(e.Graphics, meshViewPanel.Width, meshViewPanel.Height, RenderMode.Stress);
         }
 
-        // ------------------------------------------------------------------
-        //  5.  SIMPLE PLACEHOLDER MOHR‑COULOMB DIAGRAM (until implemented)
-        // ------------------------------------------------------------------
-        /// <summary>
-        /// Draw a full Mohr–Coulomb failure envelope and stress circle diagram.
-        /// </summary>
-        private void DrawMohrCoulombPlaceholder(Graphics g)
-        {
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            g.Clear(Color.Black);
-
-            float c = currentTriaxial.CohesionStrength;
-            float phi = currentTriaxial.FrictionAngle * (float)Math.PI / 180f;
-            float s3 = currentTriaxial.ConfiningPressure;
-            float s1 = currentTriaxial.BreakingPressure;
-
-            int w = mohrCoulombPanel.Width;
-            int h = mohrCoulombPanel.Height;
-            int m = 40;
-            var area = new Rectangle(m, m, w - 2 * m, h - 2 * m);
-
-            using (var pen = new Pen(Color.White, 1))
-            {
-                g.DrawLine(pen, area.Left, area.Bottom, area.Right, area.Bottom);
-                g.DrawLine(pen, area.Left, area.Bottom, area.Left, area.Top);
-            }
-
-            float center = (s1 + s3) / 2f;
-            float radius = (s1 - s3) / 2f;
-            Func<float, float, PointF> T = (sig, tau) => new PointF(
-                area.Left + sig / (s1 * 1.1f) * area.Width,
-                area.Bottom - tau / (radius * 1.1f) * area.Height);
-
-            var cpt = T(center, 0);
-            float pr = radius / (s1 * 1.1f) * area.Width;
-            using (var pen = new Pen(Color.Cyan, 2))
-                g.DrawEllipse(pen, cpt.X - pr, cpt.Y - pr, pr * 2, pr * 2);
-
-            using (var pen = new Pen(Color.Red, 2))
-            {
-                var p1 = T(0, c);
-                var p2 = T(s1 * 1.1f, c + s1 * 1.1f * (float)Math.Tan(phi));
-                g.DrawLine(pen, p1, p2);
-            }
-
-            using (var fnt = new Font("Segoe UI", 10))
-            using (var br = Brushes.White)
-            {
-                g.DrawString($"c={c:F1}MPa, φ={currentTriaxial.FrictionAngle:F1}°", fnt, br, area.Left, area.Top - 20);
-                g.DrawString($"σ₁={s1:F1}, σ₃={s3:F1}", fnt, br, area.Left, area.Bottom + 5);
-            }
-        }
+        
     }
 
     // ----------------------------------------------------------------------

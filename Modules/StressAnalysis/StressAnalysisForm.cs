@@ -67,8 +67,15 @@ namespace CTSegmenter
         private KryptonButton runTriaxialButton;
         private KryptonButton runAcousticButton;
         private KryptonCheckBox extendedSimulationCheckBox;
+        private PictureBox wavePictureBox;
+        private Panel waveScrollPanel;
         public bool UseExtendedSimulationTime { get; private set; } = true;
-
+        // Wave Propagation controls
+        private float waveZoomLevel = 1.0f;
+        private PointF wavePanOffset = new PointF(0, 0);
+        private bool isWavePanning = false;
+        private Point waveLastMousePos;
+        private Bitmap originalWaveImage = null;
         //3D view controls
         private float rotationX = 0f;
         private float rotationY = 0f;
@@ -136,13 +143,265 @@ namespace CTSegmenter
         private KryptonPage mohrCoulombPage;
         public StressAnalysisForm(MainForm mainForm)
         {
+            Logger.Log("[StressAnalysisForm] Module Initialization Called.");
+            Logger.Log("[StressAnalysisForm] Constructor Start");
+            try
+            {
+                string iconPath = Path.Combine(Application.StartupPath, "favicon.ico");
+                if (File.Exists(iconPath))
+                    this.Icon = new Icon(iconPath);
+            }
+            catch { }
             this.mainForm = mainForm;
             InitializeComponent();
             InitializeILGPU();
             PopulateMaterialList();
             this.Load += StressAnalysisPatch_Load;
+            BuildWavePropagationCanvas();
+            Logger.Log("[StressAnalysisForm] Constructor End");
         }
+        private void BuildWavePropagationCanvas()
+        {
+            // Create a panel to contain everything
+            Panel waveContainer = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.FromArgb(20, 20, 20)
+            };
 
+            // Create new PictureBox with auto-size disabled
+            wavePictureBox = new PictureBox
+            {
+                BackColor = Color.Black,
+                SizeMode = PictureBoxSizeMode.Zoom, // Use Zoom mode for auto-fitting
+                Dock = DockStyle.Fill
+            };
+
+            // Add mouse events for zoom and pan
+            wavePictureBox.MouseWheel += WavePictureBox_MouseWheel;
+            wavePictureBox.MouseDown += WavePictureBox_MouseDown;
+            wavePictureBox.MouseMove += WavePictureBox_MouseMove;
+            wavePictureBox.MouseUp += WavePictureBox_MouseUp;
+
+            // Add the picture box to the container
+            waveContainer.Controls.Add(wavePictureBox);
+
+            // Add zoom control panel
+            Panel zoomPanel = new Panel
+            {
+                Size = new Size(180, 120),
+                Location = new Point(10, 10),
+                BackColor = Color.FromArgb(60, 0, 0, 0),
+                Padding = new Padding(5)
+            };
+
+            // Create and add controls to zoom panel
+            Label zoomLabel = new Label
+            {
+                Text = "Wave Visualization Controls:",
+                ForeColor = Color.White,
+                BackColor = Color.Transparent,
+                AutoSize = true,
+                Location = new Point(5, 5)
+            };
+
+            Button zoomInButton = new Button
+            {
+                Text = "Zoom In (+)",
+                BackColor = Color.FromArgb(60, 60, 100),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Size = new Size(80, 25),
+                Location = new Point(5, 30)
+            };
+            zoomInButton.FlatAppearance.BorderColor = Color.LightBlue;
+            zoomInButton.Click += (s, e) => ZoomWaveView(1.2f);
+
+            Button zoomOutButton = new Button
+            {
+                Text = "Zoom Out (-)",
+                BackColor = Color.FromArgb(60, 60, 100),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Size = new Size(80, 25),
+                Location = new Point(90, 30)
+            };
+            zoomOutButton.FlatAppearance.BorderColor = Color.LightBlue;
+            zoomOutButton.Click += (s, e) => ZoomWaveView(0.8f);
+
+            Button zoomFitButton = new Button
+            {
+                Text = "Zoom to Fit",
+                BackColor = Color.FromArgb(60, 80, 60),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Size = new Size(170, 25),
+                Location = new Point(5, 60)
+            };
+            zoomFitButton.FlatAppearance.BorderColor = Color.LightGreen;
+            zoomFitButton.Click += (s, e) => ResetWaveView();
+
+            Button exportImageButton = new Button
+            {
+                Text = "Export Image",
+                BackColor = Color.FromArgb(80, 60, 60),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Size = new Size(170, 25),
+                Location = new Point(5, 90)
+            };
+            exportImageButton.FlatAppearance.BorderColor = Color.LightCoral;
+            exportImageButton.Click += (s, e) => ExportWaveImage();
+
+            // Add controls to zoom panel
+            zoomPanel.Controls.Add(zoomLabel);
+            zoomPanel.Controls.Add(zoomInButton);
+            zoomPanel.Controls.Add(zoomOutButton);
+            zoomPanel.Controls.Add(zoomFitButton);
+            zoomPanel.Controls.Add(exportImageButton);
+
+            // Add zoom panel to container
+            waveContainer.Controls.Add(zoomPanel);
+            zoomPanel.BringToFront();
+
+            // Add container to results page
+            resultsPage.Controls.Clear();
+            resultsPage.Controls.Add(waveContainer);
+
+            // Initialize tooltip
+            ToolTip tooltip = new ToolTip();
+            tooltip.SetToolTip(wavePictureBox, "Mouse Wheel: Zoom\nDrag: Pan\nRight-click: Reset View");
+        }
+        private void HookSimCompleted(AcousticVelocitySimulation sim)
+        {
+            if (sim == null || wavePictureBox == null) return;
+
+            sim.SimulationCompleted += (s, e) =>
+            {
+                try
+                {
+                    // Use larger dimensions for more detailed visualization
+                    const int logicalW = 2000;
+                    const int logicalH = 1500;
+
+                    using (var bmp = new Bitmap(logicalW, logicalH))
+                    using (var g = Graphics.FromImage(bmp))
+                    {
+                        // Clear the graphics area with background color
+                        g.Clear(Color.Black);
+
+                        // Render the results
+                        sim.RenderResults(g, bmp.Width, bmp.Height, RenderMode.Stress);
+
+                        // Dispose of old image
+                        if (wavePictureBox.Image != null)
+                        {
+                            var oldImage = wavePictureBox.Image;
+                            wavePictureBox.Image = null;
+                            oldImage.Dispose();
+                        }
+
+                        // Set the new image
+                        wavePictureBox.Image = (Image)bmp.Clone();
+
+                        // Ensure the picture box is sized to match the image
+                        wavePictureBox.Size = bmp.Size;
+
+                        // Force a refresh of the scrollable panel to update scrollbars
+                        waveScrollPanel.AutoScrollMinSize = wavePictureBox.Size;
+                        waveScrollPanel.Invalidate();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[StressAnalysisForm] Error rendering wave simulation: {ex.Message}");
+                }
+            };
+        }
+        public void UpdateWaveVisualization(AcousticVelocitySimulation sim)
+        {
+            if (sim == null || wavePictureBox == null) return;
+
+            try
+            {
+                // Dispose previous original image
+                if (originalWaveImage != null)
+                {
+                    originalWaveImage.Dispose();
+                    originalWaveImage = null;
+                }
+
+                // Use a reasonable fixed size for the original high-quality image
+                int bitmapWidth = 2000;
+                int bitmapHeight = 1500;
+
+                // Create the high-quality original image
+                originalWaveImage = new Bitmap(bitmapWidth, bitmapHeight);
+                using (var g = Graphics.FromImage(originalWaveImage))
+                {
+                    g.Clear(Color.Black);
+
+                    // Set high quality rendering
+                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                    g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+
+                    // Render the wave field
+                    sim.RenderResults(g, bitmapWidth, bitmapHeight, RenderMode.Stress);
+
+                    // Add a footer with key information
+                    using (var font = new Font("Arial", 12))
+                    using (var brush = new SolidBrush(Color.White))
+                    using (var bgBrush = new SolidBrush(Color.FromArgb(120, 0, 0, 0)))
+                    {
+                        string info = $"{sim.WaveType} - P-Wave: {sim.MeasuredPWaveVelocity:F1} m/s, S-Wave: {sim.MeasuredSWaveVelocity:F1} m/s, Vp/Vs: {sim.CalculatedVpVsRatio:F2}";
+                        SizeF textSize = g.MeasureString(info, font);
+                        float x = (bitmapWidth - textSize.Width) / 2;
+
+                        g.FillRectangle(bgBrush, x - 10, bitmapHeight - textSize.Height - 30, textSize.Width + 20, textSize.Height + 10);
+                        g.DrawString(info, font, brush, x, bitmapHeight - textSize.Height - 25);
+                    }
+                }
+
+                // Dispose any existing image in the picture box
+                if (wavePictureBox.Image != null)
+                {
+                    var oldImage = wavePictureBox.Image;
+                    wavePictureBox.Image = null;
+                    if (oldImage != originalWaveImage) // Don't dispose if it's the original
+                    {
+                        oldImage.Dispose();
+                    }
+                }
+
+                // Reset zoom and pan for new visualization
+                ResetWaveView();
+
+                Logger.Log($"[StressAnalysisForm] Wave visualization updated successfully");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[StressAnalysisForm] Error updating wave visualization: {ex.Message}");
+                if (wavePictureBox.Image != null)
+                {
+                    wavePictureBox.Image.Dispose();
+                    wavePictureBox.Image = null;
+                }
+
+                // Display error message in the picture box
+                Bitmap errorImage = new Bitmap(800, 600);
+                using (var g = Graphics.FromImage(errorImage))
+                {
+                    g.Clear(Color.Black);
+                    using (var font = new Font("Arial", 12))
+                    using (var brush = new SolidBrush(Color.Red))
+                    {
+                        g.DrawString($"Error updating visualization: {ex.Message}", font, brush, 20, 20);
+                        g.DrawString("Please try running the simulation again.", font, brush, 20, 50);
+                    }
+                }
+                wavePictureBox.Image = errorImage;
+            }
+        }
         private void InitializeComponent()
         {
             // Basic window settings
@@ -2380,8 +2639,8 @@ namespace CTSegmenter
 
             toggleRotationButton = new Button
             {
-                Text = "Auto-Rotate: ON",
-                BackColor = Color.FromArgb(100, 0, 100, 0),
+                Text = "Auto-Rotate: OFF",
+                BackColor = Color.FromArgb(100, 100, 0, 0),
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
                 Size = new Size(170, 25),
@@ -3325,6 +3584,7 @@ namespace CTSegmenter
                     mainForm))
                 {
                     currentAcousticSim = simulation;
+                    HookSimCompleted(currentAcousticSim);
                     // Show progress in status bar
 
                     simulation.ProgressChanged += (s, args) =>
@@ -3350,6 +3610,10 @@ namespace CTSegmenter
 
                         // Create results display on the results page
                         CreateAcousticResultsDisplay(simulation, result);
+
+                        // Manually update visualization after navigating to results
+                        // This ensures the visualization is shown correctly
+                        UpdateWaveVisualization(simulation);
 
                         // Switch to results tab
                         mainTabControl.SelectedPage = resultsPage;
@@ -3855,7 +4119,172 @@ namespace CTSegmenter
                 }
             }
         }
+        private void WavePictureBox_MouseWheel(object sender, MouseEventArgs e)
+        {
+            float zoomFactor = e.Delta > 0 ? 1.1f : 0.9f;
+            ZoomWaveView(zoomFactor, e.Location);
+        }
+        private void WavePictureBox_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                isWavePanning = true;
+                waveLastMousePos = e.Location;
+                wavePictureBox.Cursor = Cursors.Hand;
+            }
+            else if (e.Button == MouseButtons.Right)
+            {
+                ResetWaveView();
+            }
+        }
+        private void WavePictureBox_MouseMove(object sender, MouseEventArgs e)
+        {
+            if (isWavePanning)
+            {
+                // Calculate delta movement
+                int deltaX = e.X - waveLastMousePos.X;
+                int deltaY = e.Y - waveLastMousePos.Y;
 
+                // Update pan offset
+                wavePanOffset.X += deltaX / waveZoomLevel;
+                wavePanOffset.Y += deltaY / waveZoomLevel;
+
+                // Update the view
+                UpdateWaveViewTransform();
+
+                // Update last position
+                waveLastMousePos = e.Location;
+            }
+        }
+        private void WavePictureBox_MouseUp(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                isWavePanning = false;
+                wavePictureBox.Cursor = Cursors.Default;
+            }
+        }
+
+        private void ZoomWaveView(float factor, Point? zoomCenter = null)
+        {
+            // Store previous zoom level for relative calculations
+            float prevZoom = waveZoomLevel;
+
+            // Apply zoom factor
+            waveZoomLevel *= factor;
+
+            // Clamp zoom level to reasonable bounds
+            waveZoomLevel = Math.Max(0.1f, Math.Min(10.0f, waveZoomLevel));
+
+            // If we have a zoom center point, adjust pan offset to zoom toward that point
+            if (zoomCenter.HasValue && originalWaveImage != null)
+            {
+                Point center = zoomCenter.Value;
+
+                // Convert center to image coordinates
+                float imageX = center.X / prevZoom - wavePanOffset.X;
+                float imageY = center.Y / prevZoom - wavePanOffset.Y;
+
+                // Adjust pan offset to keep the center point fixed
+                wavePanOffset.X = center.X / waveZoomLevel - imageX;
+                wavePanOffset.Y = center.Y / waveZoomLevel - imageY;
+            }
+
+            // Update the view
+            UpdateWaveViewTransform();
+        }
+
+        private void ResetWaveView()
+        {
+            // Reset to default view
+            waveZoomLevel = 1.0f;
+            wavePanOffset = new PointF(0, 0);
+
+            // If we have an original image, simply redisplay it
+            if (originalWaveImage != null)
+            {
+                if (wavePictureBox.Image != null && wavePictureBox.Image != originalWaveImage)
+                {
+                    wavePictureBox.Image.Dispose();
+                }
+
+                wavePictureBox.SizeMode = PictureBoxSizeMode.Zoom;
+                wavePictureBox.Image = originalWaveImage;
+            }
+        }
+
+        private void UpdateWaveViewTransform()
+        {
+            if (originalWaveImage == null) return;
+
+            try
+            {
+                // Create a new bitmap for the transformed image
+                int width = Math.Max(10, wavePictureBox.Width);
+                int height = Math.Max(10, wavePictureBox.Height);
+
+                using (Bitmap transformedImage = new Bitmap(width, height))
+                {
+                    using (Graphics g = Graphics.FromImage(transformedImage))
+                    {
+                        g.Clear(Color.Black); // Clear background
+
+                        // Set quality
+                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+
+                        // Calculate transformation
+                        g.TranslateTransform(wavePanOffset.X * waveZoomLevel, wavePanOffset.Y * waveZoomLevel);
+                        g.ScaleTransform(waveZoomLevel, waveZoomLevel);
+
+                        // Draw the image with transformation
+                        g.DrawImage(originalWaveImage, 0, 0);
+                    }
+
+                    // Update the PictureBox
+                    if (wavePictureBox.Image != null && wavePictureBox.Image != originalWaveImage)
+                    {
+                        wavePictureBox.Image.Dispose();
+                    }
+
+                    wavePictureBox.SizeMode = PictureBoxSizeMode.Normal;
+                    wavePictureBox.Image = new Bitmap(transformedImage);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[StressAnalysisForm] Error updating wave view: {ex.Message}");
+            }
+        }
+
+        private void ExportWaveImage()
+        {
+            if (originalWaveImage == null) return;
+
+            try
+            {
+                using (SaveFileDialog dialog = new SaveFileDialog())
+                {
+                    dialog.Filter = "PNG Image|*.png";
+                    dialog.Title = "Export Wave Visualization";
+                    dialog.FileName = $"Wave_{DateTime.Now:yyyyMMdd_HHmmss}.png";
+
+                    if (dialog.ShowDialog() == DialogResult.OK)
+                    {
+                        // Export the high quality original image
+                        originalWaveImage.Save(dialog.FileName, System.Drawing.Imaging.ImageFormat.Png);
+
+                        MessageBox.Show($"Image exported to:\n{dialog.FileName}",
+                            "Export Successful", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error exporting image: {ex.Message}",
+                    "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
         private void ResetViewButton_Click(object sender, EventArgs e)
         {
             // Reset all view parameters

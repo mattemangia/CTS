@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
-using System.Linq;
 using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
@@ -42,8 +41,8 @@ namespace CTSegmenter
         public float YoungModulus { get; private set; }
         public float PoissonRatio { get; private set; }
         public float CohesionStrength { get; set; }
-        public float FrictionAngle { get;  set; }
-        public float TensileStrength { get;  set; }
+        public float FrictionAngle { get; set; }
+        public float TensileStrength { get; set; }
 
         // Results
         public float BreakingPressure { get; private set; }
@@ -1631,16 +1630,230 @@ namespace CTSegmenter
                 return false;
             }
         }
-        private void DrawMohrCircleSafe(Graphics g, float stress1, float stress3, Func<float, float, PointF> converter,
-                              Color color, string label)
+        //---------------------------------------------------------------------
+        //  Mohr-Coulomb diagram (correct tangency + uniform scaling)
+        //---------------------------------------------------------------------
+        public void RenderMohrCoulombDiagram(Graphics g, int width, int height)
+        {
+            // 0) Abort if we have no data
+            if (Status != SimulationStatus.Completed || _result == null)
+            {
+                g.DrawString("No simulation results available",
+                             new Font("Arial", 12), Brushes.Red, 20, 20);
+                return;
+            }
+
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.Clear(Color.Black);
+
+            //-----------------------------------------------------------------
+            // 1) Parameters
+            //-----------------------------------------------------------------
+            float c = CohesionStrength;
+            float phiDeg = FrictionAngle;
+            float phi = phiDeg * (float)Math.PI / 180f;
+            float sigma3 = ConfiningPressure;
+            float sigma1 = BreakingPressure;
+
+            if (!(sigma1 > sigma3)) sigma1 = Math.Max(sigma3 + 1f, 100f);
+            if (c < 0) c = 0;
+            if (phi <= 0 || phi >= Math.PI / 2) phi = 30f * (float)Math.PI / 180f;
+
+            // Mohr circle at failure
+            float sigC = 0.5f * (sigma1 + sigma3);
+            float R = 0.5f * (sigma1 - sigma3);
+
+            //-----------------------------------------------------------------
+            // 2) True tangent line  τ = μ σ + b  (guaranteed to be tangent!)
+            //-----------------------------------------------------------------
+            float μ = (float)Math.Tan(phi);                    // slope
+            float b = R * MathF.Sqrt(1f + μ * μ) - μ * sigC;  // intercept
+
+            // Point of tangency
+            float denom = μ * μ + 1f;
+            float sigmaT = sigC - μ * (μ * sigC + b) / denom;
+            float tauT = (μ * sigC + b) / denom;
+
+            //-----------------------------------------------------------------
+            // 3) Plot rectangle & mapping
+            //-----------------------------------------------------------------
+            const int leftM = 50, topM = 40, rightM = 160, botM = 60;
+
+            float maxSigma = Math.Max(sigma1, sigma3) * 1.2f;
+            float maxTau = Math.Max(b + μ * maxSigma, tauT) * 1.15f;
+
+            Rectangle plot = new Rectangle(leftM, topM,
+                                           width - leftM - rightM,
+                                           height - topM - botM);
+
+            float scale = Math.Min(plot.Width / maxSigma,
+                                   plot.Height / maxTau);
+
+            PointF ToScreen(float σ, float τ)
+            {
+                return new PointF(plot.Left + σ * scale,
+                                  plot.Bottom - τ * scale);
+            }
+
+            //-----------------------------------------------------------------
+            // 4) Axes and grid
+            //-----------------------------------------------------------------
+            using (Pen gridPen = new Pen(Color.FromArgb(50, 50, 50), 1))
+            using (Pen axisPen = new Pen(Color.White, 1))
+            using (Font tickFont = new Font("Arial", 8))
+            {
+                gridPen.DashStyle = DashStyle.Dot;
+
+                // axes
+                g.DrawLine(axisPen, plot.Left, plot.Bottom, plot.Right, plot.Bottom);
+                g.DrawLine(axisPen, plot.Left, plot.Bottom, plot.Left, plot.Top);
+
+                int tickCount = 8;
+                for (int i = 1; i <= tickCount; ++i)
+                {
+                    float σv = i * maxSigma / tickCount;
+                    float τv = i * maxTau / tickCount;
+
+                    // vertical σ-grid
+                    PointF p = ToScreen(σv, 0);
+                    g.DrawLine(gridPen, p.X, plot.Top, p.X, plot.Bottom);
+                    g.DrawString(σv.ToString("F1"), tickFont, Brushes.LightGray,
+                                 p.X - 12, plot.Bottom + 2);
+
+                    // horizontal τ-grid
+                    PointF q = ToScreen(0, τv);
+                    g.DrawLine(gridPen, plot.Left, q.Y, plot.Right, q.Y);
+                    g.DrawString(τv.ToString("F1"), tickFont, Brushes.LightGray,
+                                 plot.Left - 32, q.Y - 6);
+                }
+
+                // axis labels
+                g.DrawString("Normal stress σ (MPa)",
+                             new Font("Arial", 10), Brushes.White,
+                             plot.Left + plot.Width / 2 - 60, plot.Bottom + 22);
+
+                using (Matrix txtM = new Matrix())
+                {
+                    txtM.RotateAt(-90,
+                                  new PointF(plot.Left - 35,
+                                             plot.Bottom - plot.Height / 2));
+                    GraphicsState s = g.Save();
+                    g.Transform = txtM;
+                    g.DrawString("Shear stress τ (MPa)",
+                                 new Font("Arial", 10), Brushes.White,
+                                 plot.Left - 60, plot.Bottom - plot.Height / 2);
+                    g.Restore(s);
+                }
+            }
+
+            //-----------------------------------------------------------------
+            // 5) Helper to draw circles
+            //-----------------------------------------------------------------
+            void DrawCircle(float σH, float σL, Color col, string label)
+            {
+                float cx = 0.5f * (σH + σL);
+                float rad = 0.5f * (σH - σL);
+                if (rad <= 0f) return;                 // nothing to draw
+
+                PointF ctr = ToScreen(cx, 0f);
+                float rPx = rad * scale;
+
+                // NEW — safety: ignore degenerate or invalid radii
+                if (rPx < 0.5f ||
+                    float.IsNaN(rPx) || float.IsInfinity(rPx))
+                    return;
+
+                RectangleF rect = new RectangleF(
+                    ctr.X - rPx, ctr.Y - rPx,
+                    2f * rPx, 2f * rPx);
+
+                using (Pen pen = new Pen(col, 2f))
+                {
+                    g.DrawArc(pen, rect, 180f, 180f);          // upper half-circle
+                    g.DrawLine(pen, ToScreen(σL, 0), ToScreen(σH, 0));
+                }
+
+                using (Font f8 = new Font("Arial", 8))
+                {
+                    g.DrawString($"σ₁={σH:F1}", f8, new SolidBrush(col),
+                                 ToScreen(σH, 0).X - 20, ToScreen(σH, 0).Y + 4);
+                    g.DrawString($"σ₃={σL:F1}", f8, new SolidBrush(col),
+                                 ToScreen(σL, 0).X - 20, ToScreen(σL, 0).Y + 4);
+                }
+
+                g.DrawString(label, new Font("Arial", 9), new SolidBrush(col),
+                             ctr.X - 15, ctr.Y - rPx - 20);
+            }
+
+            DrawCircle(sigma3, sigma3, Color.LightGreen, "Initial");
+            DrawCircle(sigma1, sigma3, Color.Yellow, "Failure");
+
+            //-----------------------------------------------------------------
+            // 6) Tangent line & failure point
+            //-----------------------------------------------------------------
+            using (Pen envPen = new Pen(Color.Red, 2))
+            {
+                PointF pA = ToScreen(0, b);
+                PointF pB = ToScreen(maxSigma, b + μ * maxSigma);
+                g.DrawLine(envPen, pA, pB);
+            }
+
+            PointF pt = ToScreen(sigmaT, tauT);
+            g.FillEllipse(Brushes.White, pt.X - 4, pt.Y - 4, 8, 8);
+            g.DrawString("Failure point", new Font("Arial", 8), Brushes.White,
+                         pt.X + 6, pt.Y - 6);
+
+            //-----------------------------------------------------------------
+            // 7) Legend
+            //-----------------------------------------------------------------
+            Rectangle legend = new Rectangle(plot.Right + 10, plot.Top, 150, 120);
+            using (SolidBrush bg = new SolidBrush(Color.FromArgb(90, 0, 0, 0)))
+            using (Font f9 = new Font("Arial", 9))
+            using (Font fBold = new Font("Arial", 10, FontStyle.Bold))
+            {
+                g.FillRectangle(bg, legend);
+                g.DrawRectangle(Pens.Gray, legend);
+
+                g.DrawString("Mohr–Coulomb:", f9, Brushes.White,
+                             legend.X + 6, legend.Y + 6);
+                g.DrawString($"c   = {CohesionStrength:F2} MPa",
+                             f9, Brushes.White, legend.X + 10, legend.Y + 26);
+                g.DrawString($"φ   = {phiDeg:F1}°",
+                             f9, Brushes.White, legend.X + 10, legend.Y + 44);
+                g.DrawString($"σ₁  = {sigma1:F1} MPa",
+                             fBold, Brushes.Yellow, legend.X + 10, legend.Y + 62);
+                g.DrawString($"σ₃  = {sigma3:F1} MPa",
+                             fBold, Brushes.Yellow, legend.X + 10, legend.Y + 80);
+            }
+
+            //-----------------------------------------------------------------
+            // 8) σ₁ / σ₃ ticks on the X axis
+            //-----------------------------------------------------------------
+            using (Pen tickPen = new Pen(Color.Yellow, 2))
+            {
+                PointF p3 = ToScreen(sigma3, 0);
+                PointF p1 = ToScreen(sigma1, 0);
+
+                g.DrawLine(tickPen, p3.X, p3.Y - 4, p3.X, p3.Y + 4);
+                g.DrawLine(tickPen, p1.X, p1.Y - 4, p1.X, p1.Y + 4);
+
+                using (Font fBold = new Font("Arial", 10, FontStyle.Bold))
+                {
+                    g.DrawString("σ₃", fBold, Brushes.Yellow, p3.X - 8, p3.Y + 6);
+                    g.DrawString("σ₁", fBold, Brushes.Yellow, p1.X - 8, p1.Y + 6);
+                }
+            }
+        }
+        private void DrawMohrCircleSafe(Graphics g, float stress1, float stress3,
+                                       Func<float, float, PointF> converter,
+                                       Color color, string label, float maxTau,
+                                       Rectangle plotArea)
         {
             try
             {
-                // Safety checks for inputs
+                // Safety checks
                 if (float.IsNaN(stress1) || float.IsInfinity(stress1)) stress1 = 100.0f;
                 if (float.IsNaN(stress3) || float.IsInfinity(stress3)) stress3 = 10.0f;
-
-                // Ensure stress1 >= stress3 (for Mohr circle definition)
                 if (stress1 < stress3)
                 {
                     float temp = stress1;
@@ -1649,278 +1862,50 @@ namespace CTSegmenter
                 }
 
                 // Calculate circle parameters
-                float center = (stress1 + stress3) / 2; // Center on x-axis
-                float radius = (stress1 - stress3) / 2; // Radius
-
-                // Safety check for tiny circles
+                float center = (stress1 + stress3) / 2;
+                float radius = (stress1 - stress3) / 2;
                 if (radius < 0.1f) radius = 0.1f;
 
                 // Convert to screen coordinates
                 PointF centerPoint = converter(center, 0);
-                PointF radiusPoint = converter(center + radius, 0);
+                float screenRadius = (radius / maxTau) * plotArea.Height;
 
-                // Calculate screen radius with safety minimum
-                float screenRadius = Math.Max(2.0f, Math.Abs(radiusPoint.X - centerPoint.X));
-
-                // Make sure circle won't be too large (can cause overflow)
-                screenRadius = Math.Min(screenRadius, 500.0f);
-
-                // Draw the circle
+                // Draw the UPPER HALF of the circle ONLY
                 using (Pen circlePen = new Pen(color, 2))
                 {
-                    // Use safe values to draw ellipse
-                    g.DrawEllipse(circlePen,
+                    // Ensure the circle fits within the plot area
+                    RectangleF circleRect = new RectangleF(
                         centerPoint.X - screenRadius,
                         centerPoint.Y - screenRadius,
                         screenRadius * 2,
-                        screenRadius * 2);
+                        screenRadius * 2
+                    );
 
-                    // Draw a line from the center to the right edge (stress1)
+                    // Draw upper semicircle only
+                    g.DrawArc(circlePen, circleRect, 0, 180);
+
+                    // Draw diameter line along x-axis
                     PointF rightPoint = converter(stress1, 0);
-                    g.DrawLine(circlePen, centerPoint, rightPoint);
+                    PointF leftPoint = converter(stress3, 0);
+                    g.DrawLine(circlePen, leftPoint, rightPoint);
 
-                    // Add a label near the circle
+                    // Label principal stresses
+                    g.DrawString($"σ₁={stress1:F1}", new Font("Arial", 8), new SolidBrush(color),
+                        rightPoint.X - 20, rightPoint.Y + 5);
+                    g.DrawString($"σ₃={stress3:F1}", new Font("Arial", 8), new SolidBrush(color),
+                        leftPoint.X - 20, leftPoint.Y + 5);
+
+                    // Add circle label
                     g.DrawString(label, new Font("Arial", 9), new SolidBrush(color),
                         centerPoint.X - 15, centerPoint.Y - screenRadius - 20);
                 }
             }
             catch (Exception ex)
             {
-                // Just log and continue
                 Logger.Log($"[TriaxialSimulation] Error in DrawMohrCircleSafe: {ex.Message}");
             }
         }
-        public void RenderMohrCoulombDiagram(Graphics g, int width, int height)
-        {
-            if (Status != SimulationStatus.Completed || _result == null)
-            {
-                g.DrawString("No simulation results available", new Font("Arial", 12), Brushes.Red, 20, 20);
-                return;
-            }
-
-            try
-            {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.Clear(Color.Black);
-
-                // Parameters for the diagram
-                float c = CohesionStrength;
-                float phi = FrictionAngle * (float)Math.PI / 180f;
-                float s3 = ConfiningPressure;
-                float s1 = BreakingPressure;
-
-                // Safety check for unreasonable values
-                if (float.IsNaN(s1) || float.IsInfinity(s1) || s1 <= 0)
-                    s1 = 100.0f; // Default to reasonable value
-
-                if (float.IsNaN(s3) || float.IsInfinity(s3) || s3 < 0)
-                    s3 = 10.0f; // Default to reasonable value
-
-                if (float.IsNaN(c) || float.IsInfinity(c) || c < 0)
-                    c = 10.0f; // Default cohesion
-
-                if (float.IsNaN(phi) || float.IsInfinity(phi) || phi < 0 || phi > Math.PI / 2)
-                    phi = 30.0f * (float)Math.PI / 180.0f; // Default 30 degrees in radians
-
-                // Calculate maximum stress for scaling with safety
-                float maxStress = Math.Max(10.0f, s1 * 1.2f); // Ensure at least 10 MPa range
-                float maxTau = Math.Max(5.0f, c + maxStress * (float)Math.Sin(phi)); // Ensure at least 5 MPa range
-
-                // Layout with safer margins
-                int margin = Math.Min(50, Math.Min(width, height) / 8);
-                Rectangle plotArea = new Rectangle(
-                    margin,
-                    margin,
-                    Math.Max(50, width - 2 * margin),
-                    Math.Max(50, height - 2 * margin)
-                );
-
-                // Draw axes
-                using (Pen axisPen = new Pen(Color.White, 1))
-                {
-                    // X-axis (normal stress)
-                    g.DrawLine(axisPen, plotArea.Left, plotArea.Bottom, plotArea.Right, plotArea.Bottom);
-
-                    // Y-axis (shear stress)
-                    g.DrawLine(axisPen, plotArea.Left, plotArea.Bottom, plotArea.Left, plotArea.Top);
-
-                    // X-axis label
-                    g.DrawString("Normal Stress σ (MPa)", new Font("Arial", 10), Brushes.White,
-                        plotArea.Left + plotArea.Width / 2 - 60, plotArea.Bottom + 5);
-
-                    // Y-axis label
-                    using (Matrix m = new Matrix())
-                    {
-                        m.RotateAt(-90, new PointF(plotArea.Left - 20, plotArea.Bottom - plotArea.Height / 2));
-                        GraphicsState state = g.Save();
-                        g.Transform = m;
-                        g.DrawString("Shear Stress τ (MPa)", new Font("Arial", 10), Brushes.White,
-                            plotArea.Left - 20, plotArea.Bottom - plotArea.Height / 2);
-                        g.Restore(state);
-                    }
-                }
-
-                // Draw grid and tick marks
-                using (Pen gridPen = new Pen(Color.FromArgb(40, 40, 40), 1))
-                {
-                    gridPen.DashStyle = DashStyle.Dot;
-
-                    // Number of grid lines - limit to reasonable number
-                    int numGridLines = Math.Min(10, Math.Max(2, (int)(maxStress / 10)));
-                    float stressStep = maxStress / numGridLines;
-                    float tauStep = maxTau / numGridLines;
-
-                    // Horizontal grid lines (shear stress)
-                    for (int i = 1; i <= numGridLines; i++)
-                    {
-                        float y = plotArea.Bottom - (i * tauStep / maxTau) * plotArea.Height;
-
-                        // Safety check for y coordinate
-                        if (y >= plotArea.Top && y <= plotArea.Bottom)
-                            g.DrawLine(gridPen, plotArea.Left, y, plotArea.Right, y);
-
-                        // Tick label
-                        g.DrawString((i * tauStep).ToString("F1"), new Font("Arial", 8), Brushes.LightGray,
-                            plotArea.Left - 30, y - 6);
-                    }
-
-                    // Vertical grid lines (normal stress)
-                    for (int i = 1; i <= numGridLines; i++)
-                    {
-                        float x = plotArea.Left + (i * stressStep / maxStress) * plotArea.Width;
-
-                        // Safety check for x coordinate
-                        if (x >= plotArea.Left && x <= plotArea.Right)
-                            g.DrawLine(gridPen, x, plotArea.Top, x, plotArea.Bottom);
-
-                        // Tick label
-                        g.DrawString((i * stressStep).ToString("F1"), new Font("Arial", 8), Brushes.LightGray,
-                            x - 10, plotArea.Bottom + 5);
-                    }
-                }
-
-                // Helper function to convert stress values to screen coordinates with safety checks
-                Func<float, float, PointF> stressToScreen = (normal, shear) =>
-                {
-                    // Apply safety bounds to input values
-                    normal = Math.Max(0, Math.Min(normal, maxStress * 1.1f));
-                    shear = Math.Max(0, Math.Min(shear, maxTau * 1.1f));
-
-                    // Calculate screen coordinates with bounds checking
-                    float x = plotArea.Left + (normal / maxStress) * plotArea.Width;
-                    float y = plotArea.Bottom - (shear / maxTau) * plotArea.Height;
-
-                    // Apply final safety bounds to ensure point is within drawable area
-                    x = Math.Max(plotArea.Left, Math.Min(x, plotArea.Right));
-                    y = Math.Max(plotArea.Top, Math.Min(y, plotArea.Bottom));
-
-                    return new PointF(x, y);
-                };
-
-                // Draw Mohr-Coulomb failure envelope
-                using (Pen envelopePen = new Pen(Color.Red, 2))
-                {
-                    // Starting point at the y-axis (τ = c)
-                    PointF p1 = stressToScreen(0, c);
-
-                    // Ending point at max stress (with safety cap)
-                    float endTau = Math.Min(maxTau, c + maxStress * (float)Math.Sin(phi));
-                    PointF p2 = stressToScreen(maxStress, endTau);
-
-                    g.DrawLine(envelopePen, p1, p2);
-
-                    // Draw tension cutoff line (vertical at tensile strength)
-                    if (TensileStrength > 0)
-                    {
-                        float tensileX = Math.Min(maxStress * 0.2f, TensileStrength); // Cap to reasonable value
-                        PointF pt1 = stressToScreen(tensileX, 0);
-                        PointF pt2 = stressToScreen(tensileX, maxTau * 0.5f); // Only go halfway up
-
-                        using (Pen tensionPen = new Pen(Color.Blue, 2))
-                        {
-                            tensionPen.DashStyle = DashStyle.Dash;
-                            g.DrawLine(tensionPen, pt1, pt2);
-                        }
-                    }
-                }
-
-                // Safe drawing of Mohr circles
-                try
-                {
-                    DrawMohrCircleSafe(g, s3, s3, stressToScreen, Color.LightGreen, "Initial"); // Initial state (hydrostatic)
-                    DrawMohrCircleSafe(g, s1, s3, stressToScreen, Color.Yellow, "Failure"); // Failure state
-                }
-                catch (Exception circleEx)
-                {
-                    // Just log it and continue - don't let circle drawing crash the app
-                    Logger.Log($"[TriaxialSimulation] Error drawing Mohr circles: {circleEx.Message}");
-                }
-
-                // Draw legend
-                var legendRect = new Rectangle(plotArea.Right - 150, plotArea.Top, 140, 120);
-                using (var legendBrush = new SolidBrush(Color.FromArgb(80, 0, 0, 0)))
-                {
-                    g.FillRectangle(legendBrush, legendRect);
-                    g.DrawRectangle(Pens.Gray, legendRect);
-
-                    g.DrawString("Mohr-Coulomb Parameters:", new Font("Arial", 9, FontStyle.Bold), Brushes.White,
-                        legendRect.X + 5, legendRect.Y + 5);
-
-                    g.DrawString($"c = {c:F2} MPa", new Font("Arial", 9), Brushes.White,
-                        legendRect.X + 10, legendRect.Y + 25);
-
-                    g.DrawString($"φ = {FrictionAngle:F1}°", new Font("Arial", 9), Brushes.White,
-                        legendRect.X + 10, legendRect.Y + 45);
-
-                    g.DrawString($"σ₁ = {s1:F2} MPa", new Font("Arial", 9), Brushes.Yellow,
-                        legendRect.X + 10, legendRect.Y + 65);
-
-                    g.DrawString($"σ₃ = {s3:F2} MPa", new Font("Arial", 9), Brushes.Yellow,
-                        legendRect.X + 10, legendRect.Y + 85);
-
-                    g.DrawString($"Tensile = {TensileStrength:F2} MPa", new Font("Arial", 9), Brushes.LightBlue,
-                        legendRect.X + 10, legendRect.Y + 105);
-                }
-            }
-            catch (Exception ex)
-            {
-                // Catch-all for any other errors
-                g.Clear(Color.Black);
-                g.DrawString("Error rendering Mohr-Coulomb diagram:", new Font("Arial", 12), Brushes.Red, 20, 20);
-                g.DrawString(ex.Message, new Font("Arial", 10), Brushes.Red, 20, 50);
-                Logger.Log($"[TriaxialSimulation] Mohr-Coulomb rendering error: {ex.Message}");
-            }
-        }
-        private void DrawMohrCircle(Graphics g, float stress1, float stress3, Func<float, float, PointF> converter,
-                                  Color color, string label)
-        {
-            // Calculate circle parameters
-            float center = (stress1 + stress3) / 2; // Center on x-axis
-            float radius = (stress1 - stress3) / 2; // Radius
-
-            // Convert to screen coordinates
-            PointF centerPoint = converter(center, 0);
-            PointF radiusPoint = converter(center + radius, 0);
-            float screenRadius = Math.Abs(radiusPoint.X - centerPoint.X);
-
-            // Draw the circle
-            using (Pen circlePen = new Pen(color, 2))
-            {
-                g.DrawEllipse(circlePen,
-                    centerPoint.X - screenRadius,
-                    centerPoint.Y - screenRadius,
-                    screenRadius * 2,
-                    screenRadius * 2);
-
-                // Draw a line from the center to the right edge (stress1)
-                PointF rightPoint = converter(stress1, 0);
-                g.DrawLine(circlePen, centerPoint, rightPoint);
-
-                // Add a label near the circle
-                g.DrawString(label, new Font("Arial", 9), new SolidBrush(color),
-                    centerPoint.X - 15, centerPoint.Y - screenRadius - 20);
-            }
-        }
+        
         public bool ExportFullCompositeImage(string filePath)
         {
             try

@@ -5,7 +5,7 @@
     <ProjectGuid>{A890BC78-2B81-4116-A284-9A76A35D1996}</ProjectGuid>
     <OutputType>WinExe</OutputType>
     <NoStandardLibraries>false</NoStandardLibraries>
-    <AssemblyName>CTSegmenter</AssemblyName>
+    <AssemblyName>CTS</AssemblyName>
     <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
     <TargetFrameworkProfile>
     </TargetFrameworkProfile>

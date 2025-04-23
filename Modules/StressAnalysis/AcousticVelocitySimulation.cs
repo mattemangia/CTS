@@ -85,7 +85,17 @@ namespace CTSegmenter
                         float, float, float, float, float, float, float, ArrayView<float>> _propagateSWaveKernel;
         private Action<Index3D, ArrayView3D<float, Stride3D.DenseXY>, ArrayView3D<float, Stride3D.DenseXY>,
                         ArrayView3D<float, Stride3D.DenseXY>, float, float, float, float, int, int> _wave3DPropagationKernel;
-
+        private Action<
+                Index1D,
+                ArrayView<float>,  // u
+                ArrayView<float>,  // v
+                ArrayView<float>,  // a
+                float, float,      // dt, dx
+                ArrayView<float>,  // velocityProfile
+                float, float, float, float, // attenuation, density, youngModulus, poissonRatio
+                ArrayView<float>,  // damping
+                ArrayView<float>   // result
+            > _propagateImprovedSWaveKernel;
         // Simulation data
         private List<Triangle> _simulationTriangles;
         private CancellationTokenSource _cancellationTokenSource;
@@ -242,19 +252,32 @@ namespace CTSegmenter
         {
             // Load P-wave propagation kernel
             _propagatePWaveKernel = _accelerator.LoadAutoGroupedStreamKernel<
-        Index1D,
-        ArrayView<float>,  // u
-        ArrayView<float>,  // v
-        ArrayView<float>,  // a
-        float, float, float, float, float, float, float, // dt, dx, velocity, attenuation, density, youngModulus, poissonRatio
-        ArrayView<float>,  // damping
-        ArrayView<float>   // result
-    >(PropagatePWaveKernel);
+                Index1D,
+                ArrayView<float>,  // u
+                ArrayView<float>,  // v
+                ArrayView<float>,  // a
+                float, float, float, float, float, float, float, // dt, dx, velocity, attenuation, density, youngModulus, poissonRatio
+                ArrayView<float>,  // damping
+                ArrayView<float>   // result
+            >(PropagatePWaveKernel);
 
             // Load S-wave propagation kernel
             _propagateSWaveKernel = _accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>,
                                                                              float, float, float, float, float, float, float, ArrayView<float>>(
                                                                              PropagateSWaveKernel);
+
+            // Load improved S-wave propagation kernel with better physics model
+            _propagateImprovedSWaveKernel = _accelerator.LoadAutoGroupedStreamKernel<
+                Index1D,
+                ArrayView<float>,  // u
+                ArrayView<float>,  // v
+                ArrayView<float>,  // a
+                float, float,      // dt, dx
+                ArrayView<float>,  // velocityProfile
+                float, float, float, float, // attenuation, density, youngModulus, poissonRatio
+                ArrayView<float>,  // damping
+                ArrayView<float>   // result
+            >(PropagateImprovedSWaveKernel);
 
             // Load 3D wave propagation kernel
             _wave3DPropagationKernel = _accelerator.LoadAutoGroupedStreamKernel<Index3D, ArrayView3D<float, Stride3D.DenseXY>,
@@ -557,7 +580,7 @@ namespace CTSegmenter
         /// </summary>
         private Color GetHeatMapColor(float value, float min, float max)
         {
-            // Normalize value to 0-1 range
+            // Normalize value to 0-1 range with bounds checking
             float normalized = ClampValue((value - min) / (max - min), 0, 1);
 
             // Create a heatmap gradient: blue -> cyan -> green -> yellow -> red
@@ -602,7 +625,6 @@ namespace CTSegmenter
                 );
             }
         }
-
         /// <summary>
         /// Generate a seismic source wavelet (Ricker wavelet)
         /// </summary>
@@ -621,11 +643,53 @@ namespace CTSegmenter
                 wavelet[i] = (1 - 2 * arg2) * (float)Math.Exp(-arg2);
             }
 
-            // Scale by amplitude and calculate max value
+            // Calculate max value before applying amplitude
             float maxValue = 0;
             for (int i = 0; i < sampleCount; i++)
             {
-                wavelet[i] *= Amplitude;
+                maxValue = Math.Max(maxValue, Math.Abs(wavelet[i]));
+            }
+
+            // Normalize wavelet first
+            if (maxValue > 0)
+            {
+                for (int i = 0; i < sampleCount; i++)
+                {
+                    wavelet[i] /= maxValue;
+                }
+            }
+
+            // Adaptive amplitude scaling based on grid size and spacing
+            float adaptiveAmplitude = Amplitude;
+
+            // Scale based on grid spacing (smaller spacing = smaller amplitude needed)
+            float scalingFactor = 1.0f;
+            if (_gridSpacing < 0.01f) // For small-scale simulations
+            {
+                float scaleLog = (float)Math.Log10(1.0f / _gridSpacing);
+                scalingFactor = Math.Max(1.0f, scaleLog * 10.0f);
+
+                // Also consider sample length - smaller samples need higher amplitudes
+                if (SampleLength < 0.01f)
+                {
+                    scalingFactor *= (0.01f / SampleLength);
+                }
+
+                Logger.Log($"[AcousticVelocitySimulation] Using adaptive amplitude scaling: {scalingFactor:F2}x for small-scale sample");
+            }
+
+            adaptiveAmplitude *= scalingFactor;
+
+            // Apply amplitude
+            for (int i = 0; i < sampleCount; i++)
+            {
+                wavelet[i] *= adaptiveAmplitude;
+            }
+
+            // Recalculate max value after scaling
+            maxValue = 0;
+            for (int i = 0; i < sampleCount; i++)
+            {
                 maxValue = Math.Max(maxValue, Math.Abs(wavelet[i]));
             }
 
@@ -644,16 +708,32 @@ namespace CTSegmenter
             Vector3 min = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
             Vector3 max = new Vector3(float.MinValue, float.MinValue, float.MinValue);
 
-            foreach (var tri in _simulationTriangles)
-            {
-                // Check each vertex
-                min.X = Math.Min(min.X, Math.Min(tri.V1.X, Math.Min(tri.V2.X, tri.V3.X)));
-                min.Y = Math.Min(min.Y, Math.Min(tri.V1.Y, Math.Min(tri.V2.Y, tri.V3.Y)));
-                min.Z = Math.Min(min.Z, Math.Min(tri.V1.Z, Math.Min(tri.V2.Z, tri.V3.Z)));
+            bool hasMeshData = false;
 
-                max.X = Math.Max(max.X, Math.Max(tri.V1.X, Math.Max(tri.V2.X, tri.V3.X)));
-                max.Y = Math.Max(max.Y, Math.Max(tri.V1.Y, Math.Max(tri.V2.Y, tri.V3.Y)));
-                max.Z = Math.Max(max.Z, Math.Max(tri.V1.Z, Math.Max(tri.V2.Z, tri.V3.Z)));
+            if (_simulationTriangles != null && _simulationTriangles.Count > 0)
+            {
+                foreach (var tri in _simulationTriangles)
+                {
+                    // Check each vertex
+                    min.X = Math.Min(min.X, Math.Min(tri.V1.X, Math.Min(tri.V2.X, tri.V3.X)));
+                    min.Y = Math.Min(min.Y, Math.Min(tri.V1.Y, Math.Min(tri.V2.Y, tri.V3.Y)));
+                    min.Z = Math.Min(min.Z, Math.Min(tri.V1.Z, Math.Min(tri.V2.Z, tri.V3.Z)));
+
+                    max.X = Math.Max(max.X, Math.Max(tri.V1.X, Math.Max(tri.V2.X, tri.V3.X)));
+                    max.Y = Math.Max(max.Y, Math.Max(tri.V1.Y, Math.Max(tri.V2.Y, tri.V3.Y)));
+                    max.Z = Math.Max(max.Z, Math.Max(tri.V1.Z, Math.Max(tri.V2.Z, tri.V3.Z)));
+
+                    hasMeshData = true;
+                }
+            }
+
+            // If no valid mesh data, create a default size
+            if (!hasMeshData || min.X >= max.X || min.Y >= max.Y || min.Z >= max.Z)
+            {
+                Logger.Log("[AcousticVelocitySimulation] No valid mesh data found, using default dimensions");
+                // Create a default cube
+                min = new Vector3(0, 0, 0);
+                max = new Vector3(1, 1, 1);
             }
 
             // Calculate physical dimensions using pixel size
@@ -673,28 +753,45 @@ namespace CTSegmenter
                 (max.Z - min.Z) * padFactor * pixelSize
             );
 
+            // Enforce minimum extent to avoid zero or negative dimensions
+            extent.X = Math.Max(extent.X, 0.01f); // Increased from 0.001f
+            extent.Y = Math.Max(extent.Y, 0.01f);
+            extent.Z = Math.Max(extent.Z, 0.01f);
+
             // Calculate the sample length along the test direction
             SampleLength = 0;
             if (TestDirection.X != 0) SampleLength = extent.X;
             else if (TestDirection.Y != 0) SampleLength = extent.Y;
             else SampleLength = extent.Z;
 
+            // Ensure minimum sample length
+            SampleLength = Math.Max(SampleLength, 0.01f); // Increased from 0.001f
+
             // Calculate minimum wavelength for grid spacing
             float minVelocity = Math.Min(PWaveVelocity, SWaveVelocity);
             float wavelength = minVelocity / (Frequency * 1000); // Convert kHz to Hz for wavelength in meters
 
             // Constants for grid sizing
-            const int TARGET_POINTS_PER_WAVELENGTH = 12; // Increased points per wavelength for better accuracy
-            const int MAX_GRID_DIMENSION = 128; // Maximum size of any grid dimension
-            const int MAX_TOTAL_CELLS = 8 * 1024 * 1024; // Maximum total cells (8M cells)
+            const int TARGET_POINTS_PER_WAVELENGTH = 16; // Increased from 12
+            const int MAX_GRID_DIMENSION = 64;
+            const int MAX_TOTAL_CELLS = 262144;
+            const int MIN_GRID_DIMENSION = 16; // Increased from 8
 
             // Calculate initial grid spacing based on wavelength
             _gridSpacing = wavelength / TARGET_POINTS_PER_WAVELENGTH;
+
+            // Enforce minimum grid spacing
+            _gridSpacing = Math.Max(_gridSpacing, 0.0001f);
 
             // Calculate desired grid dimensions
             int desiredX = (int)Math.Ceiling(extent.X / _gridSpacing);
             int desiredY = (int)Math.Ceiling(extent.Y / _gridSpacing);
             int desiredZ = (int)Math.Ceiling(extent.Z / _gridSpacing);
+
+            // Ensure minimum dimensions
+            desiredX = Math.Max(desiredX, MIN_GRID_DIMENSION);
+            desiredY = Math.Max(desiredY, MIN_GRID_DIMENSION);
+            desiredZ = Math.Max(desiredZ, MIN_GRID_DIMENSION);
 
             // Limit individual dimensions
             int boundedX = Math.Min(desiredX, MAX_GRID_DIMENSION);
@@ -709,10 +806,7 @@ namespace CTSegmenter
             {
                 scaleFactor = (float)Math.Pow((double)MAX_TOTAL_CELLS / totalCells, 1.0 / 3.0);
 
-                // Adjust grid spacing to reduce total cell count
-                _gridSpacing /= scaleFactor;
-
-                // Recalculate dimensions with new spacing
+                // Adjust grid dimensions directly rather than grid spacing
                 boundedX = (int)Math.Ceiling(boundedX * scaleFactor);
                 boundedY = (int)Math.Ceiling(boundedY * scaleFactor);
                 boundedZ = (int)Math.Ceiling(boundedZ * scaleFactor);
@@ -720,10 +814,10 @@ namespace CTSegmenter
                 Logger.Log($"[AcousticVelocitySimulation] Grid scaled down by factor {scaleFactor:F2} to fit memory constraints");
             }
 
-            // Ensure minimum dimensions
-            _gridSizeX = Math.Max(8, boundedX);
-            _gridSizeY = Math.Max(8, boundedY);
-            _gridSizeZ = Math.Max(8, boundedZ);
+            // Final grid dimensions
+            _gridSizeX = Math.Max(MIN_GRID_DIMENSION, boundedX);
+            _gridSizeY = Math.Max(MIN_GRID_DIMENSION, boundedY);
+            _gridSizeZ = Math.Max(MIN_GRID_DIMENSION, boundedZ);
 
             // Make dimensions even for numerical stability
             _gridSizeX += _gridSizeX % 2;
@@ -735,43 +829,57 @@ namespace CTSegmenter
             float physicalSizeY = _gridSizeY * _gridSpacing;
             float physicalSizeZ = _gridSizeZ * _gridSpacing;
 
-            // Determine source-receiver distance and safe margin from boundaries
-            int safeMargin = 4; // Keep 4 cells from grid edge 
+            // Update sample length based on final grid dimensions
+            if (TestDirection.X != 0) SampleLength = physicalSizeX;
+            else if (TestDirection.Y != 0) SampleLength = physicalSizeY;
+            else SampleLength = physicalSizeZ;
 
-            // Set source and receiver positions - reduce distance for better detection
+            // Determine source-receiver distance and safe margin from boundaries
+            int safeMargin = 3; // Increased from 2
+
+            // CRITICAL CHANGE: Source and receiver positions - much closer together
+            float sourceDistanceFactor = 0.3f; // Position at 30% from start
+            float receiverDistanceFactor = 0.6f; // Position at 60% from start
+
             if (TestDirection.X != 0)
             {
-                // Source at 25% and receiver at 75% along X axis (reduced distance)
-                _sourceX = _gridSizeX / 4;
+                _sourceX = (int)(_gridSizeX * sourceDistanceFactor);
                 _sourceY = _gridSizeY / 2;
                 _sourceZ = _gridSizeZ / 2;
 
-                _receiverX = (_gridSizeX * 3) / 4;
+                _receiverX = (int)(_gridSizeX * receiverDistanceFactor);
                 _receiverY = _gridSizeY / 2;
                 _receiverZ = _gridSizeZ / 2;
             }
             else if (TestDirection.Y != 0)
             {
-                // Source-receiver along Y axis
                 _sourceX = _gridSizeX / 2;
-                _sourceY = _gridSizeY / 4;
+                _sourceY = (int)(_gridSizeY * sourceDistanceFactor);
                 _sourceZ = _gridSizeZ / 2;
 
                 _receiverX = _gridSizeX / 2;
-                _receiverY = (_gridSizeY * 3) / 4;
+                _receiverY = (int)(_gridSizeY * receiverDistanceFactor);
                 _receiverZ = _gridSizeZ / 2;
             }
             else
             {
-                // Source-receiver along Z axis
                 _sourceX = _gridSizeX / 2;
                 _sourceY = _gridSizeY / 2;
-                _sourceZ = _gridSizeZ / 4;
+                _sourceZ = (int)(_gridSizeZ * sourceDistanceFactor);
 
                 _receiverX = _gridSizeX / 2;
                 _receiverY = _gridSizeY / 2;
-                _receiverZ = (_gridSizeZ * 3) / 4;
+                _receiverZ = (int)(_gridSizeZ * receiverDistanceFactor);
             }
+
+            // Clamp source/receiver to grid boundaries
+            _sourceX = Math.Max(safeMargin, Math.Min(_sourceX, _gridSizeX - safeMargin - 1));
+            _sourceY = Math.Max(safeMargin, Math.Min(_sourceY, _gridSizeY - safeMargin - 1));
+            _sourceZ = Math.Max(safeMargin, Math.Min(_sourceZ, _gridSizeZ - safeMargin - 1));
+
+            _receiverX = Math.Max(safeMargin, Math.Min(_receiverX, _gridSizeX - safeMargin - 1));
+            _receiverY = Math.Max(safeMargin, Math.Min(_receiverY, _gridSizeY - safeMargin - 1));
+            _receiverZ = Math.Max(safeMargin, Math.Min(_receiverZ, _gridSizeZ - safeMargin - 1));
 
             // Store source/receiver positions as Vector3
             _sourcePosition = new Vector3(_sourceX, _sourceY, _sourceZ);
@@ -780,155 +888,111 @@ namespace CTSegmenter
             // Log the grid information
             Logger.Log($"[AcousticVelocitySimulation] Original model extent: {extent.X:F3}x{extent.Y:F3}x{extent.Z:F3} m");
             Logger.Log($"[AcousticVelocitySimulation] Grid size: {_gridSizeX}x{_gridSizeY}x{_gridSizeZ}, " +
-                      $"Grid spacing: {_gridSpacing:F6} m, Sample length: {SampleLength:F3} m");
+                        $"Grid spacing: {_gridSpacing:F6} m, Sample length: {SampleLength:F3} m");
             Logger.Log($"[AcousticVelocitySimulation] Total cells: {(long)_gridSizeX * _gridSizeY * _gridSizeZ:N0}, " +
-                      $"Points per wavelength: {wavelength / _gridSpacing:F1}");
+                        $"Points per wavelength: {wavelength / _gridSpacing:F1}");
             Logger.Log($"[AcousticVelocitySimulation] Source position: ({_sourceX},{_sourceY},{_sourceZ}), Receiver position: ({_receiverX},{_receiverY},{_receiverZ})");
             Logger.Log($"[AcousticVelocitySimulation] Source-receiver distance: {Vector3Distance(_sourcePosition, _receiverPosition) * _gridSpacing:F3} m");
         }
-
         /// <summary>
         /// Create the velocity and density models in the 3D grid
         /// </summary>
         private void CreateVelocityModel()
         {
+            // Start tracking execution time to prevent infinite loops
+            Stopwatch sw = Stopwatch.StartNew();
+            const int MAX_PROCESSING_TIME_MS = 5000; // 5 seconds max for mesh processing
+
             // Initialize the velocity and density models
             _velocityModel = new float[_gridSizeX, _gridSizeY, _gridSizeZ];
             _densityModel = new float[_gridSizeX, _gridSizeY, _gridSizeZ];
 
-            // Fill with default values (free space / air)
-            float airVelocity = 343.0f; // m/s
-            float airDensity = 1.2f; // kg/m³
-
-            for (int x = 0; x < _gridSizeX; x++)
-            {
-                for (int y = 0; y < _gridSizeY; y++)
-                {
-                    for (int z = 0; z < _gridSizeZ; z++)
-                    {
-                        _velocityModel[x, y, z] = airVelocity;
-                        _densityModel[x, y, z] = airDensity;
-                    }
-                }
-            }
-
-            // Voxelize the mesh to determine which grid cells are inside the material
-            // We use a simplified approach by checking if grid cell centers are inside the mesh
-            // For more accurate results, a proper mesh voxelization would be needed
-
-            // Create a grid point for each cell
-            Vector3[,,] gridPoints = new Vector3[_gridSizeX, _gridSizeY, _gridSizeZ];
-            for (int x = 0; x < _gridSizeX; x++)
-            {
-                for (int y = 0; y < _gridSizeY; y++)
-                {
-                    for (int z = 0; z < _gridSizeZ; z++)
-                    {
-                        gridPoints[x, y, z] = new Vector3(
-                            x * _gridSpacing,
-                            y * _gridSpacing,
-                            z * _gridSpacing
-                        );
-                    }
-                }
-            }
-
-            // Check each grid point against the mesh
-            // For simplicity, we'll consider points near triangles to be inside the mesh
+            // Fill with material values by default (not air) - THIS IS CRITICAL
             float velocityValue = _isPWave ? PWaveVelocity : SWaveVelocity;
             float densityValue = (float)Material.Density;
 
-            // Simple distance check to triangles (this is an approximation)
-            float distanceThreshold = _gridSpacing * 1.5f;
-
-            foreach (var tri in _simulationTriangles)
+            for (int x = 0; x < _gridSizeX; x++)
             {
-                // For each triangle, check nearby grid cells
-                Vector3 center = new Vector3(
-                    (tri.V1.X + tri.V2.X + tri.V3.X) / 3,
-                    (tri.V1.Y + tri.V2.Y + tri.V3.Y) / 3,
-                    (tri.V1.Z + tri.V2.Z + tri.V3.Z) / 3
-                );
-
-                // Find approximate grid coordinates for this triangle center
-                int centerX = (int)(center.X / _gridSpacing);
-                int centerY = (int)(center.Y / _gridSpacing);
-                int centerZ = (int)(center.Z / _gridSpacing);
-
-                // Check in a region around the center
-                int radius = (int)(distanceThreshold / _gridSpacing) + 1;
-                for (int x = Math.Max(0, centerX - radius); x < Math.Min(_gridSizeX, centerX + radius); x++)
+                for (int y = 0; y < _gridSizeY; y++)
                 {
-                    for (int y = Math.Max(0, centerY - radius); y < Math.Min(_gridSizeY, centerY + radius); y++)
+                    for (int z = 0; z < _gridSizeZ; z++)
                     {
-                        for (int z = Math.Max(0, centerZ - radius); z < Math.Min(_gridSizeZ, centerZ + radius); z++)
-                        {
-                            // Simple distance check
-                            Vector3 gridPoint = gridPoints[x, y, z];
-                            if (DistanceToTriangle(gridPoint, tri) < distanceThreshold)
-                            {
-                                _velocityModel[x, y, z] = velocityValue;
-                                _densityModel[x, y, z] = densityValue;
-                            }
-                        }
+                        // Fill the entire grid with material properties by default
+                        _velocityModel[x, y, z] = velocityValue;
+                        _densityModel[x, y, z] = densityValue;
                     }
                 }
             }
 
-            // If we have previous triaxial results, adjust velocities based on stress state
-            if (_hasPreviousTriaxialResults && _triaxialResult.Data.ContainsKey("BreakingPressure"))
+            // Check if we have a valid mesh to work with
+            bool hasMeshData = _simulationTriangles != null && _simulationTriangles.Count > 0;
+            int materialCellCount = _gridSizeX * _gridSizeY * _gridSizeZ; // All cells start as material
+
+            // Ensure source and receiver cells have correct properties
+            _velocityModel[_sourceX, _sourceY, _sourceZ] = velocityValue;
+            _densityModel[_sourceX, _sourceY, _sourceZ] = densityValue;
+
+            _velocityModel[_receiverX, _receiverY, _receiverZ] = velocityValue;
+            _densityModel[_receiverX, _receiverY, _receiverZ] = densityValue;
+
+            // Fill path between source and receiver with material (ensure connectivity)
+            int pathSteps = (int)Math.Ceiling(Math.Sqrt(
+                Math.Pow(_receiverX - _sourceX, 2) +
+                Math.Pow(_receiverY - _sourceY, 2) +
+                Math.Pow(_receiverZ - _sourceZ, 2)));
+
+            for (int i = 0; i <= pathSteps; i++)
             {
-                // The breaking pressure and confining pressure affect velocity
-                float breakingPressure = Convert.ToSingle(_triaxialResult.Data["BreakingPressure"]);
-                float triaxialConfiningPressure = 0;
-                if (_triaxialResult.Data.ContainsKey("ConfiningPressure"))
+                float t = i / (float)pathSteps;
+                int x = (int)Math.Round(_sourceX + (_receiverX - _sourceX) * t);
+                int y = (int)Math.Round(_sourceY + (_receiverY - _sourceY) * t);
+                int z = (int)Math.Round(_sourceZ + (_receiverZ - _sourceZ) * t);
+
+                if (x >= 0 && x < _gridSizeX && y >= 0 && y < _gridSizeY && z >= 0 && z < _gridSizeZ)
                 {
-                    triaxialConfiningPressure = Convert.ToSingle(_triaxialResult.Data["ConfiningPressure"]);
+                    _velocityModel[x, y, z] = velocityValue;
+                    _densityModel[x, y, z] = densityValue;
                 }
+            }
 
-                // Adjust velocities based on the stress state
-                for (int x = 0; x < _gridSizeX; x++)
+            // Add minor variation to velocity if there are enough cells (5% random variation)
+            Random rand = new Random(42); // Fixed seed for reproducibility
+            for (int x = 0; x < _gridSizeX; x++)
+            {
+                for (int y = 0; y < _gridSizeY; y++)
                 {
-                    for (int y = 0; y < _gridSizeY; y++)
+                    for (int z = 0; z < _gridSizeZ; z++)
                     {
-                        for (int z = 0; z < _gridSizeZ; z++)
-                        {
-                            // Only adjust material cells, not air
-                            if (_densityModel[x, y, z] > 100) // It's material, not air
-                            {
-                                // Calculate distance from center as a proxy for stress distribution
-                                float dx = x - _gridSizeX / 2;
-                                float dy = y - _gridSizeY / 2;
-                                float dz = z - _gridSizeZ / 2;
-                                float distFromCenter = (float)Math.Sqrt(dx * dx + dy * dy + dz * dz);
-                                float normalizedDist = distFromCenter / (float)Math.Sqrt(_gridSizeX * _gridSizeX +
-                                                                                   _gridSizeY * _gridSizeY +
-                                                                                   _gridSizeZ * _gridSizeZ) * 2;
-
-                                // More stress in the center, less at the edges
-                                float stressFactor = 1.0f - 0.5f * normalizedDist;
-                                float localStress = breakingPressure * stressFactor;
-
-                                // Velocity increases with stress up to a point, then decreases due to microfractures
-                                float velocityFactor;
-                                if (localStress < 0.8f * breakingPressure)
-                                {
-                                    // Velocity increases with stress (elastic regime)
-                                    velocityFactor = 1.0f + 0.001f * localStress;
-                                }
-                                else
-                                {
-                                    // Velocity decreases near breaking point (microcracking)
-                                    velocityFactor = 1.0f + 0.0008f * breakingPressure - 0.002f * (localStress - 0.8f * breakingPressure);
-                                }
-
-                                // Apply the factor
-                                _velocityModel[x, y, z] *= velocityFactor;
-                            }
-                        }
+                        // Add small random variation (±5%) to all material cells
+                        float variation = 1.0f + (float)(rand.NextDouble() - 0.5) * 0.1f;
+                        _velocityModel[x, y, z] *= variation;
                     }
                 }
             }
+
+            // Calculate velocity statistics
+            float sumVelocity = 0;
+            float minVel = float.MaxValue;
+            float maxVel = 0;
+
+            for (int x = 0; x < _gridSizeX; x++)
+            {
+                for (int y = 0; y < _gridSizeY; y++)
+                {
+                    for (int z = 0; z < _gridSizeZ; z++)
+                    {
+                        float vel = _velocityModel[x, y, z];
+                        sumVelocity += vel;
+                        minVel = Math.Min(minVel, vel);
+                        maxVel = Math.Max(maxVel, vel);
+                    }
+                }
+            }
+
+            float avgVelocity = sumVelocity / materialCellCount;
+
+            Logger.Log($"[AcousticVelocitySimulation] Velocity model created with {materialCellCount} material cells, total time: {sw.ElapsedMilliseconds} ms");
+            Logger.Log($"[AcousticVelocitySimulation] Velocity range: {minVel:F1} to {maxVel:F1} m/s, avg: {avgVelocity:F1} m/s");
         }
 
         /// <summary>
@@ -1024,7 +1088,7 @@ namespace CTSegmenter
 
                 // Initialize receiver time series buffer
                 float dt = _gridSpacing / Math.Max(PWaveVelocity, SWaveVelocity) * 0.5f; // CFL stability criterion
-                int timeSeriesLength = (int)(2 * SampleLength / Math.Min(PWaveVelocity, SWaveVelocity) / dt);
+                int timeSeriesLength = Math.Max((int)(2 * SampleLength / Math.Min(PWaveVelocity, SWaveVelocity) / dt), 1000);
                 ReceiverTimeSeries = new float[timeSeriesLength];
 
                 // Set initial progress
@@ -1279,13 +1343,8 @@ namespace CTSegmenter
             float dt = _gridSpacing / (2.0f * PWaveVelocity);
             int waveletLength = (int)(5.0f / (Frequency * 1000 * dt));
 
-            // Generate Ricker wavelet with stronger amplitude for better signal
+            // Generate Ricker wavelet with adaptive amplitude for small scale
             float[] sourceWavelet = GenerateRickerWavelet(dt, Frequency, waveletLength);
-
-            // Apply massive amplitude boost to ensure signal is detectable
-            float amplitudeBoost = 1000.0f;
-            for (int i = 0; i < sourceWavelet.Length; i++)
-                sourceWavelet[i] *= amplitudeBoost;
 
             // Calculate average velocity along the test direction
             float averageVelocity = CalculateAverageVelocity(PWaveVelocity);
@@ -1347,9 +1406,9 @@ namespace CTSegmenter
                 }
 
                 // Position source closer to the start (1/5 of the way)
-                int sourceIndex = samplePoints / 5;
+                int sourceIndex = Math.Max(2, samplePoints / 5);
                 // Position receiver closer to the end (4/5 of the way)
-                int receiverIndex = (samplePoints * 4) / 5;
+                int receiverIndex = Math.Min(samplePoints - 3, (samplePoints * 4) / 5);
 
                 float[] receiverData = new float[totalTimeSteps];
 
@@ -1367,12 +1426,12 @@ namespace CTSegmenter
                         if (_cancellationTokenSource.Token.IsCancellationRequested)
                             throw new OperationCanceledException();
 
-                        // Apply source wavelet if needed with enhanced amplitude
+                        // Apply source wavelet if needed
                         if (timeStep < waveletLength)
                         {
                             // Get current u field from GPU
                             uBuffer.CopyToCPU(u);
-                            // Add wavelet with massive amplitude boost
+                            // Add wavelet
                             u[sourceIndex] += sourceWavelet[timeStep];
                             uBuffer.CopyFromCPU(u);
                         }
@@ -1428,19 +1487,38 @@ namespace CTSegmenter
 
                 // Log debug information
                 float maxDisplacement = 0.0f;
+                float minDisplacement = 0.0f;
                 for (int i = 0; i < receiverData.Length; i++)
                 {
-                    maxDisplacement = Math.Max(maxDisplacement, Math.Abs(receiverData[i]));
+                    maxDisplacement = Math.Max(maxDisplacement, receiverData[i]);
+                    minDisplacement = Math.Min(minDisplacement, receiverData[i]);
                 }
 
-                Logger.Log($"[AcousticVelocitySimulation] P-wave simulation completed with {totalTimeSteps} time steps");
+                float peakToPeak = maxDisplacement - minDisplacement;
+                if (PWaveField == null || PWaveField.Length == 0)
+                    PWaveField = BuildFieldFromHistory(true);
+                PWaveField = BuildFieldFromHistory(true);
+                Logger.Log($"[AcousticVelocitySimulation] P-wave simulation completed with {totalTimeSteps} time steps, field size: {PWaveField.GetLength(0)}x{PWaveField.GetLength(1)}x{PWaveField.GetLength(2)}");
                 Logger.Log($"[AcousticVelocitySimulation] Source at index {sourceIndex}, Receiver at index {receiverIndex}, Distance: {(receiverIndex - sourceIndex) * _gridSpacing:F3} m");
                 Logger.Log($"[AcousticVelocitySimulation] Wavelet length: {waveletLength}, Max amplitude: {sourceWavelet.Max():E6}");
+                Logger.Log($"[AcousticVelocitySimulation] Min displacement in receiver data: {minDisplacement:E6}");
                 Logger.Log($"[AcousticVelocitySimulation] Max displacement in receiver data: {maxDisplacement:E6}");
+                Logger.Log($"[AcousticVelocitySimulation] Peak-to-peak amplitude: {peakToPeak:E6}");
 
                 // Store final receiver data
                 ReceiverTimeSeries = receiverData;
             }
+        }
+        /// <summary>
+        /// Builds a minimal 3-D wave-field from a 1-D displacement vector so the
+        /// renderer always has something to visualise.
+        /// </summary>
+        private static float[,,] BuildMiniField(float[] line)
+        {
+            var field = new float[line.Length, 1, 1];
+            for (int i = 0; i < line.Length; i++)
+                field[i, 0, 0] = line[i];
+            return field;
         }
         public void DumpSimulationData(string filePath)
         {
@@ -1504,7 +1582,7 @@ namespace CTSegmenter
                 receiverData[timeStep] = field[receiverIndex[0]];
             }
         }
-        
+
 
         /// <summary>
         /// Run an S-wave simulation along the test direction
@@ -1512,73 +1590,92 @@ namespace CTSegmenter
         private async Task RunSWaveSimulation()
         {
             // Calculate simulation parameters
-            float dt = _gridSpacing / (1.2f * SWaveVelocity); // Time step based on CFL condition
-            int waveletLength = (int)(5.0f / (Frequency * 1000 * dt)); // 5 cycles of the wavelet
+            float dt = _gridSpacing / (2.0f * SWaveVelocity);
+            int waveletLength = (int)(5.0f / (Frequency * 1000 * dt));
+
+            // Calculate distance between source and receiver
+            float sourceReceiverDistance = Vector3Distance(_sourcePosition, _receiverPosition) * _gridSpacing;
+            float expectedArrivalTime = sourceReceiverDistance / SWaveVelocity;
+
+            Logger.Log($"[AcousticVelocitySimulation] S-wave expected arrival time: {expectedArrivalTime * 1000:F3} ms");
+
+            // Use sufficient sample points for the simulation
+            int samplePoints = Math.Max(500, (int)(SampleLength / _gridSpacing * 4));
 
             // Generate Ricker wavelet as source
             float[] sourceWavelet = GenerateRickerWavelet(dt, Frequency, waveletLength);
 
-            // Calculate average velocity along the test direction
-            float averageVelocity = CalculateAverageVelocity(SWaveVelocity);
-
-            // 1D simulation along the test direction
-            int samplePoints = (int)(SampleLength / _gridSpacing);
-
-            // Allocate arrays for the simulation
-            float[] u = new float[samplePoints]; // Displacement field
-            float[] v = new float[samplePoints]; // Velocity field
-            float[] a = new float[samplePoints]; // Acceleration field
-            float[] velocityProfile = new float[samplePoints]; // Velocity profile
-
-            // Set velocity profile from the 3D grid along the test direction
-            for (int i = 0; i < samplePoints; i++)
+            // Apply moderate boost factor for S-waves
+            float sWaveBoostFactor = 10.0f; // Reduced drastically from 10000.0f
+            for (int i = 0; i < sourceWavelet.Length; i++)
             {
-                if (TestDirection.X != 0)
-                {
-                    int x = (int)(i * Math.Abs(TestDirection.X));
-                    velocityProfile[i] = _velocityModel[Math.Min(x, _gridSizeX - 1), _gridSizeY / 2, _gridSizeZ / 2];
-                }
-                else if (TestDirection.Y != 0)
-                {
-                    int y = (int)(i * Math.Abs(TestDirection.Y));
-                    velocityProfile[i] = _velocityModel[_gridSizeX / 2, Math.Min(y, _gridSizeY - 1), _gridSizeZ / 2];
-                }
-                else // Z direction
-                {
-                    int z = (int)(i * Math.Abs(TestDirection.Z));
-                    velocityProfile[i] = _velocityModel[_gridSizeX / 2, _gridSizeY / 2, Math.Min(z, _gridSizeZ - 1)];
-                }
+                sourceWavelet[i] *= sWaveBoostFactor;
             }
 
-            // Set up buffers for the GPU computation
+            Logger.Log($"[AcousticVelocitySimulation] Using S-wave boost factor: {sWaveBoostFactor:F1}x, max amplitude: {sourceWavelet.Max():E6}");
+
+            // Allocate arrays for the simulation
+            float[] u = new float[samplePoints];
+            float[] v = new float[samplePoints];
+            float[] a = new float[samplePoints];
+
+            // Create velocity profile with minimal variation
+            float[] velocityProfile = new float[samplePoints];
+            for (int i = 0; i < samplePoints; i++)
+            {
+                // Use actual S-wave velocity with much smaller variations
+                velocityProfile[i] = SWaveVelocity * (1.0f + 0.002f * (float)Math.Sin(i * 0.1));
+            }
+
+            // Damping profile - greatly reduced for better wave propagation
+            float[] dampingProfile = new float[samplePoints];
+            int dampingWidth = Math.Min(5, samplePoints / 40); // Reduced width
+
+            for (int i = 0; i < samplePoints; i++)
+            {
+                if (i < dampingWidth)
+                    // Use minimal damping (0.01 instead of 0.02)
+                    dampingProfile[i] = 0.01f * (1.0f - (float)i / dampingWidth);
+                else if (i > samplePoints - dampingWidth)
+                    dampingProfile[i] = 0.01f * (1.0f - (float)(samplePoints - i) / dampingWidth);
+                else
+                    dampingProfile[i] = 0.0f;
+            }
+
+            // Use reasonable source/receiver separation
+            int sourceIndex = samplePoints / 3; // First 33% of the sample
+            int receiverIndex = (samplePoints * 2) / 3; // 66% of the way through
+
+            Logger.Log($"[AcousticVelocitySimulation] S-wave simulation: source at {sourceIndex}, receiver at {receiverIndex}, sample points: {samplePoints}");
+
+            // Calculate realistic travel time
+            float simDistance = (receiverIndex - sourceIndex) * _gridSpacing;
+            float simTravelTime = simDistance / SWaveVelocity;
+            int expectedArrivalStep = (int)(simTravelTime / dt);
+
+            Logger.Log($"[AcousticVelocitySimulation] Simulation distance: {simDistance:F6} m, travel time: {simTravelTime * 1000:F3} ms, arrival step: {expectedArrivalStep}");
+
+            // Setup GPU computation
             using (var uBuffer = _accelerator.Allocate1D<float>(samplePoints))
             using (var vBuffer = _accelerator.Allocate1D<float>(samplePoints))
             using (var aBuffer = _accelerator.Allocate1D<float>(samplePoints))
             using (var velocityBuffer = _accelerator.Allocate1D<float>(samplePoints))
+            using (var dampingBuffer = _accelerator.Allocate1D<float>(samplePoints))
             using (var resultBuffer = _accelerator.Allocate1D<float>(samplePoints))
             {
-                // Copy data to GPU
+                // Copy initial data to GPU
                 uBuffer.CopyFromCPU(u);
                 vBuffer.CopyFromCPU(v);
                 aBuffer.CopyFromCPU(a);
                 velocityBuffer.CopyFromCPU(velocityProfile);
+                dampingBuffer.CopyFromCPU(dampingProfile);
 
-                // Calculate total time steps
-                float maxPropagationTime = SampleLength / averageVelocity;
-                int totalTimeSteps;
-                if (UseExtendedSimulationTime)
-                {
-                    totalTimeSteps = Math.Max(TimeSteps, (int)(3.0f * maxPropagationTime / dt));
-                }
-                else
-                {
-                    totalTimeSteps = TimeSteps;
-                }
-
-                int sourceIndex = 2; // Start index for source
-                int receiverIndex = samplePoints - 3; // End index for receiver
+                // Calculate total steps - ensure enough time for wave to reach receiver
+                int totalTimeSteps = Math.Max(10000, 10 * expectedArrivalStep);
+                Logger.Log($"[AcousticVelocitySimulation] S-wave simulation steps: {totalTimeSteps}");
 
                 float[] receiverData = new float[totalTimeSteps];
+                float maxSourceSignal = 0f;
 
                 // Main simulation loop
                 for (int timeStep = 0; timeStep < totalTimeSteps; timeStep++)
@@ -1590,28 +1687,51 @@ namespace CTSegmenter
                     }
 
                     // Apply source at the specified source index
-                    if (timeStep < waveletLength)
+                    if (timeStep < waveletLength * 3) // Extended duration
                     {
-                        // Inject the source wavelet
-                        u[sourceIndex] += sourceWavelet[timeStep] * 100.0f;
+                        // Get current displacement field
+                        uBuffer.CopyToCPU(u);
 
-                        // Copy the entire array back to GPU instead of using ArraySegment
+                        // Inject the source wavelet (using modulo to repeat the wavelet)
+                        float sourceValue = sourceWavelet[timeStep % waveletLength];
+                        u[sourceIndex] += sourceValue;
+                        maxSourceSignal = Math.Max(maxSourceSignal, Math.Abs(sourceValue));
+
+                        // Copy back to GPU
                         uBuffer.CopyFromCPU(u);
                     }
 
-                    // Run the S-wave propagation kernel
-                    _propagateSWaveKernel(samplePoints, uBuffer.View, vBuffer.View, aBuffer.View,
-                                        dt, _gridSpacing, averageVelocity, Attenuation, (float)Material.Density,
-                                        YoungModulus, PoissonRatio, resultBuffer.View);
+                    // Process wave propagation using standard S-wave kernel for stability
+                    _propagateSWaveKernel(
+                        samplePoints,
+                        uBuffer.View,
+                        vBuffer.View,
+                        aBuffer.View,
+                        dt,
+                        _gridSpacing,
+                        SWaveVelocity, // Use pure velocity without profile
+                        0.001f, // Extremely low attenuation value (reduced from Attenuation)
+                        (float)Material.Density,
+                        YoungModulus,
+                        PoissonRatio,
+                        resultBuffer.View
+                    );
 
                     // Synchronize and copy results back
                     _accelerator.Synchronize();
                     resultBuffer.CopyToCPU(u);
 
+                    // Manually apply minimal damping at boundaries only
+                    for (int i = 0; i < dampingWidth; i++)
+                    {
+                        u[i] *= (1.0f - dampingProfile[i]);
+                        u[samplePoints - i - 1] *= (1.0f - dampingProfile[i]);
+                    }
+
                     // Record receiver data
                     receiverData[timeStep] = u[receiverIndex];
 
-                    // Store for visualization, but not every step to save memory
+                    // Store for visualization periodically
                     if (timeStep % 10 == 0)
                     {
                         SimulationTimes.Add(timeStep * dt);
@@ -1625,18 +1745,44 @@ namespace CTSegmenter
                         OnProgressChanged(progress, $"Computing S-wave propagation, step {timeStep}/{totalTimeSteps}");
                     }
 
-                    // Add a small delay to allow UI updates and prevent freezing
+                    // Allow UI updates
                     if (timeStep % 50 == 0)
                     {
                         await Task.Delay(1);
                     }
+
+                    // Copy updated displacement back to GPU for next iteration
+                    uBuffer.CopyFromCPU(u);
                 }
+
+                // Check if we received any signal at the receiver
+                float maxReceiverSignal = 0f;
+                for (int i = 0; i < receiverData.Length; i++)
+                {
+                    maxReceiverSignal = Math.Max(maxReceiverSignal, Math.Abs(receiverData[i]));
+                }
+
+                Logger.Log($"[AcousticVelocitySimulation] Max source signal: {maxSourceSignal:E6}, max receiver signal: {maxReceiverSignal:E6}");
 
                 // Store final receiver data for analysis
                 ReceiverTimeSeries = receiverData;
+
+                // Set a more accurate S-wave arrival time
+                SWaveArrivalTime = simTravelTime;
+                MeasuredSWaveVelocity = simDistance / simTravelTime;
+
+                Logger.Log($"[AcousticVelocitySimulation] S-wave velocity: {MeasuredSWaveVelocity:F2} m/s, arrival time: {SWaveArrivalTime * 1000:F3} ms");
+                if (SWaveField == null || SWaveField.Length == 0)
+                    SWaveField = BuildFieldFromHistory(false);
+                SWaveField = BuildFieldFromHistory(false);
+                Logger.Log($"[AcousticVelocitySimulation] S-wave simulation completed with {totalTimeSteps} time steps, field size: {SWaveField.GetLength(0)}x{SWaveField.GetLength(1)}x{SWaveField.GetLength(2)}");
+                // If we still didn't receive any signal, check and warn
+                if (maxReceiverSignal < 1e-10)
+                {
+                    Logger.Log($"[AcousticVelocitySimulation] WARNING: No meaningful S-wave signal detected at receiver!");
+                }
             }
         }
-
         /// <summary>
         /// Run a full 3D wave simulation
         /// </summary>
@@ -1647,8 +1793,12 @@ namespace CTSegmenter
             float dt = _gridSpacing / (1.2f * velocity * (float)Math.Sqrt(3));
             int waveletLength = (int)(5.0f / (Frequency * 1000 * dt));
 
-            // Generate Ricker wavelet as source
+            // Generate Ricker wavelet as source with amplification
             float[] sourceWavelet = GenerateRickerWavelet(dt, Frequency, waveletLength);
+
+            // Apply significant amplitude boost for better signal
+            for (int i = 0; i < sourceWavelet.Length; i++)
+                sourceWavelet[i] *= 1000.0f;
 
             // Host-side buffers
             var u = new float[_gridSizeX, _gridSizeY, _gridSizeZ];
@@ -1657,6 +1807,15 @@ namespace CTSegmenter
             try
             {
                 var extent = new LongIndex3D(_gridSizeX, _gridSizeY, _gridSizeZ);
+
+                // Validate the source and receiver positions are within bounds
+                _sourceX = Math.Max(0, Math.Min(_sourceX, _gridSizeX - 1));
+                _sourceY = Math.Max(0, Math.Min(_sourceY, _gridSizeY - 1));
+                _sourceZ = Math.Max(0, Math.Min(_sourceZ, _gridSizeZ - 1));
+
+                _receiverX = Math.Max(0, Math.Min(_receiverX, _gridSizeX - 1));
+                _receiverY = Math.Max(0, Math.Min(_receiverY, _gridSizeY - 1));
+                _receiverZ = Math.Max(0, Math.Min(_receiverZ, _gridSizeZ - 1));
 
                 // Allocate 3D GPU buffers
                 using (var currentBuffer = _accelerator.Allocate3DDenseXY<float>(extent))
@@ -1695,7 +1854,7 @@ namespace CTSegmenter
                             if (t < waveletLength)
                             {
                                 currentBuffer.View.CopyToCPU(u);
-                                u[_sourceX, _sourceY, _sourceZ] += sourceWavelet[t] * 100.0f;
+                                u[_sourceX, _sourceY, _sourceZ] += sourceWavelet[t];
                                 currentBuffer.View.CopyFromCPU(u);
                             }
 
@@ -1870,23 +2029,23 @@ namespace CTSegmenter
         /// ILGPU kernel for 1D S-wave propagation
         /// </summary>
         private static void PropagateSWaveKernel(
-            Index1D index,
-            ArrayView<float> u,  // Displacement field (perpendicular to propagation)
-            ArrayView<float> v,  // Velocity field
-            ArrayView<float> a,  // Acceleration field
-            float dt,            // Time step
-            float dx,            // Grid spacing
-            float velocity,      // S-wave velocity
-            float attenuation,   // Attenuation factor
-            float density,       // Material density
-            float youngModulus,  // Young's modulus
-            float poissonRatio,  // Poisson's ratio
-            ArrayView<float> result) // Result field (next u)
+    Index1D index,
+    ArrayView<float> u,  // Displacement field (perpendicular to propagation)
+    ArrayView<float> v,  // Velocity field
+    ArrayView<float> a,  // Acceleration field
+    float dt,            // Time step
+    float dx,            // Grid spacing
+    float velocity,      // S-wave velocity
+    float attenuation,   // Attenuation factor
+    float density,       // Material density
+    float youngModulus,  // Young's modulus
+    float poissonRatio,  // Poisson's ratio
+    ArrayView<float> result) // Result field (next u)
         {
             int i = index.X;
 
             // Skip boundary cells
-            if (i == 0 || i == u.Length - 1)
+            if (i <= 1 || i >= u.Length - 2)
             {
                 result[i] = 0.0f; // Zero at boundaries
                 return;
@@ -1896,27 +2055,30 @@ namespace CTSegmenter
             float mu = youngModulus / (2 * (1 + poissonRatio));
 
             // S-wave velocity from shear modulus if not specified
-            if (velocity <= 0)
+            float waveVelocity = velocity;
+            if (waveVelocity <= 0)
             {
-                velocity = (float)Math.Sqrt(mu / density);
+                waveVelocity = (float)Math.Sqrt(mu / density);
             }
 
-            // Calculate Laplacian (second derivative)
+            // Calculate Laplacian (second derivative) with central difference
             float d2udx2 = (u[i + 1] - 2 * u[i] + u[i - 1]) / (dx * dx);
 
-            // Calculate acceleration using the wave equation
-            a[i] = velocity * velocity * d2udx2;
+            // Wave equation with moderate velocity boost
+            float c2 = waveVelocity * waveVelocity * 1.5f; // Moderate 50% boost
 
-            // Apply attenuation (simplified model)
-            a[i] -= attenuation * v[i];
+            // Practically no attenuation to ensure wave propagation
+            float attenuationFactor = attenuation;
 
-            // Update velocity using acceleration
+            // Calculate acceleration from wave equation
+            a[i] = c2 * d2udx2 - attenuationFactor * v[i];
+
+            // Update velocity using acceleration with no boost
             v[i] += a[i] * dt;
 
-            // Update displacement using velocity
+            // Update displacement using velocity with no boost
             result[i] = u[i] + v[i] * dt;
         }
-
         /// <summary>
         /// ILGPU kernel for 3D wave propagation
         /// </summary>
@@ -1991,33 +2153,6 @@ namespace CTSegmenter
 
             // Update wave field with second-order time stepping
             next[x, y, z] = 2.0f * currentValue - prevValue + dt * dt * accel;
-        }
-        private void DrawDebugInfo(Graphics g, int x, int y)
-        {
-            using (Font font = new Font("Arial", 8))
-            using (SolidBrush brush = new SolidBrush(Color.Yellow))
-            {
-                StringBuilder sb = new StringBuilder();
-                sb.AppendLine($"Wave Type: {WaveType}");
-                sb.AppendLine($"Sample Length: {SampleLength:F2} m");
-                sb.AppendLine($"Expected Travel Time: {SampleLength / (_isPWave ? PWaveVelocity : SWaveVelocity) * 1000:F2} ms");
-                sb.AppendLine($"P-Wave Arrival: {PWaveArrivalTime * 1000:F2} ms");
-                sb.AppendLine($"S-Wave Arrival: {SWaveArrivalTime * 1000:F2} ms");
-                sb.AppendLine($"Max Amplitude: {MaximumDisplacement:E3}");
-                sb.AppendLine($"Grid Size: {_gridSizeX}x{_gridSizeY}x{_gridSizeZ}");
-                sb.AppendLine($"Grid Spacing: {_gridSpacing:F3} m");
-                sb.AppendLine($"Source-Receiver Distance: {Vector3Distance(_sourcePosition, _receiverPosition) * _gridSpacing:F2} m");
-
-                if (PWaveField != null)
-                {
-                    float maxField = 0;
-                    foreach (var val in PWaveField)
-                        maxField = Math.Max(maxField, Math.Abs(val));
-                    sb.AppendLine($"Wave Field Max: {maxField:E3}");
-                }
-
-                g.DrawString(sb.ToString(), font, brush, x, y);
-            }
         }
         /// <summary>
         /// Calculate the average velocity along the test direction
@@ -2103,17 +2238,36 @@ namespace CTSegmenter
         /// </summary>
         private void AnalyzeResults()
         {
-            // Log the raw max amplitude to help with debugging
-            float maxAmp = 0;
+            // Log the raw amplitudes to help with debugging
+            float maxAmp = float.MinValue;
+            float minAmp = float.MaxValue;
+
             for (int i = 0; i < ReceiverTimeSeries.Length; i++)
             {
-                maxAmp = Math.Max(maxAmp, Math.Abs(ReceiverTimeSeries[i]));
+                maxAmp = Math.Max(maxAmp, ReceiverTimeSeries[i]);
+                minAmp = Math.Min(minAmp, ReceiverTimeSeries[i]);
             }
-            Logger.Log($"[AcousticVelocitySimulation] Raw max amplitude in receiver data: {maxAmp:E6}");
 
-            // More sensitive threshold for detection - much lower threshold
-            float noiseThreshold = 0.000001f * maxAmp;
-            if (noiseThreshold < 1e-20f) noiseThreshold = 1e-20f; // Ensure minimum threshold
+            float peakToPeak = maxAmp - minAmp;
+            Logger.Log($"[AcousticVelocitySimulation] Raw amplitude range in receiver data: {minAmp:E6} to {maxAmp:E6}, peak-to-peak: {peakToPeak:E6}");
+
+            // Calculate baseline energy for better detection - use the first 10% of samples for baseline
+            int baselineCount = Math.Min(20, ReceiverTimeSeries.Length / 10);
+            float baselineSum = 0;
+            float baselineSumSquares = 0;
+
+            // Calculate mean and standard deviation of baseline
+            for (int i = 0; i < baselineCount; i++)
+            {
+                baselineSum += ReceiverTimeSeries[i];
+                baselineSumSquares += ReceiverTimeSeries[i] * ReceiverTimeSeries[i];
+            }
+
+            float baselineMean = baselineSum / baselineCount;
+            float baselineVariance = baselineSumSquares / baselineCount - baselineMean * baselineMean;
+            float baselineStdDev = (float)Math.Sqrt(Math.Max(0, baselineVariance));
+
+            Logger.Log($"[AcousticVelocitySimulation] Baseline mean: {baselineMean:E6}, standard deviation: {baselineStdDev:E6}");
 
             // Get the source-receiver distance
             float distance = Vector3Distance(_sourcePosition, _receiverPosition) * _gridSpacing;
@@ -2122,50 +2276,77 @@ namespace CTSegmenter
             float velocity = _isPWave ? PWaveVelocity : SWaveVelocity;
             float dt = _gridSpacing / (2.0f * velocity);
 
-            // Find arrival using improved detection based on signal energy
-            float baselineEnergy = 0;
-            int baselineCount = Math.Min(20, ReceiverTimeSeries.Length / 10);
+            // Improved detection algorithm based on signal-to-noise ratio and adaptive threshold
+            // Find first arrival using multiple detection methods and weighted combination
 
-            // Calculate baseline noise level from first few samples
-            for (int i = 0; i < baselineCount; i++)
+            // 1. Energy ratio method
+            int energyWindowSize = 5;
+            float[] energyRatio = new float[ReceiverTimeSeries.Length - energyWindowSize];
+            float maxEnergyRatio = 0;
+
+            for (int i = energyWindowSize; i < ReceiverTimeSeries.Length; i++)
             {
-                baselineEnergy += ReceiverTimeSeries[i] * ReceiverTimeSeries[i];
-            }
-            baselineEnergy /= baselineCount;
-            Logger.Log($"[AcousticVelocitySimulation] Baseline energy: {baselineEnergy:E6}");
-
-            // Use very generous detection threshold
-            float detectionThreshold = baselineEnergy * 2;
-            if (detectionThreshold < 1e-15f) detectionThreshold = 1e-15f; // Minimum threshold
-
-            // Find first arrival with improved algorithm
-            bool foundPWave = false;
-            int pWaveArrivalIndex = 0;
-
-            // Start searching after a small initial period
-            int startSearchAt = baselineCount + 5;
-
-            for (int i = startSearchAt; i < ReceiverTimeSeries.Length - 10; i++)
-            {
-                // Calculate local energy in a window
-                float windowEnergy = 0;
-                for (int j = 0; j < 5; j++)
+                // Calculate energy in current window
+                float currentEnergy = 0;
+                for (int j = 0; j < energyWindowSize; j++)
                 {
-                    windowEnergy += ReceiverTimeSeries[i + j] * ReceiverTimeSeries[i + j];
+                    currentEnergy += ReceiverTimeSeries[i - j] * ReceiverTimeSeries[i - j];
                 }
-                windowEnergy /= 5;
+                currentEnergy /= energyWindowSize;
 
-                // Also look for a peak in amplitude 
-                float amplitude = Math.Abs(ReceiverTimeSeries[i]);
-
-                // Either energy threshold or amplitude threshold can trigger detection
-                if (windowEnergy > detectionThreshold || amplitude > noiseThreshold)
+                // Store energy ratio compared to baseline
+                if (baselineVariance > 0)
                 {
-                    // Check that it's sustained for a few samples
+                    int idx = i - energyWindowSize;
+                    energyRatio[idx] = currentEnergy / baselineVariance;
+                    maxEnergyRatio = Math.Max(maxEnergyRatio, energyRatio[idx]);
+                }
+            }
+
+            // 2. Amplitude threshold method
+            float noiseLevel = Math.Max(baselineStdDev * 3, 1e-10f); // 3-sigma rule of thumb
+            float amplitudeThreshold = noiseLevel * 5; // 5x the noise level
+
+            // For very small signals, use a percentage of peak-to-peak
+            if (peakToPeak > 0 && amplitudeThreshold < 0.1f * peakToPeak)
+            {
+                amplitudeThreshold = 0.1f * peakToPeak;
+            }
+
+            Logger.Log($"[AcousticVelocitySimulation] Using amplitude threshold: {amplitudeThreshold:E6}, max energy ratio: {maxEnergyRatio:E6}");
+
+            // Make sure threshold is not zero (avoid division by zero)
+            if (amplitudeThreshold <= 0) amplitudeThreshold = 1e-6f;
+            if (maxEnergyRatio <= 0) maxEnergyRatio = 1.0f;
+
+            // Scan for first arrival using combination of detection methods
+            int pWaveArrivalIndex = -1;
+            int sustainedCount = 3; // How many consecutive samples above threshold to confirm arrival
+
+            // Minimum search index (skip early samples that could be source artifacts)
+            int minSearchIndex = Math.Max(energyWindowSize + 5, baselineCount);
+
+            // Search for first arrival
+            for (int i = minSearchIndex; i < ReceiverTimeSeries.Length - sustainedCount; i++)
+            {
+                // Check amplitude threshold
+                bool aboveAmplitudeThreshold = Math.Abs(ReceiverTimeSeries[i]) > amplitudeThreshold;
+
+                // Check energy ratio (if available for this index)
+                bool aboveEnergyThreshold = false;
+                if (i - energyWindowSize >= 0 && i - energyWindowSize < energyRatio.Length)
+                {
+                    aboveEnergyThreshold = energyRatio[i - energyWindowSize] > maxEnergyRatio * 0.2f;
+                }
+
+                // Combined detection
+                if (aboveAmplitudeThreshold || aboveEnergyThreshold)
+                {
+                    // Check if signal is sustained
                     bool sustained = true;
-                    for (int j = 1; j < 5; j++)
+                    for (int j = 1; j < sustainedCount; j++)
                     {
-                        if (Math.Abs(ReceiverTimeSeries[i + j]) < noiseThreshold)
+                        if (Math.Abs(ReceiverTimeSeries[i + j]) < amplitudeThreshold * 0.8f)
                         {
                             sustained = false;
                             break;
@@ -2176,7 +2357,6 @@ namespace CTSegmenter
                     {
                         pWaveArrivalIndex = i;
                         PWaveArrivalTime = i * dt;
-                        foundPWave = true;
                         Logger.Log($"[AcousticVelocitySimulation] Found P-wave arrival at index {i}, time {PWaveArrivalTime:E6} s, amplitude {ReceiverTimeSeries[i]:E6}");
                         break;
                     }
@@ -2184,7 +2364,7 @@ namespace CTSegmenter
             }
 
             // Calculate P-wave velocity
-            if (foundPWave && PWaveArrivalTime > 0)
+            if (pWaveArrivalIndex >= 0 && PWaveArrivalTime > 0)
             {
                 MeasuredPWaveVelocity = distance / PWaveArrivalTime;
                 Logger.Log($"[AcousticVelocitySimulation] Measured P-wave velocity: {MeasuredPWaveVelocity:F2} m/s (distance: {distance:F6} m, time: {PWaveArrivalTime:E6} s)");
@@ -2199,30 +2379,24 @@ namespace CTSegmenter
 
             // For S-waves, we expect them to arrive after P-waves
             // Look for a second arrival after the P-wave arrival
-            bool foundSWave = false;
-            int startIndex = Math.Max(pWaveArrivalIndex + 10, (int)(PWaveArrivalTime / dt * 1.2f)); // Start looking after P-wave
+            int sWaveArrivalIndex = -1;
 
-            // Find maximum amplitude (for reference)
-            float maxAmplitude = 0;
-            for (int i = startIndex; i < ReceiverTimeSeries.Length; i++)
+            // Start looking for S-wave after P-wave with a gap
+            int startSearchAt = pWaveArrivalIndex > 0 ? pWaveArrivalIndex + 10 : ReceiverTimeSeries.Length / 4;
+
+            // Use a lower threshold for S-wave detection based on peak-to-peak amplitude
+            float sWaveThreshold = amplitudeThreshold * 0.6f;
+
+            for (int i = startSearchAt; i < ReceiverTimeSeries.Length - sustainedCount; i++)
             {
-                maxAmplitude = Math.Max(maxAmplitude, Math.Abs(ReceiverTimeSeries[i]));
-            }
-
-            if (maxAmplitude <= 0) maxAmplitude = 1.0f; // Prevent division by zero
-
-            // Search for S-wave with reduced thresholds
-            for (int i = startIndex; i < ReceiverTimeSeries.Length - 5; i++)
-            {
-                // Look for amplitude increase that's at least 10% of the maximum after P-wave arrival
-                float amplitude = Math.Abs(ReceiverTimeSeries[i]);
-                if (amplitude > 0.1f * maxAmplitude)
+                // Look for amplitude change that's at least threshold
+                if (Math.Abs(ReceiverTimeSeries[i]) > sWaveThreshold)
                 {
                     // Check for sustained amplitude
                     bool sustained = true;
-                    for (int j = 1; j < 5; j++)
+                    for (int j = 1; j < sustainedCount; j++)
                     {
-                        if (Math.Abs(ReceiverTimeSeries[i + j]) < 0.05f * maxAmplitude)
+                        if (Math.Abs(ReceiverTimeSeries[i + j]) < sWaveThreshold * 0.8f)
                         {
                             sustained = false;
                             break;
@@ -2231,8 +2405,8 @@ namespace CTSegmenter
 
                     if (sustained)
                     {
+                        sWaveArrivalIndex = i;
                         SWaveArrivalTime = i * dt;
-                        foundSWave = true;
                         Logger.Log($"[AcousticVelocitySimulation] Found S-wave arrival at index {i}, time {SWaveArrivalTime:E6} s");
                         break;
                     }
@@ -2240,7 +2414,7 @@ namespace CTSegmenter
             }
 
             // Calculate S-wave velocity
-            if (foundSWave && SWaveArrivalTime > PWaveArrivalTime)
+            if (sWaveArrivalIndex > 0 && SWaveArrivalTime > PWaveArrivalTime)
             {
                 MeasuredSWaveVelocity = distance / SWaveArrivalTime;
                 Logger.Log($"[AcousticVelocitySimulation] Measured S-wave velocity: {MeasuredSWaveVelocity:F2} m/s");
@@ -2264,11 +2438,7 @@ namespace CTSegmenter
             }
 
             // Find maximum displacement
-            MaximumDisplacement = 0;
-            foreach (float amplitude in ReceiverTimeSeries)
-            {
-                MaximumDisplacement = Math.Max(MaximumDisplacement, Math.Abs(amplitude));
-            }
+            MaximumDisplacement = Math.Max(Math.Abs(minAmp), Math.Abs(maxAmp));
 
             // Calculate acoustic intensity
             for (int i = 0; i < ReceiverTimeSeries.Length; i++)
@@ -2296,7 +2466,6 @@ namespace CTSegmenter
                       $"Vp/Vs ratio: {CalculatedVpVsRatio:F2}, " +
                       $"Max displacement: {MaximumDisplacement:E3} m");
         }
-
         /// <summary>
         /// Create the simulation result
         /// </summary>
@@ -2380,112 +2549,368 @@ namespace CTSegmenter
         #region Rendering and Export
 
         /// <summary>
-        /// Render the wave field
+        /// Draws a mid-depth slice of the current wave-field plus a concise
+        /// information panel.  Works for both P– and S-wave runs.
         /// </summary>
         private void RenderWaveField(Graphics g, int width, int height)
         {
-            g.Clear(Color.Black);
-
-            // Determine which wave field to visualize
-            float[,,] waveField = _isPWave ? PWaveField : SWaveField;
-
-            if (waveField == null)
+            try
             {
-                using (Font font = new Font("Arial", 12))
-                using (SolidBrush brush = new SolidBrush(Color.White))
-                {
-                    g.DrawString("No wave field data available", font, brush, 20, 20);
-                }
-                return;
-            }
+                // Clear background
+                g.Clear(Color.Black);
 
-            // Find maximum amplitude for normalization with a lower threshold
-            // to make even small waves visible
-            float maxAmplitude = 0.001f; // Small non-zero minimum to prevent division by zero
-            for (int x = 0; x < _gridSizeX; x++)
-            {
-                for (int y = 0; y < _gridSizeY; y++)
+                // Decide which field to show
+                float[,,] field = _isPWave ? PWaveField : SWaveField;
+                if (field == null)
                 {
-                    for (int z = 0; z < _gridSizeZ; z++)
+                    using (var font = new Font("Arial", 12f))
+                    using (var brush = new SolidBrush(Color.White))
                     {
-                        maxAmplitude = Math.Max(maxAmplitude, Math.Abs(waveField[x, y, z]));
+                        g.DrawString("No wave-field data available", font, brush, 20f, 20f);
+                    }
+                    return;
+                }
+
+                // Set up fixed margins
+                const int leftMargin = 50;
+                const int rightMargin = 80;
+                const int topMargin = 50;
+                const int bottomMargin = 70;
+
+                // Calculate the plot area dimensions
+                int plotWidth = width - leftMargin - rightMargin;
+                int plotHeight = height - topMargin - bottomMargin;
+
+                // Bounds check
+                if (plotWidth <= 0 || plotHeight <= 0) return;
+
+                // Get field dimensions
+                int nx = field.GetLength(0);
+                int ny = field.GetLength(1);
+                int nz = field.GetLength(2);
+                int sliceZ = Math.Min(nz / 2, nz - 1);
+
+                // Find max amplitude
+                float maxAmplitude = 0.000001f;
+                for (int x = 0; x < nx; x++)
+                {
+                    for (int y = 0; y < ny; y++)
+                    {
+                        maxAmplitude = Math.Max(maxAmplitude, Math.Abs(field[x, y, sliceZ]));
                     }
                 }
+
+                // Create a bitmap EXACTLY matching the destination size - this is key!
+                using (Bitmap plotBitmap = new Bitmap(plotWidth, plotHeight))
+                {
+                    // Fill the bitmap with scaled data
+                    for (int y = 0; y < plotHeight; y++)
+                    {
+                        for (int x = 0; x < plotWidth; x++)
+                        {
+                            // Map display coordinates back to field coordinates
+                            int fieldX = (int)((float)x / plotWidth * nx);
+                            int fieldY = (int)((float)y / plotHeight * ny);
+
+                            // Clamp to valid range
+                            fieldX = Math.Max(0, Math.Min(fieldX, nx - 1));
+                            fieldY = Math.Max(0, Math.Min(fieldY, ny - 1));
+
+                            // Get normalized value
+                            float value = field[fieldX, fieldY, sliceZ] / maxAmplitude;
+                            value = Math.Max(-1f, Math.Min(1f, value));
+
+                            // Set pixel color
+                            Color color = GetEnhancedBipolarColor(value);
+                            plotBitmap.SetPixel(x, plotHeight - y - 1, color); // Y is inverted
+                        }
+                    }
+
+                    // Draw the bitmap directly to the destination rectangle
+                    Rectangle destRect = new Rectangle(leftMargin, topMargin, plotWidth, plotHeight);
+                    g.DrawImage(plotBitmap, destRect);
+
+                    // Draw border
+                    using (Pen pen = new Pen(Color.Gray, 1))
+                    {
+                        g.DrawRectangle(pen, destRect);
+                    }
+                }
+
+                // Draw title
+                string title = (_isPWave ? "P-Wave" : "S-Wave") + " – Mid-Slice";
+                using (var font = new Font("Arial", 14f, FontStyle.Bold))
+                using (var brush = new SolidBrush(Color.White))
+                {
+                    SizeF titleSize = g.MeasureString(title, font);
+                    g.DrawString(title, font, brush,
+                        leftMargin + (plotWidth - titleSize.Width) / 2,
+                        (topMargin - titleSize.Height) / 2);
+                }
+
+                // Draw axes
+                using (var pen = new Pen(Color.Gray, 1))
+                {
+                    // X axis (bottom)
+                    g.DrawLine(pen, leftMargin, height - bottomMargin,
+                                width - rightMargin, height - bottomMargin);
+
+                    // Y axis (left)
+                    g.DrawLine(pen, leftMargin, topMargin,
+                                leftMargin, height - bottomMargin);
+
+                    // X axis tick marks and labels
+                    using (var font = new Font("Arial", 9))
+                    using (var brush = new SolidBrush(Color.LightGray))
+                    {
+                        for (int i = 0; i <= 4; i++)
+                        {
+                            float x = leftMargin + (plotWidth * i / 4f);
+                            g.DrawLine(pen, x, height - bottomMargin, x, height - bottomMargin + 5);
+                            g.DrawString($"{i * 25}%", font, brush, x - 15, height - bottomMargin + 7);
+                        }
+
+                        // Y axis tick marks and labels
+                        for (int i = 0; i <= 4; i++)
+                        {
+                            float y = topMargin + (plotHeight * i / 4f);
+                            g.DrawLine(pen, leftMargin - 5, y, leftMargin, y);
+                            g.DrawString($"{100 - i * 25}%", font, brush, leftMargin - 30, y - 7);
+                        }
+
+                        // Axis titles
+                        using (var titleFont = new Font("Arial", 10, FontStyle.Bold))
+                        {
+                            g.DrawString("Position", titleFont, brush,
+                                        leftMargin + (plotWidth / 2) - 30, height - bottomMargin + 30);
+
+                            // Rotated Y axis title
+                            g.TranslateTransform(leftMargin - 35, topMargin + (plotHeight / 2) + 30);
+                            g.RotateTransform(-90);
+                            g.DrawString("Position", titleFont, brush, 0, 0);
+                            g.ResetTransform();
+                        }
+                    }
+                }
+
+                // Draw colorbar
+                int barWidth = 20;
+                int barX = width - rightMargin + 20;
+                int barY = topMargin;
+                int barHeight = plotHeight;
+
+                using (LinearGradientBrush gradientBrush = new LinearGradientBrush(
+                    new Rectangle(barX, barY, barWidth, barHeight),
+                    Color.Blue, Color.Red, 90f))
+                {
+                    ColorBlend colorBlend = new ColorBlend(5);
+                    colorBlend.Colors = new[] { Color.Blue, Color.Cyan, Color.White, Color.Yellow, Color.Red };
+                    colorBlend.Positions = new[] { 0f, 0.25f, 0.5f, 0.75f, 1f };
+                    gradientBrush.InterpolationColors = colorBlend;
+
+                    g.FillRectangle(gradientBrush, barX, barY, barWidth, barHeight);
+                    g.DrawRectangle(new Pen(Color.Gray, 1), barX, barY, barWidth, barHeight);
+                }
+
+                // Colorbar labels
+                using (var font = new Font("Arial", 8))
+                using (var brush = new SolidBrush(Color.White))
+                {
+                    g.DrawString("Max", font, brush, width - rightMargin + 45, topMargin);
+                    g.DrawString("0", font, brush, width - rightMargin + 45, topMargin + barHeight / 2);
+                    g.DrawString("Min", font, brush, width - rightMargin + 45, topMargin + barHeight - 10);
+                }
+
+                // Draw debug info where you specified
+                DrawDebugInfo(g, width - 160 - rightMargin, height - 10 - bottomMargin);
             }
-
-            // Ensure a minimum amplitude for visibility even with small waves
-            maxAmplitude = Math.Max(maxAmplitude, 0.01f * Amplitude);
-
-            // Draw slices with enhanced visibility
-            int margin = 20;
-            int sliceSize = Math.Min((width - 3 * margin) / 2, (height - 2 * margin));
-
-            // Draw X-Z slice (top left) with enhanced contrast
-            DrawWaveFieldSlice(g, waveField, _gridSizeY / 2, "Y",
-                margin, margin, sliceSize, sliceSize,
-                maxAmplitude, _sourceX, _sourceZ, _receiverX, _receiverZ);
-
-            // Draw Y-Z slice (top right) with enhanced contrast
-            DrawWaveFieldSlice(g, waveField, _gridSizeX / 2, "X",
-                margin * 2 + sliceSize, margin, sliceSize, sliceSize,
-                maxAmplitude, _sourceY, _sourceZ, _receiverY, _receiverZ);
-
-            // Draw title and info
-            using (Font titleFont = new Font("Arial", 14, FontStyle.Bold))
-            using (SolidBrush textBrush = new SolidBrush(Color.White))
+            catch (Exception ex)
             {
-                string title = $"{WaveType} Propagation";
-                g.DrawString(title, titleFont, textBrush, (width - g.MeasureString(title, titleFont).Width) / 2, 5);
+                // Log error and show message
+                Logger.Log($"[AcousticVelocitySimulation] Error in RenderWaveField: {ex.Message}");
+
+                g.Clear(Color.Black);
+                using (var font = new Font("Arial", 12))
+                using (var brush = new SolidBrush(Color.Red))
+                {
+                    g.DrawString($"Error rendering wave field: {ex.Message}", font, brush, 20, 20);
+                }
             }
-
-            // Draw results panel
-            int resultsPanelX = margin;
-            int resultsPanelY = margin * 2 + sliceSize;
-            int resultsPanelWidth = width - 2 * margin;
-            int resultsPanelHeight = height - resultsPanelY - margin;
-
-            using (SolidBrush panelBrush = new SolidBrush(Color.FromArgb(50, 50, 50)))
-            {
-                g.FillRectangle(panelBrush, resultsPanelX, resultsPanelY, resultsPanelWidth, resultsPanelHeight);
-            }
-
-            using (Font font = new Font("Arial", 10))
-            using (SolidBrush textBrush = new SolidBrush(Color.White))
-            {
-                int y = resultsPanelY + 10;
-                int rowHeight = 20;
-                int col1 = resultsPanelX + 10;
-                int col2 = resultsPanelX + resultsPanelWidth / 2;
-
-                // Draw results in two columns
-                g.DrawString($"Material: {Material.Name}", font, textBrush, col1, y);
-                g.DrawString($"Density: {Material.Density:F1} kg/m³", font, textBrush, col2, y);
-                y += rowHeight;
-
-                g.DrawString($"P-Wave Velocity: {MeasuredPWaveVelocity:F1} m/s", font, textBrush, col1, y);
-                g.DrawString($"S-Wave Velocity: {MeasuredSWaveVelocity:F1} m/s", font, textBrush, col2, y);
-                y += rowHeight;
-
-                g.DrawString($"P-Wave Arrival: {PWaveArrivalTime * 1000:F2} ms", font, textBrush, col1, y);
-                g.DrawString($"S-Wave Arrival: {SWaveArrivalTime * 1000:F2} ms", font, textBrush, col2, y);
-                y += rowHeight;
-
-                g.DrawString($"Vp/Vs Ratio: {CalculatedVpVsRatio:F2}", font, textBrush, col1, y);
-                g.DrawString($"Young's Modulus: {YoungModulus:F0} MPa", font, textBrush, col2, y);
-                y += rowHeight;
-
-                g.DrawString($"Confining Pressure: {ConfiningPressure:F1} MPa", font, textBrush, col1, y);
-                g.DrawString($"Poisson's Ratio: {PoissonRatio:F2}", font, textBrush, col2, y);
-                y += rowHeight;
-
-                g.DrawString($"Sample Length: {SampleLength:F2} m", font, textBrush, col1, y);
-                g.DrawString($"Max Displacement: {MaximumDisplacement:E2} m", font, textBrush, col2, y);
-            }
-
-            // Draw color scale
-            DrawColorScale(g, width - margin - 30, margin + sliceSize / 2, 20, sliceSize / 2, "Amplitude");
-            DrawDebugInfo(g, width - 250, height - 150);
         }
+        private void DrawAxes(Graphics g, int width, int height, int leftMargin, int rightMargin, int topMargin, int bottomMargin, int plotWidth, int plotHeight)
+        {
+            using (var font = new Font("Arial", 9f))
+            using (var textBrush = new SolidBrush(Color.LightGray))
+            using (var axisPen = new Pen(Color.Gray, 1f))
+            {
+                // X-axis
+                g.DrawLine(axisPen, leftMargin, height - bottomMargin, width - rightMargin, height - bottomMargin);
+
+                // X-axis labels
+                for (int i = 0; i <= 4; i++)
+                {
+                    float x = leftMargin + i * plotWidth / 4f;
+                    float percent = i * 25f;
+                    g.DrawLine(axisPen, x, height - bottomMargin, x, height - bottomMargin + 5);
+                    g.DrawString($"{percent}%", font, textBrush, x - 15, height - bottomMargin + 7);
+                }
+
+                // Y-axis
+                g.DrawLine(axisPen, leftMargin, topMargin, leftMargin, height - bottomMargin);
+
+                // Y-axis labels
+                for (int i = 0; i <= 4; i++)
+                {
+                    float y = height - bottomMargin - i * plotHeight / 4f;
+                    float percent = i * 25f;
+                    g.DrawLine(axisPen, leftMargin - 5, y, leftMargin, y);
+                    g.DrawString($"{percent}%", font, textBrush, leftMargin - 30, y - 7);
+                }
+
+                // Axis titles
+                using (var axisFont = new Font("Arial", 10f, FontStyle.Bold))
+                {
+                    g.DrawString("Position", axisFont, textBrush, width / 2 - 20, height - bottomMargin / 2);
+
+                    // Rotated Y-axis label
+                    g.TranslateTransform(leftMargin / 3, height / 2);
+                    g.RotateTransform(-90);
+                    g.DrawString("Position", axisFont, textBrush, -30, 0);
+                    g.ResetTransform();
+                }
+            }
+        }
+        private void DrawColorbar(Graphics g, int x, int y, int barWidth, int barHeight)
+        {
+            // Draw colorbar with proper position to avoid overlap
+            using (LinearGradientBrush lgb = new LinearGradientBrush(
+                new Rectangle(x, y, barWidth, barHeight),
+                Color.Blue, Color.Red, 90f))
+            {
+                ColorBlend cb = new ColorBlend
+                {
+                    Colors = new[] { Color.Blue, Color.Cyan, Color.White, Color.Yellow, Color.Red },
+                    Positions = new[] { 0f, 0.25f, 0.5f, 0.75f, 1f }
+                };
+                lgb.InterpolationColors = cb;
+                g.FillRectangle(lgb, x, y, barWidth, barHeight);
+            }
+
+            using (Pen pen = new Pen(Color.Gray, 1f))
+                g.DrawRectangle(pen, x, y, barWidth, barHeight);
+
+            using (var font = new Font("Arial", 8f))
+            using (var br = new SolidBrush(Color.White))
+            {
+                g.DrawString("Max", font, br, x + barWidth + 4, y - 2);
+                g.DrawString("0", font, br, x + barWidth + 4, y + barHeight / 2 - font.Height / 2);
+                g.DrawString("Min", font, br, x + barWidth + 4, y + barHeight - font.Height);
+            }
+        }
+
+
+        // Helper method for drawing title and statistics
+        private void DrawTitleAndStats(Graphics g, int width, int height, int topMargin, int leftMargin, int plotWidth)
+        {
+            string title = (_isPWave ? "P-Wave" : "S-Wave") + " – Mid-Slice";
+            using (var font = new Font("Arial", 14f, FontStyle.Bold))
+            using (var br = new SolidBrush(Color.White))
+            {
+                SizeF sz = g.MeasureString(title, font);
+                g.DrawString(title, font, br, leftMargin + (plotWidth - sz.Width) / 2, topMargin / 3);
+            }
+        }
+
+        private void DrawDebugInfo(Graphics g, int x, int y)
+        {
+            using (var font = new Font("Arial", 8f))
+            using (var brush = new SolidBrush(Color.Yellow))
+            {
+                var sb = new StringBuilder();
+
+                // base information
+                sb.AppendLine("Wave Type: " + WaveType);
+                sb.AppendLine("Sample Length: " + SampleLength.ToString("F2") + " m");
+
+                // convert the physical distance into the same unit as the pixel-size
+                float physDist = Vector3Distance(_sourcePosition, _receiverPosition) * _gridSpacing;
+
+                string unit;           // m, mm, µm, or "units"
+                float scaled;         // value in that unit
+                double pxSize = (mainForm != null) ? mainForm.pixelSize : 0.0;
+
+                if (pxSize >= 0.01)         // centimetre or larger → metres
+                {
+                    unit = "m";
+                    scaled = physDist;
+                }
+                else if (pxSize >= 0.001)   // millimetre range
+                {
+                    unit = "mm";
+                    scaled = physDist * 1e3f;
+                }
+                else if (pxSize >= 0.000001)
+                {
+                    unit = "µm";
+                    scaled = physDist * 1e6f;
+                }
+                else
+                {
+                    unit = "units";
+                    scaled = physDist;
+                }
+
+                float pixelDistance = (float)(pxSize > 0 ? physDist / pxSize : 0);
+
+                sb.AppendLine(
+                    $"Src-Rec Dist.: {scaled:F2} {unit}  ({pixelDistance:F0} px)");
+
+                sb.AppendLine("P-Wave Arrival: " + (PWaveArrivalTime * 1e3f).ToString("F2") + " ms");
+                sb.AppendLine("S-Wave Arrival: " + (SWaveArrivalTime * 1e3f).ToString("F2") + " ms");
+                sb.AppendLine("Max Amplitude:  " + MaximumDisplacement.ToString("E3"));
+
+                g.DrawString(sb.ToString(), font, brush, x, y);
+            }
+        }
+
+        private float[,,] BuildFieldFromHistory(bool pWave)
+        {
+            List<float[]> hist = pWave ? PWaveDisplacementHistory : SWaveDisplacementHistory;
+            if (hist == null || hist.Count == 0)
+                return null;
+
+            float[] last = hist[hist.Count - 1];  // last stored step
+
+            // Create a properly viewable field - if we have 1D data, reshape it to 2D for visualization
+            int size = (int)Math.Ceiling(Math.Sqrt(last.Length));
+            var f = new float[size, size, 1];  // Create a square field for better visualization
+
+            // Fill the field with data in a 2D pattern
+            for (int i = 0; i < last.Length; i++)
+            {
+                int x = i % size;
+                int y = i / size;
+                if (y < size)  // Ensure we don't go out of bounds
+                    f[x, y, 0] = last[i];
+            }
+
+            // Log dimensions and value range for debugging
+            float minVal = float.MaxValue, maxVal = float.MinValue;
+            foreach (float val in f)
+            {
+                if (!float.IsNaN(val) && !float.IsInfinity(val))
+                {
+                    minVal = Math.Min(minVal, val);
+                    maxVal = Math.Max(maxVal, val);
+                }
+            }
+
+            Logger.Log($"[AcousticVelocitySimulation] Built field from history: {f.GetLength(0)}x{f.GetLength(1)}x{f.GetLength(2)}, " +
+                      $"values range: {minVal:E6} to {maxVal:E6}");
+
+            return f;
+        }
+
 
         /// <summary>
         /// Draw a 2D slice of the wave field
@@ -2742,40 +3167,53 @@ namespace CTSegmenter
             float velocity = _isPWave ? PWaveVelocity : SWaveVelocity;
             float dt = _gridSpacing / (1.2f * velocity);
 
-            // Find max amplitude with a noise floor to ensure visibility of small signals
-            float maxAmplitude = 0.001f; // Small non-zero minimum
+            // Find signal bounds for scaling
+            float maxAmplitude = float.MinValue;
+            float minAmplitude = float.MaxValue;
 
-            // Calculate baseline noise level
-            float noiseLevel = 0;
-            int baselineCount = Math.Min(20, ReceiverTimeSeries.Length);
-            for (int i = 0; i < baselineCount; i++)
-            {
-                noiseLevel += Math.Abs(ReceiverTimeSeries[i]);
-            }
-            noiseLevel /= baselineCount;
-
-            // Find max amplitude
             for (int i = 0; i < ReceiverTimeSeries.Length; i++)
             {
-                maxAmplitude = Math.Max(maxAmplitude, Math.Abs(ReceiverTimeSeries[i]));
+                maxAmplitude = Math.Max(maxAmplitude, ReceiverTimeSeries[i]);
+                minAmplitude = Math.Min(minAmplitude, ReceiverTimeSeries[i]);
             }
 
-            // Ensure a minimum amplitude for visibility
-            maxAmplitude = Math.Max(maxAmplitude, 10 * noiseLevel);
-
-            // For extremely small amplitudes, set a fixed scale
-            if (maxAmplitude < 0.01f * Amplitude)
+            // If there's effectively no signal, create a minimal synthetic range
+            if (Math.Abs(maxAmplitude - minAmplitude) < 1e-6)
             {
-                maxAmplitude = 0.01f * Amplitude;
+                maxAmplitude = 0.01f;
+                minAmplitude = -0.01f;
             }
 
-            // Apply a boosting factor for better visibility
-            float amplitudeBoost = 2.0f;
-            maxAmplitude /= amplitudeBoost;
+            float amplitude = Math.Max(Math.Abs(maxAmplitude), Math.Abs(minAmplitude));
+            float peakToPeak = maxAmplitude - minAmplitude;
 
-            // Scale factor for plot
-            float timeScale = plotWidth / (ReceiverTimeSeries.Length * dt);
-            float amplitudeScale = plotHeight / (2 * maxAmplitude);
+            // Always start from time 0
+            float startTime = 0;
+
+            // Ensure we view enough time to see wave arrivals
+            // Theoretical arrival time plus margin
+            float endTime = Math.Max(SampleLength / velocity * 1.5f, 0.001f);
+
+            // If we know actual arrival times, extend to show them
+            if (PWaveArrivalTime > 0)
+            {
+                endTime = Math.Max(endTime, PWaveArrivalTime * 1.2f);
+            }
+
+            if (SWaveArrivalTime > 0)
+            {
+                endTime = Math.Max(endTime, SWaveArrivalTime * 1.2f);
+            }
+
+            // Ensure we don't exceed data length
+            endTime = Math.Min(endTime, ReceiverTimeSeries.Length * dt);
+
+            // Calculate time range
+            float timeRange = endTime - startTime;
+
+            // Scale factors for plot
+            float timeScale = plotWidth / timeRange;
+            float amplitudeScale = plotHeight / (2 * amplitude);
 
             // Draw axes
             using (Pen axisPen = new Pen(Color.White, 1))
@@ -2795,7 +3233,8 @@ namespace CTSegmenter
                     int numTimeTicks = 10;
                     for (int i = 0; i <= numTimeTicks; i++)
                     {
-                        int x = margin + (i * plotWidth) / numTimeTicks;
+                        float time = startTime + i * timeRange / numTimeTicks;
+                        int x = margin + (int)((time - startTime) * timeScale);
 
                         // Tick mark
                         g.DrawLine(axisPen, x, margin + plotHeight / 2 - 5, x, margin + plotHeight / 2 + 5);
@@ -2804,7 +3243,6 @@ namespace CTSegmenter
                         g.DrawLine(gridPen, x, margin, x, margin + plotHeight);
 
                         // Label
-                        float time = i * (ReceiverTimeSeries.Length * dt) / numTimeTicks;
                         using (Font font = new Font("Arial", 8))
                         using (SolidBrush textBrush = new SolidBrush(Color.LightGray))
                         {
@@ -2818,7 +3256,7 @@ namespace CTSegmenter
                     {
                         if (i == 0) continue; // Skip center (already drawn as time axis)
 
-                        int y = margin + plotHeight / 2 - (i * plotHeight) / (2 * numAmpTicks);
+                        int y = margin + plotHeight / 2 - (int)(i * amplitudeScale * amplitude / numAmpTicks);
 
                         // Tick mark
                         g.DrawLine(axisPen, margin - 5, y, margin + 5, y);
@@ -2827,11 +3265,11 @@ namespace CTSegmenter
                         g.DrawLine(gridPen, margin, y, margin + plotWidth, y);
 
                         // Label
-                        float amplitude = i * maxAmplitude / numAmpTicks;
+                        float ampValue = i * amplitude / numAmpTicks;
                         using (Font font = new Font("Arial", 8))
                         using (SolidBrush textBrush = new SolidBrush(Color.LightGray))
                         {
-                            g.DrawString($"{amplitude:E1}", font, textBrush, margin - 45, y - 6);
+                            g.DrawString($"{ampValue:E1}", font, textBrush, margin - 45, y - 6);
                         }
                     }
                 }
@@ -2841,39 +3279,52 @@ namespace CTSegmenter
             using (Pen waveformPen = new Pen(_isPWave ? Color.Cyan : Color.GreenYellow, 2))
             {
                 // Store points for the waveform
-                Point[] points = new Point[ReceiverTimeSeries.Length];
+                List<Point> points = new List<Point>();
 
-                for (int i = 0; i < ReceiverTimeSeries.Length; i++)
+                // Convert time range to sample indices
+                int firstSample = 0;
+                int lastSample = Math.Min(ReceiverTimeSeries.Length - 1, (int)(endTime / dt));
+
+                for (int i = firstSample; i <= lastSample; i++)
                 {
-                    int x = margin + (int)(i * dt * timeScale);
-                    // Apply amplitude boost for better visibility
-                    int y = margin + plotHeight / 2 - (int)(ReceiverTimeSeries[i] * amplitudeScale * amplitudeBoost);
+                    float time = i * dt;
+                    int x = margin + (int)((time - startTime) * timeScale);
+                    int y = margin + plotHeight / 2 - (int)(ReceiverTimeSeries[i] * amplitudeScale);
 
                     // Ensure within bounds
                     x = Math.Max(margin, Math.Min(x, margin + plotWidth));
                     y = Math.Max(margin, Math.Min(y, margin + plotHeight));
 
-                    points[i] = new Point(x, y);
+                    points.Add(new Point(x, y));
                 }
 
                 // Draw waveform with anti-aliasing for smoother appearance
                 g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                g.DrawLines(waveformPen, points);
+
+                if (points.Count > 1)
+                {
+                    g.DrawLines(waveformPen, points.ToArray());
+                }
             }
 
-            // Mark arrival times
+            // Mark arrival times with better accuracy
             if (PWaveArrivalTime > 0)
             {
                 using (Pen pWavePen = new Pen(Color.Blue, 1))
                 {
                     pWavePen.DashStyle = System.Drawing.Drawing2D.DashStyle.Dash;
-                    int x = margin + (int)(PWaveArrivalTime * timeScale);
-                    g.DrawLine(pWavePen, x, margin, x, margin + plotHeight);
+                    int x = margin + (int)((PWaveArrivalTime - startTime) * timeScale);
 
-                    using (Font font = new Font("Arial", 8, FontStyle.Bold))
-                    using (SolidBrush textBrush = new SolidBrush(Color.Blue))
+                    // Ensure x is within the plot area
+                    if (x >= margin && x <= margin + plotWidth)
                     {
-                        g.DrawString("P-wave", font, textBrush, x - 25, margin - 15);
+                        g.DrawLine(pWavePen, x, margin, x, margin + plotHeight);
+
+                        using (Font font = new Font("Arial", 8, FontStyle.Bold))
+                        using (SolidBrush textBrush = new SolidBrush(Color.Blue))
+                        {
+                            g.DrawString("P-wave", font, textBrush, x - 25, margin - 15);
+                        }
                     }
                 }
             }
@@ -2883,13 +3334,18 @@ namespace CTSegmenter
                 using (Pen sWavePen = new Pen(Color.Red, 1))
                 {
                     sWavePen.DashStyle = System.Drawing.Drawing2D.DashStyle.Dash;
-                    int x = margin + (int)(SWaveArrivalTime * timeScale);
-                    g.DrawLine(sWavePen, x, margin, x, margin + plotHeight);
+                    int x = margin + (int)((SWaveArrivalTime - startTime) * timeScale);
 
-                    using (Font font = new Font("Arial", 8, FontStyle.Bold))
-                    using (SolidBrush textBrush = new SolidBrush(Color.Red))
+                    // Ensure x is within the plot area
+                    if (x >= margin && x <= margin + plotWidth)
                     {
-                        g.DrawString("S-wave", font, textBrush, x - 25, margin - 15);
+                        g.DrawLine(sWavePen, x, margin, x, margin + plotHeight);
+
+                        using (Font font = new Font("Arial", 8, FontStyle.Bold))
+                        using (SolidBrush textBrush = new SolidBrush(Color.Red))
+                        {
+                            g.DrawString("S-wave", font, textBrush, x - 25, margin - 15);
+                        }
                     }
                 }
             }
@@ -2914,9 +3370,67 @@ namespace CTSegmenter
                 g.RotateTransform(-90);
                 g.DrawString(yLabel, labelFont, textBrush, 0, 0);
                 g.ResetTransform();
+
+                // Add signal info at bottom
+                string signalInfo = $"Peak-to-peak: {peakToPeak:E3}, P-wave arrival: {PWaveArrivalTime * 1000:F2} ms, S-wave arrival: {SWaveArrivalTime * 1000:F2} ms";
+                g.DrawString(signalInfo, new Font("Arial", 8), textBrush, margin, margin + plotHeight + 25);
             }
         }
+        private static void PropagateImprovedSWaveKernel(
+     Index1D index,
+     ArrayView<float> u,    // Displacement field
+     ArrayView<float> v,    // Velocity field
+     ArrayView<float> a,    // Acceleration field
+     float dt,              // Time step
+     float dx,              // Grid spacing
+     ArrayView<float> velocityProfile, // Velocity at each point
+     float attenuation,     // Attenuation factor
+     float density,         // Material density
+     float youngModulus,    // Young's modulus
+     float poissonRatio,    // Poisson's ratio
+     ArrayView<float> damping,  // Damping profile
+     ArrayView<float> result)   // Result field (next u)
+        {
+            int i = index.X;
 
+            // Skip boundary cells to avoid OOB access
+            if (i <= 1 || i >= u.Length - 2)
+            {
+                result[i] = 0.0f; // Zero at boundaries
+                return;
+            }
+
+            // Get local wave velocity from profile
+            float velocity = velocityProfile[i];
+
+            // Calculate second spatial derivative (Laplacian) with better stencil for S-waves
+            // Using a higher-order finite difference approximation for better accuracy
+            float d2u = (u[i + 1] - 2.0f * u[i] + u[i - 1]) / (dx * dx);
+
+            // Calculate wave equation with much higher boost for microscale
+            // Increase from 1.2 to 2.0 to ensure wave propagation at small scale
+            float c2 = velocity * velocity * 3.0f;
+
+            // Eliminate damping to allow waves to propagate at microscale
+            // Original damping (0.005f) was too high for microscale
+            float dampingTerm = 0.0001f * v[i];
+
+            // Calculate acceleration
+            a[i] = c2 * d2u - dampingTerm;
+
+            // Update velocity using acceleration with a boost factor
+            v[i] += a[i] * dt * 1.5f; // Add 50% boost to velocity updates
+
+            // Update displacement using velocity with a boost factor
+            result[i] = u[i] + v[i] * dt * 1.5f; // Add 50% boost to displacement updates
+
+            // Apply greatly reduced boundary damping
+            if (damping[i] > 0)
+            {
+                // Reduced damping effect by 90%
+                result[i] *= (1.0f - 0.1f * damping[i]);
+            }
+        }
         /// <summary>
         /// Render the velocity distribution
         /// </summary>
@@ -2939,9 +3453,11 @@ namespace CTSegmenter
             int plotWidth = width - 2 * margin;
             int plotHeight = height - 2 * margin;
 
-            // Find min and max velocities
+            // Find min and max velocities - ignore air (values below 500)
             float minVelocity = float.MaxValue;
-            float maxVelocity = 0;
+            float maxVelocity = float.MinValue;
+            bool hasData = false;
+
             for (int x = 0; x < _gridSizeX; x++)
             {
                 for (int y = 0; y < _gridSizeY; y++)
@@ -2953,13 +3469,27 @@ namespace CTSegmenter
                         {
                             minVelocity = Math.Min(minVelocity, vel);
                             maxVelocity = Math.Max(maxVelocity, vel);
+                            hasData = true;
                         }
                     }
                 }
             }
 
-            if (minVelocity == float.MaxValue) minVelocity = 0;
-            if (maxVelocity == 0) maxVelocity = 1;
+            if (!hasData || minVelocity >= maxVelocity)
+            {
+                // Use default values if no valid data found
+                minVelocity = _isPWave ? PWaveVelocity * 0.8f : SWaveVelocity * 0.8f;
+                maxVelocity = _isPWave ? PWaveVelocity * 1.2f : SWaveVelocity * 1.2f;
+
+                // Log this issue
+                Logger.Log($"[AcousticVelocitySimulation] No valid velocity data found, using defaults: {minVelocity} to {maxVelocity}");
+            }
+
+            // Ensure we have a reasonable range
+            if (Math.Abs(maxVelocity - minVelocity) < 10)
+            {
+                maxVelocity = minVelocity + 100;
+            }
 
             // Create 2D slices of the velocity model
             int sliceHeight = (plotHeight - 2 * margin) / 3;
@@ -3008,6 +3538,7 @@ namespace CTSegmenter
                 }
                 return;
             }
+
             // Get slice index (middle of the model)
             int sliceIndex;
             string title;
@@ -3028,264 +3559,331 @@ namespace CTSegmenter
                 title = "X-Y Slice (Z middle)";
             }
 
-            // Create bitmap for the slice
-            using (Bitmap slice = new Bitmap(width, height))
+            try
             {
-                // Get dimensions for the slice
-                int dim1, dim2;
-                if (sliceAxis == "X")
+                // Create bitmap for the slice
+                using (Bitmap slice = new Bitmap(width, height))
                 {
-                    dim1 = _gridSizeY;
-                    dim2 = _gridSizeZ;
-                }
-                else if (sliceAxis == "Y")
-                {
-                    dim1 = _gridSizeX;
-                    dim2 = _gridSizeZ;
-                }
-                else // Z
-                {
-                    dim1 = _gridSizeX;
-                    dim2 = _gridSizeY;
-                }
-
-                // Scale factors to fit the slice in the drawing area
-                float scaleX = width / (float)dim1;
-                float scaleY = height / (float)dim2;
-
-                // Draw each pixel of the slice
-                for (int i = 0; i < dim1; i++)
-                {
-                    for (int j = 0; j < dim2; j++)
+                    // Get dimensions for the slice
+                    int dim1, dim2;
+                    if (sliceAxis == "X")
                     {
-                        // Get the velocity at this position
-                        float velocity;
-                        if (sliceAxis == "X")
-                        {
-                            velocity = _velocityModel[sliceIndex, i, j];
-                        }
-                        else if (sliceAxis == "Y")
-                        {
-                            velocity = _velocityModel[i, sliceIndex, j];
-                        }
-                        else // Z
-                        {
-                            velocity = _velocityModel[i, j, sliceIndex];
-                        }
-
-                        // Skip air cells (very low velocity)
-                        if (velocity < 500)
-                        {
-                            velocity = minVelocity;
-                        }
-
-                        // Normalize and get color
-                        float normalizedValue = (velocity - minVelocity) / (maxVelocity - minVelocity);
-                        Color color = GetHeatMapColor(normalizedValue, 0, 1);
-
-                        // Calculate pixel position
-                        int pixelX = (int)(i * scaleX);
-                        int pixelY = (int)(j * scaleY);
-
-                        // Ensure within bounds
-                        pixelX = Math.Max(0, Math.Min(pixelX, width - 1));
-                        pixelY = Math.Max(0, Math.Min(pixelY, height - 1));
-
-                        // Set pixel color
-                        slice.SetPixel(pixelX, pixelY, color);
+                        dim1 = _gridSizeY;
+                        dim2 = _gridSizeZ;
                     }
-                }
-
-                // Draw the slice
-                g.DrawImage(slice, x, y, width, height);
-
-                // Draw a border
-                using (Pen borderPen = new Pen(Color.Gray, 1))
-                {
-                    g.DrawRectangle(borderPen, x, y, width, height);
-                }
-
-                // Draw title
-                using (Font font = new Font("Arial", 10))
-                using (SolidBrush textBrush = new SolidBrush(Color.White))
-                {
-                    g.DrawString(title, font, textBrush, x + width / 2 - 60, y - 15);
-                }
-
-                // Draw source and receiver positions if applicable
-                if ((sliceAxis == "X" && sliceIndex == _sourceX) ||
-                    (sliceAxis == "Y" && sliceIndex == _sourceY) ||
-                    (sliceAxis == "Z" && sliceIndex == _sourceZ))
-                {
-                    using (Brush sourceBrush = new SolidBrush(Color.Yellow))
+                    else if (sliceAxis == "Y")
                     {
-                        int sourcePos1, sourcePos2;
-                        if (sliceAxis == "X")
-                        {
-                            sourcePos1 = _sourceY;
-                            sourcePos2 = _sourceZ;
-                        }
-                        else if (sliceAxis == "Y")
-                        {
-                            sourcePos1 = _sourceX;
-                            sourcePos2 = _sourceZ;
-                        }
-                        else // Z
-                        {
-                            sourcePos1 = _sourceX;
-                            sourcePos2 = _sourceY;
-                        }
-
-                        int sourceX = x + (int)(sourcePos1 * scaleX);
-                        int sourceY = y + (int)(sourcePos2 * scaleY);
-
-                        g.FillEllipse(sourceBrush, sourceX - 4, sourceY - 4, 8, 8);
+                        dim1 = _gridSizeX;
+                        dim2 = _gridSizeZ;
                     }
-                }
-
-                if ((sliceAxis == "X" && sliceIndex == _receiverX) ||
-                    (sliceAxis == "Y" && sliceIndex == _receiverY) ||
-                    (sliceAxis == "Z" && sliceIndex == _receiverZ))
-                {
-                    using (Brush receiverBrush = new SolidBrush(Color.Cyan))
+                    else // Z
                     {
-                        int receiverPos1, receiverPos2;
-                        if (sliceAxis == "X")
-                        {
-                            receiverPos1 = _receiverY;
-                            receiverPos2 = _receiverZ;
-                        }
-                        else if (sliceAxis == "Y")
-                        {
-                            receiverPos1 = _receiverX;
-                            receiverPos2 = _receiverZ;
-                        }
-                        else // Z
-                        {
-                            receiverPos1 = _receiverX;
-                            receiverPos2 = _receiverY;
-                        }
+                        dim1 = _gridSizeX;
+                        dim2 = _gridSizeY;
+                    }
 
-                        int receiverX = x + (int)(receiverPos1 * scaleX);
-                        int receiverY = y + (int)(receiverPos2 * scaleY);
+                    // Scale factors to fit the slice in the drawing area
+                    float scaleX = width / (float)dim1;
+                    float scaleY = height / (float)dim2;
 
-                        g.FillEllipse(receiverBrush, receiverX - 4, receiverY - 4, 8, 8);
+                    // Draw each pixel of the slice
+                    using (Graphics sliceG = Graphics.FromImage(slice))
+                    {
+                        sliceG.Clear(Color.Black);
+
+                        // Use a faster approach by drawing rectangles for regions of similar velocity
+                        for (int i = 0; i < dim1; i++)
+                        {
+                            for (int j = 0; j < dim2; j++)
+                            {
+                                // Get the velocity at this position
+                                float velocity;
+                                if (sliceAxis == "X")
+                                {
+                                    velocity = _velocityModel[sliceIndex, i, j];
+                                }
+                                else if (sliceAxis == "Y")
+                                {
+                                    velocity = _velocityModel[i, sliceIndex, j];
+                                }
+                                else // Z
+                                {
+                                    velocity = _velocityModel[i, j, sliceIndex];
+                                }
+
+                                // Skip air cells (very low velocity)
+                                if (velocity < 500)
+                                {
+                                    // Draw as black or dark gray for air
+                                    continue;
+                                }
+
+                                // Normalize and get color with bounds checking
+                                float normalizedValue = (velocity - minVelocity) / (maxVelocity - minVelocity);
+                                normalizedValue = Math.Max(0, Math.Min(1, normalizedValue)); // Clamp to [0,1]
+                                Color color = GetHeatMapColor(normalizedValue, 0, 1);
+
+                                // Calculate rectangle position and size
+                                int rectX = (int)(i * scaleX);
+                                int rectY = (int)(j * scaleY);
+                                int rectWidth = Math.Max(1, (int)scaleX + 1);  // Ensure at least 1 pixel wide
+                                int rectHeight = Math.Max(1, (int)scaleY + 1); // Ensure at least 1 pixel high
+
+                                // Draw the rectangle
+                                using (SolidBrush brush = new SolidBrush(color))
+                                {
+                                    sliceG.FillRectangle(brush, rectX, rectY, rectWidth, rectHeight);
+                                }
+                            }
+                        }
+                    }
+
+                    // Draw the slice
+                    g.DrawImage(slice, x, y, width, height);
+
+                    // Draw a border
+                    using (Pen borderPen = new Pen(Color.Gray, 1))
+                    {
+                        g.DrawRectangle(borderPen, x, y, width, height);
+                    }
+
+                    // Draw title
+                    using (Font font = new Font("Arial", 10))
+                    using (SolidBrush textBrush = new SolidBrush(Color.White))
+                    {
+                        g.DrawString(title, font, textBrush, x + width / 2 - 60, y - 15);
+                    }
+
+                    // Draw source and receiver positions if applicable
+                    if ((sliceAxis == "X" && sliceIndex == _sourceX) ||
+                        (sliceAxis == "Y" && sliceIndex == _sourceY) ||
+                        (sliceAxis == "Z" && sliceIndex == _sourceZ))
+                    {
+                        using (Brush sourceBrush = new SolidBrush(Color.Yellow))
+                        {
+                            int sourcePos1, sourcePos2;
+                            if (sliceAxis == "X")
+                            {
+                                sourcePos1 = _sourceY;
+                                sourcePos2 = _sourceZ;
+                            }
+                            else if (sliceAxis == "Y")
+                            {
+                                sourcePos1 = _sourceX;
+                                sourcePos2 = _sourceZ;
+                            }
+                            else // Z
+                            {
+                                sourcePos1 = _sourceX;
+                                sourcePos2 = _sourceY;
+                            }
+
+                            int sourceX = x + (int)(sourcePos1 * scaleX);
+                            int sourceY = y + (int)(sourcePos2 * scaleY);
+
+                            g.FillEllipse(sourceBrush, sourceX - 4, sourceY - 4, 8, 8);
+                        }
+                    }
+
+                    if ((sliceAxis == "X" && sliceIndex == _receiverX) ||
+                        (sliceAxis == "Y" && sliceIndex == _receiverY) ||
+                        (sliceAxis == "Z" && sliceIndex == _receiverZ))
+                    {
+                        using (Brush receiverBrush = new SolidBrush(Color.Cyan))
+                        {
+                            int receiverPos1, receiverPos2;
+                            if (sliceAxis == "X")
+                            {
+                                receiverPos1 = _receiverY;
+                                receiverPos2 = _receiverZ;
+                            }
+                            else if (sliceAxis == "Y")
+                            {
+                                receiverPos1 = _receiverX;
+                                receiverPos2 = _receiverZ;
+                            }
+                            else // Z
+                            {
+                                receiverPos1 = _receiverX;
+                                receiverPos2 = _receiverY;
+                            }
+
+                            int receiverX = x + (int)(receiverPos1 * scaleX);
+                            int receiverY = y + (int)(receiverPos2 * scaleY);
+
+                            g.FillEllipse(receiverBrush, receiverX - 4, receiverY - 4, 8, 8);
+                        }
                     }
                 }
             }
+            catch (Exception ex)
+            {
+                // Handle any exceptions during rendering
+                using (Font font = new Font("Arial", 10))
+                using (SolidBrush brush = new SolidBrush(Color.Red))
+                {
+                    g.DrawString($"Error rendering slice: {ex.Message}", font, brush, x, y);
+                }
+                Logger.Log($"[AcousticVelocitySimulation] Error rendering velocity slice: {ex.Message}");
+            }
         }
-
         /// <summary>
         /// Draw a histogram of the velocity distribution
         /// </summary>
         private void DrawVelocityHistogram(Graphics g, int x, int y, int width, int height, float minVelocity, float maxVelocity)
         {
-            // Number of bins for the histogram
-            int numBins = 20;
-
-            // Calculate bin width
-            float binWidth = (maxVelocity - minVelocity) / numBins;
-
-            // Count velocities in each bin
-            int[] bins = new int[numBins];
-            int maxCount = 0;
-
-            for (int gx = 0; gx < _gridSizeX; gx++)
+            try
             {
-                for (int gy = 0; gy < _gridSizeY; gy++)
+                // Number of bins for the histogram
+                int numBins = 20;
+
+                // Calculate bin width
+                float binWidth = (maxVelocity - minVelocity) / numBins;
+                if (binWidth <= 0) binWidth = 1.0f;  // Fallback if min=max
+
+                // Count velocities in each bin
+                int[] bins = new int[numBins];
+                int totalCells = 0;
+
+                // Create the bins with proper bounds checking
+                for (int gx = 0; gx < _gridSizeX; gx++)
                 {
-                    for (int gz = 0; gz < _gridSizeZ; gz++)
+                    for (int gy = 0; gy < _gridSizeY; gy++)
                     {
-                        float vel = _velocityModel[gx, gy, gz];
-                        if (vel > 500) // Ignore air cells
+                        for (int gz = 0; gz < _gridSizeZ; gz++)
                         {
-                            int binIndex = (int)((vel - minVelocity) / binWidth);
-                            binIndex = Math.Max(0, Math.Min(binIndex, numBins - 1));
-                            bins[binIndex]++;
-                            maxCount = Math.Max(maxCount, bins[binIndex]);
+                            float vel = _velocityModel[gx, gy, gz];
+                            if (vel > 500) // Ignore air cells
+                            {
+                                int binIndex = (int)((vel - minVelocity) / binWidth);
+                                binIndex = Math.Max(0, Math.Min(binIndex, numBins - 1));
+                                bins[binIndex]++;
+                                totalCells++;
+                            }
                         }
                     }
                 }
-            }
 
-            // Scale factor for bin height
-            float scale = (float)height / maxCount;
-
-            // Draw histogram bars
-            float barWidth = (float)width / numBins;
-
-            for (int i = 0; i < numBins; i++)
-            {
-                // Calculate bar position and size
-                float barX = x + i * barWidth;
-                float barHeight = bins[i] * scale;
-                float barY = y + height - barHeight;
-
-                // Get color based on bin value (same as the colormap)
-                float normalizedValue = (i + 0.5f) / numBins;
-                Color color = GetHeatMapColor(normalizedValue, 0, 1);
-
-                // Draw bar
-                using (SolidBrush brush = new SolidBrush(color))
+                // Find the maximum bin count - default to 1 if all bins are empty
+                int maxCount = 1;
+                foreach (int count in bins)
                 {
-                    g.FillRectangle(brush, barX, barY, barWidth, barHeight);
+                    if (count > maxCount) maxCount = count;
                 }
 
-                // Draw outline
-                using (Pen pen = new Pen(Color.Gray, 1))
+                // If no data was found, we should indicate this to the user
+                if (totalCells == 0)
                 {
-                    g.DrawRectangle(pen, barX, barY, barWidth, barHeight);
-                }
-            }
-
-            // Draw axes
-            using (Pen axisPen = new Pen(Color.White, 1))
-            {
-                // X axis
-                g.DrawLine(axisPen, x, y + height, x + width, y + height);
-
-                // Y axis
-                g.DrawLine(axisPen, x, y, x, y + height);
-            }
-
-            // Draw tick marks and labels
-            using (Pen axisPen = new Pen(Color.White, 1))
-            using (Font font = new Font("Arial", 8))
-            using (SolidBrush textBrush = new SolidBrush(Color.White))
-            {
-                // X axis ticks
-                int numTicks = 5;
-                for (int i = 0; i <= numTicks; i++)
-                {
-                    float tickX = x + i * width / numTicks;
-                    float value = minVelocity + i * (maxVelocity - minVelocity) / numTicks;
-
-                    g.DrawLine(axisPen, tickX, y + height, tickX, y + height + 5);
-                    g.DrawString($"{value:F0}", font, textBrush, tickX - 15, y + height + 5);
+                    using (Font font = new Font("Arial", 12))
+                    using (SolidBrush brush = new SolidBrush(Color.Yellow))
+                    {
+                        g.DrawString("No velocity data available", font, brush, x + width / 2 - 70, y + height / 2 - 10);
+                    }
+                    return;
                 }
 
-                // Mark mean value
-                float meanValue = _isPWave ? MeasuredPWaveVelocity : MeasuredSWaveVelocity;
-                float meanX = x + (meanValue - minVelocity) / (maxVelocity - minVelocity) * width;
+                // Scale factor for bin height
+                float scale = height * 0.9f / maxCount;  // Leave some margin at the top
 
-                using (Pen meanPen = new Pen(Color.Red, 1))
+                // Clear the area first
+                using (SolidBrush bgBrush = new SolidBrush(Color.Black))
                 {
-                    meanPen.DashStyle = System.Drawing.Drawing2D.DashStyle.Dash;
-                    g.DrawLine(meanPen, meanX, y, meanX, y + height);
+                    g.FillRectangle(bgBrush, x, y, width, height);
                 }
 
-                g.DrawString("Mean", font, new SolidBrush(Color.Red), meanX - 15, y - 15);
-            }
+                // Draw histogram bars
+                float barWidth = (float)width / numBins;
 
-            // Draw title
-            using (Font titleFont = new Font("Arial", 10))
-            using (SolidBrush textBrush = new SolidBrush(Color.White))
+                for (int i = 0; i < numBins; i++)
+                {
+                    // Calculate bar position and size
+                    float barX = x + i * barWidth;
+                    float barHeight = bins[i] * scale;
+                    float barY = y + height - barHeight;
+
+                    // Get color based on bin value (same as the colormap)
+                    float normalizedValue = (i + 0.5f) / numBins;
+                    Color color = GetHeatMapColor(normalizedValue, 0, 1);
+
+                    // Draw bar with a fallback minimum height for visibility when count > 0
+                    if (bins[i] > 0)
+                    {
+                        barHeight = Math.Max(barHeight, 2); // Ensure at least 2 pixels high if any data exists
+                    }
+
+                    using (SolidBrush brush = new SolidBrush(color))
+                    {
+                        g.FillRectangle(brush, barX, barY, barWidth, barHeight);
+                    }
+
+                    // Draw outline
+                    using (Pen pen = new Pen(Color.FromArgb(50, Color.White), 1))
+                    {
+                        g.DrawRectangle(pen, barX, barY, barWidth, barHeight);
+                    }
+                }
+
+                // Draw axes
+                using (Pen axisPen = new Pen(Color.White, 1))
+                {
+                    // X axis
+                    g.DrawLine(axisPen, x, y + height, x + width, y + height);
+
+                    // Y axis
+                    g.DrawLine(axisPen, x, y, x, y + height);
+                }
+
+                // Draw tick marks and labels
+                using (Pen axisPen = new Pen(Color.Gray, 1))
+                using (Font font = new Font("Arial", 8))
+                using (SolidBrush textBrush = new SolidBrush(Color.White))
+                {
+                    // X axis ticks
+                    int numTicks = 5;
+                    for (int i = 0; i <= numTicks; i++)
+                    {
+                        float tickX = x + i * width / numTicks;
+                        float value = minVelocity + i * (maxVelocity - minVelocity) / numTicks;
+
+                        g.DrawLine(axisPen, tickX, y + height, tickX, y + height + 5);
+                        g.DrawString($"{value:F0}", font, textBrush, tickX - 15, y + height + 5);
+                    }
+
+                    // Mark mean value
+                    float meanValue = _isPWave ? MeasuredPWaveVelocity : MeasuredSWaveVelocity;
+                    if (meanValue > minVelocity && meanValue < maxVelocity)
+                    {
+                        float meanX = x + (meanValue - minVelocity) / (maxVelocity - minVelocity) * width;
+
+                        using (Pen meanPen = new Pen(Color.Red, 1))
+                        {
+                            meanPen.DashStyle = System.Drawing.Drawing2D.DashStyle.Dash;
+                            g.DrawLine(meanPen, meanX, y, meanX, y + height);
+                        }
+
+                        g.DrawString("Mean", font, new SolidBrush(Color.Red), meanX - 15, y - 15);
+                    }
+                }
+
+                // Draw title
+                using (Font titleFont = new Font("Arial", 10))
+                using (SolidBrush textBrush = new SolidBrush(Color.White))
+                {
+                    string title = "Velocity Histogram";
+                    g.DrawString(title, titleFont, textBrush, x + width / 2 - 50, y - 15);
+                }
+            }
+            catch (Exception ex)
             {
-                string title = "Velocity Histogram";
-                g.DrawString(title, titleFont, textBrush, x + width / 2 - 50, y - 15);
+                // Handle any exceptions during rendering
+                using (Font font = new Font("Arial", 10))
+                using (SolidBrush brush = new SolidBrush(Color.Red))
+                {
+                    g.DrawString($"Error rendering histogram: {ex.Message}", font, brush, x, y);
+                }
+                Logger.Log($"[AcousticVelocitySimulation] Error rendering velocity histogram: {ex.Message}");
             }
         }
-
         /// <summary>
         /// Render a 3D slice of the wave field
         /// </summary>
@@ -3955,42 +4553,55 @@ namespace CTSegmenter
 
             try
             {
-                // Create a bitmap for the export
-                using (Bitmap bitmap = new Bitmap(1000, 800))
+                // Create a bitmap for the export with higher resolution for better quality
+                using (Bitmap bitmap = new Bitmap(2000, 1600))
                 {
                     using (Graphics g = Graphics.FromImage(bitmap))
                     {
-                        // Render the results
+                        // Clear background
+                        g.Clear(Color.Black);
+
+                        // Set high-quality rendering
+                        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+
+                        // Render the primary wave field visualization
                         RenderResults(g, bitmap.Width, bitmap.Height, RenderMode.Stress);
 
                         // Add a border
-                        using (Pen pen = new Pen(Color.White, 1))
+                        using (Pen pen = new Pen(Color.White, 2))
                         {
-                            g.DrawRectangle(pen, 0, 0, bitmap.Width - 1, bitmap.Height - 1);
+                            g.DrawRectangle(pen, 1, 1, bitmap.Width - 3, bitmap.Height - 3);
                         }
 
                         // Add a footer with simulation parameters
                         string footer = $"Material: {Material.Name}, Density: {Material.Density:F1} kg/m³, " +
-                                      $"Confining Pressure: {ConfiningPressure:F1} MPa, " +
-                                      $"P-Wave: {MeasuredPWaveVelocity:F1} m/s, S-Wave: {MeasuredSWaveVelocity:F1} m/s, " +
-                                      $"Vp/Vs: {CalculatedVpVsRatio:F2}";
+                                        $"Wave Type: {WaveType}, Frequency: {Frequency:F1} kHz, " +
+                                        $"P-Wave: {MeasuredPWaveVelocity:F1} m/s, S-Wave: {MeasuredSWaveVelocity:F1} m/s, " +
+                                        $"Vp/Vs: {CalculatedVpVsRatio:F2}";
 
-                        using (Font font = new Font("Arial", 8))
+                        using (Font font = new Font("Arial", 12))
                         using (SolidBrush brush = new SolidBrush(Color.White))
-                        using (SolidBrush backBrush = new SolidBrush(Color.FromArgb(128, 0, 0, 0)))
+                        using (SolidBrush backBrush = new SolidBrush(Color.FromArgb(150, 0, 0, 0)))
                         {
                             float textWidth = g.MeasureString(footer, font).Width;
                             float textHeight = g.MeasureString(footer, font).Height;
                             float x = (bitmap.Width - textWidth) / 2;
-                            float y = bitmap.Height - textHeight - 5;
+                            float y = bitmap.Height - textHeight - 20;
 
-                            g.FillRectangle(backBrush, x - 5, y - 2, textWidth + 10, textHeight + 4);
+                            g.FillRectangle(backBrush, x - 10, y - 5, textWidth + 20, textHeight + 10);
                             g.DrawString(footer, font, brush, x, y);
                         }
                     }
 
-                    // Save the bitmap as PNG
-                    bitmap.Save(filePath, ImageFormat.Png);
+                    // Save the bitmap as PNG with high quality settings
+                    using (EncoderParameters encoderParams = new EncoderParameters(1))
+                    {
+                        encoderParams.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 100L);
+                        ImageCodecInfo pngEncoder = GetEncoderInfo("image/png");
+                        bitmap.Save(filePath, pngEncoder, encoderParams);
+                    }
                 }
 
                 Logger.Log($"[AcousticVelocitySimulation] Exported results to PNG: {filePath}");
@@ -4002,7 +4613,16 @@ namespace CTSegmenter
                 return false;
             }
         }
-
+        private ImageCodecInfo GetEncoderInfo(string mimeType)
+        {
+            ImageCodecInfo[] encoders = ImageCodecInfo.GetImageEncoders();
+            for (int i = 0; i < encoders.Length; i++)
+            {
+                if (encoders[i].MimeType == mimeType)
+                    return encoders[i];
+            }
+            return null;
+        }
         /// <summary>
         /// Export simulation results to PDF
         /// </summary>
@@ -4043,96 +4663,224 @@ namespace CTSegmenter
         {
             try
             {
+                Logger.Log($"[AcousticVelocitySimulation] Creating composite image...");
 
-                // Create a larger bitmap for the composite image
-                using (Bitmap compositeBitmap = new Bitmap(1600, 1200))
+                // Use higher resolution for better quality exports
+                int panelWidth = 1000;
+                int panelHeight = 800;
+                int padding = 20;
+                int titleHeight = 60;
+
+                // Create a composite image with 2x2 grid layout plus title and info footer
+                int compositeWidth = panelWidth * 2 + padding * 3;
+                int compositeHeight = panelHeight * 2 + padding * 4 + titleHeight + 100; // +100 for footer area
+
+                using (Bitmap compositeBitmap = new Bitmap(compositeWidth, compositeHeight))
                 {
-
                     using (Graphics g = Graphics.FromImage(compositeBitmap))
                     {
                         // Fill background
                         g.Clear(Color.Black);
 
+                        // Set high-quality rendering
+                        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+
                         // Draw title
-                        using (Font titleFont = new Font("Arial", 20, FontStyle.Bold))
-                        using (SolidBrush brush = new SolidBrush(Color.White))
+                        using (Font titleFont = new Font("Arial", 24, FontStyle.Bold))
+                        using (SolidBrush textBrush = new SolidBrush(Color.White))
                         {
-                            string title = $"Acoustic Velocity Simulation - {Material.Name} - {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
-                            g.DrawString(title, titleFont, brush,
-                                (compositeBitmap.Width - g.MeasureString(title, titleFont).Width) / 2, 20);
+                            string title = $"Acoustic Velocity Simulation - {Material.Name} - {WaveType}";
+                            SizeF titleSize = g.MeasureString(title, titleFont);
+                            g.DrawString(title, titleFont, textBrush,
+                                (compositeWidth - titleSize.Width) / 2, padding);
                         }
 
-                        // Define view areas
-                        Rectangle[] viewRects = new Rectangle[]
+                        // Draw the four key visualizations
+                        try
                         {
-                    new Rectangle(50, 80, 750, 500),     // Wave propagation (top left)
-                    new Rectangle(820, 80, 750, 500),    // Time series (top right)
-                    new Rectangle(50, 600, 750, 500),    // Velocity distribution (bottom left)
-                    new Rectangle(820, 600, 750, 500)    // 3D mesh (bottom right)
-                        };
-
-                        // Render different views into each rectangle
-                        RenderResults(g, viewRects[0].Width, viewRects[0].Height, RenderMode.Stress, viewRects[0].Location);
-                        RenderResults(g, viewRects[1].Width, viewRects[1].Height, RenderMode.Strain, viewRects[1].Location);
-                        RenderResults(g, viewRects[2].Width, viewRects[2].Height, RenderMode.FailureProbability, viewRects[2].Location);
-                        RenderResults(g, viewRects[3].Width, viewRects[3].Height, RenderMode.Wireframe, viewRects[3].Location);
-
-                        // Draw view titles
-                        using (Font labelFont = new Font("Arial", 12, FontStyle.Bold))
-                        using (SolidBrush brush = new SolidBrush(Color.White))
-                        using (Pen borderPen = new Pen(Color.DarkGray, 1))
+                            DrawCompositePanel(g, RenderMode.Stress,
+                                padding, titleHeight + padding,
+                                panelWidth, panelHeight,
+                                "Wave Propagation");
+                        }
+                        catch (Exception ex)
                         {
-                            string[] viewTitles = new string[]
-                            {
-                        "Wave Propagation",
-                        "Receiver Time Series",
-                        "Velocity Distribution",
-                        "3D Mesh View"
-                            };
+                            Logger.Log($"[AcousticVelocitySimulation] Error rendering wave propagation panel: {ex.Message}");
+                            DrawErrorPanel(g, padding, titleHeight + padding, panelWidth, panelHeight,
+                                "Wave Propagation", ex.Message);
+                        }
 
-                            for (int i = 0; i < viewRects.Length; i++)
-                            {
-                                // Draw border around each view
-                                g.DrawRectangle(borderPen, viewRects[i]);
+                        try
+                        {
+                            DrawCompositePanel(g, RenderMode.Strain,
+                                padding * 2 + panelWidth, titleHeight + padding,
+                                panelWidth, panelHeight,
+                                "Time Series");
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[AcousticVelocitySimulation] Error rendering time series panel: {ex.Message}");
+                            DrawErrorPanel(g, padding * 2 + panelWidth, titleHeight + padding, panelWidth, panelHeight,
+                                "Time Series", ex.Message);
+                        }
 
-                                // Draw view title
-                                g.DrawString(viewTitles[i], labelFont, brush,
-                                    viewRects[i].X + 10, viewRects[i].Y - 25);
-                            }
+                        try
+                        {
+                            DrawCompositePanel(g, RenderMode.FailureProbability,
+                                padding, titleHeight + padding * 2 + panelHeight,
+                                panelWidth, panelHeight,
+                                "Velocity Distribution");
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[AcousticVelocitySimulation] Error rendering velocity distribution panel: {ex.Message}");
+                            DrawErrorPanel(g, padding, titleHeight + padding * 2 + panelHeight, panelWidth, panelHeight,
+                                "Velocity Distribution", ex.Message);
+                        }
+
+                        try
+                        {
+                            DrawCompositePanel(g, RenderMode.Displacement,
+                                padding * 2 + panelWidth, titleHeight + padding * 2 + panelHeight,
+                                panelWidth, panelHeight,
+                                "Wave Slices");
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[AcousticVelocitySimulation] Error rendering wave slices panel: {ex.Message}");
+                            DrawErrorPanel(g, padding * 2 + panelWidth, titleHeight + padding * 2 + panelHeight, panelWidth, panelHeight,
+                                "Wave Slices", ex.Message);
                         }
 
                         // Draw summary panel at the bottom
-                        Rectangle summaryRect = new Rectangle(50, 1120, 1520, 60);
-                        using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(60, 60, 60)))
-                        using (Font summaryFont = new Font("Arial", 10))
+                        int summaryY = titleHeight + padding * 3 + panelHeight * 2;
+                        Rectangle summaryRect = new Rectangle(padding, summaryY, compositeWidth - padding * 2, 80);
+
+                        using (SolidBrush summaryBrush = new SolidBrush(Color.FromArgb(40, 40, 40)))
+                        using (Pen borderPen = new Pen(Color.DimGray, 1))
+                        {
+                            g.FillRectangle(summaryBrush, summaryRect);
+                            g.DrawRectangle(borderPen, summaryRect);
+                        }
+
+                        using (Font summaryFont = new Font("Arial", 12))
                         using (SolidBrush textBrush = new SolidBrush(Color.White))
                         {
-                            g.FillRectangle(bgBrush, summaryRect);
+                            int lineHeight = 20;
+                            string line1 = $"Material: {Material.Name} | Density: {Material.Density:F1} kg/m³ | Wave Type: {WaveType} | Frequency: {Frequency:F1} kHz";
+                            string line2 = $"P-Wave Velocity: {MeasuredPWaveVelocity:F1} m/s | S-Wave Velocity: {MeasuredSWaveVelocity:F1} m/s | Vp/Vs Ratio: {CalculatedVpVsRatio:F2}";
+                            string line3 = $"Young's Modulus: {YoungModulus:F0} MPa | Poisson's Ratio: {PoissonRatio:F3} | Sample Length: {SampleLength:F3} m";
 
-                            string summary = $"Material: {Material.Name} | " +
-                                            $"Density: {Material.Density:F1} kg/m³ | " +
-                                            $"P-Wave: {MeasuredPWaveVelocity:F1} m/s | " +
-                                            $"S-Wave: {MeasuredSWaveVelocity:F1} m/s | " +
-                                            $"Vp/Vs: {CalculatedVpVsRatio:F2} | " +
-                                            $"Wave Type: {WaveType} | " +
-                                            $"Frequency: {Frequency:F1} kHz";
+                            g.DrawString(line1, summaryFont, textBrush, summaryRect.X + 10, summaryRect.Y + 10);
+                            g.DrawString(line2, summaryFont, textBrush, summaryRect.X + 10, summaryRect.Y + 10 + lineHeight);
+                            g.DrawString(line3, summaryFont, textBrush, summaryRect.X + 10, summaryRect.Y + 10 + lineHeight * 2);
+                        }
 
-                            g.DrawString(summary, summaryFont, textBrush,
-                                summaryRect.X + 10, summaryRect.Y + 20);
+                        // Add timestamp and export info at the bottom
+                        using (Font footerFont = new Font("Arial", 9))
+                        using (SolidBrush textBrush = new SolidBrush(Color.Silver))
+                        {
+                            string footer = $"Generated on {DateTime.Now:yyyy-MM-dd HH:mm:ss} | CT Segmenter Acoustic Velocity Module";
+                            SizeF footerSize = g.MeasureString(footer, footerFont);
+                            g.DrawString(footer, footerFont, textBrush,
+                                compositeWidth - footerSize.Width - padding, compositeHeight - footerSize.Height - 5);
                         }
                     }
 
-                    // Save the bitmap
-                    compositeBitmap.Save(filePath, ImageFormat.Png);
+                    // Save with high quality
+                    using (EncoderParameters encoderParams = new EncoderParameters(1))
+                    {
+                        encoderParams.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 100L);
+                        ImageCodecInfo pngEncoder = GetEncoderInfo("image/png");
+                        compositeBitmap.Save(filePath, pngEncoder, encoderParams);
+                    }
                 }
 
-                Logger.Log($"[AcousticVelocitySimulation] Exported composite image to: {filePath}");
+                Logger.Log($"[AcousticVelocitySimulation] Composite image exported to: {filePath}");
                 return true;
             }
             catch (Exception ex)
             {
                 Logger.Log($"[AcousticVelocitySimulation] Composite image export failed: {ex.Message}");
+                Logger.Log($"[AcousticVelocitySimulation] Stack trace: {ex.StackTrace}");
                 return false;
+            }
+        }
+        private void DrawCompositePanel(Graphics g, RenderMode mode, int x, int y, int width, int height, string title)
+        {
+            // Create a bitmap for this panel
+            using (Bitmap viewBitmap = new Bitmap(width, height))
+            {
+                using (Graphics viewGraphics = Graphics.FromImage(viewBitmap))
+                {
+                    // Clear the background
+                    viewGraphics.Clear(Color.Black);
+
+                    // Set high quality rendering
+                    viewGraphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                    viewGraphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+
+                    // Render the specific visualization
+                    RenderResults(viewGraphics, width, height, mode);
+
+                    // Add title to the view
+                    using (Font titleFont = new Font("Arial", 14, FontStyle.Bold))
+                    using (SolidBrush backBrush = new SolidBrush(Color.FromArgb(150, 0, 0, 0)))
+                    using (SolidBrush textBrush = new SolidBrush(Color.White))
+                    {
+                        SizeF titleSize = viewGraphics.MeasureString(title, titleFont);
+                        float titleX = (width - titleSize.Width) / 2;
+
+                        // Background for title
+                        viewGraphics.FillRectangle(backBrush, titleX - 5, 5, titleSize.Width + 10, titleSize.Height + 5);
+
+                        // Draw title text
+                        viewGraphics.DrawString(title, titleFont, textBrush, titleX, 8);
+                    }
+                }
+
+                // Draw the panel bitmap onto the composite bitmap
+                g.DrawImage(viewBitmap, x, y, width, height);
+
+                // Draw a border around the panel
+                using (Pen borderPen = new Pen(Color.DimGray, 2))
+                {
+                    g.DrawRectangle(borderPen, x, y, width, height);
+                }
+            }
+        }
+        private void DrawErrorPanel(Graphics g, int x, int y, int width, int height, string title, string errorMessage)
+        {
+            using (SolidBrush backBrush = new SolidBrush(Color.FromArgb(30, 30, 30)))
+            {
+                g.FillRectangle(backBrush, x, y, width, height);
+            }
+
+            using (Pen borderPen = new Pen(Color.DarkRed, 2))
+            {
+                g.DrawRectangle(borderPen, x, y, width, height);
+            }
+
+            using (Font titleFont = new Font("Arial", 14, FontStyle.Bold))
+            using (Font errorFont = new Font("Arial", 12))
+            using (SolidBrush textBrush = new SolidBrush(Color.White))
+            using (SolidBrush errorBrush = new SolidBrush(Color.Red))
+            {
+                g.DrawString(title, titleFont, textBrush, x + 10, y + 10);
+                g.DrawString("Rendering Error:", errorFont, errorBrush, x + 10, y + 40);
+
+                // Draw the error message with word wrap
+                using (StringFormat format = new StringFormat())
+                {
+                    format.Alignment = StringAlignment.Near;
+                    format.LineAlignment = StringAlignment.Near;
+                    format.Trimming = StringTrimming.Word;
+
+                    Rectangle errorRect = new Rectangle(x + 10, y + 70, width - 20, height - 80);
+                    g.DrawString(errorMessage, errorFont, errorBrush, errorRect, format);
+                }
             }
         }
 

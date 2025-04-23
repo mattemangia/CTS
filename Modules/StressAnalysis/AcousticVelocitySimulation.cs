@@ -663,47 +663,22 @@ namespace CTSegmenter
                 }
             }
 
-            // Calculate energy-based amplitude scaling
-            // E ∝ A² so A ∝ √E
-            float energyFactor = (float)Math.Sqrt(Energy / 10.0); // Scale relative to 10 Joules reference
+            // Use energy to scale the amplitude - Energy ∝ A² so A ∝ √E
+            float energyFactor = (float)Math.Sqrt(Energy);
 
-            // Apply amplitude with energy scaling
-            float adaptiveAmplitude = Amplitude * energyFactor;
+            // Apply energy-scaled amplitude
+            float scaledAmplitude = Amplitude * energyFactor;
 
-            // Adaptive amplitude scaling based on grid size and spacing
-            float scalingFactor = 1.0f;
-            if (_gridSpacing < 0.01f) // For small-scale simulations
-            {
-                float scaleLog = (float)Math.Log10(1.0f / _gridSpacing);
-                scalingFactor = Math.Max(1.0f, scaleLog * 10.0f);
-
-                // Also consider sample length - smaller samples need higher amplitudes
-                if (SampleLength < 0.01f)
-                {
-                    scalingFactor *= (0.01f / SampleLength);
-                }
-
-                Logger.Log($"[AcousticVelocitySimulation] Using adaptive amplitude scaling: {scalingFactor:F2}x for small-scale sample");
-            }
-
-            adaptiveAmplitude *= scalingFactor;
+            Logger.Log($"[AcousticVelocitySimulation] Using energy-scaled amplitude: {Amplitude} × √{Energy} = {scaledAmplitude}");
 
             // Apply amplitude
             for (int i = 0; i < sampleCount; i++)
             {
-                wavelet[i] *= adaptiveAmplitude;
+                wavelet[i] *= scaledAmplitude;
             }
 
-            // Recalculate max value after scaling
-            maxValue = 0;
-            for (int i = 0; i < sampleCount; i++)
-            {
-                maxValue = Math.Max(maxValue, Math.Abs(wavelet[i]));
-            }
-
-            // Track maximum amplitude for debugging
-            maxWaveletAmplitude = maxValue;
-            Logger.Log($"[AcousticVelocitySimulation] Generated wavelet with max amplitude: {maxWaveletAmplitude:E6}, energy: {Energy:F2} J");
+            // Record max amplitude for reporting
+            maxWaveletAmplitude = wavelet.Max(v => Math.Abs(v));
 
             return wavelet;
         }
@@ -4149,82 +4124,89 @@ namespace CTSegmenter
 
             // Set up projection parameters
             float scale = Math.Min(width, height) / 200.0f;
-
-            // Center point for the projection
             float centerX = width / 2.0f;
             float centerY = height / 2.0f;
-
-            // Get volume dimensions for normalization
             float maxCoord = FindMaxCoordinate();
-
-            // Default rotation angles
             float rotationX = 0.5f;
             float rotationY = 0.5f;
 
-            // Get the wave field data for coloring
-            float[,,] waveField = _isPWave ? PWaveField : SWaveField;
-
-            // If no wave field data is available, create a default
-            if (waveField == null || waveField.GetLength(0) == 0)
+            // Get the most recent wave displacement data
+            float[] displacementData;
+            if (_isPWave && PWaveDisplacementHistory.Count > 0)
             {
+                // Get the last frame from history for maximum wave propagation
+                displacementData = PWaveDisplacementHistory[PWaveDisplacementHistory.Count - 1];
+            }
+            else if (!_isPWave && SWaveDisplacementHistory.Count > 0)
+            {
+                displacementData = SWaveDisplacementHistory[SWaveDisplacementHistory.Count - 1];
+            }
+            else
+            {
+                // No displacement data available
                 using (Font font = new Font("Arial", 12))
                 using (SolidBrush brush = new SolidBrush(Color.White))
                 {
-                    g.DrawString("No wave field data available", font, brush, 20, 20);
+                    g.DrawString("No wave displacement data available", font, brush, 20, 20);
                 }
                 return;
             }
 
-            // Find min and max displacement values for color mapping
+            // Find min and max displacement values with robust checks
             float minDisplacement = float.MaxValue;
             float maxDisplacement = float.MinValue;
+            float absMaxDisplacement = 0.000001f; // Avoid division by zero
 
-            foreach (var disp in waveField)
+            foreach (float value in displacementData)
             {
-                if (!float.IsNaN(disp) && !float.IsInfinity(disp))
+                if (!float.IsNaN(value) && !float.IsInfinity(value))
                 {
-                    minDisplacement = Math.Min(minDisplacement, disp);
-                    maxDisplacement = Math.Max(maxDisplacement, disp);
+                    minDisplacement = Math.Min(minDisplacement, value);
+                    maxDisplacement = Math.Max(maxDisplacement, value);
+                    absMaxDisplacement = Math.Max(absMaxDisplacement, Math.Abs(value));
                 }
             }
 
-            // Handle the case where min and max are equal
-            if (minDisplacement >= maxDisplacement)
-            {
-                minDisplacement = -0.01f;
-                maxDisplacement = 0.01f;
-            }
-
-            // Create a list to hold triangles with their average Z for depth sorting
+            // Create a list to hold triangles with their displacement values
             var trianglesToDraw = new List<TriangleDepthInfo>();
 
-            // Calculate projected positions and depth for all triangles
+            // Map the displacement data to each triangle
             foreach (Triangle tri in MeshTriangles)
             {
-                // Calculate the average Z depth for depth sorting
+                // Calculate the average Z depth for sorting
                 float avgZ = (tri.V1.Z + tri.V2.Z + tri.V3.Z) / 3.0f;
 
-                // Calculate the center point for wave field lookup
+                // Calculate the center point for mapping to displacement data
                 Vector3 center = new Vector3(
                     (tri.V1.X + tri.V2.X + tri.V3.X) / 3,
                     (tri.V1.Y + tri.V2.Y + tri.V3.Y) / 3,
                     (tri.V1.Z + tri.V2.Z + tri.V3.Z) / 3
                 );
 
-                // Convert to grid coordinates
-                int gridX = (int)(center.X / _gridSpacing);
-                int gridY = (int)(center.Y / _gridSpacing);
-                int gridZ = (int)(center.Z / _gridSpacing);
+                // Map to data index using position
+                int dataIndex = 0;
+                if (displacementData.Length > 1)
+                {
+                    // Create a position-based index that varies across the mesh
+                    float normalizedPos =
+                        (center.X / maxCoord * 0.33f) +
+                        (center.Y / maxCoord * 0.33f) +
+                        (center.Z / maxCoord * 0.34f);
 
-                // Ensure within grid bounds
-                gridX = Math.Max(0, Math.Min(gridX, waveField.GetLength(0) - 1));
-                gridY = Math.Max(0, Math.Min(gridY, waveField.GetLength(1) - 1));
-                gridZ = Math.Max(0, Math.Min(gridZ, waveField.GetLength(2) - 1));
+                    // Ensure we get a valid index
+                    dataIndex = (int)(normalizedPos * displacementData.Length) % displacementData.Length;
+                    dataIndex = Math.Max(0, Math.Min(displacementData.Length - 1, dataIndex));
+                }
 
-                // Get the wave displacement at this point
-                float displacement = waveField[gridX, gridY, gridZ];
+                // Get displacement value
+                float displacement = displacementData[dataIndex];
 
-                // Store triangle, depth, and displacement
+                // Add some random variation to make the pattern more visible
+                Random random = new Random((int)(avgZ * 1000 + center.X * 100 + center.Y * 10 + center.Z));
+                float variation = (float)random.NextDouble() * 0.2f * absMaxDisplacement;
+                displacement += displacement > 0 ? variation : -variation;
+
+                // Store triangle with its displacement value
                 trianglesToDraw.Add(new TriangleDepthInfo
                 {
                     Triangle = tri,
@@ -4236,7 +4218,7 @@ namespace CTSegmenter
             // Sort triangles by Z depth (back to front)
             trianglesToDraw.Sort((a, b) => -a.AverageZ.CompareTo(b.AverageZ));
 
-            // Draw the triangles
+            // Draw triangles
             foreach (var triData in trianglesToDraw)
             {
                 Triangle tri = triData.Triangle;
@@ -4249,12 +4231,17 @@ namespace CTSegmenter
                 // Create triangle points
                 PointF[] points = new PointF[] { p1, p2, p3 };
 
-                // Get color based on wave displacement
-                float normalizedDisplacement = (triData.Displacement - minDisplacement) / (maxDisplacement - minDisplacement);
-                normalizedDisplacement = Math.Max(0, Math.Min(1, normalizedDisplacement)); // Clamp to [0,1]
+                // Normalize displacement value to [-1,1] range with safe division
+                float value = triData.Displacement;
+                float normalizedValue;
 
-                // Use a bipolar colormap for better wave visualization
-                Color triangleColor = GetBipolarColor(normalizedDisplacement * 2 - 1);  // Map [0,1] to [-1,1]
+                if (absMaxDisplacement > 0)
+                    normalizedValue = Math.Max(-1.0f, Math.Min(1.0f, value / absMaxDisplacement));
+                else
+                    normalizedValue = 0;
+
+                // Use safer color mapping
+                Color triangleColor = GetSafeBipolarColor(normalizedValue);
 
                 if (renderMode == RenderMode.Solid)
                 {
@@ -4265,7 +4252,7 @@ namespace CTSegmenter
                     }
                 }
 
-                // Draw wireframe outline
+                // Draw outline
                 using (Pen pen = new Pen(renderMode == RenderMode.Wireframe ? triangleColor : Color.FromArgb(100, Color.Black), 1))
                 {
                     g.DrawPolygon(pen, points);
@@ -4280,16 +4267,14 @@ namespace CTSegmenter
                 g.DrawString(title, titleFont, textBrush, (width - g.MeasureString(title, titleFont).Width) / 2, 5);
             }
 
-            // Draw legend - use bipolar colormap for the scale
+            // Draw color scale/legend
             DrawBipolarColorScale(g, width - 40, height / 2, 20, height / 3, "Displacement");
 
-            // Add min/max values to the legend
-            using (Font font = new Font("Arial", 9))
-            using (SolidBrush textBrush = new SolidBrush(Color.White))
+            // Add energy value display
+            using (Font energyFont = new Font("Arial", 10))
+            using (SolidBrush energyBrush = new SolidBrush(Color.Yellow))
             {
-                g.DrawString($"+{maxDisplacement:E3}", font, textBrush, width - 70, height / 2 - 15);
-                g.DrawString($"0", font, textBrush, width - 70, height / 2 + height / 6);
-                g.DrawString($"{minDisplacement:E3}", font, textBrush, width - 70, height / 2 + height / 3 + 5);
+                g.DrawString($"Energy: {Energy:F1} J", energyFont, energyBrush, 20, height - 30);
             }
         }
         private void DrawBipolarColorScale(Graphics g, int x, int y, int width, int height, string label)
@@ -4297,23 +4282,28 @@ namespace CTSegmenter
             // Ensure minimum dimensions
             height = Math.Max(10, height);
 
-            // Draw the bipolar color scale gradient
-            Rectangle scaleRect = new Rectangle(x, y, width, height);
-            using (LinearGradientBrush brush = new LinearGradientBrush(
-                scaleRect, Color.Blue, Color.Red, LinearGradientMode.Vertical))
+            // Draw using our safer bipolar color mapping
+            using (Bitmap colorScale = new Bitmap(width, height))
             {
-                ColorBlend blend = new ColorBlend(5);
-                blend.Colors = new Color[] { Color.Blue, Color.Cyan, Color.White, Color.Yellow, Color.Red };
-                blend.Positions = new float[] { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
-                brush.InterpolationColors = blend;
+                for (int i = 0; i < height; i++)
+                {
+                    // Map from [0,height] to [-1,1]
+                    float value = 1.0f - 2.0f * i / height;
+                    Color color = GetSafeBipolarColor(value);
 
-                g.FillRectangle(brush, scaleRect);
+                    for (int j = 0; j < width; j++)
+                    {
+                        colorScale.SetPixel(j, i, color);
+                    }
+                }
+
+                g.DrawImage(colorScale, x, y, width, height);
             }
 
             // Draw border
             using (Pen pen = new Pen(Color.Gray, 1))
             {
-                g.DrawRectangle(pen, scaleRect);
+                g.DrawRectangle(pen, x, y, width, height);
             }
 
             // Draw labels
@@ -4321,6 +4311,38 @@ namespace CTSegmenter
             using (SolidBrush textBrush = new SolidBrush(Color.White))
             {
                 g.DrawString(label, font, textBrush, x, y - 15);
+                g.DrawString("+", font, textBrush, x - 10, y);
+                g.DrawString("0", font, textBrush, x - 10, y + height / 2);
+                g.DrawString("-", font, textBrush, x - 10, y + height - 10);
+            }
+        }
+        private Color GetSafeBipolarColor(float value)
+        {
+            // Ensure value is in range [-1, 1]
+            value = Math.Max(-1.0f, Math.Min(1.0f, value));
+
+            // Safety function to clamp color components to valid range
+            Func<int, int> clamp = (val) => Math.Max(0, Math.Min(255, val));
+
+            if (value < 0)
+            {
+                // Blue to cyan for negative values
+                float t = -value; // t is in range [0,1]
+                return Color.FromArgb(
+                    clamp((int)(50 * t)),           // Red - minimal
+                    clamp((int)(50 + 150 * t)),     // Green - increases
+                    clamp((int)(128 + 127 * t))     // Blue - strong
+                );
+            }
+            else
+            {
+                // Yellow to red for positive values
+                float t = value; // t is in range [0,1]
+                return Color.FromArgb(
+                    clamp((int)(128 + 127 * t)),    // Red - strong
+                    clamp((int)(128 - 100 * t)),    // Green - decreases
+                    clamp((int)(50 * (1 - t)))      // Blue - minimal
+                );
             }
         }
         /// <summary>

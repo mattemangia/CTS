@@ -3063,7 +3063,7 @@ namespace CTSegmenter
             timeStepsNumeric = new NumericUpDown
             {
                 Minimum = 10,
-                Maximum = 10000,
+                Maximum = 10000000,
                 Value = 1000,
                 DecimalPlaces = 0,
                 Increment = 100,

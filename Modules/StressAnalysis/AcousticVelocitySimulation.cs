@@ -1671,7 +1671,18 @@ namespace CTSegmenter
                 dampingBuffer.CopyFromCPU(dampingProfile);
 
                 // Calculate total steps - ensure enough time for wave to reach receiver
-                int totalTimeSteps = Math.Max(10000, 10 * expectedArrivalStep);
+                int minSteps = 10 * expectedArrivalStep;
+                int totalTimeSteps;
+                if (UseExtendedSimulationTime)
+                        {
+                    totalTimeSteps = Math.Max(TimeSteps, minSteps);
+                    Logger.Log($"[AcousticVelocitySimulation] Using extended simulation time: {totalTimeSteps} steps (UI: {TimeSteps})");
+                        }
+                else
+                        {
+                    totalTimeSteps = Math.Max(TimeSteps, minSteps);
+                    Logger.Log($"[AcousticVelocitySimulation] Using simulation time: {totalTimeSteps} steps (UI: {TimeSteps})");
+                        }
                 Logger.Log($"[AcousticVelocitySimulation] S-wave simulation steps: {totalTimeSteps}");
 
                 float[] receiverData = new float[totalTimeSteps];

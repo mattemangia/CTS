@@ -3113,10 +3113,10 @@ namespace CTSegmenter
             {
                 Text = "Time-Step Factor:",
                 AutoSize = true,
-                ForeColor = Color.White,
+                
                 Location = new Point(10, 360)   // tweak Y as needed
             };
-            acousticParamsBox.Controls.Add(dtFactorLabel);
+            acousticTable.Controls.Add(dtFactorLabel,0,6);
 
             NumericUpDown dtFactorNumeric = new NumericUpDown
             {
@@ -3129,10 +3129,10 @@ namespace CTSegmenter
                 Width = 80,
                 Location = new Point(130, 358)
             };
-            acousticParamsBox.Controls.Add(dtFactorNumeric);
+            acousticTable.Controls.Add(dtFactorNumeric,1,6);
 
             // Direction
-            acousticTable.Controls.Add(new Label { Text = "Test Direction:", Dock = DockStyle.Fill }, 0, 6);
+            acousticTable.Controls.Add(new Label { Text = "Test Direction:", Dock = DockStyle.Fill }, 0, 7);
             acousticDirectionCombo = new ComboBox
             {
                 DropDownStyle = ComboBoxStyle.DropDownList,
@@ -3140,7 +3140,7 @@ namespace CTSegmenter
             };
             acousticDirectionCombo.Items.AddRange(new object[] { "X-Axis", "Y-Axis", "Z-Axis" });
             acousticDirectionCombo.SelectedIndex = 2; // Default to Z-axis
-            acousticTable.Controls.Add(acousticDirectionCombo, 1, 6);
+            acousticTable.Controls.Add(acousticDirectionCombo, 1, 7);
             extendedSimulationCheckBox = new KryptonCheckBox
             {
                 Text = "Use Extended Simulation Time",
@@ -3151,7 +3151,7 @@ namespace CTSegmenter
             {
                 UseExtendedSimulationTime = extendedSimulationCheckBox.Checked;
             };
-            acousticTable.Controls.Add(extendedSimulationCheckBox, 1, 7);
+            acousticTable.Controls.Add(extendedSimulationCheckBox, 0, 8);
             acousticTable.RowStyles.Add(new RowStyle(SizeType.Absolute, 30F));
             KryptonButton dumpDataButton = new KryptonButton
             {

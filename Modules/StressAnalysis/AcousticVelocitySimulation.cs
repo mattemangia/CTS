@@ -4659,7 +4659,7 @@ namespace CTSegmenter
         /// <summary>
         /// Export simulation results as a composite image with multiple views
         /// </summary>
-        private bool ExportCompositeImage(string filePath)
+        public bool ExportCompositeImage(string filePath)
         {
             try
             {

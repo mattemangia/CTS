@@ -538,7 +538,7 @@ namespace CTSegmenter
                 };
                 wireframeButton.Click += WireframeButton_Click;
 
-                var solidButton = new KryptonRibbonGroupButton
+                /*var solidButton = new KryptonRibbonGroupButton
                 {
                     TextLine1 = "Solid",
                     TextLine2 = "View",
@@ -547,7 +547,7 @@ namespace CTSegmenter
                 };
                 solidButton.Click += SolidButton_Click;
 
-                visualTriple.Items.AddRange(new KryptonRibbonGroupItem[] { wireframeButton, solidButton });
+                visualTriple.Items.AddRange(new KryptonRibbonGroupItem[] { wireframeButton, solidButton });*/
                 visualizationGroup.Items.Add(visualTriple);
             }
 
@@ -752,6 +752,44 @@ namespace CTSegmenter
             meshLayout.SetRowSpan(controlsPanel, 2);
             meshPage.Controls.Add(meshLayout);
 
+            var resultsExportGroup = new KryptonRibbonGroup { TextLine1 = "Results Export" };
+            var resultsExportTriple = new KryptonRibbonGroupTriple();
+            var exportCompositeRibbonButton = new KryptonRibbonGroupButton
+            {
+                TextLine1 = "Export",
+                TextLine2 = "Triaxial Composite",
+                ImageSmall = CreateExportCompositeIcon(16),
+                ImageLarge = CreateExportCompositeIcon(32)
+            };
+            exportCompositeRibbonButton.Click += (s, e) =>
+            {
+                // Assuming 'currentTriaxial' holds your latest simulation
+                if (currentTriaxial != null)
+                    ExportFullCompositeImage(currentTriaxial);
+                else
+                    MessageBox.Show("No simulation results available.", "Export Error",
+                                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            };
+            resultsExportTriple.Items.Add(exportCompositeRibbonButton);
+            resultsExportGroup.Items.Add(resultsExportTriple);
+            resultsTab.Groups.Add(resultsExportGroup);
+            // -- Acoustic composite export button --
+            var exportAcousticCompositeBtn = new KryptonRibbonGroupButton
+            {
+                TextLine1 = "Export",
+                TextLine2 = "Acoustic Composite",
+                ImageSmall = CreateExportAcousticCompositeIcon(16),
+                ImageLarge = CreateExportAcousticCompositeIcon(32)
+            };
+            exportAcousticCompositeBtn.Click += (s, e) =>
+            {
+                if (currentAcousticSim != null)
+                    ExportAcousticCompositeImage(currentAcousticSim);
+                else
+                    MessageBox.Show("No acoustic simulation results available.",
+                                    "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            };
+            resultsExportTriple.Items.Add(exportAcousticCompositeBtn);
             // Finally add everything into the form
             this.Controls.Add(mainTabControl);
             this.Controls.Add(statusHeader);
@@ -761,8 +799,111 @@ namespace CTSegmenter
             InitializeTabManagement();
             InitializeSimulationParameters();
         }
+        private void ExportAcousticCompositeImage(AcousticVelocitySimulation sim)
+        {
+            try
+            {
+                using (var dlg = new SaveFileDialog())
+                {
+                    dlg.Filter = "PNG Image|*.png";
+                    dlg.Title = "Export Acoustic Composite Image";
+                    dlg.FileName = $"Acoustic_{selectedMaterial.Name}_{DateTime.Now:yyyyMMdd_HHmmss}_composite.png";
 
+                    if (dlg.ShowDialog() == DialogResult.OK)
+                    {
+                        this.Cursor = Cursors.WaitCursor;
+                        statusHeader.Text = "Creating acoustic composite image.";
 
+                        bool ok = sim.ExportCompositeImage(dlg.FileName);
+                        if (ok)
+                        {
+                            statusHeader.Text = $"Exported acoustic composite to {Path.GetFileName(dlg.FileName)}";
+                            MessageBox.Show($"Acoustic composite image exported to:\n{dlg.FileName}",
+                                            "Export Successful", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        }
+                        else
+                        {
+                            statusHeader.Text = "Export failed.";
+                            MessageBox.Show("Failed to export acoustic composite image.",
+                                            "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error exporting acoustic composite: {ex.Message}",
+                                "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Logger.Log($"[StressAnalysisForm] Acoustic export error: {ex.Message}");
+            }
+            finally
+            {
+                this.Cursor = Cursors.Default;
+            }
+        }
+
+        private Image CreateExportAcousticCompositeIcon(int size)
+        {
+            var bmp = new Bitmap(size, size);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+
+                // Draw a 2×2 grid like the composite icon, but in cyan
+                using (Pen pen = new Pen(Color.Cyan, 2))
+                {
+                    int cell = size / 2;
+                    g.DrawRectangle(pen, 1, 1, size - 2, size - 2);
+                    g.DrawLine(pen, cell, 1, cell, size - 2);
+                    g.DrawLine(pen, 1, cell, size - 2, cell);
+                }
+
+                // Overlay a little sine‐wave arrow to hint “acoustic”
+                using (Pen wavePen = new Pen(Color.Cyan, 1))
+                {
+                    var pts = new PointF[]
+                    {
+                new PointF(4, size - 8),
+                new PointF(size/4f, size - 12),
+                new PointF(size/2f, size - 4),
+                new PointF(3*size/4f, size - 14),
+                new PointF(size - 4, size - 8)
+                    };
+                    g.DrawCurve(wavePen, pts);
+                }
+            }
+            return bmp;
+        }
+        private Image CreateExportCompositeIcon(int size)
+        {
+            var bmp = new Bitmap(size, size);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                using (Pen pen = new Pen(Color.OrangeRed, 2))
+                {
+                    int cell = size / 2;
+                    // draw outer border
+                    g.DrawRectangle(pen, 1, 1, size - 2, size - 2);
+                    // draw vertical divider
+                    g.DrawLine(pen, cell, 1, cell, size - 2);
+                    // draw horizontal divider
+                    g.DrawLine(pen, 1, cell, size - 2, cell);
+                }
+                using (SolidBrush brush = new SolidBrush(Color.OrangeRed))
+                {
+                    // small arrow in lower-right to indicate export
+                    var arrow = new Point[]
+                    {
+                new Point(size - 1 - 4, size - 1 - 8),
+                new Point(size - 1 - 4, size - 1 - 2),
+                new Point(size - 1 - 10, size - 1 - 2)
+                    };
+                    g.FillPolygon(brush, arrow);
+                }
+            }
+            return bmp;
+        }
         // Create an icon for reopening tabs
         private Image CreateReopenTabIcon(int size)
         {

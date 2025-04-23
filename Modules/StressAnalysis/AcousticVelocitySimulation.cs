@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -103,19 +104,19 @@ namespace CTSegmenter
         private SimulationResult _result;
         private bool _isDisposed;
         private Dictionary<string, MaterialAcousticProperties> _materialPropertiesDatabase;
-        private bool _isPWave;
+        public bool _isPWave;
         private bool _hasPreviousTriaxialResults;
         private SimulationResult _triaxialResult;
         float totalEnergy = 0;
          // The input energy value
         float energyLoss = 0;
         // 3D grid for simulation
-        private int _gridSizeX;
-        private int _gridSizeY;
-        private int _gridSizeZ;
+        public int _gridSizeX;
+        public int _gridSizeY;
+        public int _gridSizeZ;
         private float _gridSpacing;
-        private float[,,] _velocityModel;
-        private float[,,] _densityModel;
+        public float[,,] _velocityModel;
+        public float[,,] _densityModel;
         private Vector3 _sourcePosition;
         private Vector3 _receiverPosition;
         private int _sourceX, _sourceY, _sourceZ;
@@ -123,6 +124,8 @@ namespace CTSegmenter
         public float TimeStepFactor { get; set; } = 1.0f;
 
         private MainForm mainForm;
+        private bool v;
+        private ConcurrentDictionary<Vector3, float> densityMap;
 
         #endregion
 
@@ -210,6 +213,12 @@ namespace CTSegmenter
 
             // Estimate material properties based on density and material type
             EstimateMaterialProperties();
+        }
+
+        public AcousticVelocitySimulation(Material material, List<Triangle> triangles, float confiningPressure, string waveType, int timeSteps, float frequency, float amplitude, float energy, string direction, bool useExtendedSimulationTime, SimulationResult previousTriaxialResult = null, MainForm mainForm = null, bool v = false, ConcurrentDictionary<Vector3, float> densityMap = null) : this(material, triangles, confiningPressure, waveType, timeSteps, frequency, amplitude, energy, direction, useExtendedSimulationTime, previousTriaxialResult, mainForm)
+        {
+            this.v = v;
+            this.densityMap = densityMap;
         }
 
         /// <summary>
@@ -1041,7 +1050,7 @@ namespace CTSegmenter
         /// <summary>
         /// Initialize the simulation
         /// </summary>
-        public bool Initialize()
+        public virtual bool Initialize()
         {
             try
             {
@@ -1154,7 +1163,7 @@ namespace CTSegmenter
         /// <summary>
         /// Render simulation results to the specified graphics context
         /// </summary>
-        public void RenderResults(Graphics g, int width, int height, RenderMode renderMode = RenderMode.Stress)
+        public virtual void RenderResults(Graphics g, int width, int height, RenderMode renderMode = RenderMode.Stress)
         {
             if (Status != SimulationStatus.Completed || _result == null)
             {
@@ -1194,7 +1203,7 @@ namespace CTSegmenter
         /// <summary>
         /// Render simulation results to the specified graphics context
         /// </summary>
-        public void RenderResults(Graphics g, int width, int height, RenderMode renderMode = RenderMode.Stress, Point? location = null)
+        public virtual void RenderResults(Graphics g, int width, int height, RenderMode renderMode = RenderMode.Stress, Point? location = null)
         {
             // If location is specified, translate graphics to that location
             if (location.HasValue)
@@ -3488,9 +3497,6 @@ namespace CTSegmenter
                 // Use default values if no valid data found
                 minVelocity = _isPWave ? PWaveVelocity * 0.8f : SWaveVelocity * 0.8f;
                 maxVelocity = _isPWave ? PWaveVelocity * 1.2f : SWaveVelocity * 1.2f;
-
-                // Log this issue
-                Logger.Log($"[AcousticVelocitySimulation] No valid velocity data found, using defaults: {minVelocity} to {maxVelocity}");
             }
 
             // Ensure we have a reasonable range
@@ -3511,12 +3517,19 @@ namespace CTSegmenter
             // Draw histogram (bottom)
             DrawVelocityHistogram(g, margin, margin + 2 * (sliceHeight + margin / 2), plotWidth, sliceHeight, minVelocity, maxVelocity);
 
-            // Draw title
+            // Draw title - FIXED POSITIONING
             using (Font titleFont = new Font("Arial", 14, FontStyle.Bold))
             using (SolidBrush textBrush = new SolidBrush(Color.White))
+            using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(100, 0, 0, 0)))
             {
-                string title = $"Velocity Distribution - {(_isPWave ? "P-Wave" : "S-Wave")}";
-                g.DrawString(title, titleFont, textBrush, (width - g.MeasureString(title, titleFont).Width) / 2, 10);
+                string title = "Velocity Distribution";
+                SizeF titleSize = g.MeasureString(title, titleFont);
+                float titleX = (width - titleSize.Width) / 2;
+                float titleY = 10;
+
+                // Draw background for better visibility
+                g.FillRectangle(bgBrush, titleX - 5, titleY - 2, titleSize.Width + 10, titleSize.Height + 4);
+                g.DrawString(title, titleFont, textBrush, titleX, titleY);
             }
 
             // Draw color scale
@@ -3525,9 +3538,16 @@ namespace CTSegmenter
             // Add info text
             using (Font font = new Font("Arial", 10))
             using (SolidBrush textBrush = new SolidBrush(Color.White))
+            using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(100, 0, 0, 0)))
             {
                 string info = $"Min: {minVelocity:F0} m/s, Max: {maxVelocity:F0} m/s, Mean: {(_isPWave ? MeasuredPWaveVelocity : MeasuredSWaveVelocity):F0} m/s";
-                g.DrawString(info, font, textBrush, margin, height - 25);
+                SizeF infoSize = g.MeasureString(info, font);
+
+                // Position at bottom with background
+                float infoX = margin;
+                float infoY = height - 25;
+                g.FillRectangle(bgBrush, infoX - 5, infoY - 2, infoSize.Width + 10, infoSize.Height + 4);
+                g.DrawString(info, font, textBrush, infoX, infoY);
             }
         }
 
@@ -4796,61 +4816,135 @@ namespace CTSegmenter
                                 (compositeWidth - titleSize.Width) / 2, padding);
                         }
 
-                        // Draw the four key visualizations
-                        try
+                        // Create individual panel bitmaps WITHOUT panel titles
+                        Bitmap panel1 = new Bitmap(panelWidth, panelHeight);
+                        Bitmap panel2 = new Bitmap(panelWidth, panelHeight);
+                        Bitmap panel3 = new Bitmap(panelWidth, panelHeight);
+                        Bitmap panel4 = new Bitmap(panelWidth, panelHeight);
+
+                        // Render panels directly to individual bitmaps WITHOUT titles
+                        using (Graphics g1 = Graphics.FromImage(panel1))
                         {
-                            DrawCompositePanel(g, RenderMode.Stress,
-                                padding, titleHeight + padding,
-                                panelWidth, panelHeight,
-                                "Wave Propagation");
-                        }
-                        catch (Exception ex)
-                        {
-                            Logger.Log($"[AcousticVelocitySimulation] Error rendering wave propagation panel: {ex.Message}");
-                            DrawErrorPanel(g, padding, titleHeight + padding, panelWidth, panelHeight,
-                                "Wave Propagation", ex.Message);
+                            g1.Clear(Color.Black);
+                            g1.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                            g1.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                            // Just call the internal render method that doesn't add titles
+                            if (RenderMode.Stress == RenderMode.Stress)
+                            {
+                                RenderWaveField(g1, panelWidth, panelHeight);
+                            }
                         }
 
-                        try
+                        using (Graphics g2 = Graphics.FromImage(panel2))
                         {
-                            DrawCompositePanel(g, RenderMode.Strain,
-                                padding * 2 + panelWidth, titleHeight + padding,
-                                panelWidth, panelHeight,
-                                "Time Series");
-                        }
-                        catch (Exception ex)
-                        {
-                            Logger.Log($"[AcousticVelocitySimulation] Error rendering time series panel: {ex.Message}");
-                            DrawErrorPanel(g, padding * 2 + panelWidth, titleHeight + padding, panelWidth, panelHeight,
-                                "Time Series", ex.Message);
+                            g2.Clear(Color.Black);
+                            g2.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                            g2.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                            // Call the internal method directly
+                            RenderTimeSeries(g2, panelWidth, panelHeight);
                         }
 
-                        try
+                        using (Graphics g3 = Graphics.FromImage(panel3))
                         {
-                            DrawCompositePanel(g, RenderMode.FailureProbability,
-                                padding, titleHeight + padding * 2 + panelHeight,
-                                panelWidth, panelHeight,
-                                "Velocity Distribution");
-                        }
-                        catch (Exception ex)
-                        {
-                            Logger.Log($"[AcousticVelocitySimulation] Error rendering velocity distribution panel: {ex.Message}");
-                            DrawErrorPanel(g, padding, titleHeight + padding * 2 + panelHeight, panelWidth, panelHeight,
-                                "Velocity Distribution", ex.Message);
+                            g3.Clear(Color.Black);
+                            g3.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                            g3.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                            // Call the internal method directly
+                            RenderVelocityDistribution(g3, panelWidth, panelHeight);
                         }
 
-                        try
+                        using (Graphics g4 = Graphics.FromImage(panel4))
                         {
-                            DrawCompositePanel(g, RenderMode.Displacement,
-                                padding * 2 + panelWidth, titleHeight + padding * 2 + panelHeight,
-                                panelWidth, panelHeight,
-                                "Wave Slices");
+                            g4.Clear(Color.Black);
+                            g4.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                            g4.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                            // Call the internal method directly
+                            RenderWaveSlice(g4, panelWidth, panelHeight);
                         }
-                        catch (Exception ex)
+
+                        // Draw panels to the composite
+                        g.DrawImage(panel1, padding, titleHeight + padding);
+                        g.DrawImage(panel2, padding * 2 + panelWidth, titleHeight + padding);
+                        g.DrawImage(panel3, padding, titleHeight + padding * 2 + panelHeight);
+                        g.DrawImage(panel4, padding * 2 + panelWidth, titleHeight + padding * 2 + panelHeight);
+
+                        // Add the panel titles ONLY HERE - not in the rendering methods
+                        using (Font panelFont = new Font("Arial", 14, FontStyle.Bold))
+                        using (SolidBrush textBrush = new SolidBrush(Color.White))
+                        using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(150, 0, 0, 0)))
                         {
-                            Logger.Log($"[AcousticVelocitySimulation] Error rendering wave slices panel: {ex.Message}");
-                            DrawErrorPanel(g, padding * 2 + panelWidth, titleHeight + padding * 2 + panelHeight, panelWidth, panelHeight,
-                                "Wave Slices", ex.Message);
+                            // Panel 1 title
+                            string panel1Title = "P-Wave Propagation";
+                            SizeF title1Size = g.MeasureString(panel1Title, panelFont);
+                            float title1X = padding + (panelWidth - title1Size.Width) / 2;
+                            float title1Y = titleHeight + padding + 10;
+                            //g.FillRectangle(bgBrush, title1X - 5, title1Y - 2, title1Size.Width + 10, title1Size.Height + 4);
+                            //g.DrawString(panel1Title, panelFont, textBrush, title1X, title1Y);
+
+                            // Panel 2 title
+                            string panel2Title = "P-Wave Time Series";
+                            SizeF title2Size = g.MeasureString(panel2Title, panelFont);
+                            float title2X = padding * 2 + panelWidth + (panelWidth - title2Size.Width) / 2;
+                            float title2Y = titleHeight + padding + 10;
+                            //g.FillRectangle(bgBrush, title2X - 5, title2Y - 2, title2Size.Width + 10, title2Size.Height + 4);
+                            //g.DrawString(panel2Title, panelFont, textBrush, title2X, title2Y);
+
+                            // Panel 3 title
+                            string panel3Title = "Velocity Distribution";
+                            SizeF title3Size = g.MeasureString(panel3Title, panelFont);
+                            float title3X = padding + (panelWidth - title3Size.Width) / 2;
+                            float title3Y = titleHeight + padding * 2 + panelHeight + 10;
+                            g.FillRectangle(bgBrush, title3X - 5, title3Y - 2, title3Size.Width + 10, title3Size.Height + 4);
+                            g.DrawString(panel3Title, panelFont, textBrush, title3X, title3Y);
+
+                            // Panel 4 title
+                            string panel4Title = "P-Wave Slices";
+                            SizeF title4Size = g.MeasureString(panel4Title, panelFont);
+                            float title4X = padding * 2 + panelWidth + (panelWidth - title4Size.Width) / 2;
+                            float title4Y = titleHeight + padding * 2 + panelHeight + 10;
+                            //g.FillRectangle(bgBrush, title4X - 5, title4Y - 2, title4Size.Width + 10, title4Size.Height + 4);
+                            //g.DrawString(panel4Title, panelFont, textBrush, title4X, title4Y);
+                        }
+
+                        // Add density information if applicable
+                        bool isInhomogeneous = this is InhomogeneousAcousticSimulation;
+                        InhomogeneousAcousticSimulation inhomogeneousSim = this as InhomogeneousAcousticSimulation;
+
+                        if (isInhomogeneous && inhomogeneousSim != null)
+                        {
+                            using (Font infoFont = new Font("Arial", 9, FontStyle.Bold))
+                            using (SolidBrush textBrush = new SolidBrush(Color.Yellow))
+                            using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(150, 0, 0, 0)))
+                            {
+                                // Add density info to each panel in non-overlapping areas
+                                string densityInfo = $"Inhomogeneous Density: {inhomogeneousSim.TriangleDensities?.Count ?? 0} points";
+                                string densityRange = $"Density: {inhomogeneousSim.AverageDensity:F1} kg/m³";
+
+                                // Panel 1 - Top left
+                                g.FillRectangle(bgBrush, padding + 10, titleHeight + padding + 40, 200, 20);
+                                g.DrawString(densityInfo, infoFont, textBrush, padding + 15, titleHeight + padding + 42);
+
+                                // Panel 2 - Top right
+                                g.FillRectangle(bgBrush, padding * 2 + panelWidth + panelWidth - 220, titleHeight + padding + 40, 200, 20);
+                                g.DrawString(densityInfo, infoFont, textBrush, padding * 2 + panelWidth + panelWidth - 215, titleHeight + padding + 42);
+
+                                // Panel 3 - Bottom left
+                                g.FillRectangle(bgBrush, padding + 10, titleHeight + padding * 2 + panelHeight + 40, 200, 20);
+                                g.DrawString(densityInfo, infoFont, textBrush, padding + 15, titleHeight + padding * 2 + panelHeight + 42);
+
+                                // Panel 4 - Bottom right
+                                g.FillRectangle(bgBrush, padding * 2 + panelWidth + panelWidth - 220, titleHeight + padding * 2 + panelHeight + 40, 200, 20);
+                                g.DrawString(densityInfo, infoFont, textBrush, padding * 2 + panelWidth + panelWidth - 215, titleHeight + padding * 2 + panelHeight + 42);
+                            }
+                        }
+
+                        // Draw panel borders
+                        using (Pen borderPen = new Pen(Color.DimGray, 2))
+                        {
+                            g.DrawRectangle(borderPen, padding, titleHeight + padding, panelWidth, panelHeight);
+                            g.DrawRectangle(borderPen, padding * 2 + panelWidth, titleHeight + padding, panelWidth, panelHeight);
+                            g.DrawRectangle(borderPen, padding, titleHeight + padding * 2 + panelHeight, panelWidth, panelHeight);
+                            g.DrawRectangle(borderPen, padding * 2 + panelWidth, titleHeight + padding * 2 + panelHeight, panelWidth, panelHeight);
                         }
 
                         // Draw summary panel at the bottom
@@ -4907,6 +5001,42 @@ namespace CTSegmenter
                 return false;
             }
         }
+
+
+        // Add this helper method to draw error panels
+        private void DrawErrorPanel(Graphics g, int x, int y, int width, int height, string title, string errorMessage)
+        {
+            using (SolidBrush backBrush = new SolidBrush(Color.FromArgb(30, 30, 30)))
+            {
+                g.FillRectangle(backBrush, x, y, width, height);
+            }
+
+            using (Pen borderPen = new Pen(Color.DarkRed, 2))
+            {
+                g.DrawRectangle(borderPen, x, y, width, height);
+            }
+
+            using (Font titleFont = new Font("Arial", 14, FontStyle.Bold))
+            using (Font errorFont = new Font("Arial", 12))
+            using (SolidBrush textBrush = new SolidBrush(Color.White))
+            using (SolidBrush errorBrush = new SolidBrush(Color.Red))
+            {
+                g.DrawString(title, titleFont, textBrush, x + 10, y + 10);
+                g.DrawString("Rendering Error:", errorFont, errorBrush, x + 10, y + 40);
+
+                // Draw the error message with word wrap
+                using (StringFormat format = new StringFormat())
+                {
+                    format.Alignment = StringAlignment.Near;
+                    format.LineAlignment = StringAlignment.Near;
+                    format.Trimming = StringTrimming.Word;
+
+                    Rectangle errorRect = new Rectangle(x + 10, y + 70, width - 20, height - 80);
+                    g.DrawString(errorMessage, errorFont, errorBrush, errorRect, format);
+                }
+            }
+        }
+
         private void DrawCompositePanel(Graphics g, RenderMode mode, int x, int y, int width, int height, string title)
         {
             // Create a bitmap for this panel
@@ -4950,38 +5080,7 @@ namespace CTSegmenter
                 }
             }
         }
-        private void DrawErrorPanel(Graphics g, int x, int y, int width, int height, string title, string errorMessage)
-        {
-            using (SolidBrush backBrush = new SolidBrush(Color.FromArgb(30, 30, 30)))
-            {
-                g.FillRectangle(backBrush, x, y, width, height);
-            }
-
-            using (Pen borderPen = new Pen(Color.DarkRed, 2))
-            {
-                g.DrawRectangle(borderPen, x, y, width, height);
-            }
-
-            using (Font titleFont = new Font("Arial", 14, FontStyle.Bold))
-            using (Font errorFont = new Font("Arial", 12))
-            using (SolidBrush textBrush = new SolidBrush(Color.White))
-            using (SolidBrush errorBrush = new SolidBrush(Color.Red))
-            {
-                g.DrawString(title, titleFont, textBrush, x + 10, y + 10);
-                g.DrawString("Rendering Error:", errorFont, errorBrush, x + 10, y + 40);
-
-                // Draw the error message with word wrap
-                using (StringFormat format = new StringFormat())
-                {
-                    format.Alignment = StringAlignment.Near;
-                    format.LineAlignment = StringAlignment.Near;
-                    format.Trimming = StringTrimming.Word;
-
-                    Rectangle errorRect = new Rectangle(x + 10, y + 70, width - 20, height - 80);
-                    g.DrawString(errorMessage, errorFont, errorBrush, errorRect, format);
-                }
-            }
-        }
+        
 
         #endregion
 

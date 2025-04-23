@@ -8,8 +8,11 @@ using ILGPU.Runtime.CPU;
 using Krypton.Ribbon;
 using Krypton.Toolkit;
 using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
+using System.Numerics;
 using System.Reflection;
 using System.Windows.Forms;
 
@@ -18,11 +21,29 @@ namespace CTSegmenter
 
     public partial class TriaxialSimulation
     {
+        private bool v;
+        private ConcurrentDictionary<Vector3, float> densityMap;
+
+        public TriaxialSimulation(Material material, List<Triangle> triangles, float confiningPressure, float minAxialPressure, float maxAxialPressure, int pressureSteps, string direction, bool v, ConcurrentDictionary<Vector3, float> densityMap) : this(material, triangles, confiningPressure, minAxialPressure, maxAxialPressure, pressureSteps, direction)
+        {
+            this.v = v;
+            this.densityMap = densityMap;
+        }
+        private Action<Index1D,
+       ArrayView<Vector3>,
+       ArrayView<Vector3>,
+       ArrayView<Vector3>,
+       ArrayView<float>, // stress factors for density
+       float, float, Vector3,
+       float, float, // cohesion and friction angle
+       ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<int>>
+       _inhomogeneousStressKernel;
+
         // REPLACE the previous kernel binding with a version that uses only
         // primitive math and ILGPU.XMath to avoid internal compiler errors on
         // some NVIDIA drivers.
 
-       
+
 
         // --- Override LoadKernels ------------------------------------------------
         private void LoadKernels()
@@ -34,6 +55,7 @@ namespace CTSegmenter
                     float, float, System.Numerics.Vector3,
                     float, float, // Added cohesion and frictionAngleRad
                     ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<int>>(ComputeStressKernelSafe);
+
             }
             catch (Exception ex)
             {

@@ -12,6 +12,8 @@ using ILGPU.Runtime;
 using Krypton.Navigator;
 using Krypton.Docking;
 using static MaterialDensityLibrary;
+using System.Drawing.Drawing2D;
+using System.Collections.Concurrent;
 
 namespace CTSegmenter
 {
@@ -31,6 +33,9 @@ namespace CTSegmenter
         private KryptonRibbonGroup visualizationGroup;
         private KryptonRibbonGroup analysisGroup;
         private KryptonHeader statusHeader;
+        private KryptonButton btnAssignVaryingDensity;
+        public bool inhomogeneousDensityEnabled = false;
+        public Dictionary<Vector3, float> voxelDensities = null;
         private KryptonDockableNavigator mainTabControl;
         private KryptonPage meshPage;
         private KryptonPage analysisPage;
@@ -69,7 +74,17 @@ namespace CTSegmenter
         private KryptonCheckBox extendedSimulationCheckBox;
         private PictureBox wavePictureBox;
         private Panel waveScrollPanel;
-        
+
+        // Properties to expose inhomogeneous density state
+        public bool InhomogeneousDensityEnabled => inhomogeneousDensityEnabled;
+        public Dictionary<Vector3, float> VoxelDensities => voxelDensities;
+
+        // Method to expose density calculations to other forms
+        public Dictionary<Vector3, float> GetCalculatedDensityMap()
+        {
+            return voxelDensities;
+        }
+
         public bool UseExtendedSimulationTime { get; private set; } = true;
         // Wave Propagation controls
         private float waveZoomLevel = 1.0f;
@@ -129,7 +144,7 @@ namespace CTSegmenter
         }
 
         // Simple 3D vector structure
-        private struct Vector3
+        public struct Vector3
         {
             public float X;
             public float Y;
@@ -463,9 +478,29 @@ namespace CTSegmenter
             importGroup = new KryptonRibbonGroup { TextLine1 = "Import/Export" };
             visualizationGroup = new KryptonRibbonGroup { TextLine1 = "Visualization" };
             analysisGroup = new KryptonRibbonGroup { TextLine1 = "Analysis Options" };
-
+            var simulationOptionsGroup = new KryptonRibbonGroup { TextLine1 = "Simulation Options" };
             meshTab.Groups.AddRange(new[] { meshGroup, importGroup, visualizationGroup });
+            var simOptionsTriple = new KryptonRibbonGroupTriple();
+            simulationOptionsGroup.Items.Add(simOptionsTriple);
             analysisTab.Groups.Add(analysisGroup);
+            analysisTab.Groups.Add(simulationOptionsGroup);
+
+            var toggleInhomogeneousBtn = new KryptonRibbonGroupButton
+            {
+                TextLine1 = "Use Varying",
+                TextLine2 = "Density",
+                Checked = inhomogeneousDensityEnabled,
+                ButtonType = GroupButtonType.Check,
+                ImageSmall = CreateInhomogeneousDensityIcon(16),
+                ImageLarge = CreateInhomogeneousDensityIcon(32)
+            };
+            toggleInhomogeneousBtn.Click += (s, e) => {
+                inhomogeneousDensityEnabled = toggleInhomogeneousBtn.Checked;
+                statusHeader.Text = inhomogeneousDensityEnabled ?
+                    "Inhomogeneous density mode enabled." :
+                    "Inhomogeneous density mode disabled.";
+            };
+            simOptionsTriple.Items.Add(toggleInhomogeneousBtn);
 
             // Mesh Generation buttons
             {
@@ -732,6 +767,15 @@ namespace CTSegmenter
                 ForeColor = Color.White,
                 Location = new Point(10, 310)
             };
+            btnAssignVaryingDensity = new KryptonButton
+            {
+                Text = "Calculate Varying Density",
+                Location = new Point(10, 340),
+                Width = 150,
+                Values = { Image = CreateVaryingDensityIcon(16) }
+            };
+            btnAssignVaryingDensity.Click += BtnAssignVaryingDensity_Click;
+            
 
             // Add all controls to the controlsPanel
             controlsPanel.Controls.Add(materialLabel);
@@ -744,6 +788,7 @@ namespace CTSegmenter
             controlsPanel.Controls.Add(importMeshButton);
             controlsPanel.Controls.Add(applyMeshButton);
             controlsPanel.Controls.Add(btnSetDensity);
+            controlsPanel.Controls.Add(btnAssignVaryingDensity);
             controlsPanel.Controls.Add(densityLabel);
 
             // Place panels into meshLayout
@@ -798,6 +843,46 @@ namespace CTSegmenter
             // Save the “original” pages for reopen logic
             InitializeTabManagement();
             InitializeSimulationParameters();
+        }
+        private Image CreateVaryingDensityIcon(int size)
+        {
+            Bitmap bmp = new Bitmap(size, size);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+
+                // Draw container
+                Rectangle container = new Rectangle(2, 2, size - 4, size - 4);
+                using (Pen pen = new Pen(Color.DarkGray, 1))
+                {
+                    g.DrawRectangle(pen, container);
+                }
+
+                // Draw dots of different intensities (representing varying density)
+                Random rnd = new Random(42); // Fixed seed for consistent pattern
+                for (int i = 0; i < 12; i++)
+                {
+                    int x = rnd.Next(4, size - 4);
+                    int y = rnd.Next(4, size - 4);
+                    int dotSize = rnd.Next(1, 3);
+                    int intensity = rnd.Next(64, 255);
+
+                    using (SolidBrush brush = new SolidBrush(Color.FromArgb(intensity, 0, 0, intensity)))
+                    {
+                        g.FillEllipse(brush, x - dotSize / 2, y - dotSize / 2, dotSize, dotSize);
+                    }
+                }
+
+                // Draw gradient indicator in bottom right
+                using (LinearGradientBrush gradBrush = new LinearGradientBrush(
+                       new Point(size - 7, size - 7),
+                       new Point(size - 3, size - 3),
+                       Color.Blue, Color.Red))
+                {
+                    g.FillRectangle(gradBrush, size - 7, size - 7, 4, 4);
+                }
+            }
+            return bmp;
         }
         private void ExportAcousticCompositeImage(AcousticVelocitySimulation sim)
         {
@@ -1109,7 +1194,193 @@ namespace CTSegmenter
             }
             return bmp;
         }
+        private void BtnAssignVaryingDensity_Click(object sender, EventArgs e)
+        {
+            if (selectedMaterial == null || selectedMaterial.ID == 0)
+            {
+                MessageBox.Show("Please select a material first.", "No Material Selected",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
 
+            if (selectedMaterial.Density <= 0)
+            {
+                MessageBox.Show("Please set a base material density first using the 'Set Material Density' button.",
+                    "Base Density Required", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (!meshGenerated || meshTriangles.Count == 0)
+            {
+                MessageBox.Show("Please generate a mesh first.", "No Mesh",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            try
+            {
+                Cursor = Cursors.WaitCursor;
+                statusHeader.Text = "Calculating varying density based on grayscale values...";
+
+                // Call method to calculate densities based on grayscale values
+                voxelDensities = CalculateVaryingDensity();
+
+                // Enable the inhomogeneous density mode
+                inhomogeneousDensityEnabled = true;
+
+                // Update the toggle button in the ribbon
+                UpdateInhomogeneousDensityToggle();
+
+                MessageBox.Show($"Successfully calculated varying density for {voxelDensities.Count} mesh elements.",
+                    "Varying Density", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+                statusHeader.Text = "Varying density calculation complete.";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error calculating varying density: {ex.Message}",
+                    "Calculation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Logger.Log($"[StressAnalysisForm] Varying density calculation error: {ex.Message}");
+            }
+            finally
+            {
+                Cursor = Cursors.Default;
+            }
+        }
+        private Dictionary<Vector3, float> CalculateVaryingDensity()
+        {
+            // Create a dictionary to store densities for each mesh position
+            Dictionary<Vector3, float> densities = new Dictionary<Vector3, float>();
+
+            // Get the average gray value for the material
+            double avgGrayValue = CalculateAverageMaterialGrayValue();
+            double baseDensity = selectedMaterial.Density;
+
+            // For each mesh triangle
+            foreach (var triangle in meshTriangles)
+            {
+                // For each vertex of the triangle
+                ProcessVertexDensity(triangle.V1, densities, avgGrayValue, baseDensity);
+                ProcessVertexDensity(triangle.V2, densities, avgGrayValue, baseDensity);
+                ProcessVertexDensity(triangle.V3, densities, avgGrayValue, baseDensity);
+            }
+
+            return densities;
+        }
+
+        private void ProcessVertexDensity(Vector3 vertex, Dictionary<Vector3, float> densities, double avgGrayValue, double baseDensity)
+        {
+            // Skip if we already processed this vertex
+            if (densities.ContainsKey(vertex)) return;
+
+            // Convert vertex position to voxel coordinates
+            int x = (int)Math.Round(vertex.X);
+            int y = (int)Math.Round(vertex.Y);
+            int z = (int)Math.Round(vertex.Z);
+
+            // Make sure we're within volume bounds
+            if (x < 0 || y < 0 || z < 0 || x >= mainForm.GetWidth() || y >= mainForm.GetHeight() || z >= mainForm.GetDepth())
+            {
+                // Out of bounds, use default density
+                densities[vertex] = (float)baseDensity;
+                return;
+            }
+
+            // Get the grayscale value at this position
+            byte grayValue = mainForm.volumeData[x, y, z];
+
+            // Skip if this voxel isn't part of our material
+            if (mainForm.volumeLabels[x, y, z] != selectedMaterial.ID)
+            {
+                densities[vertex] = (float)baseDensity;
+                return;
+            }
+
+            // Calculate relative density based on gray value
+            // Simple linear relationship: denser = brighter
+            double densityScale = (double)grayValue / avgGrayValue;
+
+            // Apply scaling but keep within reasonable bounds (e.g. ±30% of base density)
+            double scaledDensity = Math.Max(baseDensity * 0.7, Math.Min(baseDensity * 1.3, baseDensity * densityScale));
+
+            // Store the calculated density
+            densities[vertex] = (float)scaledDensity;
+        }
+        private Image CreateInhomogeneousDensityIcon(int size)
+        {
+            Bitmap bmp = new Bitmap(size, size);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+
+                // Draw a material sample with gradient
+                Rectangle gradRect = new Rectangle(2, 2, size - 4, size - 4);
+
+                using (LinearGradientBrush gradBrush = new LinearGradientBrush(
+                       gradRect, Color.LightBlue, Color.DarkBlue, 45f))
+                {
+                    // Add density variation with gradient stops
+                    ColorBlend blend = new ColorBlend(4);
+                    blend.Colors = new Color[] {
+                Color.LightBlue,
+                Color.RoyalBlue,
+                Color.MediumBlue,
+                Color.DarkBlue
+            };
+                    blend.Positions = new float[] { 0.0f, 0.3f, 0.7f, 1.0f };
+                    gradBrush.InterpolationColors = blend;
+
+                    g.FillEllipse(gradBrush, gradRect);
+                }
+
+                // Draw outline
+                using (Pen pen = new Pen(Color.Gray, 1))
+                {
+                    g.DrawEllipse(pen, gradRect);
+                }
+
+                // Draw density indicator lines
+                using (Pen pen = new Pen(Color.White, 1))
+                {
+                    for (int i = 1; i < 4; i++)
+                    {
+                        int y = size * i / 4;
+                        g.DrawLine(pen, 4, y, size - 4, y);
+                    }
+                }
+            }
+            return bmp;
+        }
+
+        private void UpdateInhomogeneousDensityToggle()
+        {
+            // Find the toggle button in the ribbon
+            foreach (KryptonRibbonTab tab in ribbon.RibbonTabs)
+            {
+                foreach (KryptonRibbonGroup group in tab.Groups)
+                {
+                    if (group.TextLine1 == "Simulation Options")
+                    {
+                        foreach (var item in group.Items)
+                        {
+                            if (item is KryptonRibbonGroupTriple triple)
+                            {
+                                foreach (var button in triple.Items)
+                                {
+                                    if (button is KryptonRibbonGroupButton rbtn &&
+                                        rbtn.TextLine1 == "Use Varying" &&
+                                        rbtn.TextLine2 == "Density")
+                                    {
+                                        rbtn.Checked = inhomogeneousDensityEnabled;
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         private Image CreateImportIcon(int size, string fileType)
         {
             Bitmap bmp = new Bitmap(size, size);
@@ -3245,67 +3516,101 @@ namespace CTSegmenter
                     ));
                 }
 
-                // Create and initialize the simulation
-                using (var simulation = new TriaxialSimulation(
-                    selectedMaterial,
-                    simulationTriangles,
-                    confiningPressure,
-                    minPressure,
-                    maxPressure,
-                    steps,
-                    direction))
+                // Prepare density map if inhomogeneous density is enabled
+                ConcurrentDictionary<System.Numerics.Vector3, float> densityMap = null;
+                if (inhomogeneousDensityEnabled && voxelDensities != null && voxelDensities.Count > 0)
                 {
-                    // IMPORTANT: Set custom rock strength parameters from UI
-                    // Check if rock strength UI controls exist and use their values
-                    if (cohesionNumeric != null)
-                        simulation.CohesionStrength = (float)cohesionNumeric.Value;
-
-                    if (frictionAngleNumeric != null)
-                        simulation.FrictionAngle = (float)frictionAngleNumeric.Value;
-
-                    if (tensileStrengthNumeric != null)
-                        simulation.TensileStrength = (float)tensileStrengthNumeric.Value;
-
-                    // Log the values for debugging
-                    Logger.Log($"[StressAnalysisForm] Simulation rock strength parameters: Cohesion={simulation.CohesionStrength}MPa, " +
-                              $"Friction Angle={simulation.FrictionAngle}°, Tensile Strength={simulation.TensileStrength}MPa");
-
-                    // Show progress in status bar
-                    simulation.ProgressChanged += (s, args) =>
+                    densityMap = new ConcurrentDictionary<System.Numerics.Vector3, float>();
+                    foreach (var kvp in voxelDensities)
                     {
-                        this.BeginInvoke(new Action(() =>
-                        {
-                            statusHeader.Text = args.StatusMessage;
-                        }));
-                    };
-
-                    // Initialize
-                    if (!simulation.Initialize())
-                    {
-                        throw new InvalidOperationException("Failed to initialize simulation");
+                        densityMap[new System.Numerics.Vector3(kvp.Key.X, kvp.Key.Y, kvp.Key.Z)] = kvp.Value;
                     }
+                    Logger.Log($"[StressAnalysisForm] Using inhomogeneous density with {densityMap.Count} density points");
+                }
 
-                    // Run the simulation
-                    var result = await simulation.RunAsync();
+                // Create simulation with appropriate constructor based on density mode
+                TriaxialSimulation simulation;
+                if (inhomogeneousDensityEnabled && densityMap != null)
+                {
+                    // Use the inhomogeneous simulation
+                    simulation = new InhomogeneousTriaxialSimulation(
+                        selectedMaterial,
+                        simulationTriangles,
+                        confiningPressure,
+                        minPressure,
+                        maxPressure,
+                        steps,
+                        direction,
+                        true,  // inhomogeneousDensityEnabled
+                        densityMap);
 
-                    currentTriaxial = simulation;
+                    Logger.Log("[StressAnalysisForm] Created inhomogeneous triaxial simulation");
+                }
+                else
+                {
+                    // Use the standard simulation
+                    simulation = new TriaxialSimulation(
+                        selectedMaterial,
+                        simulationTriangles,
+                        confiningPressure,
+                        minPressure,
+                        maxPressure,
+                        steps,
+                        direction);
 
-                    if (result.IsSuccessful)
+                    Logger.Log("[StressAnalysisForm] Created standard triaxial simulation");
+                }
+
+                // IMPORTANT: Set custom rock strength parameters from UI
+                // Check if rock strength UI controls exist and use their values
+                if (cohesionNumeric != null)
+                    simulation.CohesionStrength = (float)cohesionNumeric.Value;
+
+                if (frictionAngleNumeric != null)
+                    simulation.FrictionAngle = (float)frictionAngleNumeric.Value;
+
+                if (tensileStrengthNumeric != null)
+                    simulation.TensileStrength = (float)tensileStrengthNumeric.Value;
+
+                // Log the values for debugging
+                Logger.Log($"[StressAnalysisForm] Simulation rock strength parameters: Cohesion={simulation.CohesionStrength}MPa, " +
+                          $"Friction Angle={simulation.FrictionAngle}°, Tensile Strength={simulation.TensileStrength}MPa");
+
+                // Show progress in status bar
+                simulation.ProgressChanged += (s, args) =>
+                {
+                    this.BeginInvoke(new Action(() =>
                     {
-                        statusHeader.Text = "Triaxial simulation completed.";
+                        statusHeader.Text = args.StatusMessage;
+                    }));
+                };
 
-                        // Create results display on the results page
-                        CreateTriaxialResultsDisplay(simulation, result);
+                // Initialize
+                if (!simulation.Initialize())
+                {
+                    throw new InvalidOperationException("Failed to initialize simulation");
+                }
 
-                        // Switch to results tab
-                        mainTabControl.SelectedPage = resultsPage;
-                    }
-                    else
-                    {
-                        statusHeader.Text = "Simulation failed.";
-                        MessageBox.Show($"Triaxial simulation failed: {result.ErrorMessage}",
-                            "Simulation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    }
+                // Run the simulation
+                var result = await simulation.RunAsync();
+
+                currentTriaxial = simulation;
+
+                if (result.IsSuccessful)
+                {
+                    statusHeader.Text = "Triaxial simulation completed.";
+
+                    // Create results display on the results page
+                    CreateTriaxialResultsDisplay(simulation, result);
+
+                    // Switch to results tab
+                    mainTabControl.SelectedPage = resultsPage;
+                }
+                else
+                {
+                    statusHeader.Text = "Simulation failed.";
+                    MessageBox.Show($"Triaxial simulation failed: {result.ErrorMessage}",
+                        "Simulation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
             catch (Exception ex)
@@ -3313,6 +3618,72 @@ namespace CTSegmenter
                 MessageBox.Show($"Error running triaxial simulation: {ex.Message}",
                     "Simulation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 Logger.Log($"[StressAnalysisForm] Triaxial simulation error: {ex.Message}");
+            }
+            finally
+            {
+                this.Cursor = Cursors.Default;
+            }
+        }
+        private void ExportFullCompositeWithDensity(TriaxialSimulation simulation)
+        {
+            try
+            {
+                using (SaveFileDialog dlg = new SaveFileDialog())
+                {
+                    dlg.Filter = "PNG Image|*.png";
+                    dlg.Title = "Export Complete Simulation Results with Density";
+                    dlg.FileName = $"Triaxial_{selectedMaterial.Name}_Density_{DateTime.Now:yyyyMMdd_HHmmss}.png";
+
+                    if (dlg.ShowDialog() == DialogResult.OK)
+                    {
+                        this.Cursor = Cursors.WaitCursor;
+                        statusHeader.Text = "Creating composite image with density visualization...";
+
+                        if (simulation is InhomogeneousTriaxialSimulation inhomogeneousSim)
+                        {
+                            // Add special handling for inhomogeneous simulation if needed
+                            // For example, include density visualization in the export
+                            bool success = simulation.ExportFullCompositeImage(dlg.FileName);
+
+                            if (success)
+                            {
+                                statusHeader.Text = $"Exported composite image to {Path.GetFileName(dlg.FileName)}";
+                                MessageBox.Show($"Complete composite image successfully exported to:\n{dlg.FileName}",
+                                    "Export Successful", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            }
+                            else
+                            {
+                                statusHeader.Text = "Export failed.";
+                                MessageBox.Show("Failed to export composite image.", "Export Error",
+                                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            }
+                        }
+                        else
+                        {
+                            // Standard export for regular simulation
+                            bool success = simulation.ExportFullCompositeImage(dlg.FileName);
+
+                            if (success)
+                            {
+                                statusHeader.Text = $"Exported composite image to {Path.GetFileName(dlg.FileName)}";
+                                MessageBox.Show($"Complete composite image successfully exported to:\n{dlg.FileName}",
+                                    "Export Successful", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            }
+                            else
+                            {
+                                statusHeader.Text = "Export failed.";
+                                MessageBox.Show("Failed to export composite image.", "Export Error",
+                                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error exporting composite image: {ex.Message}",
+                    "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Logger.Log($"[StressAnalysisForm] Composite image export error: {ex.Message}");
             }
             finally
             {
@@ -3789,7 +4160,7 @@ namespace CTSegmenter
                 }
 
                 float dtFactor = (float)dtFactorNumeric.Value;
-                
+
                 statusHeader.Text = $"Running acoustic velocity simulation ({waveType}, {direction})...";
                 Cursor = Cursors.WaitCursor;
 
@@ -3804,8 +4175,20 @@ namespace CTSegmenter
 
                 SimulationResult triaxialResult = null;
 
-                // 5) Create & configure
-                using (var simulation = new AcousticVelocitySimulation(
+                // 5) Prepare density map if inhomogeneous density is enabled
+                ConcurrentDictionary<System.Numerics.Vector3, float> densityMap = null;
+                if (inhomogeneousDensityEnabled && voxelDensities != null && voxelDensities.Count > 0)
+                {
+                    densityMap = new ConcurrentDictionary<System.Numerics.Vector3, float>();
+                    foreach (var kvp in voxelDensities)
+                    {
+                        densityMap[new System.Numerics.Vector3(kvp.Key.X, kvp.Key.Y, kvp.Key.Z)] = kvp.Value;
+                    }
+                    Logger.Log($"[StressAnalysisForm] Using inhomogeneous density with {densityMap.Count} density points for acoustic simulation");
+                }
+
+                // 6) Use the factory to create the appropriate simulation type
+                AcousticVelocitySimulation simulation = SimulationFactory.CreateAcousticSimulation(
                     selectedMaterial,
                     simulationTriangles,
                     confiningPressure,
@@ -3816,41 +4199,49 @@ namespace CTSegmenter
                     energy,
                     direction,
                     UseExtendedSimulationTime,
+                    inhomogeneousDensityEnabled,
+                    densityMap,
                     triaxialResult,
-                    mainForm))
+                    mainForm);
+
+                simulation.TimeStepFactor = dtFactor;
+                currentAcousticSim = simulation;
+                HookSimCompleted(simulation);
+
+                simulation.ProgressChanged += (s, args) =>
+                    BeginInvoke(new Action(() => statusHeader.Text = args.StatusMessage));
+
+                // 7) Initialize
+                if (!simulation.Initialize())
+                    throw new InvalidOperationException("Failed to initialize simulation");
+
+                // 8) Run
+                var result = await simulation.RunAsync();
+
+                // 9) Handle results
+                if (result.IsSuccessful)
                 {
-                    simulation.TimeStepFactor = dtFactor;
-                    currentAcousticSim = simulation;
-                    HookSimCompleted(simulation);
+                    statusHeader.Text = "Acoustic velocity simulation completed.";
+                    CreateAcousticResultsDisplay(simulation, result);
+                    UpdateWaveVisualization(simulation);
+                    mainTabControl.SelectedPage = resultsPage;
 
-                    simulation.ProgressChanged += (s, args) =>
-                        BeginInvoke(new Action(() => statusHeader.Text = args.StatusMessage));
-
-                    // 6) Initialize
-                    if (!simulation.Initialize())
-                        throw new InvalidOperationException("Failed to initialize simulation");
-
-                    // 7) Run
-                    var result = await simulation.RunAsync();
-
-                    // 8) Handle results
-                    if (result.IsSuccessful)
+                    // If we're using inhomogeneous density, add a button to visualize it
+                    if (inhomogeneousDensityEnabled && simulation is InhomogeneousAcousticSimulation inhomogeneousSim)
                     {
-                        statusHeader.Text = "Acoustic velocity simulation completed.";
-                        CreateAcousticResultsDisplay(simulation, result);
-                        UpdateWaveVisualization(simulation);
-                        mainTabControl.SelectedPage = resultsPage;
+                        // Add a button to results page to visualize the density distribution
+                        AddDensityVisualizationButton(inhomogeneousSim);
                     }
-                    else
-                    {
-                        statusHeader.Text = "Simulation failed.";
-                        MessageBox.Show(
-                            $"Acoustic velocity simulation failed: {result.ErrorMessage}",
-                            "Simulation Error",
-                            MessageBoxButtons.OK,
-                            MessageBoxIcon.Error
-                        );
-                    }
+                }
+                else
+                {
+                    statusHeader.Text = "Simulation failed.";
+                    MessageBox.Show(
+                        $"Acoustic velocity simulation failed: {result.ErrorMessage}",
+                        "Simulation Error",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error
+                    );
                 }
             }
             catch (Exception ex)
@@ -3868,7 +4259,381 @@ namespace CTSegmenter
                 Cursor = Cursors.Default;
             }
         }
+        private void AddDensityVisualizationButton(InhomogeneousAcousticSimulation simulation)
+        {
+            try
+            {
+                Logger.Log("[StressAnalysisForm] Creating density visualization tab");
 
+                // Find the results tabs
+                KryptonDockableNavigator resultsTabs = null;
+                foreach (Control control in resultsPage.Controls)
+                {
+                    if (control is KryptonDockableNavigator navigator)
+                    {
+                        resultsTabs = navigator;
+                        break;
+                    }
+                }
+
+                if (resultsTabs == null)
+                {
+                    MessageBox.Show("Cannot find results tab control.", "Error",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                // Remove any existing density tab
+                foreach (KryptonPage page in resultsTabs.Pages)
+                {
+                    if (page.Text == "Density Distribution")
+                    {
+                        resultsTabs.Pages.Remove(page);
+                        break;
+                    }
+                }
+
+                // Create new density tab
+                KryptonPage densityPage = new KryptonPage
+                {
+                    Text = "Density Distribution",
+                    TextTitle = "Material Density Distribution",
+                    BackColor = Color.Black
+                };
+
+                // Use TableLayoutPanel for proper organization
+                TableLayoutPanel mainLayout = new TableLayoutPanel
+                {
+                    Dock = DockStyle.Fill,
+                    RowCount = 3,
+                    ColumnCount = 1,
+                    BackColor = Color.Black,
+                    CellBorderStyle = TableLayoutPanelCellBorderStyle.None,
+                    Padding = new Padding(10)
+                };
+
+                // Configure rows - title row, top slice row, bottom slice row
+                mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+                mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+                mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+
+                // Header panel with title and refresh button
+                Panel headerPanel = new Panel
+                {
+                    Dock = DockStyle.Fill,
+                    BackColor = Color.FromArgb(30, 30, 30)
+                };
+
+                Label titleLabel = new Label
+                {
+                    Text = "Inhomogeneous Density Visualization",
+                    Font = new Font("Arial", 12, FontStyle.Bold),
+                    ForeColor = Color.White,
+                    AutoSize = true,
+                    Location = new Point(10, 10)
+                };
+
+                Button refreshButton = new Button
+                {
+                    Text = "Refresh View",
+                    Size = new Size(100, 25),
+                    Location = new Point(300, 8),
+                    BackColor = Color.DimGray,
+                    ForeColor = Color.White
+                };
+
+                headerPanel.Controls.Add(titleLabel);
+                headerPanel.Controls.Add(refreshButton);
+
+                // Top slice panel with X-Z slice
+                Panel topSlicePanel = new Panel
+                {
+                    Dock = DockStyle.Fill,
+                    BackColor = Color.Black,
+                    Margin = new Padding(5)
+                };
+
+                // Bottom slice panel with Y-Z slice
+                Panel bottomSlicePanel = new Panel
+                {
+                    Dock = DockStyle.Fill,
+                    BackColor = Color.Black,
+                    Margin = new Padding(5)
+                };
+
+                // Add panels to main layout
+                mainLayout.Controls.Add(headerPanel, 0, 0);
+                mainLayout.Controls.Add(topSlicePanel, 0, 1);
+                mainLayout.Controls.Add(bottomSlicePanel, 0, 2);
+
+                // Set up paint handlers for both panels
+                topSlicePanel.Paint += (s, e) =>
+                {
+                    e.Graphics.Clear(Color.Black);
+
+                    // Draw title
+                    using (Font titleFont = new Font("Arial", 10, FontStyle.Bold))
+                        e.Graphics.DrawString("X-Z Slice (Y middle)",
+                            titleFont, Brushes.White, 10, 5);
+
+                    // Direct access to density model
+                    if (simulation._detailedDensityModel != null)
+                    {
+                        // Get dimensions with proper margins
+                        int panelWidth = topSlicePanel.Width;
+                        int panelHeight = topSlicePanel.Height;
+                        int graphWidth = (int)(panelWidth * 0.85);  // Leave room for colorbar
+                        int graphHeight = panelHeight - 25;        // Leave room for title
+                        float minDensity = simulation.MinimumDensity;
+                        float maxDensity = simulation.MaximumDensity;
+
+                        // Get slice from middle Y
+                        int sliceY = simulation._gridSizeY / 2;
+
+                        // Draw the slice
+                        using (Bitmap slice = new Bitmap(graphWidth, graphHeight))
+                        {
+                            using (Graphics g = Graphics.FromImage(slice))
+                            {
+                                g.Clear(Color.Black);
+
+                                // Scale factors
+                                float scaleX = (float)graphWidth / simulation._gridSizeX;
+                                float scaleZ = (float)graphHeight / simulation._gridSizeZ;
+
+                                // Draw each cell
+                                for (int x = 0; x < simulation._gridSizeX; x++)
+                                {
+                                    for (int z = 0; z < simulation._gridSizeZ; z++)
+                                    {
+                                        float density = simulation._detailedDensityModel[x, sliceY, z];
+
+                                        // Skip very low densities
+                                        if (density < 0.1f)
+                                            continue;
+
+                                        // Calculate color
+                                        float normalizedDensity = 0.5f;
+                                        if (maxDensity > minDensity)
+                                            normalizedDensity = (density - minDensity) / (maxDensity - minDensity);
+
+                                        normalizedDensity = Math.Max(0f, Math.Min(1f, normalizedDensity));
+
+                                        // Get density color (blue to red)
+                                        Color color = GetDensityColor(normalizedDensity);
+
+                                        // Draw rectangle
+                                        int px = (int)(x * scaleX);
+                                        int py = (int)(z * scaleZ);
+                                        int w = Math.Max(1, (int)Math.Ceiling(scaleX));
+                                        int h = Math.Max(1, (int)Math.Ceiling(scaleZ));
+
+                                        g.FillRectangle(new SolidBrush(color), px, py, w, h);
+                                    }
+                                }
+                            }
+
+                            // Draw to panel
+                            e.Graphics.DrawImage(slice, 10, 25);
+                        }
+
+                        // Draw color scale - right aligned
+                        int colorBarX = graphWidth + 15;
+                        int colorBarY = 25;
+                        int colorBarWidth = 20;
+                        int colorBarHeight = graphHeight;
+
+                        DrawColorScale(e.Graphics, colorBarX, colorBarY, colorBarWidth, colorBarHeight, minDensity, maxDensity);
+                    }
+                    else
+                    {
+                        e.Graphics.DrawString("No density model available",
+                            new Font("Arial", 12), Brushes.Yellow, 10, 50);
+                    }
+                };
+
+                // Similar handler for bottom panel (Y-Z slice)
+                bottomSlicePanel.Paint += (s, e) =>
+                {
+                    e.Graphics.Clear(Color.Black);
+
+                    // Draw title
+                    using (Font titleFont = new Font("Arial", 10, FontStyle.Bold))
+                        e.Graphics.DrawString("Y-Z Slice (X middle)",
+                            titleFont, Brushes.White, 10, 5);
+
+                    // Direct access to density model
+                    if (simulation._detailedDensityModel != null)
+                    {
+                        // Get dimensions with proper margins
+                        int panelWidth = bottomSlicePanel.Width;
+                        int panelHeight = bottomSlicePanel.Height;
+                        int graphWidth = (int)(panelWidth * 0.85);  // Leave room for colorbar
+                        int graphHeight = panelHeight - 25;        // Leave room for title
+                        float minDensity = simulation.MinimumDensity;
+                        float maxDensity = simulation.MaximumDensity;
+
+                        // Get slice from middle X
+                        int sliceX = simulation._gridSizeX / 2;
+
+                        // Draw the slice
+                        using (Bitmap slice = new Bitmap(graphWidth, graphHeight))
+                        {
+                            using (Graphics g = Graphics.FromImage(slice))
+                            {
+                                g.Clear(Color.Black);
+
+                                // Scale factors
+                                float scaleY = (float)graphWidth / simulation._gridSizeY;
+                                float scaleZ = (float)graphHeight / simulation._gridSizeZ;
+
+                                // Draw each cell
+                                for (int y = 0; y < simulation._gridSizeY; y++)
+                                {
+                                    for (int z = 0; z < simulation._gridSizeZ; z++)
+                                    {
+                                        float density = simulation._detailedDensityModel[sliceX, y, z];
+
+                                        // Skip very low densities
+                                        if (density < 0.1f)
+                                            continue;
+
+                                        // Calculate color
+                                        float normalizedDensity = 0.5f;
+                                        if (maxDensity > minDensity)
+                                            normalizedDensity = (density - minDensity) / (maxDensity - minDensity);
+
+                                        normalizedDensity = Math.Max(0f, Math.Min(1f, normalizedDensity));
+
+                                        // Get density color (blue to red)
+                                        Color color = GetDensityColor(normalizedDensity);
+
+                                        // Draw rectangle
+                                        int px = (int)(y * scaleY);
+                                        int py = (int)(z * scaleZ);
+                                        int w = Math.Max(1, (int)Math.Ceiling(scaleY));
+                                        int h = Math.Max(1, (int)Math.Ceiling(scaleZ));
+
+                                        g.FillRectangle(new SolidBrush(color), px, py, w, h);
+                                    }
+                                }
+                            }
+
+                            // Draw to panel
+                            e.Graphics.DrawImage(slice, 10, 25);
+                        }
+
+                        // Draw color scale - right aligned
+                        int colorBarX = graphWidth + 15;
+                        int colorBarY = 25;
+                        int colorBarWidth = 20;
+                        int colorBarHeight = graphHeight;
+
+                        DrawColorScale(e.Graphics, colorBarX, colorBarY, colorBarWidth, colorBarHeight, minDensity, maxDensity);
+                    }
+                    else
+                    {
+                        e.Graphics.DrawString("No density model available",
+                            new Font("Arial", 12), Brushes.Yellow, 10, 50);
+                    }
+                };
+
+                // Refresh button handler
+                refreshButton.Click += (s, e) => {
+                    Logger.Log("[StressAnalysisForm] Refreshing density visualization");
+                    topSlicePanel.Invalidate();
+                    bottomSlicePanel.Invalidate();
+                };
+
+                // Add main layout to page
+                densityPage.Controls.Add(mainLayout);
+
+                // Add page to tabs and select it
+                resultsTabs.Pages.Add(densityPage);
+                resultsTabs.SelectedPage = densityPage;
+
+                Logger.Log("[StressAnalysisForm] Density visualization tab added successfully");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[StressAnalysisForm] Error adding density tab: {ex.Message}");
+                MessageBox.Show($"Error adding density visualization: {ex.Message}",
+                               "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // Helper method to get a color for a normalized density value
+        private Color GetDensityColor(float normalizedValue)
+        {
+            if (normalizedValue < 0.5f)
+            {
+                // Blue to green (0.0 - 0.5)
+                float t = normalizedValue * 2;
+                return Color.FromArgb(
+                    0,
+                    (int)(t * 255),
+                    (int)(255 * (1 - t) + t * 150)
+                );
+            }
+            else
+            {
+                // Green to red (0.5 - 1.0)
+                float t = (normalizedValue - 0.5f) * 2;
+                return Color.FromArgb(
+                    (int)(t * 255),
+                    (int)(255 * (1 - t)),
+                    0
+                );
+            }
+        }
+
+        // Helper method to draw a color scale with density values
+        private void DrawColorScale(Graphics g, int x, int y, int width, int height,
+                                  float minValue, float maxValue)
+        {
+            // Create gradient brush
+            using (LinearGradientBrush brush = new LinearGradientBrush(
+                new Rectangle(x, y, width, height),
+                Color.Blue, Color.Red, LinearGradientMode.Vertical))
+            {
+                // Create color blend
+                ColorBlend blend = new ColorBlend(5);
+                blend.Colors = new Color[] {
+            Color.Blue, Color.Cyan, Color.Green, Color.Yellow, Color.Red
+        };
+                blend.Positions = new float[] { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
+                brush.InterpolationColors = blend;
+
+                // Draw gradient bar
+                g.FillRectangle(brush, x, y, width, height);
+                g.DrawRectangle(Pens.White, x, y, width, height);
+            }
+
+            // Draw labels
+            using (Font font = new Font("Arial", 8))
+            {
+                // Draw min and max values
+                g.DrawString(maxValue.ToString("F1"), font, Brushes.White, x + width + 2, y);
+                g.DrawString(minValue.ToString("F1"), font, Brushes.White, x + width + 2, y + height - 12);
+
+                // Draw units centered
+                g.DrawString("kg/m³", font, Brushes.White, x + width + 2, y + height / 2 - 6);
+            }
+        }
+
+
+        // Helper method to find the tab control
+
+
+        private KryptonDockableNavigator FindResultsTabs()
+        {
+            foreach (Control control in resultsPage.Controls)
+            {
+                if (control is KryptonDockableNavigator navigator)
+                    return navigator;
+            }
+            return null;
+        }
         private void ExportTriaxialSimulationResults(TriaxialSimulation simulation, ExportFormat format)
         {
             if (simulation == null)

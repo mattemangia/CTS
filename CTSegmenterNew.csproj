@@ -126,7 +126,13 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Modules\StressAnalysis\AcousticVelocitySimulation.cs" />
+    <Compile Include="Modules\StressAnalysis\DensityVisualizationForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Modules\StressAnalysis\InhomogeneousAcousticSimulation.cs" />
+    <Compile Include="Modules\StressAnalysis\InhomogeneousTriaxialSimulation.cs" />
     <Compile Include="Modules\StressAnalysis\IStressSimulation.cs" />
+    <Compile Include="Modules\StressAnalysis\SimulationFactory.cs" />
     <Compile Include="Modules\StressAnalysis\StressAnalysisForm.cs">
       <SubType>Form</SubType>
     </Compile>

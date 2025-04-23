@@ -36,7 +36,10 @@ namespace CTSegmenter
                 Multiline = true,
                 Dock = DockStyle.Fill,
                 ScrollBars = ScrollBars.Vertical,
-                ReadOnly = true
+                ReadOnly = true,
+                BackColor = Color.Black,
+                ForeColor = Color.LightCyan,
+                Font = new Font("Consolas", 10,FontStyle.Bold),
             };
             Controls.Add(textBox);
         }

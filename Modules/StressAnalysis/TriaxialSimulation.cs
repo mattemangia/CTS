@@ -55,7 +55,7 @@ namespace CTSegmenter
 
         // ILGPU context
         private Context _context;
-        private Accelerator _accelerator;
+        public Accelerator _accelerator;
         private Action<Index1D,
                ArrayView<System.Numerics.Vector3>,
                ArrayView<System.Numerics.Vector3>,
@@ -66,7 +66,7 @@ namespace CTSegmenter
                _computeStressKernelSafe;
 
         // Simulation data
-        private List<Triangle> _simulationTriangles;
+        public List<Triangle> _simulationTriangles;
         private CancellationTokenSource _cancellationTokenSource;
         private SimulationResult _result;
         private bool _isDisposed;
@@ -362,7 +362,7 @@ namespace CTSegmenter
         /// <summary>
         /// Initialize the simulation
         /// </summary>
-        public bool Initialize()
+        public virtual bool Initialize()
         {
             try
             {
@@ -525,7 +525,7 @@ namespace CTSegmenter
         /// <summary>
         /// Render simulation results to the specified graphics context
         /// </summary>
-        public void RenderResults(Graphics g, int width, int height, RenderMode renderMode = RenderMode.Stress)
+        public virtual void RenderResults(Graphics g, int width, int height, RenderMode renderMode = RenderMode.Stress)
         {
             if (Status != SimulationStatus.Completed || _result == null)
             {
@@ -601,7 +601,7 @@ namespace CTSegmenter
         /// </summary>
         /// <param name="axialPressure">Current axial pressure</param>
         /// <returns>True if fracture detected, false otherwise</returns>
-        private async Task<bool> RunSimulationStep(float axialPressure)
+        public virtual async Task<bool> RunSimulationStep(float axialPressure)
         {
             int n = _simulationTriangles.Count;
             var v1 = new Vector3[n];

@@ -3746,7 +3746,7 @@ namespace CTSegmenter
                     mainForm))
                 {
                     currentAcousticSim = simulation;
-                    simulation.TimeStepFactor = dtFactor;
+                    simulation.TimeStepFactor = (float)dtFactor;
                     HookSimCompleted(currentAcousticSim);
                     // Show progress in status bar
 

@@ -2646,7 +2646,7 @@ namespace CTSegmenter
                 Size = new Size(170, 25),
                 Location = new Point(5, 25)
             };
-            toggleRotationButton.FlatAppearance.BorderColor = Color.LightGreen;
+            toggleRotationButton.FlatAppearance.BorderColor = Color.Pink;
             toggleRotationButton.Click += ToggleRotationButton_Click;
 
             resetViewButton = new Button

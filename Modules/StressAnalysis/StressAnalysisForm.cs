@@ -1359,7 +1359,7 @@ namespace CTSegmenter
             try
             {
                 // Create ILGPU context
-                ilgpuContext = Context.Create(builder => builder.Default().EnableAlgorithms());
+                ilgpuContext = Context.CreateDefault();
 
                 // Try to get a GPU accelerator first
                 try

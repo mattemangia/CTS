@@ -140,7 +140,7 @@ namespace CTSegmenter
             try
             {
                 // Create ILGPU context
-                _context = Context.Create(builder => builder.Default().EnableAlgorithms());
+                _context = Context.CreateDefault();
 
                 try
                 {

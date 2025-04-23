@@ -144,7 +144,7 @@ namespace CTSegmenter
         public StressAnalysisForm(MainForm mainForm)
         {
             Logger.Log("[StressAnalysisForm] Module Initialization Called.");
-            Logger.Log("[StressAnalysisForm] Constructor Start");
+            Logger.Log("[StressAnalysisForm] Constructor start.");
             try
             {
                 string iconPath = Path.Combine(Application.StartupPath, "favicon.ico");
@@ -158,7 +158,7 @@ namespace CTSegmenter
             PopulateMaterialList();
             this.Load += StressAnalysisPatch_Load;
             BuildWavePropagationCanvas();
-            Logger.Log("[StressAnalysisForm] Constructor End");
+            Logger.Log("[StressAnalysisForm] Constructor end.");
         }
         private void BuildWavePropagationCanvas()
         {

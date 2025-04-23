@@ -69,6 +69,7 @@ namespace CTSegmenter
         private KryptonCheckBox extendedSimulationCheckBox;
         private PictureBox wavePictureBox;
         private Panel waveScrollPanel;
+        
         public bool UseExtendedSimulationTime { get; private set; } = true;
         // Wave Propagation controls
         private float waveZoomLevel = 1.0f;
@@ -98,6 +99,7 @@ namespace CTSegmenter
         private Button cancelMeshButton;
         private Panel controlsPanel;
         private TriaxialSimulation currentTriaxialSim;
+        private NumericUpDown dtFactorNumeric;
         private struct Point3D
         {
             public int X;
@@ -162,31 +164,30 @@ namespace CTSegmenter
         }
         private void BuildWavePropagationCanvas()
         {
-            // Create a panel to contain everything
-            Panel waveContainer = new Panel
+            // Create a scrollable panel to hold the PictureBox
+            waveScrollPanel = new Panel
             {
                 Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(20, 20, 20)
+                BackColor = Color.FromArgb(20, 20, 20),
+                AutoScroll = true
             };
 
-            // Create new PictureBox with auto-size disabled
+            // Create the PictureBox for rendering the wave image
             wavePictureBox = new PictureBox
             {
                 BackColor = Color.Black,
-                SizeMode = PictureBoxSizeMode.Zoom, // Use Zoom mode for auto-fitting
-                Dock = DockStyle.Fill
+                SizeMode = PictureBoxSizeMode.Zoom
             };
-
-            // Add mouse events for zoom and pan
+            // Wire up zoom/pan events
             wavePictureBox.MouseWheel += WavePictureBox_MouseWheel;
             wavePictureBox.MouseDown += WavePictureBox_MouseDown;
             wavePictureBox.MouseMove += WavePictureBox_MouseMove;
             wavePictureBox.MouseUp += WavePictureBox_MouseUp;
 
-            // Add the picture box to the container
-            waveContainer.Controls.Add(wavePictureBox);
+            // Add the PictureBox into the scroll panel
+            waveScrollPanel.Controls.Add(wavePictureBox);
 
-            // Add zoom control panel
+            // Build the overlay controls (zoom in/out, fit, export)
             Panel zoomPanel = new Panel
             {
                 Size = new Size(180, 120),
@@ -195,7 +196,6 @@ namespace CTSegmenter
                 Padding = new Padding(5)
             };
 
-            // Create and add controls to zoom panel
             Label zoomLabel = new Label
             {
                 Text = "Wave Visualization Controls:",
@@ -204,6 +204,7 @@ namespace CTSegmenter
                 AutoSize = true,
                 Location = new Point(5, 5)
             };
+            zoomPanel.Controls.Add(zoomLabel);
 
             Button zoomInButton = new Button
             {
@@ -216,6 +217,7 @@ namespace CTSegmenter
             };
             zoomInButton.FlatAppearance.BorderColor = Color.LightBlue;
             zoomInButton.Click += (s, e) => ZoomWaveView(1.2f);
+            zoomPanel.Controls.Add(zoomInButton);
 
             Button zoomOutButton = new Button
             {
@@ -228,6 +230,7 @@ namespace CTSegmenter
             };
             zoomOutButton.FlatAppearance.BorderColor = Color.LightBlue;
             zoomOutButton.Click += (s, e) => ZoomWaveView(0.8f);
+            zoomPanel.Controls.Add(zoomOutButton);
 
             Button zoomFitButton = new Button
             {
@@ -240,6 +243,7 @@ namespace CTSegmenter
             };
             zoomFitButton.FlatAppearance.BorderColor = Color.LightGreen;
             zoomFitButton.Click += (s, e) => ResetWaveView();
+            zoomPanel.Controls.Add(zoomFitButton);
 
             Button exportImageButton = new Button
             {
@@ -252,26 +256,22 @@ namespace CTSegmenter
             };
             exportImageButton.FlatAppearance.BorderColor = Color.LightCoral;
             exportImageButton.Click += (s, e) => ExportWaveImage();
-
-            // Add controls to zoom panel
-            zoomPanel.Controls.Add(zoomLabel);
-            zoomPanel.Controls.Add(zoomInButton);
-            zoomPanel.Controls.Add(zoomOutButton);
-            zoomPanel.Controls.Add(zoomFitButton);
             zoomPanel.Controls.Add(exportImageButton);
 
-            // Add zoom panel to container
-            waveContainer.Controls.Add(zoomPanel);
+            // Add the zoomPanel on top of the scroll panel
+            waveScrollPanel.Controls.Add(zoomPanel);
             zoomPanel.BringToFront();
 
-            // Add container to results page
+            // Finally, clear and add our scroll panel into the Results tab
             resultsPage.Controls.Clear();
-            resultsPage.Controls.Add(waveContainer);
+            resultsPage.Controls.Add(waveScrollPanel);
 
-            // Initialize tooltip
+            // Set up a tooltip for the PictureBox
             ToolTip tooltip = new ToolTip();
-            tooltip.SetToolTip(wavePictureBox, "Mouse Wheel: Zoom\nDrag: Pan\nRight-click: Reset View");
+            tooltip.SetToolTip(wavePictureBox,
+                "Mouse Wheel: Zoom\nDrag: Pan\nRight-click: Reset View");
         }
+
         private void HookSimCompleted(AcousticVelocitySimulation sim)
         {
             if (sim == null || wavePictureBox == null) return;
@@ -3109,6 +3109,27 @@ namespace CTSegmenter
                 Dock = DockStyle.Fill
             };
             acousticTable.Controls.Add(energyNumeric, 1, 5);
+            Label dtFactorLabel = new Label
+            {
+                Text = "Time-Step Factor:",
+                AutoSize = true,
+                ForeColor = Color.White,
+                Location = new Point(10, 360)   // tweak Y as needed
+            };
+            acousticParamsBox.Controls.Add(dtFactorLabel);
+
+            NumericUpDown dtFactorNumeric = new NumericUpDown
+            {
+                Name = "dtFactorNumeric",
+                Minimum = 0,
+                Maximum = 100,
+                DecimalPlaces = 2,
+                Increment = 0.01M,
+                Value = 1.00M,
+                Width = 80,
+                Location = new Point(130, 358)
+            };
+            acousticParamsBox.Controls.Add(dtFactorNumeric);
 
             // Direction
             acousticTable.Controls.Add(new Label { Text = "Test Direction:", Dock = DockStyle.Fill }, 0, 6);
@@ -3708,7 +3729,7 @@ namespace CTSegmenter
                         new System.Numerics.Vector3(meshTri.V3.X, meshTri.V3.Y, meshTri.V3.Z)
                     ));
                 }
-
+                decimal dtFactor = dtFactorNumeric.Value;
                 // Create and initialize the simulation
                 using (var simulation = new AcousticVelocitySimulation(
                     selectedMaterial,
@@ -3725,6 +3746,7 @@ namespace CTSegmenter
                     mainForm))
                 {
                     currentAcousticSim = simulation;
+                    simulation.TimeStepFactor = dtFactor;
                     HookSimCompleted(currentAcousticSim);
                     // Show progress in status bar
 

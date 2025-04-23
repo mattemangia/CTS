@@ -117,6 +117,7 @@ namespace CTSegmenter
         private Vector3 _receiverPosition;
         private int _sourceX, _sourceY, _sourceZ;
         private int _receiverX, _receiverY, _receiverZ;
+        public float TimeStepFactor { get; set; } = 1.0f;
 
         private MainForm mainForm;
 
@@ -1340,7 +1341,8 @@ namespace CTSegmenter
         private async Task RunPWaveSimulation()
         {
             // Calculate simulation parameters
-            float dt = _gridSpacing / (2.0f * PWaveVelocity);
+            float baseDt = _gridSpacing / (2.0f * (_isPWave ? PWaveVelocity : SWaveVelocity));
+            float dt = baseDt * TimeStepFactor;
             int waveletLength = (int)(5.0f / (Frequency * 1000 * dt));
 
             // Generate Ricker wavelet with adaptive amplitude for small scale
@@ -1590,7 +1592,8 @@ namespace CTSegmenter
         private async Task RunSWaveSimulation()
         {
             // Calculate simulation parameters
-            float dt = _gridSpacing / (2.0f * SWaveVelocity);
+            float baseDt = _gridSpacing / (2.0f * (_isPWave ? PWaveVelocity : SWaveVelocity));
+            float dt = baseDt * TimeStepFactor;
             int waveletLength = (int)(5.0f / (Frequency * 1000 * dt));
 
             // Calculate distance between source and receiver

@@ -75,6 +75,7 @@ namespace CTSegmenter
         public float[] ReceiverTimeSeries { get; private set; }
         public List<float> AcousticIntensity { get; private set; }
         public float SampleLength { get; private set; }
+        public float energyLossPercent;
 
         // ILGPU context
         private Context _context;
@@ -105,7 +106,9 @@ namespace CTSegmenter
         private bool _isPWave;
         private bool _hasPreviousTriaxialResults;
         private SimulationResult _triaxialResult;
-
+        float totalEnergy = 0;
+         // The input energy value
+        float energyLoss = 0;
         // 3D grid for simulation
         private int _gridSizeX;
         private int _gridSizeY;
@@ -660,10 +663,14 @@ namespace CTSegmenter
                 }
             }
 
-            // Adaptive amplitude scaling based on grid size and spacing
-            float adaptiveAmplitude = Amplitude;
+            // Calculate energy-based amplitude scaling
+            // E ∝ A² so A ∝ √E
+            float energyFactor = (float)Math.Sqrt(Energy / 10.0); // Scale relative to 10 Joules reference
 
-            // Scale based on grid spacing (smaller spacing = smaller amplitude needed)
+            // Apply amplitude with energy scaling
+            float adaptiveAmplitude = Amplitude * energyFactor;
+
+            // Adaptive amplitude scaling based on grid size and spacing
             float scalingFactor = 1.0f;
             if (_gridSpacing < 0.01f) // For small-scale simulations
             {
@@ -696,10 +703,11 @@ namespace CTSegmenter
 
             // Track maximum amplitude for debugging
             maxWaveletAmplitude = maxValue;
-            Logger.Log($"[AcousticVelocitySimulation] Generated wavelet with max amplitude: {maxWaveletAmplitude:E6}");
+            Logger.Log($"[AcousticVelocitySimulation] Generated wavelet with max amplitude: {maxWaveletAmplitude:E6}, energy: {Energy:F2} J");
 
             return wavelet;
         }
+
         /// <summary>
         /// Calculate the dimensions of the 3D simulation grid
         /// </summary>
@@ -779,7 +787,8 @@ namespace CTSegmenter
             const int MIN_GRID_DIMENSION = 16; // Increased from 8
 
             // Calculate initial grid spacing based on wavelength
-            _gridSpacing = wavelength / TARGET_POINTS_PER_WAVELENGTH;
+            //_gridSpacing = wavelength / TARGET_POINTS_PER_WAVELENGTH;
+            _gridSpacing = (wavelength / TARGET_POINTS_PER_WAVELENGTH) * TimeStepFactor;
 
             // Enforce minimum grid spacing
             _gridSpacing = Math.Max(_gridSpacing, 0.0001f);
@@ -2021,10 +2030,14 @@ namespace CTSegmenter
                 // Calculate squared wave velocity (with slight boost for numerical reasons)
                 float c2 = velocity * velocity * 1.1f;
 
+                // Calculate energy density from displacement (proportional to u^2)
+                float energyDensity = u[i] * u[i] * density;
+
+                // Energy-dependent attenuation - higher energy loses more energy proportionally
+                float effectiveAttenuation = attenuation * (1.0f + 0.1f * energyDensity);
+
                 // Wave equation: a = c^2 * ∇²u - damping * v
-                // Reduced attenuation for better wave propagation
-                float dampingCoeff = attenuation * 0.01f;
-                a[i] = c2 * d2 - dampingCoeff * v[i];
+                a[i] = c2 * d2 - effectiveAttenuation * v[i];
 
                 // Update velocity using acceleration
                 v[i] += a[i] * dt;
@@ -2039,6 +2052,7 @@ namespace CTSegmenter
                 }
             }
         }
+
         /// <summary>
         /// ILGPU kernel for 1D S-wave propagation
         /// </summary>
@@ -2081,18 +2095,22 @@ namespace CTSegmenter
             // Wave equation with moderate velocity boost
             float c2 = waveVelocity * waveVelocity * 1.5f; // Moderate 50% boost
 
-            // Practically no attenuation to ensure wave propagation
-            float attenuationFactor = attenuation;
+            // Calculate energy density from displacement
+            float energyDensity = u[i] * u[i] * density;
 
-            // Calculate acceleration from wave equation
-            a[i] = c2 * d2udx2 - attenuationFactor * v[i];
+            // Energy-dependent attenuation 
+            float effectiveAttenuation = attenuation * (1.0f + 0.1f * energyDensity);
 
-            // Update velocity using acceleration with no boost
+            // Calculate acceleration from wave equation with energy-dependent attenuation
+            a[i] = c2 * d2udx2 - effectiveAttenuation * v[i];
+
+            // Update velocity using acceleration
             v[i] += a[i] * dt;
 
-            // Update displacement using velocity with no boost
+            // Update displacement using velocity
             result[i] = u[i] + v[i] * dt;
         }
+
         /// <summary>
         /// ILGPU kernel for 3D wave propagation
         /// </summary>
@@ -2153,11 +2171,17 @@ namespace CTSegmenter
                 laplacian /= (dx * dx);
             }
 
-            // Wave equation with reduced attenuation to maintain wave energy
+            // Calculate energy density from displacement - proportional to square of displacement
+            float energyDensity = currentValue * currentValue;
+
+            // Energy-dependent attenuation - higher energy waves lose energy faster
+            float energyFactor = 1.0f + 0.05f * energyDensity;
+
+            // Wave equation with energy-dependent attenuation
             float accel = velocity * velocity * laplacian;
 
             // Reduce attenuation to make waves more visible over distance
-            float reducedAttenuation = attenuation * 0.5f; // Half the attenuation
+            float reducedAttenuation = attenuation * 0.5f * energyFactor; // Half the attenuation but scale with energy
             float attenuationTerm = reducedAttenuation * (currentValue - prevValue) / dt;
             accel -= attenuationTerm;
 
@@ -2252,6 +2276,9 @@ namespace CTSegmenter
         /// </summary>
         private void AnalyzeResults()
         {
+            float totalEnergy = 0;
+            float initialEnergy = Energy; // The input energy value
+            float energyLoss = 0;
             // Log the raw amplitudes to help with debugging
             float maxAmp = float.MinValue;
             float minAmp = float.MaxValue;
@@ -2473,6 +2500,20 @@ namespace CTSegmenter
                 StoredSWaveVelocity = MeasuredSWaveVelocity;
                 StoredSWaveArrivalTime = SWaveArrivalTime;
             }
+            for (int i = 0; i < ReceiverTimeSeries.Length; i++)
+            {
+                // Intensity is proportional to displacement squared * density * velocity
+                float intensity = ReceiverTimeSeries[i] * ReceiverTimeSeries[i] * (float)Material.Density * velocity;
+                AcousticIntensity.Add(intensity);
+
+                // Accumulate energy (simplified calculation)
+                totalEnergy += intensity * dt;
+            }
+            energyLoss = Math.Max(0, initialEnergy - totalEnergy);
+            energyLossPercent = initialEnergy > 0 ? (energyLoss / initialEnergy) * 100 : 0;
+
+            Logger.Log($"[AcousticVelocitySimulation] Energy analysis: Input energy: {initialEnergy:F2} J, " +
+                       $"Measured energy: {totalEnergy:F2} J, Energy loss: {energyLossPercent:F1}%");
 
             Logger.Log($"[AcousticVelocitySimulation] Results: " +
                       $"P-wave velocity: {MeasuredPWaveVelocity:F1} m/s, " +
@@ -2542,6 +2583,9 @@ namespace CTSegmenter
             result.Data.Add("Frequency", Frequency);
             result.Data.Add("Amplitude", Amplitude);
             result.Data.Add("Energy", Energy);
+            result.Data.Add("TotalEnergy", totalEnergy);
+            result.Data.Add("EnergyLoss", energyLoss);
+            result.Data.Add("EnergyLossPercent", energyLossPercent);
             result.Data.Add("TestDirection", TestDirection);
             result.Data.Add("TheoreticalPWaveVelocity", PWaveVelocity);
             result.Data.Add("TheoreticalSWaveVelocity", SWaveVelocity);
@@ -2613,6 +2657,7 @@ namespace CTSegmenter
                         maxAmplitude = Math.Max(maxAmplitude, Math.Abs(field[x, y, sliceZ]));
                     }
                 }
+                if (maxAmplitude < 1e-12f) maxAmplitude = 1e-12f;
 
                 // Create a bitmap EXACTLY matching the destination size - this is key!
                 using (Bitmap plotBitmap = new Bitmap(plotWidth, plotHeight))
@@ -2631,11 +2676,13 @@ namespace CTSegmenter
                             fieldY = Math.Max(0, Math.Min(fieldY, ny - 1));
 
                             // Get normalized value
-                            float value = field[fieldX, fieldY, sliceZ] / maxAmplitude;
-                            value = Math.Max(-1f, Math.Min(1f, value));
+                            float norm = field[fieldX, fieldY, sliceZ] / maxAmplitude;
+                            if (float.IsNaN(norm) || float.IsInfinity(norm))
+                                norm = 0f;                // bail-out for NaN/Inf
+                            norm = ClampValue(norm, -1f, 1f);
 
                             // Set pixel color
-                            Color color = GetEnhancedBipolarColor(value);
+                            Color color = GetEnhancedBipolarColor(norm);
                             plotBitmap.SetPixel(x, plotHeight - y - 1, color); // Y is inverted
                         }
                     }
@@ -3155,241 +3202,213 @@ namespace CTSegmenter
             }
         }
 
+
         /// <summary>
-        /// Render the time series data
+        /// Draw the recorded receiver trace (time-series) into the given <see cref="Graphics"/> surface.
+        /// This version is hardened against infinite / NaN samples and against values whose
+        /// magnitude would overflow <see cref="System.Drawing.Graphics.DrawLine"/>.
+        /// 
         /// </summary>
         private void RenderTimeSeries(Graphics g, int width, int height)
         {
             g.Clear(Color.Black);
-
-            if (ReceiverTimeSeries == null || ReceiverTimeSeries.Length == 0)
+            // ─── quick sanity checks ────────────────────────────────────────────────────
+            if (ReceiverTimeSeries == null || ReceiverTimeSeries.Length < 2)
             {
-                using (Font font = new Font("Arial", 12))
-                using (SolidBrush brush = new SolidBrush(Color.White))
+                using (var font = new Font("Arial", 12f))
+                using (var brush = new SolidBrush(Color.White))
                 {
-                    g.DrawString("No time series data available", font, brush, 20, 20);
+                    g.DrawString("No time-series data available.", font, brush, 20, 20);
                 }
                 return;
             }
 
-            // Set up plot area
-            int margin = 50;
-            int plotWidth = width - 2 * margin;
-            int plotHeight = height - 2 * margin;
+            // ─── layout constants ──────────────────────────────────────────────────────
+            const int leftMargin = 60;
+            const int rightMargin = 20;
+            const int topMargin = 40;
+            const int bottomMargin = 60;  // Increased to accommodate X-axis labels
 
-            // Calculate time step
+            int plotWidth = width - leftMargin - rightMargin;
+            int plotHeight = height - topMargin - bottomMargin;
+            if (plotWidth <= 0 || plotHeight <= 0) return;
+
+            // ─── determine amplitude window ────────────────────────────────────────────
+            float absMax = 0f;
+            foreach (var sample in ReceiverTimeSeries)
+            {
+                if (!float.IsInfinity(sample) && !float.IsNaN(sample))
+                {
+                    float a = Math.Abs(sample);
+                    if (a > absMax) absMax = a;
+                }
+            }
+
+            if (absMax <= 0f)          // all-zero or all invalid → message instead of crash
+            {
+                using (var font = new Font("Arial", 12f))
+                using (var brush = new SolidBrush(Color.White))
+                {
+                    g.DrawString("Time-series contains no finite data.", font, brush, 20, 20);
+                }
+                return;
+            }
+
+            // ─── derive scales ─────────────────────────────────────────────────────────
+            float xScale = plotWidth / (float)(ReceiverTimeSeries.Length - 1);
+            // leave 10 % head-room so the trace never touches the top/bottom border
+            float yScale = (plotHeight * 0.45f) / absMax;
+            float midY = topMargin + plotHeight / 2f;
+
+            // Calculate time step for X-axis labels
             float velocity = _isPWave ? PWaveVelocity : SWaveVelocity;
-            float dt = _gridSpacing / (1.2f * velocity);
+            float dt = _gridSpacing / (2.0f * velocity);
+            float totalTimeMs = ReceiverTimeSeries.Length * dt * 1000; // Total time in milliseconds
 
-            // Find signal bounds for scaling
-            float maxAmplitude = float.MinValue;
-            float minAmplitude = float.MaxValue;
+            // ─── prepare drawing helpers ───────────────────────────────────────────────
+            Func<float, bool> isFinite = v => !(float.IsNaN(v) || float.IsInfinity(v));
 
-            for (int i = 0; i < ReceiverTimeSeries.Length; i++)
+            // Drawing one line per sample pair is cheaper than allocating a giant array
+            using (var pen = new Pen(Color.Lime, 2f))
             {
-                maxAmplitude = Math.Max(maxAmplitude, ReceiverTimeSeries[i]);
-                minAmplitude = Math.Min(minAmplitude, ReceiverTimeSeries[i]);
-            }
+                pen.Alignment = PenAlignment.Center;
+                pen.LineJoin = System.Drawing.Drawing2D.LineJoin.Bevel;
 
-            // If there's effectively no signal, create a minimal synthetic range
-            if (Math.Abs(maxAmplitude - minAmplitude) < 1e-6)
-            {
-                maxAmplitude = 0.01f;
-                minAmplitude = -0.01f;
-            }
-
-            float amplitude = Math.Max(Math.Abs(maxAmplitude), Math.Abs(minAmplitude));
-            float peakToPeak = maxAmplitude - minAmplitude;
-
-            // Always start from time 0
-            float startTime = 0;
-
-            // Ensure we view enough time to see wave arrivals
-            // Theoretical arrival time plus margin
-            float endTime = Math.Max(SampleLength / velocity * 1.5f, 0.001f);
-
-            // If we know actual arrival times, extend to show them
-            if (PWaveArrivalTime > 0)
-            {
-                endTime = Math.Max(endTime, PWaveArrivalTime * 1.2f);
-            }
-
-            if (SWaveArrivalTime > 0)
-            {
-                endTime = Math.Max(endTime, SWaveArrivalTime * 1.2f);
-            }
-
-            // Ensure we don't exceed data length
-            endTime = Math.Min(endTime, ReceiverTimeSeries.Length * dt);
-
-            // Calculate time range
-            float timeRange = endTime - startTime;
-
-            // Scale factors for plot
-            float timeScale = plotWidth / timeRange;
-            float amplitudeScale = plotHeight / (2 * amplitude);
-
-            // Draw axes
-            using (Pen axisPen = new Pen(Color.White, 1))
-            {
-                // X axis (time)
-                g.DrawLine(axisPen, margin, margin + plotHeight / 2, margin + plotWidth, margin + plotHeight / 2);
-
-                // Y axis (amplitude)
-                g.DrawLine(axisPen, margin, margin, margin, margin + plotHeight);
-
-                // Draw tick marks and grid lines
-                using (Pen gridPen = new Pen(Color.FromArgb(60, 60, 60), 1))
-                {
-                    gridPen.DashStyle = System.Drawing.Drawing2D.DashStyle.Dash;
-
-                    // Time axis ticks and grid
-                    int numTimeTicks = 10;
-                    for (int i = 0; i <= numTimeTicks; i++)
-                    {
-                        float time = startTime + i * timeRange / numTimeTicks;
-                        int x = margin + (int)((time - startTime) * timeScale);
-
-                        // Tick mark
-                        g.DrawLine(axisPen, x, margin + plotHeight / 2 - 5, x, margin + plotHeight / 2 + 5);
-
-                        // Grid line
-                        g.DrawLine(gridPen, x, margin, x, margin + plotHeight);
-
-                        // Label
-                        using (Font font = new Font("Arial", 8))
-                        using (SolidBrush textBrush = new SolidBrush(Color.LightGray))
-                        {
-                            g.DrawString($"{time * 1000:F1} ms", font, textBrush, x - 20, margin + plotHeight / 2 + 10);
-                        }
-                    }
-
-                    // Amplitude axis ticks and grid
-                    int numAmpTicks = 4;
-                    for (int i = -numAmpTicks; i <= numAmpTicks; i++)
-                    {
-                        if (i == 0) continue; // Skip center (already drawn as time axis)
-
-                        int y = margin + plotHeight / 2 - (int)(i * amplitudeScale * amplitude / numAmpTicks);
-
-                        // Tick mark
-                        g.DrawLine(axisPen, margin - 5, y, margin + 5, y);
-
-                        // Grid line
-                        g.DrawLine(gridPen, margin, y, margin + plotWidth, y);
-
-                        // Label
-                        float ampValue = i * amplitude / numAmpTicks;
-                        using (Font font = new Font("Arial", 8))
-                        using (SolidBrush textBrush = new SolidBrush(Color.LightGray))
-                        {
-                            g.DrawString($"{ampValue:E1}", font, textBrush, margin - 45, y - 6);
-                        }
-                    }
-                }
-            }
-
-            // Plot the time series
-            using (Pen waveformPen = new Pen(_isPWave ? Color.Cyan : Color.GreenYellow, 2))
-            {
-                // Store points for the waveform
-                List<Point> points = new List<Point>();
-
-                // Convert time range to sample indices
-                int firstSample = 0;
-                int lastSample = Math.Min(ReceiverTimeSeries.Length - 1, (int)(endTime / dt));
-
-                for (int i = firstSample; i <= lastSample; i++)
-                {
-                    float time = i * dt;
-                    int x = margin + (int)((time - startTime) * timeScale);
-                    int y = margin + plotHeight / 2 - (int)(ReceiverTimeSeries[i] * amplitudeScale);
-
-                    // Ensure within bounds
-                    x = Math.Max(margin, Math.Min(x, margin + plotWidth));
-                    y = Math.Max(margin, Math.Min(y, margin + plotHeight));
-
-                    points.Add(new Point(x, y));
-                }
-
-                // Draw waveform with anti-aliasing for smoother appearance
                 g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
 
-                if (points.Count > 1)
+                // first point
+                float prevXf = leftMargin;
+                float prevYf = midY - (isFinite(ReceiverTimeSeries[0]) ? ReceiverTimeSeries[0] * yScale : 0f);
+
+                // clamp to something that fits into Int32
+                prevYf = Math.Max(Int32.MinValue + 2, Math.Min(Int32.MaxValue - 2, prevYf));
+
+                for (int i = 1; i < ReceiverTimeSeries.Length; i++)
                 {
-                    g.DrawLines(waveformPen, points.ToArray());
+                    float curXf = leftMargin + i * xScale;
+                    float sample = ReceiverTimeSeries[i];
+
+                    float curYf;
+                    if (isFinite(sample))
+                    {
+                        curYf = midY - sample * yScale;
+                        curYf = Math.Max(Int32.MinValue + 2, Math.Min(Int32.MaxValue - 2, curYf));
+                    }
+                    else
+                    {
+                        // non-finite value → draw it on the mid-line
+                        curYf = midY;
+                    }
+
+                    // finally cast to int only after clamping
+                    int x1 = (int)prevXf;
+                    int y1 = (int)prevYf;
+                    int x2 = (int)curXf;
+                    int y2 = (int)curYf;
+
+                    g.DrawLine(pen, x1, y1, x2, y2);
+
+                    prevXf = curXf;
+                    prevYf = curYf;
                 }
             }
 
-            // Mark arrival times with better accuracy
-            if (PWaveArrivalTime > 0)
+            // ─── axes & labels ─────────────────────────────────────────────────────────
+            using (var axisPen = new Pen(Color.DimGray, 1f))
+            using (var labelBrush = new SolidBrush(Color.LightGray))
+            using (var lblFont = new Font("Arial", 8f))
+            using (var axisFont = new Font("Arial", 10f, FontStyle.Bold))
             {
-                using (Pen pWavePen = new Pen(Color.Blue, 1))
+                // X-axis
+                g.DrawLine(axisPen, leftMargin, midY, width - rightMargin, midY);
+                // Y-axis
+                g.DrawLine(axisPen, leftMargin, topMargin, leftMargin, height - bottomMargin);
+
+                // Y-axis labels: min / mid / max
+                string maxLbl = "+" + absMax.ToString("G4");
+                string minLbl = "-" + absMax.ToString("G4");
+
+                SizeF lblSize = g.MeasureString(maxLbl, lblFont);
+
+                g.DrawString(maxLbl, lblFont, labelBrush, leftMargin - lblSize.Width - 4,
+                             topMargin - lblSize.Height / 2f);
+                g.DrawString("0", lblFont, labelBrush, leftMargin - lblSize.Width - 4,
+                             midY - lblSize.Height / 2f);
+                g.DrawString(minLbl, lblFont, labelBrush, leftMargin - lblSize.Width - 4,
+                             height - bottomMargin - lblSize.Height / 2f);
+
+                // X-axis time labels
+                int numTimeLabels = 5; // Number of time labels to show
+
+                for (int i = 0; i <= numTimeLabels; i++)
                 {
-                    pWavePen.DashStyle = System.Drawing.Drawing2D.DashStyle.Dash;
-                    int x = margin + (int)((PWaveArrivalTime - startTime) * timeScale);
+                    float position = i / (float)numTimeLabels;
+                    float x = leftMargin + position * plotWidth;
+                    float timeMs = position * totalTimeMs;
 
-                    // Ensure x is within the plot area
-                    if (x >= margin && x <= margin + plotWidth)
+                    // Draw tick mark
+                    g.DrawLine(axisPen, x, midY, x, midY + 5);
+
+                    // Draw time label
+                    string timeLabel = $"{timeMs:F1} ms";
+                    SizeF timeLblSize = g.MeasureString(timeLabel, lblFont);
+                    g.DrawString(timeLabel, lblFont, labelBrush, x - timeLblSize.Width / 2, midY + 8);
+                }
+
+                // Draw arrival time markers if available
+                if (PWaveArrivalTime > 0)
+                {
+                    float pArrivalX = leftMargin + (PWaveArrivalTime * 1000 / totalTimeMs) * plotWidth;
+                    if (pArrivalX >= leftMargin && pArrivalX <= width - rightMargin)
                     {
-                        g.DrawLine(pWavePen, x, margin, x, margin + plotHeight);
-
-                        using (Font font = new Font("Arial", 8, FontStyle.Bold))
-                        using (SolidBrush textBrush = new SolidBrush(Color.Blue))
+                        using (var pWavePen = new Pen(Color.Red, 1f))
                         {
-                            g.DrawString("P-wave", font, textBrush, x - 25, margin - 15);
+                            pWavePen.DashStyle = System.Drawing.Drawing2D.DashStyle.Dash;
+                            g.DrawLine(pWavePen, pArrivalX, topMargin, pArrivalX, height - bottomMargin);
+                            g.DrawString("P-wave", lblFont, new SolidBrush(Color.Red), pArrivalX - 20, topMargin + 10);
                         }
                     }
                 }
-            }
 
-            if (SWaveArrivalTime > 0)
-            {
-                using (Pen sWavePen = new Pen(Color.Red, 1))
+                if (SWaveArrivalTime > 0 && !_isPWave) // Only show S-wave for S-wave simulations or after both are run
                 {
-                    sWavePen.DashStyle = System.Drawing.Drawing2D.DashStyle.Dash;
-                    int x = margin + (int)((SWaveArrivalTime - startTime) * timeScale);
-
-                    // Ensure x is within the plot area
-                    if (x >= margin && x <= margin + plotWidth)
+                    float sArrivalX = leftMargin + (SWaveArrivalTime * 1000 / totalTimeMs) * plotWidth;
+                    if (sArrivalX >= leftMargin && sArrivalX <= width - rightMargin)
                     {
-                        g.DrawLine(sWavePen, x, margin, x, margin + plotHeight);
-
-                        using (Font font = new Font("Arial", 8, FontStyle.Bold))
-                        using (SolidBrush textBrush = new SolidBrush(Color.Red))
+                        using (var sWavePen = new Pen(Color.Orange, 1f))
                         {
-                            g.DrawString("S-wave", font, textBrush, x - 25, margin - 15);
+                            sWavePen.DashStyle = System.Drawing.Drawing2D.DashStyle.Dash;
+                            g.DrawLine(sWavePen, sArrivalX, topMargin, sArrivalX, height - bottomMargin);
+                            g.DrawString("S-wave", lblFont, new SolidBrush(Color.Orange), sArrivalX - 20, topMargin + 25);
                         }
                     }
                 }
-            }
 
-            // Draw titles and labels
-            using (Font titleFont = new Font("Arial", 14, FontStyle.Bold))
-            using (Font labelFont = new Font("Arial", 10))
-            using (SolidBrush textBrush = new SolidBrush(Color.White))
-            {
-                // Title
-                string title = $"Receiver Waveform - {WaveType}";
-                g.DrawString(title, titleFont, textBrush, (width - g.MeasureString(title, titleFont).Width) / 2, 10);
+                // X-axis title
+                g.DrawString("Time (ms)", axisFont, labelBrush, leftMargin + (plotWidth / 2) - 30, height - 30);
 
-                // X axis label
-                string xLabel = "Time (ms)";
-                g.DrawString(xLabel, labelFont, textBrush, margin + plotWidth / 2 - 20, margin + plotHeight + 25);
-
-                // Y axis label
-                string yLabel = "Amplitude";
-                // Rotate text for Y axis label
-                g.TranslateTransform(margin - 30, margin + plotHeight / 2 + 20);
+                // Y-axis title - rotated
+                g.TranslateTransform(15, midY + 50);
                 g.RotateTransform(-90);
-                g.DrawString(yLabel, labelFont, textBrush, 0, 0);
+                g.DrawString("Displacement", axisFont, labelBrush, 0, 0);
                 g.ResetTransform();
 
-                // Add signal info at bottom
-                string signalInfo = $"Peak-to-peak: {peakToPeak:E3}, P-wave arrival: {PWaveArrivalTime * 1000:F2} ms, S-wave arrival: {SWaveArrivalTime * 1000:F2} ms";
-                g.DrawString(signalInfo, new Font("Arial", 8), textBrush, margin, margin + plotHeight + 25);
+                // Add energy indicator
+                string energyLabel = $"Energy: {Energy:F1} J";
+                g.DrawString(energyLabel, lblFont, labelBrush, width - rightMargin - 80, topMargin + 10);
+            }
+
+            // Add title
+            using (var titleFont = new Font("Arial", 12f, FontStyle.Bold))
+            using (var titleBrush = new SolidBrush(Color.White))
+            {
+                string title = $"{WaveType} Receiver Time Series";
+                SizeF titleSize = g.MeasureString(title, titleFont);
+                g.DrawString(title, titleFont, titleBrush, (width - titleSize.Width) / 2, 10);
             }
         }
+
+
         private static void PropagateImprovedSWaveKernel(
      Index1D index,
      ArrayView<float> u,    // Displacement field
@@ -4142,28 +4161,39 @@ namespace CTSegmenter
             float rotationX = 0.5f;
             float rotationY = 0.5f;
 
-            // Find min and max velocity for color mapping
-            float minVelocity = float.MaxValue;
-            float maxVelocity = 0;
+            // Get the wave field data for coloring
+            float[,,] waveField = _isPWave ? PWaveField : SWaveField;
 
-            for (int x = 0; x < _gridSizeX; x++)
+            // If no wave field data is available, create a default
+            if (waveField == null || waveField.GetLength(0) == 0)
             {
-                for (int y = 0; y < _gridSizeY; y++)
+                using (Font font = new Font("Arial", 12))
+                using (SolidBrush brush = new SolidBrush(Color.White))
                 {
-                    for (int z = 0; z < _gridSizeZ; z++)
-                    {
-                        float vel = _velocityModel[x, y, z];
-                        if (vel > 500) // Ignore air cells
-                        {
-                            minVelocity = Math.Min(minVelocity, vel);
-                            maxVelocity = Math.Max(maxVelocity, vel);
-                        }
-                    }
+                    g.DrawString("No wave field data available", font, brush, 20, 20);
+                }
+                return;
+            }
+
+            // Find min and max displacement values for color mapping
+            float minDisplacement = float.MaxValue;
+            float maxDisplacement = float.MinValue;
+
+            foreach (var disp in waveField)
+            {
+                if (!float.IsNaN(disp) && !float.IsInfinity(disp))
+                {
+                    minDisplacement = Math.Min(minDisplacement, disp);
+                    maxDisplacement = Math.Max(maxDisplacement, disp);
                 }
             }
 
-            if (minVelocity == float.MaxValue) minVelocity = 0;
-            if (maxVelocity == 0) maxVelocity = 8000; // Default max P-wave velocity
+            // Handle the case where min and max are equal
+            if (minDisplacement >= maxDisplacement)
+            {
+                minDisplacement = -0.01f;
+                maxDisplacement = 0.01f;
+            }
 
             // Create a list to hold triangles with their average Z for depth sorting
             var trianglesToDraw = new List<TriangleDepthInfo>();
@@ -4174,7 +4204,7 @@ namespace CTSegmenter
                 // Calculate the average Z depth for depth sorting
                 float avgZ = (tri.V1.Z + tri.V2.Z + tri.V3.Z) / 3.0f;
 
-                // Calculate the center point for velocity lookup
+                // Calculate the center point for wave field lookup
                 Vector3 center = new Vector3(
                     (tri.V1.X + tri.V2.X + tri.V3.X) / 3,
                     (tri.V1.Y + tri.V2.Y + tri.V3.Y) / 3,
@@ -4187,21 +4217,20 @@ namespace CTSegmenter
                 int gridZ = (int)(center.Z / _gridSpacing);
 
                 // Ensure within grid bounds
-                gridX = Math.Max(0, Math.Min(gridX, _gridSizeX - 1));
-                gridY = Math.Max(0, Math.Min(gridY, _gridSizeY - 1));
-                gridZ = Math.Max(0, Math.Min(gridZ, _gridSizeZ - 1));
+                gridX = Math.Max(0, Math.Min(gridX, waveField.GetLength(0) - 1));
+                gridY = Math.Max(0, Math.Min(gridY, waveField.GetLength(1) - 1));
+                gridZ = Math.Max(0, Math.Min(gridZ, waveField.GetLength(2) - 1));
 
-                // Get velocity at this point
-                float velocity = _velocityModel[gridX, gridY, gridZ];
+                // Get the wave displacement at this point
+                float displacement = waveField[gridX, gridY, gridZ];
 
-                // If it's air, use the material velocity
-                if (velocity < 500)
+                // Store triangle, depth, and displacement
+                trianglesToDraw.Add(new TriangleDepthInfo
                 {
-                    velocity = _isPWave ? PWaveVelocity : SWaveVelocity;
-                }
-
-                // Store triangle, depth, and velocity
-                trianglesToDraw.Add(new TriangleDepthInfo { Triangle = tri, AverageZ = avgZ, Velocity = velocity });
+                    Triangle = tri,
+                    AverageZ = avgZ,
+                    Displacement = displacement
+                });
             }
 
             // Sort triangles by Z depth (back to front)
@@ -4220,9 +4249,12 @@ namespace CTSegmenter
                 // Create triangle points
                 PointF[] points = new PointF[] { p1, p2, p3 };
 
-                // Get color based on velocity
-                float normalizedVelocity = (triData.Velocity - minVelocity) / (maxVelocity - minVelocity);
-                Color triangleColor = GetHeatMapColor(normalizedVelocity, 0, 1);
+                // Get color based on wave displacement
+                float normalizedDisplacement = (triData.Displacement - minDisplacement) / (maxDisplacement - minDisplacement);
+                normalizedDisplacement = Math.Max(0, Math.Min(1, normalizedDisplacement)); // Clamp to [0,1]
+
+                // Use a bipolar colormap for better wave visualization
+                Color triangleColor = GetBipolarColor(normalizedDisplacement * 2 - 1);  // Map [0,1] to [-1,1]
 
                 if (renderMode == RenderMode.Solid)
                 {
@@ -4241,25 +4273,56 @@ namespace CTSegmenter
             }
 
             // Draw title
-            string title = $"{(renderMode == RenderMode.Wireframe ? "Wireframe" : "Solid")} Mesh with {(_isPWave ? "P-Wave" : "S-Wave")} Velocity";
+            string title = $"{(renderMode == RenderMode.Wireframe ? "Wireframe" : "Solid")} Mesh with {(_isPWave ? "P-Wave" : "S-Wave")} Propagation";
             using (Font titleFont = new Font("Arial", 14, FontStyle.Bold))
             using (SolidBrush textBrush = new SolidBrush(Color.White))
             {
                 g.DrawString(title, titleFont, textBrush, (width - g.MeasureString(title, titleFont).Width) / 2, 5);
             }
 
-            // Draw legend
-            DrawColorScale(g, width - 40, height / 2, 20, height / 3, "Velocity (m/s)");
+            // Draw legend - use bipolar colormap for the scale
+            DrawBipolarColorScale(g, width - 40, height / 2, 20, height / 3, "Displacement");
 
             // Add min/max values to the legend
             using (Font font = new Font("Arial", 9))
             using (SolidBrush textBrush = new SolidBrush(Color.White))
             {
-                g.DrawString($"{maxVelocity:F0}", font, textBrush, width - 70, height / 2 - 15);
-                g.DrawString($"{minVelocity:F0}", font, textBrush, width - 70, height / 2 + height / 3 + 5);
+                g.DrawString($"+{maxDisplacement:E3}", font, textBrush, width - 70, height / 2 - 15);
+                g.DrawString($"0", font, textBrush, width - 70, height / 2 + height / 6);
+                g.DrawString($"{minDisplacement:E3}", font, textBrush, width - 70, height / 2 + height / 3 + 5);
             }
         }
+        private void DrawBipolarColorScale(Graphics g, int x, int y, int width, int height, string label)
+        {
+            // Ensure minimum dimensions
+            height = Math.Max(10, height);
 
+            // Draw the bipolar color scale gradient
+            Rectangle scaleRect = new Rectangle(x, y, width, height);
+            using (LinearGradientBrush brush = new LinearGradientBrush(
+                scaleRect, Color.Blue, Color.Red, LinearGradientMode.Vertical))
+            {
+                ColorBlend blend = new ColorBlend(5);
+                blend.Colors = new Color[] { Color.Blue, Color.Cyan, Color.White, Color.Yellow, Color.Red };
+                blend.Positions = new float[] { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
+                brush.InterpolationColors = blend;
+
+                g.FillRectangle(brush, scaleRect);
+            }
+
+            // Draw border
+            using (Pen pen = new Pen(Color.Gray, 1))
+            {
+                g.DrawRectangle(pen, scaleRect);
+            }
+
+            // Draw labels
+            using (Font font = new Font("Arial", 8))
+            using (SolidBrush textBrush = new SolidBrush(Color.White))
+            {
+                g.DrawString(label, font, textBrush, x, y - 15);
+            }
+        }
         /// <summary>
         /// Helper class for triangle depth sorting
         /// </summary>
@@ -4267,7 +4330,7 @@ namespace CTSegmenter
         {
             public Triangle Triangle { get; set; }
             public float AverageZ { get; set; }
-            public float Velocity { get; set; }
+            public float Displacement { get; set; }
         }
 
         /// <summary>

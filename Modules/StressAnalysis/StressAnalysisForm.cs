@@ -3118,7 +3118,7 @@ namespace CTSegmenter
             };
             acousticTable.Controls.Add(dtFactorLabel,0,6);
 
-            NumericUpDown dtFactorNumeric = new NumericUpDown
+            dtFactorNumeric = new NumericUpDown
             {
                 Name = "dtFactorNumeric",
                 Minimum = 0,
@@ -3687,50 +3687,124 @@ namespace CTSegmenter
 
         private async void RunAcousticButton_Click(object sender, EventArgs e)
         {
+            // 1) Sanity-check our UI controls before we even try to read them:
+            if (acousticConfiningNumeric == null)
+            {
+                Logger.Log("[StressAnalysisForm] acousticConfiningNumeric is null");
+                MessageBox.Show("Internal error: missing confining-pressure control.");
+                return;
+            }
+            if (waveTypeCombo == null)
+            {
+                Logger.Log("[StressAnalysisForm] waveTypeCombo is null");
+                MessageBox.Show("Internal error: missing wave-type selector.");
+                return;
+            }
+            if (timeStepsNumeric == null)
+            {
+                Logger.Log("[StressAnalysisForm] timeStepsNumeric is null");
+                MessageBox.Show("Internal error: missing time-steps control.");
+                return;
+            }
+            if (frequencyNumeric == null)
+            {
+                Logger.Log("[StressAnalysisForm] frequencyNumeric is null");
+                MessageBox.Show("Internal error: missing frequency control.");
+                return;
+            }
+            if (amplitudeNumeric == null)
+            {
+                Logger.Log("[StressAnalysisForm] amplitudeNumeric is null");
+                MessageBox.Show("Internal error: missing amplitude control.");
+                return;
+            }
+            if (energyNumeric == null)
+            {
+                Logger.Log("[StressAnalysisForm] energyNumeric is null");
+                MessageBox.Show("Internal error: missing energy control.");
+                return;
+            }
+            if (acousticDirectionCombo == null)
+            {
+                Logger.Log("[StressAnalysisForm] acousticDirectionCombo is null");
+                MessageBox.Show("Internal error: missing direction selector.");
+                return;
+            }
+            if (dtFactorNumeric == null)
+            {
+                Logger.Log("[StressAnalysisForm] dtFactorNumeric is null");
+                MessageBox.Show("Internal error: missing time-step factor control.");
+                return;
+            }
 
+            // 2) Check mesh/material as before:
             if (!meshGenerated || meshTriangles.Count == 0)
             {
-                MessageBox.Show("No mesh to analyze. Please generate or import a mesh first.",
-                    "No Mesh", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(
+                    "No mesh to analyze. Please generate or import a mesh first.",
+                    "No Mesh",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning
+                );
                 return;
             }
 
             if (selectedMaterial == null || selectedMaterial.Density <= 0)
             {
-                MessageBox.Show("Please set material density before running simulation.",
-                    "Material Properties", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(
+                    "Please set material density before running simulation.",
+                    "Material Properties",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning
+                );
                 return;
             }
 
             try
             {
-                // Get simulation parameters
+                // 3) Safely read each value, providing a fallback if SelectedItem is null:
                 float confiningPressure = (float)acousticConfiningNumeric.Value;
-                string waveType = waveTypeCombo.SelectedItem.ToString();
+
+                string waveType;
+                if (waveTypeCombo.SelectedItem != null)
+                    waveType = waveTypeCombo.SelectedItem.ToString();
+                else
+                {
+                    waveType = "P-Wave";
+                    Logger.Log("[StressAnalysisForm] waveTypeCombo had no selection; defaulting to P-Wave");
+                }
+
                 int timeSteps = (int)timeStepsNumeric.Value;
                 float frequency = (float)frequencyNumeric.Value;
                 float amplitude = (float)amplitudeNumeric.Value;
                 float energy = (float)energyNumeric.Value;
-                string direction = acousticDirectionCombo.SelectedItem.ToString();
 
+                string direction;
+                if (acousticDirectionCombo.SelectedItem != null)
+                    direction = acousticDirectionCombo.SelectedItem.ToString();
+                else
+                {
+                    direction = "X-Axis";
+                    Logger.Log("[StressAnalysisForm] acousticDirectionCombo had no selection; defaulting to X-Axis");
+                }
+
+                float dtFactor = (float)dtFactorNumeric.Value;
+                
                 statusHeader.Text = $"Running acoustic velocity simulation ({waveType}, {direction})...";
-                this.Cursor = Cursors.WaitCursor;
+                Cursor = Cursors.WaitCursor;
 
-                // Get any previous triaxial results if available
+                // 4) Convert the mesh for the sim
+                var simulationTriangles = meshTriangles
+                    .Select(tri => new CTSegmenter.Triangle(
+                        new System.Numerics.Vector3(tri.V1.X, tri.V1.Y, tri.V1.Z),
+                        new System.Numerics.Vector3(tri.V2.X, tri.V2.Y, tri.V2.Z),
+                        new System.Numerics.Vector3(tri.V3.X, tri.V3.Y, tri.V3.Z)
+                    ))
+                    .ToList();
+
                 SimulationResult triaxialResult = null;
 
-                // Create converter for mesh triangles
-                List<CTSegmenter.Triangle> simulationTriangles = new List<CTSegmenter.Triangle>();
-                foreach (var meshTri in meshTriangles)
-                {
-                    simulationTriangles.Add(new CTSegmenter.Triangle(
-                        new System.Numerics.Vector3(meshTri.V1.X, meshTri.V1.Y, meshTri.V1.Z),
-                        new System.Numerics.Vector3(meshTri.V2.X, meshTri.V2.Y, meshTri.V2.Z),
-                        new System.Numerics.Vector3(meshTri.V3.X, meshTri.V3.Y, meshTri.V3.Z)
-                    ));
-                }
-                decimal dtFactor = dtFactorNumeric.Value;
-                // Create and initialize the simulation
+                // 5) Create & configure
                 using (var simulation = new AcousticVelocitySimulation(
                     selectedMaterial,
                     simulationTriangles,
@@ -3745,61 +3819,56 @@ namespace CTSegmenter
                     triaxialResult,
                     mainForm))
                 {
+                    simulation.TimeStepFactor = dtFactor;
                     currentAcousticSim = simulation;
-                    simulation.TimeStepFactor = (float)dtFactor;
-                    HookSimCompleted(currentAcousticSim);
-                    // Show progress in status bar
+                    HookSimCompleted(simulation);
 
                     simulation.ProgressChanged += (s, args) =>
-                    {
-                        this.BeginInvoke(new Action(() =>
-                        {
-                            statusHeader.Text = args.StatusMessage;
-                        }));
-                    };
+                        BeginInvoke(new Action(() => statusHeader.Text = args.StatusMessage));
 
-                    // Initialize
+                    // 6) Initialize
                     if (!simulation.Initialize())
-                    {
                         throw new InvalidOperationException("Failed to initialize simulation");
-                    }
 
-                    // Run the simulation
+                    // 7) Run
                     var result = await simulation.RunAsync();
 
+                    // 8) Handle results
                     if (result.IsSuccessful)
                     {
                         statusHeader.Text = "Acoustic velocity simulation completed.";
-
-                        // Create results display on the results page
                         CreateAcousticResultsDisplay(simulation, result);
-
-                        // Manually update visualization after navigating to results
-                        // This ensures the visualization is shown correctly
                         UpdateWaveVisualization(simulation);
-
-                        // Switch to results tab
                         mainTabControl.SelectedPage = resultsPage;
                     }
                     else
                     {
                         statusHeader.Text = "Simulation failed.";
-                        MessageBox.Show($"Acoustic velocity simulation failed: {result.ErrorMessage}",
-                            "Simulation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        MessageBox.Show(
+                            $"Acoustic velocity simulation failed: {result.ErrorMessage}",
+                            "Simulation Error",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Error
+                        );
                     }
                 }
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error running acoustic velocity simulation: {ex.Message}",
-                    "Simulation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(
+                    $"Error running acoustic velocity simulation: {ex.Message}",
+                    "Simulation Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error
+                );
                 Logger.Log($"[StressAnalysisForm] Acoustic simulation error: {ex.Message}");
             }
             finally
             {
-                this.Cursor = Cursors.Default;
+                Cursor = Cursors.Default;
             }
         }
+
         private void ExportTriaxialSimulationResults(TriaxialSimulation simulation, ExportFormat format)
         {
             if (simulation == null)

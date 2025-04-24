@@ -180,7 +180,7 @@ namespace CTSegmenter
     int chunkDim, float px,
     bool useMM)
         {
-            Logger.Log("[CreateBlankLabels] Creating empty label volume => all zero => exterior"+ " Binning");
+            Logger.Log("[CreateBlankLabels] Creating empty label volume => all zero => exterior" + " Binning");
 
             // 1) Delete old labels.bin/.chk
             string labelsBin = Path.Combine(folderPath, "labels.bin");
@@ -195,7 +195,7 @@ namespace CTSegmenter
 
             // 3) If we want to be sure everything is zero, 
 
-           
+
 
             //    do a triple nested loop writing labelVol[x,y,z] = 0.
             //    Usually new file is zeroed, but let's do it explicitly:
@@ -232,7 +232,7 @@ namespace CTSegmenter
                 sw.WriteLine("Material1=Material1");
                 sw.WriteLine($"RawFile={Path.GetFileName(labelsBin)}");
             }
-            Logger.Log("[CreateBlankLabels] Created new labels.bin/.chk with all-zero data => exterior only."+ "Binning");
+            Logger.Log("[CreateBlankLabels] Created new labels.bin/.chk with all-zero data => exterior only." + "Binning");
         }
 
 
@@ -268,7 +268,7 @@ namespace CTSegmenter
 
         ///   only parse ChunkDim & PixelSize here to replicate the main usage.
 
-        
+
 
         /// </summary>
         private static void ParseVolumeChk(string chkPath, ref int chunkDim, ref float px)

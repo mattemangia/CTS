@@ -1,18 +1,14 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
 using System.Drawing;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using System.Windows.Forms;
-using System.Runtime.InteropServices;
-using ILGPU;
-using ILGPU.Runtime;
-using ILGPU.Algorithms;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using ILGPU;
+using ILGPU.Runtime;
 
 namespace CTSegmenter
 {
@@ -27,6 +23,7 @@ namespace CTSegmenter
 
         // Form components
         private ComboBox cboDevices;
+
         private Button btnOK;
         private Button btnCancel;
         private NumericUpDown numResampleFactor;
@@ -45,6 +42,7 @@ namespace CTSegmenter
 
         // Properties for export options
         public bool OverwriteExisting { get; private set; } = true;
+
         public bool ExportAsBMP { get; private set; } = false;
         public string ExportPath { get; private set; } = "";
 
@@ -259,8 +257,6 @@ namespace CTSegmenter
             this.PerformLayout();
         }
 
-
-
         private void InitializeAccelerators()
         {
             try
@@ -439,7 +435,8 @@ namespace CTSegmenter
 
                 if (mainForm.volumeData == null)
                 {
-                    this.Invoke((MethodInvoker)delegate {
+                    this.Invoke((MethodInvoker)delegate
+                    {
                         MessageBox.Show("No volume data loaded.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     });
                     return false;
@@ -1157,6 +1154,7 @@ namespace CTSegmenter
             Logger.Log("[IntegrateResampleForm] Form closed");
             base.OnFormClosed(e);
         }
+
         private void ChkExportBMP_CheckedChanged(object sender, EventArgs e)
         {
             ExportAsBMP = chkExportBMP.Checked;
@@ -1189,6 +1187,5 @@ namespace CTSegmenter
                 }
             }
         }
-
     }
 }

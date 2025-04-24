@@ -1,6 +1,4 @@
 ﻿using System;
-using System.Numerics;
-using SharpDX;
 using Vector4 = SharpDX.Vector4;
 
 namespace CTSegmenter
@@ -245,6 +243,7 @@ namespace CTSegmenter
             );
         }
     }
+
     public static class Matrix4x4Extensions
     {
         // Convert between Matrix4x4 implementations

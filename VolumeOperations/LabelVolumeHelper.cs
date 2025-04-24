@@ -1,6 +1,5 @@
-﻿using CTSegmenter;
-
-using System;
+﻿using System;
+using CTSegmenter;
 
 /// <summary>
 /// Helper class for working with labeled volumes that could be either int[,,] or ChunkedLabelVolume

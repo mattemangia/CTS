@@ -22,6 +22,7 @@ namespace CTSegmenter
 
         // Methods for accessing chunk data
         byte[] GetChunkBytes(int chunkIndex);
+
         int GetChunkIndex(int cx, int cy, int cz);
     }
 
@@ -31,6 +32,7 @@ namespace CTSegmenter
     public interface IGrayscaleVolumeData : IVolumeData
     {
         void WriteChunks(BinaryWriter bw);
+
         void ReadChunks(BinaryReader br);
     }
 
@@ -40,7 +42,9 @@ namespace CTSegmenter
     public interface ILabelVolumeData : IVolumeData
     {
         void WriteChunks(BinaryWriter w);
+
         void ReadChunksHeaderAndData(BinaryReader br, MemoryMappedFile mmfIfAny = null, long offsetAfterHeader = 0);
+
         void ReleaseFileLock();
     }
 }

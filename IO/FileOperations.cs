@@ -6,7 +6,6 @@ using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Linq;
 using System.Threading.Tasks;
-using System.Windows.Forms;
 
 namespace CTSegmenter
 {
@@ -216,7 +215,7 @@ namespace CTSegmenter
                 accessors[i] = mmf.CreateViewAccessor(offset, chunkSize, MemoryMappedFileAccess.Read);
             }
 
-            return (IGrayscaleVolumeData)new ChunkedVolume(volWidth, volHeight, volDepth, chunkDim, mmf, accessors);
+            return new ChunkedVolume(volWidth, volHeight, volDepth, chunkDim, mmf, accessors);
         }
 
         /// <summary>
@@ -244,7 +243,7 @@ namespace CTSegmenter
                 accessors[i] = mmf.CreateViewAccessor(offset, chunkSize, MemoryMappedFileAccess.Read);
             }
 
-            return (IGrayscaleVolumeData)new ChunkedVolume(volWidth, volHeight, volDepth, chunkDim, mmf, accessors);
+            return new ChunkedVolume(volWidth, volHeight, volDepth, chunkDim, mmf, accessors);
         }
 
         /// <summary>
@@ -280,7 +279,7 @@ namespace CTSegmenter
                 int labWidth = cntX * chunkDim;
                 int labHeight = cntY * chunkDim;
                 int labDepth = cntZ * chunkDim;
-                ChunkedLabelVolume labVol =(ChunkedLabelVolume)(ILabelVolumeData)new ChunkedLabelVolume(labWidth, labHeight, labDepth, chunkDim, mmf);
+                ChunkedLabelVolume labVol = (ChunkedLabelVolume)(ILabelVolumeData)new ChunkedLabelVolume(labWidth, labHeight, labDepth, chunkDim, mmf);
 
                 using (var dataStream = mmf.CreateViewStream(headerSize, 0, MemoryMappedFileAccess.ReadWrite))
                 using (BinaryReader dataReader = new BinaryReader(dataStream))
@@ -363,9 +362,10 @@ namespace CTSegmenter
                 volumeLabels.ReadChunksHeaderAndData(br);
             }
 
-            return ((IGrayscaleVolumeData)volumeData, (ILabelVolumeData)volumeLabels, width, height, depth, pixelSize);
+            return (volumeData, volumeLabels, width, height, depth, pixelSize);
         }
-        #endregion
+
+        #endregion Volume and Label Loading
 
         #region Header Files Operations
 
@@ -458,7 +458,8 @@ namespace CTSegmenter
             Logger.Log($"[FileOperations] Loaded {mats.Count} materials from labels.chk");
             return mats;
         }
-        #endregion
+
+        #endregion Header Files Operations
 
         #region File Creation and Export
 
@@ -571,11 +572,11 @@ namespace CTSegmenter
                 for (int x = 0; x < width; x++)
                 {
                     // Start with the grayscale value
-                    byte gVal = volumeData?[x, y, sliceIndex] ?? (byte)128;
+                    byte gVal = volumeData?[x, y, sliceIndex] ?? 128;
                     Color finalColor = Color.FromArgb(gVal, gVal, gVal);
 
                     // If a segmentation has been applied, use it
-                    byte appliedLabel = volumeLabels?[x, y, sliceIndex] ?? (byte)0;
+                    byte appliedLabel = volumeLabels?[x, y, sliceIndex] ?? 0;
                     if (appliedLabel != 0)
                     {
                         Material mat = materials.FirstOrDefault(m => m.ID == appliedLabel);
@@ -591,6 +592,7 @@ namespace CTSegmenter
 
             return bmp;
         }
-        #endregion
+
+        #endregion File Creation and Export
     }
 }

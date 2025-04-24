@@ -1,18 +1,20 @@
 ﻿using System;
-using System.Windows.Forms;
 using System.Drawing;
+using System.Windows.Forms;
 
 namespace CTSegmenter
 {
     public class PoreConnectivityDialog : Form
     {
         // Public properties to access the settings
-        public double MaxThroatLengthFactor { get;  set; } = 3.0;
-        public double MinOverlapFactor { get;  set; } = 0.1;
-        public bool EnforceFlowPath { get;  set; } = true;
+        public double MaxThroatLengthFactor { get; set; } = 3.0;
+
+        public double MinOverlapFactor { get; set; } = 0.1;
+        public bool EnforceFlowPath { get; set; } = true;
 
         // UI controls
         private NumericUpDown maxThroatLengthFactorNumeric;
+
         private NumericUpDown minOverlapFactorNumeric;
         private CheckBox enforceFlowPathCheckBox;
 
@@ -153,7 +155,6 @@ namespace CTSegmenter
             this.AcceptButton = okButton;
             this.CancelButton = cancelButton;
         }
-
 
         private void OkButton_Click(object sender, EventArgs e)
         {

@@ -1,19 +1,15 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+﻿using System.Collections.Generic;
 
 namespace CTSegmenter
 {
-
-
     // LRU Cache implementation
     public class LRUCache<TKey, TValue>
     {
         private readonly int _capacity;
+
         private readonly Dictionary<TKey, LinkedListNode<CacheItem>> _cacheMap =
             new Dictionary<TKey, LinkedListNode<CacheItem>>();
+
         private readonly LinkedList<CacheItem> _lruList =
             new LinkedList<CacheItem>();
 
@@ -29,10 +25,12 @@ namespace CTSegmenter
             }
             return default;
         }
+
         public List<TKey> GetKeys()
         {
             return new List<TKey>(_cacheMap.Keys);
         }
+
         public void Add(TKey key, TValue val)
         {
             if (_cacheMap.Count >= _capacity)
@@ -52,8 +50,8 @@ namespace CTSegmenter
         {
             public TKey Key { get; }
             public TValue Value { get; }
+
             public CacheItem(TKey k, TValue v) => (Key, Value) = (k, v);
         }
     }
 }
-

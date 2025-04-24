@@ -140,9 +140,11 @@ namespace CTSegmenter
                     case FlowAxis.X:
                         getAxisCoordinate = p => p.Center.X;
                         break;
+
                     case FlowAxis.Y:
                         getAxisCoordinate = p => p.Center.Y;
                         break;
+
                     case FlowAxis.Z:
                     default:
                         getAxisCoordinate = p => p.Center.Z;
@@ -309,10 +311,12 @@ namespace CTSegmenter
                         minCoord = model.Pores.Min(p => p.Center.X);
                         maxCoord = model.Pores.Max(p => p.Center.X);
                         break;
+
                     case FlowAxis.Y:
                         minCoord = model.Pores.Min(p => p.Center.Y);
                         maxCoord = model.Pores.Max(p => p.Center.Y);
                         break;
+
                     case FlowAxis.Z:
                         minCoord = model.Pores.Min(p => p.Center.Z);
                         maxCoord = model.Pores.Max(p => p.Center.Z);
@@ -336,9 +340,11 @@ namespace CTSegmenter
                     case FlowAxis.X:
                         area = (maxY - minY) * (maxZ - minZ) * 1e-12; // µm² to m²
                         break;
+
                     case FlowAxis.Y:
                         area = (maxX - minX) * (maxZ - minZ) * 1e-12; // µm² to m²
                         break;
+
                     case FlowAxis.Z:
                     default:
                         area = (maxX - minX) * (maxY - minY) * 1e-12; // µm² to m²
@@ -370,7 +376,6 @@ namespace CTSegmenter
                 Logger.Log($"[PermeabilitySimulator] CPU simulation completed. Permeability: {permeabilityDarcy:F4} Darcy");
             });
         }
-
 
         /// <summary>
         /// GPU implementation of permeability simulation
@@ -406,9 +411,11 @@ namespace CTSegmenter
                         case FlowAxis.X:
                             getAxisCoordinate = p => p.Center.X;
                             break;
+
                         case FlowAxis.Y:
                             getAxisCoordinate = p => p.Center.Y;
                             break;
+
                         case FlowAxis.Z:
                         default:
                             getAxisCoordinate = p => p.Center.Z;
@@ -649,10 +656,12 @@ namespace CTSegmenter
                             minCoord = model.Pores.Min(p => p.Center.X);
                             maxCoord = model.Pores.Max(p => p.Center.X);
                             break;
+
                         case FlowAxis.Y:
                             minCoord = model.Pores.Min(p => p.Center.Y);
                             maxCoord = model.Pores.Max(p => p.Center.Y);
                             break;
+
                         case FlowAxis.Z:
                             minCoord = model.Pores.Min(p => p.Center.Z);
                             maxCoord = model.Pores.Max(p => p.Center.Z);
@@ -676,9 +685,11 @@ namespace CTSegmenter
                         case FlowAxis.X:
                             area = (maxY - minY) * (maxZ - minZ) * 1e-12; // µm² to m²
                             break;
+
                         case FlowAxis.Y:
                             area = (maxX - minX) * (maxZ - minZ) * 1e-12; // µm² to m²
                             break;
+
                         case FlowAxis.Z:
                         default:
                             area = (maxX - minX) * (maxY - minY) * 1e-12; // µm² to m²
@@ -869,9 +880,6 @@ namespace CTSegmenter
             }
         }
 
-
-
-
         /// <summary>
         /// Solves a linear system Ax = b using Gauss-Seidel iterative method
         /// </summary>
@@ -914,7 +922,6 @@ namespace CTSegmenter
 
                 residualNorm = Math.Sqrt(residualNorm);
                 iterations++;
-
             } while (residualNorm > tolerance && iterations < maxIterations);
 
             Logger.Log($"[PermeabilitySimulator] Linear system solved in {iterations} iterations, residual: {residualNorm}");
@@ -970,6 +977,7 @@ namespace CTSegmenter
         public List<int> OutletPores { get; set; }
     }
 }
+
 /*
 Recommended Values by Rock Type
 Rock Type	Max Throat Length Factor	Min Overlap Factor	Enforce Flow Path

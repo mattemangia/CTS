@@ -15,6 +15,7 @@ namespace CTSegmenter
     public interface IDensityVisualizable
     {
         void RenderDensityDistribution(Graphics g, int width, int height);
+
         float MinimumDensity { get; }
         float MaximumDensity { get; }
         float AverageDensity { get; }
@@ -30,11 +31,13 @@ namespace CTSegmenter
     {
         // Simulation to visualize
         private readonly IDensityVisualizable _simulation;
+
         private readonly bool _isTriaxial;
         private readonly string _simulationType;
 
         // UI Elements
         private Panel _visualizationPanel;
+
         private KryptonGroupBox _controlsGroupBox;
         private KryptonButton _exportButton;
         private KryptonButton _closeButton;
@@ -45,6 +48,7 @@ namespace CTSegmenter
 
         // View controls
         private float _rotationX = 0.5f;
+
         private float _rotationY = 0.5f;
         private float _zoomLevel = 1.0f;
         private PointF _panOffset = new PointF(0, 0);
@@ -57,7 +61,7 @@ namespace CTSegmenter
         // Constructor overloads for both simulation types
         public DensityVisualizationForm(InhomogeneousAcousticSimulation simulation)
         {
-            _simulation = (IDensityVisualizable)simulation;
+            _simulation = simulation;
             _isTriaxial = false;
             _simulationType = "Acoustic";
             InitializeComponent();
@@ -105,7 +109,7 @@ namespace CTSegmenter
             _visualizationPanel.MouseUp += VisualizationPanel_MouseUp;
             _visualizationPanel.MouseWheel += VisualizationPanel_MouseWheel;
 
-            // Create controls panel 
+            // Create controls panel
             Panel controlsPanel = new Panel
             {
                 Dock = DockStyle.Fill,
@@ -119,7 +123,7 @@ namespace CTSegmenter
                 Text = "Visualization Controls",
                 Dock = DockStyle.Top,
                 Height = 280,
-                Name= "Controls"
+                Name = "Controls"
             };
 
             // Show wireframe checkbox

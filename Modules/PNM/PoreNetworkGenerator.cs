@@ -2,18 +2,13 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-using System.Drawing;
-using System.Windows.Forms;
-using System.Numerics;
 using ILGPU;
 using ILGPU.Runtime;
-using System.IO;
 using ILGPU.Runtime.CPU;
-using SharpDX;
 
 namespace CTSegmenter
 {
-    public class PoreNetworkGenerator:IDisposable
+    public class PoreNetworkGenerator : IDisposable
     {
         private Context context;
         private Accelerator accelerator;
@@ -128,6 +123,7 @@ namespace CTSegmenter
             progress?.Report(100);
             return model;
         }
+
         private void GeneratePetrophysicalThroats(PoreNetworkModel model, int maxConnections, Random random,
     double maxThroatLength, double minOverlapFactor, bool enforceFlowPath)
         {
@@ -212,6 +208,7 @@ namespace CTSegmenter
                 EnsureFlowPathConnectivity(model, distances);
             }
         }
+
         private bool CanPoresConnect(Pore pore1, Pore pore2, double distance, double maxThroatLength, double minOverlapFactor)
         {
             // Check if distance is within maximum throat length
@@ -226,6 +223,7 @@ namespace CTSegmenter
             // Must have minimum overlap to connect
             return overlapFactor >= minOverlapFactor;
         }
+
         private void EnsureFlowPathConnectivity(PoreNetworkModel model, Dictionary<(int, int), double> distances)
         {
             // Sort pores by Z coordinate (typical flow direction)
@@ -298,6 +296,7 @@ namespace CTSegmenter
                 ConnectLargestClusters(model, clusters, distances);
             }
         }
+
         private List<List<int>> FindDisconnectedClusters(PoreNetworkModel model, Dictionary<int, List<int>> graph)
         {
             HashSet<int> visited = new HashSet<int>();
@@ -404,6 +403,7 @@ namespace CTSegmenter
                 ConnectLargestClusters(model, remainingClusters, distances);
             }
         }
+
         private double CalculateThroatRadius(double radius1, double radius2)
         {
             // Use the petrophysical relationship for throat radius
@@ -411,6 +411,7 @@ namespace CTSegmenter
             double minRadius = Math.Min(radius1, radius2);
             return minRadius * 0.4; // Standard factor in petrophysical models
         }
+
         private void GenerateConsistentThroats(PoreNetworkModel model, int maxConnections, Random random)
         {
             model.Throats.Clear();
@@ -477,8 +478,6 @@ namespace CTSegmenter
                 }
             }
         }
-
-        
 
         /// <summary>
         /// Calculates the surface area of a particle using GPU acceleration if available
@@ -674,8 +673,6 @@ namespace CTSegmenter
             Logger.Log($"[PoreNetworkGenerator] CPU calculated surface area: {boundaryVoxelCount} boundary voxels, {surfaceArea} m²");
             return surfaceArea;
         }
-
-
 
         private void GenerateThroatsCPU(PoreNetworkModel model)
         {
@@ -1005,8 +1002,6 @@ namespace CTSegmenter
             }
         }
 
-
-
         private void CalculateNetworkProperties(PoreNetworkModel model)
         {
             // Calculate total volumes
@@ -1045,7 +1040,6 @@ namespace CTSegmenter
             model.Porosity = totalVolume > 0 ?
                 Math.Min(1.0, (model.TotalPoreVolume + model.TotalThroatVolume) / totalVolume) : 0;
         }
-
 
         private double Distance(Point3D p1, Point3D p2)
         {

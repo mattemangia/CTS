@@ -13,7 +13,7 @@ namespace CTSegmenter
     ///   - Weighted Averaging,
     ///   - Probability Map,
     ///   - Basic CRF smoothing.
-    /// 
+    ///
     /// Typically, volumes are [width, height, depth], with each pixel a label or probability.
     /// </summary>
     public static class CTFusion
@@ -125,7 +125,7 @@ namespace CTSegmenter
 
         /// <summary>
         /// Simple CRF-like smoothing on a single grayscale mask, not a full multi-label CRF.
-        /// 
+        ///
         /// </summary>
         public static Bitmap CRFSmoothing(Bitmap inputMask, int iterations = 1)
         {

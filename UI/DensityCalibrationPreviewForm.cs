@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Drawing;
 using System.Windows.Forms;
 using Krypton.Toolkit;
@@ -26,6 +25,7 @@ namespace CTSegmenter
 
         // Selected region and average gray value
         public Rectangle SelectedRegion { get; private set; }
+
         public double AverageGrayValue { get; private set; }
 
         public DensityCalibrationPreviewForm(MainForm mainForm)

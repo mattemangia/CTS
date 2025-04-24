@@ -1,24 +1,18 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
-using System.Linq;
 using System.Runtime.InteropServices;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using System.Numerics;
 using Color = System.Drawing.Color;
 using Matrix = System.Drawing.Drawing2D.Matrix;
 using Point = System.Drawing.Point;
 using Rectangle = System.Drawing.Rectangle;
 using RectangleF = System.Drawing.RectangleF;
-using SharpDX;
 using Vector3 = SharpDX.Vector3;
 using Vector4 = SharpDX.Vector4;
 
@@ -32,6 +26,7 @@ namespace CTSegmenter
 
         // Current transformation parameters
         private Rectangle _cropRectXY;
+
         private Rectangle _cropRectXZ;
         private Rectangle _cropRectYZ;
 
@@ -49,12 +44,14 @@ namespace CTSegmenter
 
         // Cached original dimensions
         private int _origWidth;
+
         private int _origHeight;
         private int _origDepth;
         private double _origPixelSize;
 
         // Current dimensions based on transformations
         private int _newWidth;
+
         private int _newHeight;
         private int _newDepth;
         private double _newPixelSize;
@@ -64,21 +61,25 @@ namespace CTSegmenter
 
         // View controls
         private PictureBox _xyView;
+
         private PictureBox _xzView;
         private PictureBox _yzView;
 
         // Sliders
         private TrackBar _xySlider;
+
         private TrackBar _xzSlider;
         private TrackBar _yzSlider;
 
         // Numeric input fields
         private NumericUpDown _numXYSlice;
+
         private NumericUpDown _numXZSlice;
         private NumericUpDown _numYZSlice;
 
         // Transformation input fields
         private NumericUpDown _numRotX;
+
         private NumericUpDown _numRotY;
         private NumericUpDown _numRotZ;
 
@@ -92,17 +93,20 @@ namespace CTSegmenter
 
         // Dimension input fields
         private NumericUpDown _numNewWidth;
+
         private NumericUpDown _numNewHeight;
         private NumericUpDown _numNewDepth;
         private NumericUpDown _numNewPixelSize;
 
         // Action buttons
         private Button _btnReset;
+
         private Button _btnApplyToCurrentDataset;
         private Button _btnCreateNewDataset;
 
         // Interaction state
         private bool _isResizing = false;
+
         private bool _isDragging = false;
         private Point _lastMousePosition;
         private PictureBox _activeView;
@@ -110,25 +114,30 @@ namespace CTSegmenter
 
         // For progress tracking
         private ProgressBar _progressBar;
+
         private Label _lblProgress;
 
         // Current slice indices
         private int _currentXYSlice = 0;
+
         private int _currentXZSlice = 0;
         private int _currentYZSlice = 0;
 
         // Handles for resize operations
         private List<ResizeHandle> _xyHandles = new List<ResizeHandle>();
+
         private List<ResizeHandle> _xzHandles = new List<ResizeHandle>();
         private List<ResizeHandle> _yzHandles = new List<ResizeHandle>();
 
         // Rotation controls
         private bool _isRotating = false;
+
         private Point _rotationStartPoint;
         private TransformViewType _rotatingView = TransformViewType.XY;
 
         // Zoom and pan for each view
         private float _xyZoom = 1.0f;
+
         private float _xzZoom = 1.0f;
         private float _yzZoom = 1.0f;
 
@@ -532,7 +541,6 @@ namespace CTSegmenter
             };
         }
 
-
         private void InitializeResizeHandles()
         {
             // Create resize handles for XY view
@@ -691,17 +699,14 @@ namespace CTSegmenter
             }
         }
 
-
         private void View_MouseMove(object sender, MouseEventArgs e)
         {
             if (sender is PictureBox view)
             {
-
                 Point currentPosition = e.Location;
                 Point viewPoint = ConvertClientToView(view, currentPosition);
                 if (_isRotating && _activeView == view)
                 {
-                    
                     Point delta = new Point(
                         currentPosition.X - _lastMousePosition.X,
                         currentPosition.Y - _lastMousePosition.Y
@@ -714,10 +719,12 @@ namespace CTSegmenter
                             // XY view rotates around Z axis
                             _rotationZ = (_rotationZ + delta.X * 0.5) % 360;
                             break;
+
                         case TransformViewType.XZ:
                             // XZ view rotates around Y axis
                             _rotationY = (_rotationY + delta.X * 0.5) % 360;
                             break;
+
                         case TransformViewType.YZ:
                             // YZ view rotates around X axis
                             _rotationX = (_rotationX + delta.Y * 0.5) % 360;
@@ -1036,12 +1043,14 @@ namespace CTSegmenter
                         g.DrawString("Y", axisFont, axisBrush, margin, margin + 30);
                         g.DrawLine(axisPen, margin, margin + 50, margin, margin + 70);
                         break;
+
                     case TransformViewType.XZ:
                         g.DrawString("X", axisFont, axisBrush, margin, margin);
                         g.DrawLine(axisPen, margin, margin + 20, margin + 20, margin + 20);
                         g.DrawString("Z", axisFont, axisBrush, margin, margin + 30);
                         g.DrawLine(axisPen, margin, margin + 50, margin, margin + 70);
                         break;
+
                     case TransformViewType.YZ:
                         g.DrawString("Y", axisFont, axisBrush, margin, margin);
                         g.DrawLine(axisPen, margin, margin + 20, margin + 20, margin + 20);
@@ -1093,9 +1102,11 @@ namespace CTSegmenter
                     case TransformViewType.XY:
                         sliceInfo = $"XY Slice: {_currentXYSlice}";
                         break;
+
                     case TransformViewType.XZ:
                         sliceInfo = $"XZ Slice: {_currentXZSlice}";
                         break;
+
                     case TransformViewType.YZ:
                         sliceInfo = $"YZ Slice: {_currentYZSlice}";
                         break;
@@ -1122,7 +1133,6 @@ namespace CTSegmenter
                 g.DrawString(dimInfo, dimFont, dimBrush, 10, yPos + 2);
             }
         }
-
 
         private Point ConvertClientToView(PictureBox view, Point clientPoint)
         {
@@ -1187,15 +1197,19 @@ namespace CTSegmenter
                 case ResizeHandleType.TopLeft:
                 case ResizeHandleType.BottomRight:
                     return Cursors.SizeNWSE;
+
                 case ResizeHandleType.TopRight:
                 case ResizeHandleType.BottomLeft:
                     return Cursors.SizeNESW;
+
                 case ResizeHandleType.Top:
                 case ResizeHandleType.Bottom:
                     return Cursors.SizeNS;
+
                 case ResizeHandleType.Left:
                 case ResizeHandleType.Right:
                     return Cursors.SizeWE;
+
                 default:
                     return Cursors.Default;
             }
@@ -1498,8 +1512,6 @@ namespace CTSegmenter
             }
         }
 
-
-
         private Bitmap RenderXYSlice(int sliceZ)
         {
             // Create bitmap with exact dimensions
@@ -1585,8 +1597,6 @@ namespace CTSegmenter
 
             return bitmap;
         }
-
-
 
         private Bitmap RenderXZSlice(int sliceY)
         {
@@ -1760,8 +1770,6 @@ namespace CTSegmenter
             return bitmap;
         }
 
-
-
         private void UpdatePreview()
         {
             // Need to clear the slice cache - implement a workaround for missing Clear() method
@@ -1779,7 +1787,6 @@ namespace CTSegmenter
             // Re-render the views
             RenderViews();
         }
-
 
         private void CalculateNewDimensions()
         {
@@ -1816,6 +1823,7 @@ namespace CTSegmenter
             double avgScale = (_scaleX + _scaleY + _scaleZ) / 3.0;
             _newPixelSize = _origPixelSize / avgScale;
         }
+
         private SharpDX.Vector3[] GetCuboidCorners(int width, int height, int depth)
         {
             // Create an array of the 8 corners of the cuboid
@@ -1971,7 +1979,6 @@ namespace CTSegmenter
 
             Logger.Log("[TransformDatasetForm] Reset all transformations");
         }
-
 
         private void BtnApplyToCurrentDataset_Click(object sender, EventArgs e)
         {
@@ -2445,6 +2452,7 @@ namespace CTSegmenter
             // Get voxel value
             return volume.GetVoxel(nx, ny, nz);
         }
+
         private void RotationControl_RotationChanged(object sender, RotationChangedEventArgs e)
         {
             // Update numeric controls
@@ -2460,6 +2468,7 @@ namespace CTSegmenter
             // Update the preview in real-time
             UpdatePreview();
         }
+
         private byte GetTransformedVoxelValue(ChunkedVolume volume, int x, int y, int z)
         {
             // Apply inverse transformations to get source coordinates
@@ -2486,6 +2495,7 @@ namespace CTSegmenter
 
             return 0; // Return black for out of bounds
         }
+
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             base.OnFormClosing(e);
@@ -2545,24 +2555,31 @@ namespace CTSegmenter
                 case ResizeHandleType.TopLeft:
                     Bounds = new Rectangle(rect.X - halfSize, rect.Y - halfSize, HandleSize, HandleSize);
                     break;
+
                 case ResizeHandleType.Top:
                     Bounds = new Rectangle(rect.X + rect.Width / 2 - halfSize, rect.Y - halfSize, HandleSize, HandleSize);
                     break;
+
                 case ResizeHandleType.TopRight:
                     Bounds = new Rectangle(rect.Right - halfSize, rect.Y - halfSize, HandleSize, HandleSize);
                     break;
+
                 case ResizeHandleType.Right:
                     Bounds = new Rectangle(rect.Right - halfSize, rect.Y + rect.Height / 2 - halfSize, HandleSize, HandleSize);
                     break;
+
                 case ResizeHandleType.BottomRight:
                     Bounds = new Rectangle(rect.Right - halfSize, rect.Bottom - halfSize, HandleSize, HandleSize);
                     break;
+
                 case ResizeHandleType.Bottom:
                     Bounds = new Rectangle(rect.X + rect.Width / 2 - halfSize, rect.Bottom - halfSize, HandleSize, HandleSize);
                     break;
+
                 case ResizeHandleType.BottomLeft:
                     Bounds = new Rectangle(rect.X - halfSize, rect.Bottom - halfSize, HandleSize, HandleSize);
                     break;
+
                 case ResizeHandleType.Left:
                     Bounds = new Rectangle(rect.X - halfSize, rect.Y + rect.Height / 2 - halfSize, HandleSize, HandleSize);
                     break;
@@ -2615,30 +2632,37 @@ namespace CTSegmenter
                     newRect.Width -= delta.X;
                     newRect.Height -= delta.Y;
                     break;
+
                 case ResizeHandleType.Top:
                     newRect.Y += delta.Y;
                     newRect.Height -= delta.Y;
                     break;
+
                 case ResizeHandleType.TopRight:
                     newRect.Y += delta.Y;
                     newRect.Width += delta.X;
                     newRect.Height -= delta.Y;
                     break;
+
                 case ResizeHandleType.Right:
                     newRect.Width += delta.X;
                     break;
+
                 case ResizeHandleType.BottomRight:
                     newRect.Width += delta.X;
                     newRect.Height += delta.Y;
                     break;
+
                 case ResizeHandleType.Bottom:
                     newRect.Height += delta.Y;
                     break;
+
                 case ResizeHandleType.BottomLeft:
                     newRect.X += delta.X;
                     newRect.Width -= delta.X;
                     newRect.Height += delta.Y;
                     break;
+
                 case ResizeHandleType.Left:
                     newRect.X += delta.X;
                     newRect.Width -= delta.X;
@@ -2648,9 +2672,4 @@ namespace CTSegmenter
             return newRect;
         }
     }
-
-    
-
-        
-    
 }

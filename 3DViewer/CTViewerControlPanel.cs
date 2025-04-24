@@ -24,6 +24,7 @@ namespace CTSegmenter.SharpDXIntegration
 
         // UI elements
         private TrackBar trkMinThreshold;
+
         private TrackBar trkMaxThreshold;
         private NumericUpDown numMinThreshold;
         private NumericUpDown numMaxThreshold;
@@ -42,16 +43,18 @@ namespace CTSegmenter.SharpDXIntegration
         private TabPage tabSlices;
         private TabPage tabCutting;
         private TabPage tabInfo;
-        FlowLayoutPanel panel = new FlowLayoutPanel();
+        private FlowLayoutPanel panel = new FlowLayoutPanel();
 
         // Material controls
         private CheckedListBox lstMaterials;
+
         private TrackBar trkOpacity;
         private Label lblOpacity;
         private Button btnDebugTest;
 
         // Cutting plane controls
         private CheckBox chkCutX, chkCutY, chkCutZ;
+
         private RadioButton radCutXForward, radCutXBackward;
         private RadioButton radCutYForward, radCutYBackward;
         private RadioButton radCutZForward, radCutZBackward;
@@ -59,9 +62,9 @@ namespace CTSegmenter.SharpDXIntegration
 
         private CheckBox chkSliceX, chkSliceY, chkSliceZ;
 
-
         // Info panel
         private Label lblVolumeInfo;
+
         private Label lblMaterialsInfo;
         private Label lblPixelSizeInfo;
 
@@ -71,12 +74,13 @@ namespace CTSegmenter.SharpDXIntegration
 
         //Measurement Tab
         private TabPage tabMeasurements;
+
         private CheckedListBox lstMeasurements;
         private Button btnAddMeasure, btnDeleteMeasure, btnExportMeasures;
         private CheckBox chkShowMeasurements;
 
         //Streaming render
-        CheckBox chkUseStreaming;
+        private CheckBox chkUseStreaming;
 
         public SharpDXControlPanel(SharpDXViewerForm viewer, MainForm main, SharpDXVolumeRenderer renderer)
         {
@@ -127,6 +131,7 @@ namespace CTSegmenter.SharpDXIntegration
 
             this.Controls.Add(tabControl);
         }
+
         private void InitializeMeasurementsTab()
         {
             // Create panel to hold controls
@@ -178,7 +183,8 @@ namespace CTSegmenter.SharpDXIntegration
             lstMeasurements.ItemCheck += lstMeasurements_ItemCheck;
 
             // Add selection changed event to update UI when selection changes
-            lstMeasurements.SelectedIndexChanged += (s, e) => {
+            lstMeasurements.SelectedIndexChanged += (s, e) =>
+            {
                 btnDeleteMeasure.Enabled = lstMeasurements.SelectedIndex >= 0;
             };
 
@@ -227,6 +233,7 @@ namespace CTSegmenter.SharpDXIntegration
             // Refresh measurements list to show any existing measurements
             RefreshMeasurementsList();
         }
+
         private void chkShowMeasurements_CheckedChanged(object sender, EventArgs e)
         {
             bool isChecked = chkShowMeasurements.Checked;
@@ -248,6 +255,7 @@ namespace CTSegmenter.SharpDXIntegration
                 Logger.Log($"[SharpDXControlPanel] Error updating checkboxes: {ex.Message}");
             }
         }
+
         private void btnDeleteMeasure_Click(object sender, EventArgs e)
         {
             try
@@ -277,6 +285,7 @@ namespace CTSegmenter.SharpDXIntegration
                 lblStatus.Text = "Error deleting measurement.";
             }
         }
+
         private void InitializeShowMeasurementsCheckbox()
         {
             // Show/Hide measurements
@@ -290,6 +299,7 @@ namespace CTSegmenter.SharpDXIntegration
             // Add to panel
             panel.Controls.Add(chkShowMeasurements);
         }
+
         private void lstMeasurements_ItemCheck(object sender, ItemCheckEventArgs e)
         {
             try
@@ -310,6 +320,7 @@ namespace CTSegmenter.SharpDXIntegration
                 Logger.Log($"[SharpDXControlPanel] Error toggling measurement visibility: {ex.Message}");
             }
         }
+
         private void InitializeRenderingTab()
         {
             // Create panel to hold controls
@@ -382,7 +393,8 @@ namespace CTSegmenter.SharpDXIntegration
             btnDownsample.Text = "Apply Downsampling (1/2 Resolution)";
             btnDownsample.Location = new Point(10, 55);
             btnDownsample.Width = 250;
-            btnDownsample.Click += async (s, e) => {
+            btnDownsample.Click += async (s, e) =>
+            {
                 // Confirm with user
                 DialogResult result = MessageBox.Show(
                     "This will reduce the dataset resolution by half to save memory.\n" +
@@ -403,7 +415,8 @@ namespace CTSegmenter.SharpDXIntegration
                     try
                     {
                         // Implement progress reporting
-                        var progressHandler = new Progress<int>(value => {
+                        var progressHandler = new Progress<int>(value =>
+                        {
                             progress.Value = value;
                             lblStatus.Text = $"Downsampling... {value}%";
                             Application.DoEvents();
@@ -433,7 +446,8 @@ namespace CTSegmenter.SharpDXIntegration
             btnHigherDownsample.Text = "Apply Aggressive Downsampling (1/4 Resolution)";
             btnHigherDownsample.Location = new Point(10, 85);
             btnHigherDownsample.Width = 300;
-            btnHigherDownsample.Click += async (s, e) => {
+            btnHigherDownsample.Click += async (s, e) =>
+            {
                 // Confirm with user
                 DialogResult result = MessageBox.Show(
                     "This will reduce the dataset resolution to 1/4 for extremely large datasets.\n" +
@@ -453,7 +467,8 @@ namespace CTSegmenter.SharpDXIntegration
 
                     try
                     {
-                        var progressHandler = new Progress<int>(value => {
+                        var progressHandler = new Progress<int>(value =>
+                        {
                             progress.Value = value;
                             lblStatus.Text = $"Downsampling... {value}%";
                             Application.DoEvents();
@@ -681,7 +696,8 @@ namespace CTSegmenter.SharpDXIntegration
                         progress.Visible = true;
 
                         // Setup progress reporting
-                        var progressHandler = new Progress<int>(value => {
+                        var progressHandler = new Progress<int>(value =>
+                        {
                             progress.Value = value;
                             lblStatus.Text = $"Exporting 3D model... {value}%";
                             Application.DoEvents(); // Allow UI to refresh
@@ -1023,7 +1039,8 @@ namespace CTSegmenter.SharpDXIntegration
             trkXSlice.TickFrequency = Math.Max(1, mainForm.GetWidth() / 20);
             trkXSlice.Width = 330;
             trkXSlice.Enabled = chkSliceX.Checked;
-            trkXSlice.Scroll += (s, e) => {
+            trkXSlice.Scroll += (s, e) =>
+            {
                 UpdateSlices();
                 lblXSliceValue.Text = $"Slice: {trkXSlice.Value}/{trkXSlice.Maximum}";
             };
@@ -1050,7 +1067,8 @@ namespace CTSegmenter.SharpDXIntegration
             trkYSlice.TickFrequency = Math.Max(1, mainForm.GetHeight() / 20);
             trkYSlice.Width = 330;
             trkYSlice.Enabled = chkSliceY.Checked;
-            trkYSlice.Scroll += (s, e) => {
+            trkYSlice.Scroll += (s, e) =>
+            {
                 UpdateSlices();
                 lblYSliceValue.Text = $"Slice: {trkYSlice.Value}/{trkYSlice.Maximum}";
             };
@@ -1077,7 +1095,8 @@ namespace CTSegmenter.SharpDXIntegration
             trkZSlice.TickFrequency = Math.Max(1, mainForm.GetDepth() / 20);
             trkZSlice.Width = 330;
             trkZSlice.Enabled = chkSliceZ.Checked;
-            trkZSlice.Scroll += (s, e) => {
+            trkZSlice.Scroll += (s, e) =>
+            {
                 UpdateSlices();
                 lblZSliceValue.Text = $"Slice: {trkZSlice.Value}/{trkZSlice.Maximum}";
             };
@@ -1105,6 +1124,7 @@ namespace CTSegmenter.SharpDXIntegration
 
             tabSlices.Controls.Add(panel);
         }
+
         private void UpdateMasterSliceCheckbox()
         {
             bool allChecked = chkSliceX.Checked && chkSliceY.Checked && chkSliceZ.Checked;
@@ -1112,6 +1132,7 @@ namespace CTSegmenter.SharpDXIntegration
             chkSlices.Checked = allChecked;
             chkSlices.CheckedChanged += OnMasterSliceCheckChanged;
         }
+
         private void OnIndividualSliceCheckChanged(object sender, EventArgs e)
         {
             CheckBox checkbox = sender as CheckBox;
@@ -1139,6 +1160,7 @@ namespace CTSegmenter.SharpDXIntegration
             // Update master checkbox correctly
             UpdateMasterSliceCheckbox();
         }
+
         private void RemoveAllEventHandlers(Control control, string eventName)
         {
             try
@@ -1239,6 +1261,7 @@ namespace CTSegmenter.SharpDXIntegration
                 }
             }
         }
+
         private void OnMasterSliceCheckChanged(object sender, EventArgs e)
         {
             // Set all individual slices to match
@@ -1548,7 +1571,8 @@ namespace CTSegmenter.SharpDXIntegration
             lstMatInfo.Width = 330;
             lstMatInfo.Height = 150;
             lstMatInfo.DrawMode = DrawMode.OwnerDrawFixed;
-            lstMatInfo.DrawItem += (s, e) => {
+            lstMatInfo.DrawItem += (s, e) =>
+            {
                 e.DrawBackground();
 
                 if (e.Index < 0 || e.Index >= mainForm.Materials.Count)
@@ -1616,6 +1640,7 @@ namespace CTSegmenter.SharpDXIntegration
 
             tabInfo.Controls.Add(panel);
         }
+
         public void UpdateMeasurementUI(bool isMeasuring)
         {
             try
@@ -1647,11 +1672,13 @@ namespace CTSegmenter.SharpDXIntegration
                 Logger.Log($"[SharpDXControlPanel] Error updating measurement UI: {ex.Message}");
             }
         }
+
         private void InitializeThresholdTimer()
         {
             thresholdUpdateTimer = new Timer();
             thresholdUpdateTimer.Interval = 150; // Update threshold every 150ms during slider drag
-            thresholdUpdateTimer.Tick += async (s, e) => {
+            thresholdUpdateTimer.Tick += async (s, e) =>
+            {
                 if (thresholdUpdatePending && !isThresholdUpdating)
                 {
                     try
@@ -1680,6 +1707,7 @@ namespace CTSegmenter.SharpDXIntegration
                 }
             };
         }
+
         public void RefreshMeasurementsList()
         {
             try
@@ -1737,6 +1765,7 @@ namespace CTSegmenter.SharpDXIntegration
                 Logger.Log($"[SharpDXControlPanel] Error refreshing measurements list: {ex.Message}");
             }
         }
+
         private string FormatSize(double meters)
         {
             if (meters >= 1)
@@ -1747,11 +1776,13 @@ namespace CTSegmenter.SharpDXIntegration
                 return $"{meters * 1e6:F3} μm";
             return $"{meters * 1e9:F3} nm";
         }
+
         private void InitializeOpacityTimer()
         {
             opacityUpdateTimer = new Timer();
             opacityUpdateTimer.Interval = 100; // Update every 100ms during slider drag
-            opacityUpdateTimer.Tick += (s, e) => {
+            opacityUpdateTimer.Tick += (s, e) =>
+            {
                 if (opacityUpdatePending)
                 {
                     try
@@ -1767,6 +1798,7 @@ namespace CTSegmenter.SharpDXIntegration
                 opacityUpdateTimer.Stop();
             };
         }
+
         private void UpdateSlices()
         {
             viewerForm.SetSliceIndices(trkXSlice.Value, trkYSlice.Value, trkZSlice.Value);

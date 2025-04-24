@@ -17,6 +17,7 @@ namespace CTSegmenter
     public partial class TriaxialSimulation : IStressSimulation, IDisposable
     {
         #region Properties and Fields
+
         private Action<Index1D,
        ArrayView<System.Numerics.Vector3>,
        ArrayView<System.Numerics.Vector3>,
@@ -25,6 +26,7 @@ namespace CTSegmenter
        float, float, float, // Changed: cohesion, sinPhi, cosPhi
        ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<int>>
        _computeStressKernelSafe;
+
         public Guid SimulationId { get; }
         public string Name { get; private set; }
         public DateTime CreationTime { get; }
@@ -35,10 +37,12 @@ namespace CTSegmenter
 
         // Events
         public event EventHandler<SimulationProgressEventArgs> ProgressChanged;
+
         public event EventHandler<SimulationCompletedEventArgs> SimulationCompleted;
 
         // Triaxial test specific parameters
         public float ConfiningPressure { get; private set; }
+
         public float MinAxialPressure { get; private set; }
         public float MaxAxialPressure { get; private set; }
         public int PressureSteps { get; private set; }
@@ -46,6 +50,7 @@ namespace CTSegmenter
 
         // Material properties
         public float YoungModulus { get; private set; }
+
         public float PoissonRatio { get; private set; }
         public float CohesionStrength { get; set; }
         public float FrictionAngle { get; set; }
@@ -53,6 +58,7 @@ namespace CTSegmenter
 
         // Results
         public float BreakingPressure { get; private set; }
+
         public List<float> SimulationPressures { get; private set; }
         public List<float> SimulationTimes { get; private set; }
         public List<float> SimulationStrains { get; private set; }
@@ -62,16 +68,17 @@ namespace CTSegmenter
 
         // ILGPU context
         private Context _context;
+
         public Accelerator _accelerator;
-       
 
         // Simulation data
         public List<Triangle> _simulationTriangles;
+
         private CancellationTokenSource _cancellationTokenSource;
         private SimulationResult _result;
         private bool _isDisposed;
 
-        #endregion
+        #endregion Properties and Fields
 
         #region Constructor and Initialization
 
@@ -333,7 +340,7 @@ namespace CTSegmenter
             FrictionAngle = ClampValue(FrictionAngle, 10f, 60f); // Degrees
         }
 
-        #endregion
+        #endregion Constructor and Initialization
 
         #region Utility Methods
 
@@ -398,7 +405,7 @@ namespace CTSegmenter
             }
         }
 
-        #endregion
+        #endregion Utility Methods
 
         #region IStressSimulation Implementation
 
@@ -665,7 +672,7 @@ namespace CTSegmenter
             }
         }
 
-        #endregion
+        #endregion IStressSimulation Implementation
 
         #region Simulation Implementation
 
@@ -747,7 +754,8 @@ namespace CTSegmenter
                 // Fallback: Perform calculation on CPU
                 Logger.Log("[TriaxialSimulation] Falling back to CPU calculation");
 
-                Parallel.For(0, n, i => {
+                Parallel.For(0, n, i =>
+                {
                     Vector3 normal = Vector3.Normalize(Vector3.Cross(v2[i] - v1[i], v3[i] - v1[i]));
 
                     // Calculate directional effects
@@ -840,12 +848,13 @@ namespace CTSegmenter
 
             return fracturePercentage > 0.02f; // Reduced threshold: only 2% required for fracture detection
         }
+
         /// <summary>
         /// ILGPU kernel –– **complete** Mohr–Coulomb stress evaluation per
         /// triangle.  The formulation follows the classical criterion
-        /// 
+        ///
         ///     (σ₁ − σ₃) ≥ 2 c cos φ / (1 − sin φ) + (σ₁ + σ₃) sin φ / (1 − sin φ)
-        /// 
+        ///
         /// with σ₁ ≥ σ₂ ≥ σ₃ the principal stresses, *c* the cohesion, and φ the
         /// internal friction angle (in radians).  No empirical shortcuts, no
         /// hidden scale factors.
@@ -932,6 +941,7 @@ namespace CTSegmenter
             s3Arr[idx] = σ3;
             //fracArr[idx] = failed ? 1 : 0;
         }
+
         /// <summary>
         /// Specialized kernel method for inhomogeneous simulation that can be used by the child class
         /// </summary>
@@ -1048,6 +1058,7 @@ namespace CTSegmenter
             s3Arr[idx] = sigma3;
             fracArr[idx] = failed;
         }
+
         private static void ComputeStressKernelFixed(
     Index1D idx,
     ArrayView<Vector3> v1Arr,
@@ -1202,6 +1213,7 @@ namespace CTSegmenter
 
             return ClampValue(probability, 0f, 1f);
         }
+
         /// <summary>
         /// Create the simulation result
         /// </summary>
@@ -1241,7 +1253,7 @@ namespace CTSegmenter
             return result;
         }
 
-        #endregion
+        #endregion Simulation Implementation
 
         #region Rendering and Export
 
@@ -1991,6 +2003,7 @@ namespace CTSegmenter
                 return false;
             }
         }
+
         //---------------------------------------------------------------------
         //  Mohr-Coulomb diagram (correct tangency + uniform scaling)
         //---------------------------------------------------------------------
@@ -2205,6 +2218,7 @@ namespace CTSegmenter
                 }
             }
         }
+
         private void DrawMohrCircleSafe(Graphics g, float stress1, float stress3,
                                        Func<float, float, PointF> converter,
                                        Color color, string label, float maxTau,
@@ -2266,7 +2280,7 @@ namespace CTSegmenter
                 Logger.Log($"[TriaxialSimulation] Error in DrawMohrCircleSafe: {ex.Message}");
             }
         }
-        
+
         public bool ExportFullCompositeImage(string filePath)
         {
             try
@@ -2348,6 +2362,7 @@ namespace CTSegmenter
                 return false;
             }
         }
+
         private void CreateTriaxialView(Graphics g, TriaxialSimulation simulation, RenderMode renderMode,
         int x, int y, int width, int height, string title)
         {
@@ -2380,6 +2395,7 @@ namespace CTSegmenter
                 }
             }
         }
+
         private void CreateFractureView(Graphics g, TriaxialSimulation simulation,
                                       int x, int y, int width, int height, string title)
         {
@@ -2425,6 +2441,7 @@ namespace CTSegmenter
                 }
             }
         }
+
         private void RenderFracturedTriangles(Graphics g, List<Triangle> triangles, int width, int height)
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -2493,6 +2510,7 @@ namespace CTSegmenter
                 g.DrawString(infoText, infoFont, textBrush, 20, height - 50);
             }
         }
+
         private void CreateMohrCoulombView(Graphics g, TriaxialSimulation simulation,
                                          int x, int y, int width, int height, string title)
         {
@@ -2524,6 +2542,7 @@ namespace CTSegmenter
                 }
             }
         }
+
         /// <summary>
         /// Helper method to check if a Vector3 is in a dictionary using approximate equality
         /// </summary>
@@ -2539,7 +2558,7 @@ namespace CTSegmenter
             return false;
         }
 
-        #endregion
+        #endregion Rendering and Export
 
         #region Event Handlers
 
@@ -2559,7 +2578,7 @@ namespace CTSegmenter
             SimulationCompleted?.Invoke(this, new SimulationCompletedEventArgs(success, message, result, error));
         }
 
-        #endregion
+        #endregion Event Handlers
 
         #region IDisposable Implementation
 
@@ -2579,6 +2598,6 @@ namespace CTSegmenter
             }
         }
 
-        #endregion
+        #endregion IDisposable Implementation
     }
 }

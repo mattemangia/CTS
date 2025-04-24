@@ -2,9 +2,7 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
-using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -33,12 +31,14 @@ namespace CTSegmenter
 
         // UI controls - Main Layout
         private TableLayoutPanel mainLayout;
+
         private ProgressBar progressBar;
         private StatusStrip statusStrip;
         private ToolStripStatusLabel statusLabel;
 
         // View panels and picture boxes
         private Panel xyViewPanel, xzViewPanel, yzViewPanel, controlPanel;
+
         private PictureBox xyPictureBox, xzPictureBox, yzPictureBox;
         private TrackBar xySliceTrackBar, xzSliceTrackBar, yzSliceTrackBar;
         private NumericUpDown xySliceNumeric, xzSliceNumeric, yzSliceNumeric;
@@ -46,6 +46,7 @@ namespace CTSegmenter
 
         // Control panel elements
         private CheckBox useGpuCheckBox;
+
         private CheckBox generateCsvCheckBox;
         private RadioButton currentSliceRadio;
         private RadioButton wholeVolumeRadio;
@@ -66,6 +67,7 @@ namespace CTSegmenter
 
         // Current view positions
         private int currentXYSlice;
+
         private int currentXZSlice;
         private int currentYZSlice;
 
@@ -74,10 +76,12 @@ namespace CTSegmenter
 
         // Color palette for particles
         private Dictionary<int, Color> particleColors = new Dictionary<int, Color>();
+
         private Random random = new Random(0); // Fixed seed for consistent colors
 
         // Task synchronization for rendering
         private TaskCompletionSource<bool> currentRenderTask = null;
+
         private readonly object renderLock = new object();
 
         public ParticleSeparatorForm(MainForm mainForm, Material selectedMaterial)
@@ -173,7 +177,8 @@ namespace CTSegmenter
                 currentYZSlice = Math.Min(width / 2, width - 1);
 
                 // Update slice controls on the UI thread
-                this.Invoke((Action)(() => {
+                this.Invoke((Action)(() =>
+                {
                     try
                     {
                         xySliceTrackBar.Value = currentXYSlice;
@@ -194,7 +199,8 @@ namespace CTSegmenter
                 }));
 
                 // Render the preview images in a background thread
-                Task.Run(() => {
+                Task.Run(() =>
+                {
                     try
                     {
                         // Create XY view bitmap (axial)
@@ -207,7 +213,8 @@ namespace CTSegmenter
                         Bitmap yzBitmap = RenderMaterialPreviewBitmap(height, depth, ViewType.YZ, currentYZSlice);
 
                         // Update UI on main thread
-                        this.Invoke((Action)(() => {
+                        this.Invoke((Action)(() =>
+                        {
                             try
                             {
                                 // Update XY view
@@ -446,12 +453,15 @@ namespace CTSegmenter
                             case ViewType.XY:
                                 text = $"Slice: {sliceIndex + 1}/{volumeData?.Depth ?? 0}";
                                 break;
+
                             case ViewType.XZ:
                                 text = $"Y Position: {sliceIndex + 1}/{volumeData?.Height ?? 0}";
                                 break;
+
                             case ViewType.YZ:
                                 text = $"X Position: {sliceIndex + 1}/{volumeData?.Width ?? 0}";
                                 break;
+
                             default:
                                 text = "";
                                 break;
@@ -485,7 +495,6 @@ namespace CTSegmenter
 
             return bitmap;
         }
-
 
         private void RenderXYSlice(byte[] rgbValues, int stride, int width, int height, int z)
         {
@@ -670,8 +679,6 @@ namespace CTSegmenter
             }
         }
 
-
-
         private void InitializeViewPositions()
         {
             // Set initial slice positions
@@ -851,7 +858,6 @@ namespace CTSegmenter
             return panel;
         }
 
-
         private PictureBox CreatePictureBox(ViewType viewType)
         {
             PictureBox pictureBox = new PictureBox
@@ -871,9 +877,11 @@ namespace CTSegmenter
                 case ViewType.XY:
                     targetPanel = ((Tuple<Panel, Panel>)xyViewPanel.Tag).Item2;
                     break;
+
                 case ViewType.XZ:
                     targetPanel = ((Tuple<Panel, Panel>)xzViewPanel.Tag).Item2;
                     break;
+
                 case ViewType.YZ:
                     targetPanel = ((Tuple<Panel, Panel>)yzViewPanel.Tag).Item2;
                     break;
@@ -1259,8 +1267,6 @@ namespace CTSegmenter
             AdjustListViewColumns();
         }
 
-
-
         private async void SortOrderComboBox_SelectedIndexChanged(object sender, EventArgs e)
         {
             if (result == null || result.Particles == null) return;
@@ -1269,19 +1275,23 @@ namespace CTSegmenter
             statusLabel.Text = "Sorting particles...";
             Logger.Log($"[ParticleSeparatorForm] Sorting particles using order: {sortOrderComboBox.SelectedItem}");
 
-            await Task.Run(() => {
+            await Task.Run(() =>
+            {
                 // Sort the particles based on the selected criterion
                 switch (sortOrderComboBox.SelectedIndex)
                 {
                     case 0: // Largest to Smallest
                         result.Particles = result.Particles.OrderByDescending(p => p.VoxelCount).ToList();
                         break;
+
                     case 1: // Smallest to Largest
                         result.Particles = result.Particles.OrderBy(p => p.VoxelCount).ToList();
                         break;
+
                     case 2: // ID (Ascending)
                         result.Particles = result.Particles.OrderBy(p => p.Id).ToList();
                         break;
+
                     case 3: // ID (Descending)
                         result.Particles = result.Particles.OrderByDescending(p => p.Id).ToList();
                         break;
@@ -1317,7 +1327,8 @@ namespace CTSegmenter
 
             try
             {
-                await Task.Run(() => {
+                await Task.Run(() =>
+                {
                     // Filter the particles
                     List<ParticleSeparator.Particle> filteredParticles =
                         result.Particles.Where(p => p.VoxelCount >= minSize).ToList();
@@ -1416,8 +1427,10 @@ namespace CTSegmenter
                 byte matId = 0;
 
                 // Create the material on the UI thread
-                await Task.Run(() => {
-                    this.Invoke((Action)(() => {
+                await Task.Run(() =>
+                {
+                    this.Invoke((Action)(() =>
+                    {
                         matId = mainForm.GetNextMaterialID();
                         Material newMat = new Material(matName, Color.Yellow, 0, 0, matId);
                         mainForm.Materials.Add(newMat);
@@ -1513,7 +1526,6 @@ namespace CTSegmenter
 
         private void ParticleListView_CacheVirtualItems(object sender, CacheVirtualItemsEventArgs e)
         {
-            
             // For our purposes, we're already caching everything in memory
         }
 
@@ -1538,6 +1550,7 @@ namespace CTSegmenter
                         currentXYSlice = trackBar.Value;
                     }
                     break;
+
                 case ViewType.XZ:
                     numeric = xzSliceNumeric;
                     if (numeric.Value != trackBar.Value)
@@ -1546,6 +1559,7 @@ namespace CTSegmenter
                         currentXZSlice = trackBar.Value;
                     }
                     break;
+
                 case ViewType.YZ:
                     numeric = yzSliceNumeric;
                     if (numeric.Value != trackBar.Value)
@@ -1581,6 +1595,7 @@ namespace CTSegmenter
                         currentXYSlice = (int)numeric.Value;
                     }
                     break;
+
                 case ViewType.XZ:
                     trackBar = xzSliceTrackBar;
                     if (trackBar.Value != (int)numeric.Value)
@@ -1589,6 +1604,7 @@ namespace CTSegmenter
                         currentXZSlice = (int)numeric.Value;
                     }
                     break;
+
                 case ViewType.YZ:
                     trackBar = yzSliceTrackBar;
                     if (trackBar.Value != (int)numeric.Value)
@@ -1775,7 +1791,6 @@ namespace CTSegmenter
             }
         }
 
-
         private Point GetImageCoordinates(PictureBox pictureBox, Point mouseLocation)
         {
             if (pictureBox.Image == null) return new Point(0, 0);
@@ -1895,6 +1910,7 @@ namespace CTSegmenter
                 particleInfoLabel.Height = (int)textSize.Height + 10; // Add padding
             }
         }
+
         private void AdjustListViewColumns()
         {
             // Set wider column widths for the ListView
@@ -2051,6 +2067,7 @@ namespace CTSegmenter
                                             xyPictureBox.Image = bitmap;
                                         }
                                         break;
+
                                     case ViewType.XZ:
                                         if (xzPictureBox.Image != null)
                                         {
@@ -2063,6 +2080,7 @@ namespace CTSegmenter
                                             xzPictureBox.Image = bitmap;
                                         }
                                         break;
+
                                     case ViewType.YZ:
                                         if (yzPictureBox.Image != null)
                                         {
@@ -2095,6 +2113,7 @@ namespace CTSegmenter
                 }
             });
         }
+
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
@@ -2124,10 +2143,13 @@ namespace CTSegmenter
                     {
                         case ViewType.XY:
                             return CreateEmptyBitmap(mainForm.GetWidth(), mainForm.GetHeight());
+
                         case ViewType.XZ:
                             return CreateEmptyBitmap(mainForm.GetWidth(), mainForm.GetDepth());
+
                         case ViewType.YZ:
                             return CreateEmptyBitmap(mainForm.GetHeight(), mainForm.GetDepth());
+
                         default:
                             return new Bitmap(1, 1);
                     }
@@ -2142,16 +2164,19 @@ namespace CTSegmenter
                         sourceHeight = result.LabelVolume.GetLength(1);
                         sliceIndex = Math.Min(currentXYSlice, result.LabelVolume.GetLength(2) - 1);
                         break;
+
                     case ViewType.XZ:
                         sourceWidth = result.LabelVolume.GetLength(0);
                         sourceHeight = result.LabelVolume.GetLength(2);
                         sliceIndex = Math.Min(currentXZSlice, result.LabelVolume.GetLength(1) - 1);
                         break;
+
                     case ViewType.YZ:
                         sourceWidth = result.LabelVolume.GetLength(1);
                         sourceHeight = result.LabelVolume.GetLength(2);
                         sliceIndex = Math.Min(currentYZSlice, result.LabelVolume.GetLength(0) - 1);
                         break;
+
                     default:
                         return new Bitmap(1, 1);
                 }
@@ -2226,6 +2251,7 @@ namespace CTSegmenter
                 return CreateErrorBitmap($"Rendering error: {ex.Message}");
             }
         }
+
         private Bitmap CreateErrorBitmap(string errorMessage)
         {
             Bitmap bmp = new Bitmap(400, 100);
@@ -2239,6 +2265,7 @@ namespace CTSegmenter
             }
             return bmp;
         }
+
         private void FillPixelDataScaled(byte[] rgbValues, int stride, int targetWidth, int rowsInBatch, int yStart,
                                 ViewType viewType, int sliceIndex, int sourceWidth, int sourceHeight, float scaleFactor)
         {
@@ -2303,6 +2330,7 @@ namespace CTSegmenter
                                     }
                                 }
                                 break;
+
                             case ViewType.XZ:
                                 if (sourceX < result.LabelVolume.GetLength(0) &&
                                     sliceIndex < result.LabelVolume.GetLength(1) &&
@@ -2316,6 +2344,7 @@ namespace CTSegmenter
                                     }
                                 }
                                 break;
+
                             case ViewType.YZ:
                                 if (sliceIndex < result.LabelVolume.GetLength(0) &&
                                     sourceX < result.LabelVolume.GetLength(1) &&
@@ -2383,6 +2412,7 @@ namespace CTSegmenter
                 }
             }
         }
+
         private void FillPixelDataOptimized(byte[] rgbValues, int stride, int width, int height,
                                            ViewType viewType, int sliceIndex, float scaleX, float scaleY,
                                            CancellationToken token)
@@ -2407,10 +2437,12 @@ namespace CTSegmenter
                     origWidth = result.LabelVolume.GetLength(0);
                     origHeight = result.LabelVolume.GetLength(1);
                     break;
+
                 case ViewType.XZ:
                     origWidth = result.LabelVolume.GetLength(0);
                     origHeight = volDepth;
                     break;
+
                 case ViewType.YZ:
                     origWidth = result.LabelVolume.GetLength(1);
                     origHeight = volDepth;
@@ -2472,6 +2504,7 @@ namespace CTSegmenter
                                 }
                             }
                             break;
+
                         case ViewType.XZ:
                             if (origX < result.LabelVolume.GetLength(0) &&
                                 sliceIndex < result.LabelVolume.GetLength(1) &&
@@ -2485,6 +2518,7 @@ namespace CTSegmenter
                                 }
                             }
                             break;
+
                         case ViewType.YZ:
                             if (sliceIndex < result.LabelVolume.GetLength(0) &&
                                 origX < result.LabelVolume.GetLength(1) &&
@@ -2622,6 +2656,7 @@ namespace CTSegmenter
                 return errorBmp;
             }
         }
+
         private void FillPixelDataBatch(byte[] rgbValues, int stride, int width, int rowsInBatch, int yStart,
                                ViewType viewType, int sliceIndex)
         {
@@ -2665,6 +2700,7 @@ namespace CTSegmenter
                                 }
                             }
                             break;
+
                         case ViewType.XZ:
                             if (x < result.LabelVolume.GetLength(0) &&
                                 sliceIndex < result.LabelVolume.GetLength(1) &&
@@ -2678,6 +2714,7 @@ namespace CTSegmenter
                                 }
                             }
                             break;
+
                         case ViewType.YZ:
                             if (sliceIndex < result.LabelVolume.GetLength(0) &&
                                 x < result.LabelVolume.GetLength(1) &&
@@ -2729,6 +2766,7 @@ namespace CTSegmenter
                 }
             }
         }
+
         private void LogMemoryUsage(string context)
         {
             GC.Collect(); // Optional: collect garbage before measuring
@@ -2789,6 +2827,7 @@ namespace CTSegmenter
                                 }
                             }
                             break;
+
                         case ViewType.XZ:
                             if (x < result.LabelVolume.GetLength(0) &&
                                 sliceIndex < result.LabelVolume.GetLength(1) &&
@@ -2802,6 +2841,7 @@ namespace CTSegmenter
                                 }
                             }
                             break;
+
                         case ViewType.YZ:
                             if (sliceIndex < result.LabelVolume.GetLength(0) &&
                                 x < result.LabelVolume.GetLength(1) &&
@@ -2863,7 +2903,6 @@ namespace CTSegmenter
             }
         }
 
-
         private void UpdateParticleList()
         {
             if (result == null || result.Particles == null)
@@ -2909,7 +2948,8 @@ namespace CTSegmenter
                            $"GPU: {useGpuCheckBox.Checked}");
 
                 // Create progress reporter
-                var progress = new Progress<int>(p => {
+                var progress = new Progress<int>(p =>
+                {
                     progressBar.Value = p;
                     statusLabel.Text = $"Separating particles... {p}%";
                     Application.DoEvents();
@@ -3006,6 +3046,7 @@ namespace CTSegmenter
                 progressBar.Value = 0;
             }
         }
+
         private void UpdateSliceControlRanges()
         {
             if (result == null || result.LabelVolume == null)
@@ -3064,6 +3105,7 @@ namespace CTSegmenter
             // Reattach the event handler
             numeric.ValueChanged += SliceNumeric_ValueChanged;
         }
+
         private void SaveButton_Click(object sender, EventArgs e)
         {
             if (result == null || result.Particles == null)

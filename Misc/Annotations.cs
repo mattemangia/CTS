@@ -1,5 +1,4 @@
 ﻿// Annotations.cs
-using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -24,6 +23,7 @@ namespace CTSegmenter
 
         // Box properties (only if Type=="Box")
         public float X2 { get; set; } = 0;
+
         public float Y2 { get; set; } = 0;
     }
 
@@ -81,10 +81,12 @@ namespace CTSegmenter
             foreach (var p in Points)
                 p.ID = counter++;
         }
+
         public IEnumerable<AnnotationPoint> GetAllPoints()
         {
             return Points.ToList();
         }
+
         /// <summary>
         /// Returns all annotation points for a given slice Z.
         /// </summary>

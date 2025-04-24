@@ -1,7 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -13,10 +11,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Windows.Forms.DataVisualization.Charting;
-using ILGPU;
-using ILGPU.Runtime;
-using ILGPU.Runtime.CPU;
-using ILGPU.Runtime.Cuda;
 
 namespace CTSegmenter
 {
@@ -27,6 +21,7 @@ namespace CTSegmenter
 
         // UI Components
         private TableLayoutPanel mainLayout;
+
         private Panel xyPanel, xzPanel, yzPanel;
         private PictureBox xyPictureBox, xzPictureBox, yzPictureBox;
         private TrackBar xySliceTrackBar, xzSliceTrackBar, yzSliceTrackBar;
@@ -41,6 +36,7 @@ namespace CTSegmenter
 
         // Processing parameters
         private int diskRadius = 50;
+
         private double gaussianSigma = 10.0;
         private int peakDistance = 40;
         private double peakProminence = 0.02;
@@ -50,6 +46,7 @@ namespace CTSegmenter
 
         // Current state
         private Bitmap xyProcessedImage, xzProcessedImage, yzProcessedImage;
+
         private double[] xyRowProfile, xzRowProfile, yzRowProfile;
         private int[] xyDarkPeaks, xyBrightPeaks;
         private int[] xzDarkPeaks, xzBrightPeaks;
@@ -97,7 +94,7 @@ namespace CTSegmenter
             xySliceTrackBar.Value = xyValue;
             xzSliceTrackBar.Value = xzValue;
             yzSliceTrackBar.Value = yzValue;
-            
+
             // Initial processing
             Task.Run(() => ProcessAllViews());
         }
@@ -317,6 +314,7 @@ namespace CTSegmenter
 
             xyPanel.Controls.Add(xyLayout);
         }
+
         private void InitializeXZView()
         {
             // Create a single-row layout with the image and chart side by side
@@ -437,6 +435,7 @@ namespace CTSegmenter
 
             xzPanel.Controls.Add(xzLayout);
         }
+
         private void InitializeYZView()
         {
             // Create a single-row layout with the image and chart side by side
@@ -703,7 +702,6 @@ namespace CTSegmenter
             };
 
             createCompositeButton.Click += CreateCompositeButton_Click;
-            
 
             progressBar = new ProgressBar
             {
@@ -832,6 +830,7 @@ namespace CTSegmenter
                 UpdateXYChart();
             }
         }
+
         private void XYPictureBox_MouseUp(object sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left)
@@ -960,7 +959,6 @@ namespace CTSegmenter
             UpdateXZChart();
         }
 
-
         private void XZPictureBox_Paint(object sender, PaintEventArgs e)
         {
             if (xzProcessedImage == null)
@@ -1014,6 +1012,7 @@ namespace CTSegmenter
                 }
             }
         }
+
         // YZ PictureBox mouse events
         private void YZPictureBox_MouseDown(object sender, MouseEventArgs e)
         {
@@ -1023,6 +1022,7 @@ namespace CTSegmenter
                 yzPictureBox.Capture = true;
             }
         }
+
         private void YZPictureBox_MouseMove(object sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left && yzPictureBox.Capture)
@@ -1038,6 +1038,7 @@ namespace CTSegmenter
                 UpdateYZChart();
             }
         }
+
         private void YZPictureBox_MouseUp(object sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left)
@@ -1061,6 +1062,7 @@ namespace CTSegmenter
             // Update chart to match zoom level - CRITICAL for alignment
             UpdateYZChart();
         }
+
         private void YZPictureBox_Paint(object sender, PaintEventArgs e)
         {
             if (yzProcessedImage == null)
@@ -1115,7 +1117,7 @@ namespace CTSegmenter
             }
         }
 
-        #endregion
+        #endregion Mouse Events
 
         #region Button Events
 
@@ -1152,8 +1154,8 @@ namespace CTSegmenter
                         {
                             progressBar.Value = 100;
                             exportButton.Enabled = true;
-                           // MessageBox.Show("Export completed successfully!", "Export Results",
-                           //     MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            // MessageBox.Show("Export completed successfully!", "Export Results",
+                            //     MessageBoxButtons.OK, MessageBoxIcon.Information);
                             progressBar.Value = 0;
                         }));
                     }
@@ -1181,8 +1183,7 @@ namespace CTSegmenter
             }
         }
 
-
-        #endregion
+        #endregion Button Events
 
         #region Processing Methods
 
@@ -1216,7 +1217,8 @@ namespace CTSegmenter
                 }
 
                 // Update all charts on UI thread
-                this.Invoke(new Action(() => {
+                this.Invoke(new Action(() =>
+                {
                     // Explicitly reconfigure charts if needed
                     if (xyChart.Series.Count == 0 || xyChart.Series["Profile"] == null)
                         ConfigureChart(xyChart, "XY Row Profile", "Intensity", "Row");
@@ -1575,6 +1577,7 @@ namespace CTSegmenter
                 return new Tuple<Bitmap, double[], int[], int[]>(resultImage, smoothRowProfile, darkPeaks, brightPeaks);
             }, token);
         }
+
         private float[,] WhiteTopHatParallel(float[,] image, int radius, int cropRow, CancellationToken token)
         {
             int width = image.GetLength(0);
@@ -2100,7 +2103,7 @@ namespace CTSegmenter
             return distanceFilteredPeaks.ToArray();
         }
 
-        #endregion
+        #endregion Processing Methods
 
         #region UI Update Methods
 
@@ -2189,6 +2192,7 @@ namespace CTSegmenter
                 MessageBox.Show($"Error processing XY chart: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
+
         private void UpdateXZChart()
         {
             if (xzRowProfile == null || xzProcessedImage == null)
@@ -2263,6 +2267,7 @@ namespace CTSegmenter
                 MessageBox.Show($"Error processing XZ chart: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
+
         private void UpdateYZChart()
         {
             if (yzRowProfile == null || yzProcessedImage == null)
@@ -2374,9 +2379,10 @@ namespace CTSegmenter
             }
         }
 
-        #endregion
+        #endregion UI Update Methods
 
         #region Export Methods
+
         private async Task ExportResults()
         {
             // Show save file dialog on UI thread
@@ -2391,7 +2397,8 @@ namespace CTSegmenter
             string fileName = string.Empty;
 
             // Show the dialog on UI thread
-            this.Invoke(new Action(() => {
+            this.Invoke(new Action(() =>
+            {
                 dialogResult = saveDialog.ShowDialog() == DialogResult.OK;
                 if (dialogResult)
                     fileName = saveDialog.FileName;
@@ -2435,6 +2442,7 @@ namespace CTSegmenter
                 throw; // Re-throw to be caught by the caller
             }
         }
+
         private async Task ExportToExcel(string fileName)
         {
             await Task.Run(() =>
@@ -2894,7 +2902,6 @@ namespace CTSegmenter
             xml.AppendLine("</Worksheet>");
         }
 
-
         private async Task ExportToCSV(string fileName)
         {
             await Task.Run(() =>
@@ -3079,6 +3086,7 @@ namespace CTSegmenter
                 }
             });
         }
+
         private Bitmap CreateCompositeImage(Bitmap image, double[] profile, int[] darkPeaks, int[] brightPeaks, string viewLabel)
         {
             int imageWidth = image.Width;
@@ -3379,6 +3387,6 @@ namespace CTSegmenter
             }
         }
     }
-    
-    #endregion
+
+    #endregion Export Methods
 }

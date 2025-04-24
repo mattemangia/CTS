@@ -2,9 +2,9 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using ILGPU;
 using ILGPU.Runtime;
-using System.Threading;
 using ILGPU.Runtime.CPU;
 
 namespace CTSegmenter
@@ -544,7 +544,6 @@ namespace CTSegmenter
                 return Separate3DLarge(conservative, progress, cancellationToken);
             }
         }
-
 
         // For large volumes, use a chunking approach
         private SeparationResult Separate3DLarge(bool conservative, IProgress<int> progress, CancellationToken cancellationToken)
@@ -1087,7 +1086,7 @@ namespace CTSegmenter
         }
 
         // GPU kernel methods for 2D connected component labeling
-        static void InitLabelsKernel2D(
+        private static void InitLabelsKernel2D(
     Index2D index,
     ArrayView2D<byte, Stride2D.DenseY> input,
     ArrayView2D<int, Stride2D.DenseY> output)
@@ -1098,8 +1097,7 @@ namespace CTSegmenter
             output[x, y] = input[x, y] == 0 ? 0 : -1;
         }
 
-
-        static void PropagateLabelsKernel2D(
+        private static void PropagateLabelsKernel2D(
     Index2D index,
     ArrayView2D<int, Stride2D.DenseY> labels,
     ArrayView1D<int, Stride1D.Dense> changes)
@@ -1217,7 +1215,7 @@ namespace CTSegmenter
                             return;
 
                         // Convert 1D index to 2D coordinates
-                        int x = (int)(index % w);
+                        int x = index % w;
                         int y = (int)(index / w);
 
                         if (labels[index] <= 0)
@@ -1301,9 +1299,6 @@ namespace CTSegmenter
         }
 
         // GPU kernel methods for 3D connected component labeling
-
-
-
 
         private int[,,] LabelConnectedComponents3DGpu(byte[,,] data, CancellationToken cancellationToken)
         {
@@ -1411,8 +1406,8 @@ namespace CTSegmenter
                                 return;
 
                             // Convert 1D index to 3D coordinates
-                            int x = (int)(index % w);
-                            int y = (int)((index / w) % h);
+                            int x = index % w;
+                            int y = (index / w) % h;
                             int z = (int)(index / (w * h));
 
                             if (labels[index] <= 0)
@@ -1748,7 +1743,6 @@ namespace CTSegmenter
             Logger.Log($"[ProcessLargeVolumeWithChunks] Completed with {finalLabelCount} final components");
             return mergedResult;
         }
-
 
         public void SaveToCsv(string filePath, List<Particle> particles)
         {

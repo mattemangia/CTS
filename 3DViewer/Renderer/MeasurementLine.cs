@@ -1,7 +1,4 @@
-﻿using System;
-using System.Drawing;
-using System.Windows.Media;
-using SharpDX;
+﻿using SharpDX;
 
 namespace CTSegmenter.SharpDXIntegration
 {
@@ -18,6 +15,7 @@ namespace CTSegmenter.SharpDXIntegration
 
         // For slice-specific measurements
         public bool IsOnSlice { get; set; } = false;
+
         public int SliceType { get; set; } = 0; // 1=X, 2=Y, 3=Z
         public int SlicePosition { get; set; } = 0;
 

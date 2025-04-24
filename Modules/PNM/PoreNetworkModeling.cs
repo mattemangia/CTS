@@ -1,13 +1,13 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Drawing;
-using System.Windows.Forms;
+using System.Drawing.Imaging;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Linq;
-using System.Data;
-using System.Drawing.Imaging;
+using System.Windows.Forms;
 
 namespace CTSegmenter
 {
@@ -20,6 +20,7 @@ namespace CTSegmenter
 
         // Permeability Simulation
         private PermeabilitySimulationResult permeabilityResult;
+
         private TabPage permeabilityTab;
         private Button simulateButton;
         private PictureBox permeabilityPictureBox;
@@ -30,6 +31,7 @@ namespace CTSegmenter
 
         // UI Elements
         private SplitContainer mainSplitContainer;
+
         private Panel previewPanel;
         private PictureBox previewPictureBox;
         private ComboBox materialComboBox;
@@ -53,9 +55,9 @@ namespace CTSegmenter
         private double minOverlapFactor = 0.1;
         private bool enforceFlowPath = true;
 
-
         // 3d rotation
         private float rotationX = 30.0f;
+
         private float rotationY = 30.0f;
         private float rotationZ = 0.0f;
         private float viewScale = 1.0f;
@@ -67,6 +69,7 @@ namespace CTSegmenter
 
         // Processing data
         private CancellationTokenSource cts;
+
         private ParticleSeparator.SeparationResult separationResult;
         private float previewZoom = 1.0f;
         private int currentSlice = 0;
@@ -162,7 +165,8 @@ namespace CTSegmenter
                 FlatStyle = FlatStyle.Flat
             };
             materialComboBox.DisplayMember = "Name";
-            materialComboBox.SelectedIndexChanged += (s, e) => {
+            materialComboBox.SelectedIndexChanged += (s, e) =>
+            {
                 if (materialComboBox.SelectedItem is Material material)
                 {
                     selectedMaterial = material;
@@ -433,7 +437,8 @@ namespace CTSegmenter
                 TickFrequency = Math.Max(1, mainForm.GetDepth() / 20),
                 Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
             };
-            sliceTrackBar.ValueChanged += (s, e) => {
+            sliceTrackBar.ValueChanged += (s, e) =>
+            {
                 currentSlice = sliceTrackBar.Value;
                 UpdatePreviewImage();
             };
@@ -459,7 +464,8 @@ namespace CTSegmenter
                 TickFrequency = 2,
                 Anchor = AnchorStyles.Top | AnchorStyles.Right
             };
-            zoomTrackBar.ValueChanged += (s, e) => {
+            zoomTrackBar.ValueChanged += (s, e) =>
+            {
                 previewZoom = zoomTrackBar.Value / 10.0f;
                 UpdatePreviewImage();
             };
@@ -537,7 +543,8 @@ namespace CTSegmenter
                 BackColor = Color.FromArgb(80, 80, 80),
                 ForeColor = Color.White
             };
-            resetViewButton.Click += (s, e) => {
+            resetViewButton.Click += (s, e) =>
+            {
                 rotationX = 30.0f;
                 rotationY = 30.0f;
                 rotationZ = 0.0f;
@@ -584,7 +591,8 @@ namespace CTSegmenter
             };
 
             // Add mouse handling for rotation and zooming
-            networkPictureBox.MouseDown += (s, e) => {
+            networkPictureBox.MouseDown += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Left)
                 {
                     isDragging = true;
@@ -597,7 +605,8 @@ namespace CTSegmenter
                 }
             };
 
-            networkPictureBox.MouseMove += (s, e) => {
+            networkPictureBox.MouseMove += (s, e) =>
+            {
                 if (isDragging)
                 {
                     // Calculate delta movement for rotation
@@ -630,7 +639,8 @@ namespace CTSegmenter
                 }
             };
 
-            networkPictureBox.MouseUp += (s, e) => {
+            networkPictureBox.MouseUp += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Left)
                 {
                     isDragging = false;
@@ -641,7 +651,8 @@ namespace CTSegmenter
                 }
             };
 
-            networkPictureBox.MouseWheel += (s, e) => {
+            networkPictureBox.MouseWheel += (s, e) =>
+            {
                 // Change zoom level with mouse wheel
                 float zoomFactor = 1.0f + (e.Delta > 0 ? 0.1f : -0.1f);
                 viewScale *= zoomFactor;
@@ -729,7 +740,8 @@ namespace CTSegmenter
             };
 
             // Toggle now only shows/hides the content panel, not the entire outer panel
-            toggleDataPanelButton.Click += (s, e) => {
+            toggleDataPanelButton.Click += (s, e) =>
+            {
                 if (dataContentPanel.Visible)
                 {
                     // Collapse - hide content panel but keep header
@@ -745,7 +757,8 @@ namespace CTSegmenter
                     dataOuterPanel.Height = 250;
 
                     // Force refresh after expansion
-                    this.BeginInvoke(new Action(() => {
+                    this.BeginInvoke(new Action(() =>
+                    {
                         if (poreDataGridView != null && !poreDataGridView.IsDisposed)
                         {
                             poreDataGridView.Refresh();
@@ -818,7 +831,8 @@ namespace CTSegmenter
             poreDataGridView.ContextMenuStrip = gridContextMenu;
 
             // Force header visibility on load
-            poreDataGridView.HandleCreated += (s, e) => {
+            poreDataGridView.HandleCreated += (s, e) =>
+            {
                 poreDataGridView.ColumnHeadersVisible = true;
                 poreDataGridView.Refresh();
             };
@@ -837,7 +851,7 @@ namespace CTSegmenter
             // ASSEMBLE FORM
             // =====================
             this.Controls.Add(mainTabControl);
-            this.Controls.Add(dataOuterPanel);  
+            this.Controls.Add(dataOuterPanel);
             this.Controls.Add(ribbonPanel);
 
             // Select the 3D Network View tab if in viewer mode
@@ -847,7 +861,8 @@ namespace CTSegmenter
             }
 
             // Force an initial preview update and ensure data grid visibility
-            this.Load += (s, e) => {
+            this.Load += (s, e) =>
+            {
                 UpdatePreviewImage();
                 EnsureDataGridViewHeadersVisible();
 
@@ -859,7 +874,8 @@ namespace CTSegmenter
                 }
             };
 
-            this.Resize += (s, e) => {
+            this.Resize += (s, e) =>
+            {
                 if (dataContentPanel.Visible && poreDataGridView != null && !poreDataGridView.IsDisposed)
                 {
                     poreDataGridView.ColumnHeadersVisible = true;
@@ -957,7 +973,8 @@ namespace CTSegmenter
             try
             {
                 // Create progress reporter
-                Progress<int> progress = new Progress<int>(percent => {
+                Progress<int> progress = new Progress<int>(percent =>
+                {
                     if (!IsDisposed && progressBar != null && !progressBar.IsDisposed)
                         progressBar.Value = percent;
                 });
@@ -1048,7 +1065,8 @@ namespace CTSegmenter
 
             try
             {
-                Progress<int> progress = new Progress<int>(percent => {
+                Progress<int> progress = new Progress<int>(percent =>
+                {
                     progressBar.Value = percent;
                 });
 
@@ -1330,7 +1348,8 @@ namespace CTSegmenter
             };
 
             // Now the resetViewButton click event will work correctly
-            resetViewButton.Click += (s, e) => {
+            resetViewButton.Click += (s, e) =>
+            {
                 rotationX = 30.0f;
                 rotationY = 30.0f;
                 rotationZ = 0.0f;
@@ -1342,7 +1361,8 @@ namespace CTSegmenter
             controlPanel.Controls.Add(resetViewButton);
 
             // Add mouse handling for rotation and zooming
-            networkPictureBox.MouseDown += (s, e) => {
+            networkPictureBox.MouseDown += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Left)
                 {
                     isDragging = true;
@@ -1355,7 +1375,8 @@ namespace CTSegmenter
                 }
             };
 
-            networkPictureBox.MouseMove += (s, e) => {
+            networkPictureBox.MouseMove += (s, e) =>
+            {
                 if (isDragging)
                 {
                     // Calculate the delta movement for rotation
@@ -1388,8 +1409,8 @@ namespace CTSegmenter
                 }
             };
 
-
-            networkPictureBox.MouseUp += (s, e) => {
+            networkPictureBox.MouseUp += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Left)
                 {
                     isDragging = false;
@@ -1400,7 +1421,8 @@ namespace CTSegmenter
                 }
             };
 
-            networkPictureBox.MouseWheel += (s, e) => {
+            networkPictureBox.MouseWheel += (s, e) =>
+            {
                 // Change zoom level with mouse wheel
                 float zoomFactor = 1.0f + (e.Delta > 0 ? 0.1f : -0.1f);
                 viewScale *= zoomFactor;
@@ -1547,7 +1569,6 @@ namespace CTSegmenter
                             (int)(width / 2 + transformedP2.x * scaleFactor + panOffsetX * width),
                             (int)(height / 2 - transformedP2.y * scaleFactor + panOffsetY * height));
 
-
                         // Calculate throat thickness
                         float thickness = (float)(throat.Radius * scaleFactor * 0.25);
                         thickness = Math.Max(1, thickness);
@@ -1683,7 +1704,6 @@ namespace CTSegmenter
             g.DrawLine(new Pen(Color.Blue, 2), origin, zPoint);
             g.DrawString("Z", new Font("Arial", 8, FontStyle.Bold), Brushes.Blue, zPoint);
         }
-
 
         // Helper function to draw legend and statistics
         private void DrawLegendAndStats(Graphics g, int width, int height)
@@ -1979,7 +1999,7 @@ namespace CTSegmenter
                 {
                     // Write file header
                     writer.Write("PORENETWORK"); // Magic string
-                    writer.Write((int)1); // Version number
+                    writer.Write(1); // Version number
 
                     // Write metadata
                     writer.Write(networkModel.Pores.Count);
@@ -2244,6 +2264,7 @@ namespace CTSegmenter
                 throw; // Re-throw to allow caller to handle the error
             }
         }
+
         private async void SimulatePermeabilityClick(object sender, EventArgs e)
         {
             if (networkModel?.Pores == null || networkModel.Pores.Count == 0 ||
@@ -2269,7 +2290,8 @@ namespace CTSegmenter
                     // Run simulation
                     using (var simulator = new PermeabilitySimulator())
                     {
-                        Progress<int> progress = new Progress<int>(percent => {
+                        Progress<int> progress = new Progress<int>(percent =>
+                        {
                             progressBar.Value = percent;
                         });
 
@@ -2308,7 +2330,6 @@ namespace CTSegmenter
                 Logger.Log($"[PoreNetworkModelingForm] Error: {ex.Message}\n{ex.StackTrace}");
             }
         }
-
 
         private void RenderPermeabilityResults()
         {
@@ -2358,7 +2379,8 @@ namespace CTSegmenter
                 BackColor = Color.FromArgb(80, 80, 80),
                 ForeColor = Color.White
             };
-            resetViewButton.Click += (s, e) => {
+            resetViewButton.Click += (s, e) =>
+            {
                 rotationX = 30.0f;
                 rotationY = 30.0f;
                 rotationZ = 0.0f;
@@ -2485,7 +2507,8 @@ namespace CTSegmenter
             permeabilityPictureBox.Image = RenderPressureField();
 
             // Add mouse handling for rotation and zooming (same as the 3D network viewer)
-            permeabilityPictureBox.MouseDown += (s, e) => {
+            permeabilityPictureBox.MouseDown += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Left)
                 {
                     isDragging = true;
@@ -2498,8 +2521,8 @@ namespace CTSegmenter
                 }
             };
 
-
-            permeabilityPictureBox.MouseMove += (s, e) => {
+            permeabilityPictureBox.MouseMove += (s, e) =>
+            {
                 if (isDragging)
                 {
                     // Calculate the delta movement for rotation
@@ -2532,7 +2555,8 @@ namespace CTSegmenter
                 }
             };
 
-            permeabilityPictureBox.MouseUp += (s, e) => {
+            permeabilityPictureBox.MouseUp += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Left)
                 {
                     isDragging = false;
@@ -2543,7 +2567,8 @@ namespace CTSegmenter
                 }
             };
 
-            permeabilityPictureBox.MouseWheel += (s, e) => {
+            permeabilityPictureBox.MouseWheel += (s, e) =>
+            {
                 // Change zoom level with mouse wheel
                 float zoomFactor = 1.0f + (e.Delta > 0 ? 0.1f : -0.1f);
                 viewScale *= zoomFactor;
@@ -2645,7 +2670,6 @@ namespace CTSegmenter
             // Enable the export button but we'll handle the screenshot button differently
             if (exportPermeabilityButton != null) exportPermeabilityButton.Enabled = true;
         }
-
 
         private Bitmap RenderPressureField()
         {
@@ -2777,7 +2801,6 @@ namespace CTSegmenter
                     int x = (int)(width / 2 + transformed.x * scaleFactor + panOffsetX * width);
                     int y = (int)(height / 2 - transformed.y * scaleFactor + panOffsetY * height);
 
-
                     // Calculate pore radius in screen space
                     int radius = Math.Max(3, (int)(pore.Radius * scaleFactor * 0.5));
 
@@ -2846,6 +2869,7 @@ namespace CTSegmenter
 
             return pressureImage;
         }
+
         private Color GetPressureColor(double normalizedPressure)
         {
             // Red (high pressure) to Blue (low pressure) gradient
@@ -2870,6 +2894,7 @@ namespace CTSegmenter
                 return Color.FromArgb(r, g, b);
             }
         }
+
         // New method to handle loading raw data without header validation
         private void LoadNetworkAsRawData(FileStream fs)
         {
@@ -3073,6 +3098,7 @@ namespace CTSegmenter
                 }
             }
         }
+
         private void SavePermeabilityResults(object sender, EventArgs e)
         {
             if (permeabilityResult == null)
@@ -3097,7 +3123,7 @@ namespace CTSegmenter
                         {
                             // Write file header
                             writer.Write("PERMEABILITY"); // Magic string
-                            writer.Write((int)1); // Version number
+                            writer.Write(1); // Version number
 
                             // Write basic simulation parameters
                             writer.Write((int)permeabilityResult.FlowAxis);
@@ -3156,6 +3182,7 @@ namespace CTSegmenter
                 }
             }
         }
+
         private void LoadPermeabilityResults(object sender, EventArgs e)
         {
             using (OpenFileDialog openDialog = new OpenFileDialog())
@@ -3264,6 +3291,7 @@ namespace CTSegmenter
                 }
             }
         }
+
         private void ExportPermeabilityResults(object sender, EventArgs e)
         {
             if (permeabilityResult == null)
@@ -3440,6 +3468,7 @@ namespace CTSegmenter
                 }
             }
         }
+
         private void OpenPoreConnectivityDialog(object sender, EventArgs e)
         {
             using (var dialog = new PoreConnectivityDialog())
@@ -3461,6 +3490,7 @@ namespace CTSegmenter
                 }
             }
         }
+
         private void DrawPressureScaleBar(Graphics g, Rectangle rect, double maxPressure, double minPressure)
         {
             // Draw gradient bar

@@ -1,15 +1,14 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
-using System.Drawing.Drawing2D;
 
 namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
 {
@@ -17,6 +16,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
     {
         // Main form components
         private Form samForm;
+
         private TableLayoutPanel mainLayout;
         private Panel xyPanel, xzPanel, yzPanel;
         private PictureBox xyViewer, xzViewer, yzViewer;
@@ -36,19 +36,23 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
         private HashSet<int> cachedYZKeys = new HashSet<int>();
         private const int CACHE_SIZE = 30; // Number of slices to cache
 
-        private enum ActiveView { XY, XZ, YZ }
+        private enum ActiveView
+        { XY, XZ, YZ }
+
         private ActiveView currentActiveView = ActiveView.XY;
 
-
         private Button btnXYView, btnXZView, btnYZView;
-        // Slice control components 
+
+        // Slice control components
         private Label lblSliceXY;
+
         private TrackBar sliderXY;
         private NumericUpDown numXY;
         private CheckBox chkSyncWithMainView;
 
         // Orthoslice controls
         private Label lblSliceXZ;
+
         private TrackBar sliderXZ;
         private NumericUpDown numXZ;
 
@@ -58,25 +62,30 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
 
         // Scrollbar controls
         private HScrollBar xyHScroll, xzHScroll, yzHScroll;
+
         private VScrollBar xyVScroll, xzVScroll, yzVScroll;
 
         // Zoom and pan state variables
         private float xyZoom = 1.0f, xzZoom = 1.0f, yzZoom = 1.0f;
+
         private Point xyPan = Point.Empty, xzPan = Point.Empty, yzPan = Point.Empty;
 
         // Image bounds tracking
         private Rectangle xyImageBounds = Rectangle.Empty;
+
         private Rectangle xzImageBounds = Rectangle.Empty;
         private Rectangle yzImageBounds = Rectangle.Empty;
 
         // References to parent application components
         private MainForm mainForm;
+
         private Material selectedMaterial;
         private AnnotationManager annotationManager;
         private Dictionary<int, bool> pointTypes = new Dictionary<int, bool>(); // Maps point ID to isPositive
 
         // ONNX model components
         private InferenceSession encoderSession;
+
         private InferenceSession decoderSession;
         private string encoderPath;
         private string decoderPath;
@@ -91,15 +100,19 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
 
         // Segmentation results
         private byte[,] segmentationMask;
+
         private List<Rectangle> boundingBoxes = new List<Rectangle>();
         private bool showBoundingBoxes = false;
 
         // Prompt mode
-        private enum PromptMode { Positive, Negative, ZeroShot }
+        private enum PromptMode
+        { Positive, Negative, ZeroShot }
+
         private PromptMode currentMode = PromptMode.Positive;
 
         // candidate masks produced by zero‑shot
         private List<byte[,]> zeroShotMasks = null;
+
         private List<Rectangle> zeroShotBoxes = null;
         private List<int> zeroShotActive = null;
 
@@ -175,7 +188,6 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
         public MicroSAM(MainForm mainForm, Material selectedMaterial, AnnotationManager annotationManager)
             : this(mainForm, selectedMaterial, annotationManager, true)
         {
-
         }
 
         private void InitializeForm()
@@ -289,7 +301,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 Height = 30,
                 BackColor = Color.LightGreen
             };
-            btnPositivePrompt.Click += (s, e) => {
+            btnPositivePrompt.Click += (s, e) =>
+            {
                 currentMode = PromptMode.Positive;
                 btnPositivePrompt.BackColor = Color.LightGreen;
                 btnNegativePrompt.BackColor = SystemColors.Control;
@@ -304,7 +317,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 Width = 110,
                 Height = 30
             };
-            btnNegativePrompt.Click += (s, e) => {
+            btnNegativePrompt.Click += (s, e) =>
+            {
                 currentMode = PromptMode.Negative;
                 btnPositivePrompt.BackColor = SystemColors.Control;
                 btnNegativePrompt.BackColor = Color.LightPink;
@@ -320,7 +334,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 Width = 110,
                 Height = 30
             };
-            btnZeroShotPrompt.Click += (s, e) => {
+            btnZeroShotPrompt.Click += (s, e) =>
+            {
                 currentMode = PromptMode.ZeroShot;
                 btnPositivePrompt.BackColor = SystemColors.Control;
                 btnNegativePrompt.BackColor = SystemColors.Control;
@@ -348,7 +363,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 AutoSize = true,
                 Checked = false
             };
-            chkShowBoundingBoxes.CheckedChanged += (s, e) => {
+            chkShowBoundingBoxes.CheckedChanged += (s, e) =>
+            {
                 showBoundingBoxes = chkShowBoundingBoxes.Checked;
                 UpdateViewers();
                 Logger.Log($"[MicroSAM] Bounding box mode {(showBoundingBoxes ? "enabled" : "disabled")}");
@@ -370,7 +386,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 Height = 30,
                 BackColor = Color.LightSkyBlue
             };
-            btnXYView.Click += (s, e) => {
+            btnXYView.Click += (s, e) =>
+            {
                 currentActiveView = ActiveView.XY;
                 UpdateActiveViewButtons();
                 Logger.Log("[MicroSAM] Switched to XY view for segmentation");
@@ -396,7 +413,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 Width = 80,
                 Height = 30
             };
-            btnXZView.Click += (s, e) => {
+            btnXZView.Click += (s, e) =>
+            {
                 currentActiveView = ActiveView.XZ;
                 UpdateActiveViewButtons();
                 Logger.Log("[MicroSAM] Switched to XZ view for segmentation");
@@ -422,7 +440,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 Width = 80,
                 Height = 30
             };
-            btnYZView.Click += (s, e) => {
+            btnYZView.Click += (s, e) =>
+            {
                 currentActiveView = ActiveView.YZ;
                 UpdateActiveViewButtons();
                 Logger.Log("[MicroSAM] Switched to YZ view for segmentation");
@@ -505,13 +524,15 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             };
 
             // Add event handlers for XY slice controls
-            sliderXY.Scroll += (s, e) => {
+            sliderXY.Scroll += (s, e) =>
+            {
                 xySlice = sliderXY.Value;
                 UpdateSliceControls();
                 UpdateViewers();
             };
 
-            numXY.ValueChanged += (s, e) => {
+            numXY.ValueChanged += (s, e) =>
+            {
                 if (numXY.Value != xySlice)
                 {
                     xySlice = (int)numXY.Value;
@@ -548,13 +569,15 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             };
 
             // Add event handlers for XZ slice controls
-            sliderXZ.Scroll += (s, e) => {
+            sliderXZ.Scroll += (s, e) =>
+            {
                 xzRow = sliderXZ.Value;
                 UpdateSliceControls();
                 UpdateViewers();
             };
 
-            numXZ.ValueChanged += (s, e) => {
+            numXZ.ValueChanged += (s, e) =>
+            {
                 if (numXZ.Value != xzRow)
                 {
                     xzRow = (int)numXZ.Value;
@@ -591,13 +614,15 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             };
 
             // Add event handlers for YZ slice controls
-            sliderYZ.Scroll += (s, e) => {
+            sliderYZ.Scroll += (s, e) =>
+            {
                 yzCol = sliderYZ.Value;
                 UpdateSliceControls();
                 UpdateViewers();
             };
 
-            numYZ.ValueChanged += (s, e) => {
+            numYZ.ValueChanged += (s, e) =>
+            {
                 if (numYZ.Value != yzCol)
                 {
                     yzCol = (int)numYZ.Value;
@@ -615,7 +640,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 AutoSize = true
             };
 
-            chkSyncWithMainView.CheckedChanged += (s, e) => {
+            chkSyncWithMainView.CheckedChanged += (s, e) =>
+            {
                 // If synchronization is turned on, update the main view
                 if (chkSyncWithMainView.Checked)
                 {
@@ -653,30 +679,30 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             controlPanel.Controls.AddRange(new Control[] {
                 // Model Loading
                 lblModelPath, modelPathTextBox, btnBrowse,
-                
+
                 // Device Selection
                 lblDevice, rbCPU, rbGPU, btnLoadModel,
-                
+
                 // Prompt Mode
                 lblPromptMode, btnPositivePrompt, btnNegativePrompt, btnZeroShotPrompt,
-                
+
                 // Auto-Update and Bounding Box
                 chkAutoUpdate, chkShowBoundingBoxes,
-                
+
                 // Active View Selection
                 lblActiveView, btnXYView, btnXZView, btnYZView,
-                
+
                 // Action Buttons
                 btnApply, btnClose, statusLabel,
-                
+
                 // Slice Controls
                 lblSliceXY, sliderXY, numXY,
                 lblSliceXZ, sliderXZ, numXZ,
                 lblSliceYZ, sliderYZ, numYZ,
-                
+
                 // Sync Checkbox
                 chkSyncWithMainView,
-                
+
                 // Help and Material Info
                 lblHelp, lblMaterial
             });
@@ -690,7 +716,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             samForm.Controls.Add(mainLayout);
 
             // Handle form events
-            samForm.FormClosing += (s, e) => {
+            samForm.FormClosing += (s, e) =>
+            {
                 // Clean up resources
                 encoderSession?.Dispose();
                 decoderSession?.Dispose();
@@ -708,7 +735,6 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
 
                 Logger.Log("[MicroSAM] Form closing, resources cleaned up");
             };
-
 
             // Initially load the slices
             UpdateViewers();
@@ -799,18 +825,21 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
         private void SetupXYViewerEvents()
         {
             // XY viewer scroll events
-            xyHScroll.Scroll += (s, e) => {
+            xyHScroll.Scroll += (s, e) =>
+            {
                 xyPan.X = -xyHScroll.Value;
                 xyViewer.Invalidate();
             };
 
-            xyVScroll.Scroll += (s, e) => {
+            xyVScroll.Scroll += (s, e) =>
+            {
                 xyPan.Y = -xyVScroll.Value;
                 xyViewer.Invalidate();
             };
 
             // XY viewer mouse wheel for zooming
-            xyViewer.MouseWheel += (s, e) => {
+            xyViewer.MouseWheel += (s, e) =>
+            {
                 float oldZoom = xyZoom;
                 // Adjust zoom based on wheel direction
                 if (e.Delta > 0)
@@ -830,7 +859,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             Point lastPos = Point.Empty;
             bool isPanning = false;
 
-            xyViewer.MouseDown += (s, e) => {
+            xyViewer.MouseDown += (s, e) =>
+            {
                 if (currentMode == PromptMode.ZeroShot && zeroShotBoxes != null)
                 {
                     int hit = PickZeroShotBox(e.X, e.Y, currentActiveView);
@@ -953,7 +983,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 }
             };
 
-            xyViewer.MouseMove += (s, e) => {
+            xyViewer.MouseMove += (s, e) =>
+            {
                 if (isPanning && e.Button == MouseButtons.Right)
                 {
                     // Calculate the move delta
@@ -970,7 +1001,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 }
             };
 
-            xyViewer.MouseUp += (s, e) => {
+            xyViewer.MouseUp += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Right)
                 {
                     isPanning = false;
@@ -978,7 +1010,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             };
 
             // Paint event for custom rendering with checkerboard background
-            xyViewer.Paint += (s, e) => {
+            xyViewer.Paint += (s, e) =>
+            {
                 // Clear background
                 e.Graphics.Clear(Color.Black);
 
@@ -1022,18 +1055,21 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
         private void SetupXZViewerEvents()
         {
             // XZ viewer scroll events
-            xzHScroll.Scroll += (s, e) => {
+            xzHScroll.Scroll += (s, e) =>
+            {
                 xzPan.X = -xzHScroll.Value;
                 xzViewer.Invalidate();
             };
 
-            xzVScroll.Scroll += (s, e) => {
+            xzVScroll.Scroll += (s, e) =>
+            {
                 xzPan.Y = -xzVScroll.Value;
                 xzViewer.Invalidate();
             };
 
             // XZ viewer mouse wheel for zooming
-            xzViewer.MouseWheel += (s, e) => {
+            xzViewer.MouseWheel += (s, e) =>
+            {
                 float oldZoom = xzZoom;
                 // Adjust zoom based on wheel direction
                 if (e.Delta > 0)
@@ -1053,7 +1089,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             Point lastPos = Point.Empty;
             bool isPanning = false;
 
-            xzViewer.MouseDown += (s, e) => {
+            xzViewer.MouseDown += (s, e) =>
+            {
                 if (currentMode == PromptMode.ZeroShot && zeroShotBoxes != null)
                 {
                     int hit = PickZeroShotBox(e.X, e.Y, currentActiveView);
@@ -1179,7 +1216,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 }
             };
 
-            xzViewer.MouseMove += (s, e) => {
+            xzViewer.MouseMove += (s, e) =>
+            {
                 if (isPanning && e.Button == MouseButtons.Right)
                 {
                     // Calculate the move delta
@@ -1196,7 +1234,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 }
             };
 
-            xzViewer.MouseUp += (s, e) => {
+            xzViewer.MouseUp += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Right)
                 {
                     isPanning = false;
@@ -1204,7 +1243,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             };
 
             // Paint event for custom rendering with checkerboard background
-            xzViewer.Paint += (s, e) => {
+            xzViewer.Paint += (s, e) =>
+            {
                 // Clear background
                 e.Graphics.Clear(Color.Black);
 
@@ -1233,7 +1273,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                         e.Graphics.DrawRectangle(borderPen, xzImageBounds);
                     }
 
-                    // Draw annotations 
+                    // Draw annotations
                     DrawAnnotationsOnXZ(e.Graphics);
 
                     // Draw bounding boxes if enabled
@@ -1248,18 +1288,21 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
         private void SetupYZViewerEvents()
         {
             // YZ viewer scroll events
-            yzHScroll.Scroll += (s, e) => {
+            yzHScroll.Scroll += (s, e) =>
+            {
                 yzPan.X = -yzHScroll.Value;
                 yzViewer.Invalidate();
             };
 
-            yzVScroll.Scroll += (s, e) => {
+            yzVScroll.Scroll += (s, e) =>
+            {
                 yzPan.Y = -yzVScroll.Value;
                 yzViewer.Invalidate();
             };
 
             // YZ viewer mouse wheel for zooming
-            yzViewer.MouseWheel += (s, e) => {
+            yzViewer.MouseWheel += (s, e) =>
+            {
                 float oldZoom = yzZoom;
                 // Adjust zoom based on wheel direction
                 if (e.Delta > 0)
@@ -1279,7 +1322,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             Point lastPos = Point.Empty;
             bool isPanning = false;
 
-            yzViewer.MouseDown += (s, e) => {
+            yzViewer.MouseDown += (s, e) =>
+            {
                 if (currentMode == PromptMode.ZeroShot && zeroShotBoxes != null)
                 {
                     int hit = PickZeroShotBox(e.X, e.Y, currentActiveView);
@@ -1405,7 +1449,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 }
             };
 
-            yzViewer.MouseMove += (s, e) => {
+            yzViewer.MouseMove += (s, e) =>
+            {
                 if (isPanning && e.Button == MouseButtons.Right)
                 {
                     // Calculate the move delta
@@ -1422,7 +1467,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 }
             };
 
-            yzViewer.MouseUp += (s, e) => {
+            yzViewer.MouseUp += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Right)
                 {
                     isPanning = false;
@@ -1430,7 +1476,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             };
 
             // Paint event for custom rendering with checkerboard background
-            yzViewer.Paint += (s, e) => {
+            yzViewer.Paint += (s, e) =>
+            {
                 // Clear background
                 e.Graphics.Clear(Color.Black);
 
@@ -1484,14 +1531,17 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                         zoom = xyZoom;
                         pan = xyPan;
                         break;
+
                     case ActiveView.XZ:
                         zoom = xzZoom;
                         pan = xzPan;
                         break;
+
                     case ActiveView.YZ:
                         zoom = yzZoom;
                         pan = yzPan;
                         break;
+
                     default:
                         return;
                 }
@@ -1746,7 +1796,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 options.EnableMemoryPattern = true;
                 options.EnableCpuMemArena = true;
 
-                // Set intra-op and inter-op thread count for CPU 
+                // Set intra-op and inter-op thread count for CPU
                 int cpuThreads = Environment.ProcessorCount;
                 options.IntraOpNumThreads = Math.Max(1, cpuThreads / 2);
 
@@ -2106,6 +2156,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
 
             return bmp;
         }
+
         /// <summary>Returns the union of the masks whose indices are in
         /// <paramref name="active"/>.  If none are active, returns null.</summary>
         private byte[,] BuildMergedMask(IEnumerable<int> active)
@@ -2129,6 +2180,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             }
             return merged;
         }
+
         private async Task PerformSegmentation()
         {
             zeroShotBoxes = null;
@@ -2143,10 +2195,10 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             /* ---------- gather annotation points --------------------------------- */
             List<AnnotationPoint> relevantPoints = GetRelevantPointsForCurrentView();
 
-             if (currentMode == PromptMode.ZeroShot)
-                     return;          // zero‑shot needs no auto‑refresh
-            
-             if (relevantPoints.Count == 0)
+            if (currentMode == PromptMode.ZeroShot)
+                return;          // zero‑shot needs no auto‑refresh
+
+            if (relevantPoints.Count == 0)
                 return;
 
             // UI feedback
@@ -2187,10 +2239,12 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                         scaleX = 1024f / mainForm.GetWidth();
                         scaleY = 1024f / mainForm.GetHeight();
                         break;
+
                     case ActiveView.XZ:
                         scaleX = 1024f / mainForm.GetWidth();
                         scaleY = 1024f / mainForm.GetDepth();
                         break;
+
                     default: /* YZ */
                         scaleX = 1024f / mainForm.GetDepth();
                         scaleY = 1024f / mainForm.GetHeight();
@@ -2295,7 +2349,6 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             }
         }
 
-
         // Zero-shot prompt mode - performs segmentation without any points
         private async Task PerformZeroShotSegmentation()
         {
@@ -2345,9 +2398,9 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                     // Use center point (just as a placeholder)
                     pointCoords[0, 0, 0] = 512; // center x (1024/2)
                     pointCoords[0, 0, 1] = 512; // center y (1024/2)
-                    pointLabels[0, 0] = -1; // zero-shot mode 
+                    pointLabels[0, 0] = -1; // zero-shot mode
 
-                    // Empty mask input 
+                    // Empty mask input
                     DenseTensor<float> maskInput = new DenseTensor<float>(new[] { 1, 1, 256, 256 });
                     DenseTensor<float> hasMaskInput = new DenseTensor<float>(new[] { 1 });
                     hasMaskInput[0] = 0;  // No mask input for zero-shot
@@ -2360,14 +2413,17 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                             origWidth = mainForm.GetWidth();
                             origHeight = mainForm.GetHeight();
                             break;
+
                         case ActiveView.XZ:
                             origWidth = mainForm.GetWidth();
                             origHeight = mainForm.GetDepth();
                             break;
+
                         case ActiveView.YZ:
                             origWidth = mainForm.GetDepth();
                             origHeight = mainForm.GetHeight();
                             break;
+
                         default:
                             origWidth = mainForm.GetWidth();
                             origHeight = mainForm.GetHeight();
@@ -2474,7 +2530,6 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                     {
                         decoderOutputs.Dispose();
                     }
-
                 }
                 finally
                 {
@@ -2483,7 +2538,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             }
             catch (Exception ex)
             {
-                samForm.Invoke(new Action(() => {
+                samForm.Invoke(new Action(() =>
+                {
                     MessageBox.Show($"Error during zero-shot segmentation: {ex.Message}");
                     statusLabel.Text = $"Error: {ex.Message}";
                 }));
@@ -2491,6 +2547,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 Logger.Log($"[MicroSAM] Zero-shot segmentation error: {ex.Message}");
             }
         }
+
         /// <summary>Upscales a small 256×256 byte mask to the current view size.</summary>
         private byte[,] ResizeByteMask(byte[,] src, ActiveView view)
         {
@@ -2519,6 +2576,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             }
             return dst;
         }
+
         /// <summary>Returns the index of the zero‑shot box that contains (x,y)
         /// in *viewer‑space*, or –1 if none.</summary>
         private int PickZeroShotBox(int vx, int vy, ActiveView view)
@@ -2623,12 +2681,15 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 case ActiveView.XY:
                     viewBitmap = CreateSliceBitmap(xySlice);
                     break;
+
                 case ActiveView.XZ:
                     viewBitmap = CreateXZSliceBitmap(xzRow);
                     break;
+
                 case ActiveView.YZ:
                     viewBitmap = CreateYZSliceBitmap(yzCol);
                     break;
+
                 default:
                     viewBitmap = CreateSliceBitmap(xySlice);
                     break;
@@ -2749,10 +2810,12 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                     // Points on the current XY slice
                     relevantPoints.AddRange(allPoints.Where(p => p.Z == xySlice));
                     break;
+
                 case ActiveView.XZ:
                     // Points on the current XZ row
                     relevantPoints.AddRange(allPoints.Where(p => Math.Abs(p.Y - xzRow) <= 1));
                     break;
+
                 case ActiveView.YZ:
                     // Points on the current YZ column
                     relevantPoints.AddRange(allPoints.Where(p => Math.Abs(p.X - yzCol) <= 1));
@@ -3145,7 +3208,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 grpProcessing.Controls.AddRange(new Control[] { lblProcessStrategy, cboStrategy });
 
                 // Add event handler to control sub-option visibility
-                rbCreateMaterial.CheckedChanged += (s, e) => {
+                rbCreateMaterial.CheckedChanged += (s, e) =>
+                {
                     chkNewMaterial.Enabled = rbCreateMaterial.Checked;
                 };
 
@@ -3241,7 +3305,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                             {
                                 if (form.GetType().Name == "ControlForm")
                                 {
-                                    form.Invoke(new Action(() => {
+                                    form.Invoke(new Action(() =>
+                                    {
                                         var refreshMethod = form.GetType().GetMethod("RefreshMaterialList");
                                         if (refreshMethod != null)
                                             refreshMethod.Invoke(form, null);
@@ -3286,7 +3351,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                                                               relevantPoints, progressForm);
                                     break;
 
-                                case 2:  // Forward only 
+                                case 2:  // Forward only
                                     await SegmentVolumeForwardOnly(xySlice, endSlice, materialID,
                                                                  relevantPoints, progressForm);
                                     break;
@@ -3462,7 +3527,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             byte[,] backwardMask = segmentationMask;
 
             // Create progress reporting
-            var progress = new Progress<(int processed, string message)>(update => {
+            var progress = new Progress<(int processed, string message)>(update =>
+            {
                 processedSlices = update.processed;
                 progressForm.SafeUpdateProgress(processedSlices, totalSlices, update.message);
             });
@@ -3626,7 +3692,6 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             }
         }
 
-
         // Guided segmentation for a single slice
         // Guided propagation (previous mask + annotation points)
         private async Task<byte[,]> SegmentSliceWithMask(
@@ -3670,10 +3735,12 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                         sx = 256f / mainForm.GetWidth();
                         sy = 256f / mainForm.GetHeight();
                         break;
+
                     case ActiveView.XZ:
                         sx = 256f / mainForm.GetWidth();
                         sy = 256f / mainForm.GetDepth();
                         break;
+
                     default:       /* YZ */
                         sx = 256f / mainForm.GetDepth();
                         sy = 256f / mainForm.GetHeight();
@@ -3706,10 +3773,12 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                         scaleX = 1024f / mainForm.GetWidth();
                         scaleY = 1024f / mainForm.GetHeight();
                         break;
+
                     case ActiveView.XZ:
                         scaleX = 1024f / mainForm.GetWidth();
                         scaleY = 1024f / mainForm.GetDepth();
                         break;
+
                     default:       /* YZ */
                         scaleX = 1024f / mainForm.GetDepth();
                         scaleY = 1024f / mainForm.GetHeight();
@@ -3738,10 +3807,12 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                         origImSize[0] = mainForm.GetHeight();
                         origImSize[1] = mainForm.GetWidth();
                         break;
+
                     case ActiveView.XZ:
                         origImSize[0] = mainForm.GetDepth();
                         origImSize[1] = mainForm.GetWidth();
                         break;
+
                     default:       /* YZ */
                         origImSize[0] = mainForm.GetHeight();
                         origImSize[1] = mainForm.GetDepth();
@@ -3781,7 +3852,6 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 return null;
             }
         }
-
 
         // Export cropped dataset based on segmentation
         private async Task ExportCroppedDataset(int sliceRange, string outputFolder, ProgressForm progressForm, bool useZeroShot)
@@ -3895,7 +3965,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             int maxX = int.MinValue, maxY = int.MinValue, maxZ = int.MinValue;
 
             // Calculate the bounds and check if this is a "dark" or "bright" segmentation
-            bool isDarkSegmentation = await Task.Run(() => {
+            bool isDarkSegmentation = await Task.Run(() =>
+            {
                 long totalPixelValue = 0;
                 long totalPixelCount = 0;
 
@@ -3971,11 +4042,13 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
             progressForm.UpdateProgress(0, croppedDepth, "Saving cropped slices...");
 
             // Use parallel processing for saving the images
-            await Task.Run(() => {
+            await Task.Run(() =>
+            {
                 object lockObj = new object();
                 int saved = 0;
 
-                Parallel.For(minZ, maxZ + 1, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, z => {
+                Parallel.For(minZ, maxZ + 1, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, z =>
+                {
                     try
                     {
                         // Check if we have a mask for this slice
@@ -4119,6 +4192,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                 }
             }
         }
+
         /// <summary>Returns the index of the mask with the highest IoU prediction.</summary>
         private static int GetBestMaskIndex(Tensor<float> iouPredictions)
         {
@@ -4180,14 +4254,17 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
                     dstW = mainForm.GetWidth();
                     dstH = mainForm.GetHeight();
                     break;
+
                 case ActiveView.XZ:
                     dstW = mainForm.GetWidth();
                     dstH = mainForm.GetDepth();
                     break;
+
                 case ActiveView.YZ:
                     dstW = mainForm.GetDepth();
                     dstH = mainForm.GetHeight();
                     break;
+
                 default:
                     throw new ArgumentOutOfRangeException(nameof(view));
             }
@@ -4217,6 +4294,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
 
             return dst;
         }
+
         private void ClearCaches()
         {
             // Clear XY cache

@@ -1,9 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.Windows.Forms;
-using System.Reflection;
 using System.Linq;
+using System.Reflection;
+using System.Windows.Forms;
 
 namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
 {
@@ -59,7 +59,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
 
                 if (pointTypesField != null)
                 {
-                    // Direct field replacement - set our point types to SAM's dictionary 
+                    // Direct field replacement - set our point types to SAM's dictionary
                     pointTypesField.SetValue(samInterface, new Dictionary<int, bool>(pointTypes));
                     Logger.Log($"[SAMPointsHelper] Successfully injected {pointTypes.Count} positive points");
                 }
@@ -78,12 +78,14 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                     if (samForm != null)
                     {
                         // Add Shown event to the form
-                        samForm.Shown += (s, e) => {
+                        samForm.Shown += (s, e) =>
+                        {
                             Logger.Log("[SAMPointsHelper] SAM form shown, preparing auto-segmentation");
                             // Delay the segmentation to allow UI to fully initialize
                             Timer timer = new Timer();
                             timer.Interval = 800;
-                            timer.Tick += (s2, e2) => {
+                            timer.Tick += (s2, e2) =>
+                            {
                                 timer.Stop();
                                 timer.Dispose();
                                 TriggerSegmentation(samInterface);
@@ -269,7 +271,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                             Form form = formField.GetValue(samInterface) as Form;
                             if (form != null)
                             {
-                                form.Invoke(new Action(() => {
+                                form.Invoke(new Action(() =>
+                                {
                                     btnApply.PerformClick();
                                 }));
                                 return;

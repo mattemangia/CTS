@@ -60,6 +60,7 @@ namespace CTSegmenter
 
             Log(message, level);
         }
+
         public static void Log(string message, LogLevel level)
         {
             try
@@ -81,11 +82,12 @@ namespace CTSegmenter
                     }));
                 }
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 // Swallow logging errors.
             }
         }
+
         public static void Log(string message)
         {
             try
@@ -107,7 +109,7 @@ namespace CTSegmenter
                     }));
                 }
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 // Swallow logging errors.
             }

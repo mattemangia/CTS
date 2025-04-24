@@ -1,6 +1,5 @@
 ﻿using System.Collections.Generic;
 
-
 public class Pore
 {
     public int Id { get; set; }
@@ -10,6 +9,7 @@ public class Pore
     public Point3D Center { get; set; }
     public int ConnectionCount { get; set; }
 }
+
 public class Throat
 {
     public int Id { get; set; }
@@ -19,6 +19,7 @@ public class Throat
     public double Length { get; set; }      // in µm
     public double Volume { get; set; }      // in µm³
 }
+
 public class Point3D
 {
     public double X { get; set; }

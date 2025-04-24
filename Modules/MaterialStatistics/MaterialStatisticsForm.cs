@@ -1,15 +1,15 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Data;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Windows.Forms.DataVisualization.Charting;
-using System.Globalization;
+
 // Make sure to add reference to System.Windows.Forms.DataVisualization.dll in project
 
 namespace CTSegmenter
@@ -816,7 +816,7 @@ namespace CTSegmenter
             this.panel1.TabIndex = 1;
 
             // progressBar
-            this.progressBar.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Left | System.Windows.Forms.AnchorStyles.Right)));
+            this.progressBar.Anchor = (System.Windows.Forms.AnchorStyles.Left | System.Windows.Forms.AnchorStyles.Right);
             this.progressBar.Location = new System.Drawing.Point(200, 5);
             this.progressBar.MarqueeAnimationSpeed = 50;
             this.progressBar.Name = "progressBar";
@@ -834,7 +834,7 @@ namespace CTSegmenter
             this.lblStatus.Text = "Ready";
 
             // btnExportTable
-            this.btnExportTable.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Right)));
+            this.btnExportTable.Anchor = (System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Right);
             this.btnExportTable.Location = new System.Drawing.Point(688, 3);
             this.btnExportTable.Name = "btnExportTable";
             this.btnExportTable.Size = new System.Drawing.Size(100, 23);
@@ -854,7 +854,7 @@ namespace CTSegmenter
             this.panel2.TabIndex = 1;
 
             // btnExportChart
-            this.btnExportChart.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Right)));
+            this.btnExportChart.Anchor = (System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Right);
             this.btnExportChart.Location = new System.Drawing.Point(688, 3);
             this.btnExportChart.Name = "btnExportChart";
             this.btnExportChart.Size = new System.Drawing.Size(100, 23);
@@ -886,9 +886,9 @@ namespace CTSegmenter
             this.rbPieChart.CheckedChanged += new System.EventHandler(this.rbPieChart_CheckedChanged);
 
             // chart
-            this.chart.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom)
+            this.chart.Anchor = (((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom)
             | System.Windows.Forms.AnchorStyles.Left)
-            | System.Windows.Forms.AnchorStyles.Right)));
+            | System.Windows.Forms.AnchorStyles.Right);
             chartArea.Name = "ChartArea1";
             this.chart.ChartAreas.Add(chartArea);
             legend.Name = "Legend1";
@@ -932,6 +932,6 @@ namespace CTSegmenter
         private System.Windows.Forms.Label lblStatus;
         private System.Windows.Forms.ProgressBar progressBar;
 
-        #endregion
+        #endregion Designer Generated Code
     }
 }

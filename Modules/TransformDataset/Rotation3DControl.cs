@@ -9,16 +9,19 @@ namespace CTSegmenter
     {
         // Rotation values in degrees
         private double _rotX = 0;
+
         private double _rotY = 0;
         private double _rotZ = 0;
 
         // Dragging state
         private bool _isDragging = false;
+
         private Point _lastMousePos;
         private RotationAxis _activeAxis = RotationAxis.None;
 
         // Appearance
         private readonly Color _xAxisColor = Color.Red;
+
         private readonly Color _yAxisColor = Color.Green;
         private readonly Color _zAxisColor = Color.Blue;
         private readonly int _axisLength = 60;
@@ -27,7 +30,8 @@ namespace CTSegmenter
         // Event to notify when rotation changes
         public event EventHandler<RotationChangedEventArgs> RotationChanged;
 
-        public enum RotationAxis { None, X, Y, Z }
+        public enum RotationAxis
+        { None, X, Y, Z }
 
         public Rotation3DControl()
         {
@@ -131,12 +135,15 @@ namespace CTSegmenter
                 case RotationAxis.X:
                     _rotX = (_rotX + dy) % 360;
                     break;
+
                 case RotationAxis.Y:
                     _rotY = (_rotY + dx) % 360;
                     break;
+
                 case RotationAxis.Z:
                     _rotZ = (_rotZ + Math.Sqrt(dx * dx + dy * dy) * Math.Sign(dx)) % 360;
                     break;
+
                 case RotationAxis.None:
                     // Rotate around X and Y based on mouse movement
                     _rotY = (_rotY + dx * 0.5) % 360;

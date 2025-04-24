@@ -12,7 +12,6 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using ILGPU;
-using ILGPU.IR.Transformations;
 using ILGPU.Runtime;
 
 namespace CTSegmenter
@@ -23,6 +22,7 @@ namespace CTSegmenter
     public class AcousticVelocitySimulation : IStressSimulation, IDisposable
     {
         #region Properties and Fields
+
         public static float StoredPWaveVelocity { get; private set; } = 0;
         public static float StoredSWaveVelocity { get; private set; } = 0;
         public static float StoredPWaveArrivalTime { get; private set; } = 0;
@@ -40,10 +40,12 @@ namespace CTSegmenter
 
         // Events
         public event EventHandler<SimulationProgressEventArgs> ProgressChanged;
+
         public event EventHandler<SimulationCompletedEventArgs> SimulationCompleted;
 
         // Acoustic test specific parameters
         public float ConfiningPressure { get; private set; }
+
         public string WaveType { get; private set; }
         public int TimeSteps { get; private set; }
         public float Frequency { get; private set; } // kHz
@@ -53,6 +55,7 @@ namespace CTSegmenter
 
         // Material acoustic properties
         public float PWaveVelocity { get; private set; }
+
         public float SWaveVelocity { get; private set; }
         public float YoungModulus { get; private set; }
         public float PoissonRatio { get; private set; }
@@ -62,6 +65,7 @@ namespace CTSegmenter
 
         // Results
         public float MeasuredPWaveVelocity { get; private set; }
+
         public float MeasuredSWaveVelocity { get; private set; }
         public float PWaveArrivalTime { get; private set; }
         public float SWaveArrivalTime { get; private set; }
@@ -80,11 +84,15 @@ namespace CTSegmenter
 
         // ILGPU context
         private Context _context;
+
         public Accelerator _accelerator;
+
         private Action<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>,
                         float, float, float, float, float, float, float, ArrayView<float>, ArrayView<float>> _propagatePWaveKernel;
+
         private Action<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>,
                         float, float, float, float, float, float, float, ArrayView<float>> _propagateSWaveKernel;
+
         private Action<Index3D,
     ArrayView3D<float, Stride3D.DenseXY>,  // current field
     ArrayView3D<float, Stride3D.DenseXY>,  // previous field
@@ -108,8 +116,10 @@ namespace CTSegmenter
                 ArrayView<float>,  // damping
                 ArrayView<float>   // result
             > _propagateImprovedSWaveKernel;
+
         // Simulation data
         private List<Triangle> _simulationTriangles;
+
         private CancellationTokenSource _cancellationTokenSource;
         private SimulationResult _result;
         private bool _isDisposed;
@@ -117,11 +127,14 @@ namespace CTSegmenter
         public bool _isPWave;
         private bool _hasPreviousTriaxialResults;
         private SimulationResult _triaxialResult;
-        float totalEnergy = 0;
-         // The input energy value
-        float energyLoss = 0;
+        private float totalEnergy = 0;
+
+        // The input energy value
+        private float energyLoss = 0;
+
         // 3D grid for simulation
         public int _gridSizeX;
+
         public int _gridSizeY;
         public int _gridSizeZ;
         private float _gridSpacing;
@@ -137,7 +150,7 @@ namespace CTSegmenter
         private bool v;
         private ConcurrentDictionary<Vector3, float> densityMap;
 
-        #endregion
+        #endregion Properties and Fields
 
         #region Constructor and Initialization
 
@@ -263,6 +276,7 @@ namespace CTSegmenter
                 throw new InvalidOperationException("Failed to initialize ILGPU. The simulation cannot continue.", ex);
             }
         }
+
         /// <summary>
         /// Load ILGPU kernels
         /// </summary>
@@ -587,7 +601,7 @@ namespace CTSegmenter
                       $"Vp/Vs ratio: {CalculatedVpVsRatio:F2}");
         }
 
-        #endregion
+        #endregion Constructor and Initialization
 
         #region Utility Methods
 
@@ -651,6 +665,7 @@ namespace CTSegmenter
                 );
             }
         }
+
         /// <summary>
         /// Generate a seismic source wavelet (Ricker wavelet)
         /// </summary>
@@ -903,7 +918,6 @@ namespace CTSegmenter
         {
             // Start tracking execution time to prevent infinite loops
             Stopwatch sw = Stopwatch.StartNew();
-            const int MAX_PROCESSING_TIME_MS = 5000; // 5 seconds max for mesh processing
 
             // Initialize the velocity and density models
             _velocityModel = new float[_gridSizeX, _gridSizeY, _gridSizeZ];
@@ -1071,7 +1085,7 @@ namespace CTSegmenter
             return (float)Math.Sqrt(dx * dx + dy * dy + dz * dz);
         }
 
-        #endregion
+        #endregion Utility Methods
 
         #region IStressSimulation Implementation
 
@@ -1240,24 +1254,30 @@ namespace CTSegmenter
                 case RenderMode.Stress:
                     RenderWaveField(g, width, height);
                     break;
+
                 case RenderMode.Strain:
                     RenderTimeSeries(g, width, height);
                     break;
+
                 case RenderMode.FailureProbability:
                     RenderVelocityDistribution(g, width, height);
                     break;
+
                 case RenderMode.Displacement:
                     RenderWaveSlice(g, width, height);
                     break;
+
                 case RenderMode.Wireframe:
                 case RenderMode.Solid:
                     RenderMeshWithVelocity(g, width, height, renderMode);
                     break;
+
                 default:
                     RenderWaveField(g, width, height);
                     break;
             }
         }
+
         /// <summary>
         /// Render simulation results to the specified graphics context
         /// </summary>
@@ -1293,19 +1313,24 @@ namespace CTSegmenter
                 case RenderMode.Stress:
                     RenderWaveField(g, width, height);
                     break;
+
                 case RenderMode.Strain:
                     RenderTimeSeries(g, width, height);
                     break;
+
                 case RenderMode.FailureProbability:
                     RenderVelocityDistribution(g, width, height);
                     break;
+
                 case RenderMode.Displacement:
                     RenderWaveSlice(g, width, height);
                     break;
+
                 case RenderMode.Wireframe:
                 case RenderMode.Solid:
                     RenderMeshWithVelocity(g, width, height, renderMode);
                     break;
+
                 default:
                     RenderWaveField(g, width, height);
                     break;
@@ -1317,6 +1342,7 @@ namespace CTSegmenter
                 g.ResetTransform();
             }
         }
+
         /// <summary>
         /// Export simulation results to the specified file
         /// </summary>
@@ -1359,7 +1385,7 @@ namespace CTSegmenter
             }
         }
 
-        #endregion
+        #endregion IStressSimulation Implementation
 
         #region Simulation Implementation
 
@@ -1462,7 +1488,7 @@ namespace CTSegmenter
             }
 
             // Position source and receiver at specific points in the 1D array
-            int sourceIndex = samplePoints / 4;  // 25% in 
+            int sourceIndex = samplePoints / 4;  // 25% in
             int receiverIndex = (samplePoints * 3) / 4;  // 75% in
 
             Logger.Log($"[AcousticVelocitySimulation] Source at index {sourceIndex}, receiver at index {receiverIndex} (distance: {(receiverIndex - sourceIndex) * _gridSpacing:F3} m)");
@@ -1624,6 +1650,7 @@ namespace CTSegmenter
                 field[i, 0, 0] = line[i];
             return field;
         }
+
         public void DumpSimulationData(string filePath)
         {
             try
@@ -1662,6 +1689,7 @@ namespace CTSegmenter
                 Logger.Log($"[AcousticVelocitySimulation] Failed to dump debug data: {ex.Message}");
             }
         }
+
         private static void InjectSourceToFieldKernel(
     Index1D index,
     ArrayView<int> sourceIndex,
@@ -1674,6 +1702,7 @@ namespace CTSegmenter
                 field[sourceIndex[0]] = wavelet[timeStep];
             }
         }
+
         private static void ExtractReceiverDataFromFieldKernel(
     Index1D index,
     ArrayView<int> receiverIndex,
@@ -1686,7 +1715,6 @@ namespace CTSegmenter
                 receiverData[timeStep] = field[receiverIndex[0]];
             }
         }
-
 
         /// <summary>
         /// Run an S-wave simulation along the test direction
@@ -1799,7 +1827,7 @@ namespace CTSegmenter
             }
 
             // Use a fixed source-receiver distance for the 1D simulation
-            int sourceIndex = samplePoints / 4;  // 25% in 
+            int sourceIndex = samplePoints / 4;  // 25% in
             int receiverIndex = (samplePoints * 3) / 4;  // 75% in
 
             // Calculate travel times based on the actual distance in the simulation
@@ -2180,6 +2208,7 @@ namespace CTSegmenter
                 currentBuffer?.Dispose();
             }
         }
+
         /// <summary>
         /// Kernel for injecting source wavelet directly on GPU
         /// </summary>
@@ -2217,6 +2246,7 @@ namespace CTSegmenter
                 receiverData[timeStep] = field[x, y, z];
             }
         }
+
         /// <summary>
         /// ILGPU kernel for 1D P-wave propagation
         /// </summary>
@@ -2328,7 +2358,7 @@ namespace CTSegmenter
             // Calculate energy density from displacement
             float energyDensity = u[i] * u[i] * density;
 
-            // Energy-dependent attenuation 
+            // Energy-dependent attenuation
             float effectiveAttenuation = attenuation * (1.0f + 0.1f * energyDensity);
 
             // Calculate acceleration from wave equation with energy-dependent attenuation
@@ -2395,6 +2425,7 @@ namespace CTSegmenter
             // Time‐stepping
             next[x, y, z] = 2f * c0 - prevVal + dt * dt * accel;
         }
+
         /// <summary>
         /// Calculate the average velocity along the test direction
         /// </summary>
@@ -2460,7 +2491,7 @@ namespace CTSegmenter
             float stepY = (_receiverY - _sourceY) / (float)steps;
             float stepZ = (_receiverZ - _sourceZ) / (float)steps;
 
-            // Calculate the average velocity using harmonic mean 
+            // Calculate the average velocity using harmonic mean
             // (more accurate for wave propagation in layered media)
             for (int i = 0; i < steps; i++)
             {
@@ -2749,6 +2780,7 @@ namespace CTSegmenter
                       $"Vp/Vs ratio: {CalculatedVpVsRatio:F2}, " +
                       $"Max displacement: {MaximumDisplacement:E3} m");
         }
+
         /// <summary>
         /// Create the simulation result
         /// </summary>
@@ -2830,7 +2862,7 @@ namespace CTSegmenter
             return result;
         }
 
-        #endregion
+        #endregion Simulation Implementation
 
         #region Rendering and Export
 
@@ -3169,6 +3201,7 @@ namespace CTSegmenter
                 }
             }
         }
+
         private void DrawColorbar(Graphics g, int x, int y, int barWidth, int barHeight)
         {
             // Draw colorbar with proper position to avoid overlap
@@ -3196,7 +3229,6 @@ namespace CTSegmenter
                 g.DrawString("Min", font, br, x + barWidth + 4, y + barHeight - font.Height);
             }
         }
-
 
         // Helper method for drawing title and statistics
         private void DrawTitleAndStats(Graphics g, int width, int height, int topMargin, int leftMargin, int plotWidth)
@@ -3261,6 +3293,7 @@ namespace CTSegmenter
                 g.DrawString(sb.ToString(), font, brush, x, y);
             }
         }
+
         private float[,,] BuildFieldFromHistory(bool pWave)
         {
             List<float[]> hist = pWave ? PWaveDisplacementHistory : SWaveDisplacementHistory;
@@ -3350,7 +3383,7 @@ namespace CTSegmenter
             Logger.Log($"[AcousticVelocitySimulation] Built 3D field: {field.GetLength(0)}x{field.GetLength(1)}x{field.GetLength(2)}, " +
                       $"non-zero values: {nonZeroCount}, range: {minVal:E6} to {maxVal:E6}");
 
-            // If the field has no variation, add some noise for visualization  
+            // If the field has no variation, add some noise for visualization
             if (nonZeroCount == 0 || (maxVal - minVal) < 1e-10)
             {
                 Logger.Log($"[AcousticVelocitySimulation] WARNING: Field has no variation, adding visualization data");
@@ -3475,7 +3508,6 @@ namespace CTSegmenter
 
                 // Draw borders, source/receiver markers, etc.
                 // (rest of method remains the same)
-            
 
                 // Draw a border
                 using (Pen borderPen = new Pen(Color.Gray, 1))
@@ -3515,6 +3547,7 @@ namespace CTSegmenter
                 }
             }
         }
+
         private Color GetEnhancedBipolarColor(float normalizedValue)
         {
             // Ensure value is in range [-1, 1]
@@ -3549,6 +3582,7 @@ namespace CTSegmenter
                 );
             }
         }
+
         /// <summary>
         /// Draw a color scale
         /// </summary>
@@ -3622,12 +3656,11 @@ namespace CTSegmenter
             }
         }
 
-
         /// <summary>
         /// Draw the recorded receiver trace (time-series) into the given <see cref="Graphics"/> surface.
         /// This version is hardened against infinite / NaN samples and against values whose
         /// magnitude would overflow <see cref="System.Drawing.Graphics.DrawLine"/>.
-        /// 
+        ///
         /// </summary>
         private void RenderTimeSeries(Graphics g, int width, int height)
         {
@@ -3861,6 +3894,7 @@ namespace CTSegmenter
                 g.DrawString(energyLabel, lblFont, labelBrush, width - rightMargin - 80, topMargin + 10);
             }
         }
+
         private static void PropagateImprovedSWaveKernel(
     Index1D index,
     ArrayView<float> u,    // Displacement field
@@ -3906,7 +3940,7 @@ namespace CTSegmenter
             // Update velocity using acceleration
             v[i] += a[i] * dt;
 
-            // Update displacement using velocity 
+            // Update displacement using velocity
             result[i] = u[i] + v[i] * dt;
 
             // Apply minimal boundary damping
@@ -3984,7 +4018,7 @@ namespace CTSegmenter
             );
 
             // Primary, secondary and tertiary axes for slices
-            string primaryAxis, secondaryAxis, tertiaryAxis;
+            string primaryAxis, secondaryAxis;
 
             if (absDir.X >= absDir.Y && absDir.X >= absDir.Z)
             {
@@ -3993,12 +4027,10 @@ namespace CTSegmenter
                 if (absDir.Y >= absDir.Z)
                 {
                     secondaryAxis = "Y";
-                    tertiaryAxis = "Z";
                 }
                 else
                 {
                     secondaryAxis = "Z";
-                    tertiaryAxis = "Y";
                 }
             }
             else if (absDir.Y >= absDir.X && absDir.Y >= absDir.Z)
@@ -4008,12 +4040,10 @@ namespace CTSegmenter
                 if (absDir.X >= absDir.Z)
                 {
                     secondaryAxis = "X";
-                    tertiaryAxis = "Z";
                 }
                 else
                 {
                     secondaryAxis = "Z";
-                    tertiaryAxis = "X";
                 }
             }
             else
@@ -4023,12 +4053,10 @@ namespace CTSegmenter
                 if (absDir.X >= absDir.Y)
                 {
                     secondaryAxis = "X";
-                    tertiaryAxis = "Y";
                 }
                 else
                 {
                     secondaryAxis = "Y";
-                    tertiaryAxis = "X";
                 }
             }
 
@@ -4295,6 +4323,7 @@ namespace CTSegmenter
                 Logger.Log($"[AcousticVelocitySimulation] Error rendering velocity slice: {ex.Message}");
             }
         }
+
         /// <summary>
         /// Draw a histogram of the velocity distribution
         /// </summary>
@@ -4452,6 +4481,7 @@ namespace CTSegmenter
                 Logger.Log($"[AcousticVelocitySimulation] Error rendering velocity histogram: {ex.Message}");
             }
         }
+
         /// <summary>
         /// Render a 3D slice of the wave field
         /// </summary>
@@ -4957,7 +4987,6 @@ namespace CTSegmenter
             }
         }
 
-
         /// <summary>
         /// Draw a slice showing wave displacement vectors
         /// </summary>
@@ -5236,6 +5265,7 @@ namespace CTSegmenter
                 g.DrawString($"Energy: {Energy:F1} J", energyFont, energyBrush, 20, height - 30);
             }
         }
+
         private void DrawBipolarColorScale(Graphics g, int x, int y, int width, int height, string label)
         {
             // Ensure minimum dimensions
@@ -5275,6 +5305,7 @@ namespace CTSegmenter
                 g.DrawString("-", font, textBrush, x - 10, y + height - 10);
             }
         }
+
         private Color GetSafeBipolarColor(float value)
         {
             // Ensure value is in range [-1, 1]
@@ -5304,6 +5335,7 @@ namespace CTSegmenter
                 );
             }
         }
+
         /// <summary>
         /// Helper class for triangle depth sorting
         /// </summary>
@@ -5369,7 +5401,7 @@ namespace CTSegmenter
             return maxCoord;
         }
 
-        #endregion
+        #endregion Rendering and Export
 
         #region Export Methods
 
@@ -5671,6 +5703,7 @@ namespace CTSegmenter
                 return false;
             }
         }
+
         private ImageCodecInfo GetEncoderInfo(string mimeType)
         {
             ImageCodecInfo[] encoders = ImageCodecInfo.GetImageEncoders();
@@ -5681,6 +5714,7 @@ namespace CTSegmenter
             }
             return null;
         }
+
         /// <summary>
         /// Export simulation results to PDF
         /// </summary>
@@ -5714,6 +5748,7 @@ namespace CTSegmenter
                 return false;
             }
         }
+
         /// <summary>
         /// Export simulation results as a composite image with multiple views
         /// </summary>
@@ -5941,7 +5976,6 @@ namespace CTSegmenter
             }
         }
 
-
         // Add this helper method to draw error panels
         private void DrawErrorPanel(Graphics g, int x, int y, int width, int height, string title, string errorMessage)
         {
@@ -6019,9 +6053,8 @@ namespace CTSegmenter
                 }
             }
         }
-        
 
-        #endregion
+        #endregion Export Methods
 
         #region Event Handlers
 
@@ -6042,7 +6075,7 @@ namespace CTSegmenter
             SimulationCompleted?.Invoke(this, new SimulationCompletedEventArgs(success, message, result, error));
         }
 
-        #endregion
+        #endregion Event Handlers
 
         #region IDisposable Implementation
 
@@ -6062,7 +6095,7 @@ namespace CTSegmenter
             }
         }
 
-        #endregion
+        #endregion IDisposable Implementation
 
         #region Internal Classes
 
@@ -6081,6 +6114,6 @@ namespace CTSegmenter
             public float DensityReference { get; set; }
         }
 
-        #endregion
+        #endregion Internal Classes
     }
 }

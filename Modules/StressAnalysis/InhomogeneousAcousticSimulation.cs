@@ -1,17 +1,10 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
-using System.IO;
-using System.Linq;
 using System.Numerics;
-using System.Text;
-using System.Threading;
 using System.Threading.Tasks;
-using ILGPU;
-using ILGPU.Runtime;
 
 namespace CTSegmenter
 {
@@ -22,14 +15,17 @@ namespace CTSegmenter
     {
         // Additional properties for inhomogeneous density
         private readonly bool _useInhomogeneousDensity;
+
         private readonly ConcurrentDictionary<Vector3, float> _densityMap;
         public float[,,] _detailedDensityModel;
         private bool _hasInitializedInhomogeneousModels = false;
 
         // Statistics for density variation
         public float MinimumDensity { get; private set; }
+
         public float MaximumDensity { get; private set; }
         public float AverageDensity { get; private set; }
+
         public Dictionary<Triangle, float> TriangleDensities
         {
             get
@@ -72,6 +68,7 @@ namespace CTSegmenter
                 return result;
             }
         }
+
         /// <summary>
         /// Constructor for inhomogeneous density simulation
         /// </summary>

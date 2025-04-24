@@ -12,12 +12,14 @@ namespace CTSegmenter
     {
         // Properties for range values
         private int minimum = 0;
+
         private int maximum = 255;
         private int rangeMinimum = 0;
         private int rangeMaximum = 255;
 
         // UI settings
         private int trackHeight = 6;
+
         private int handleSize = 16;
         private Color trackColor = Color.FromArgb(60, 60, 60);
         private Color rangeColor = Color.FromArgb(0, 120, 215);
@@ -26,6 +28,7 @@ namespace CTSegmenter
 
         // Dragging state
         private bool draggingMinHandle = false;
+
         private bool draggingMaxHandle = false;
         private Rectangle minHandleRect;
         private Rectangle maxHandleRect;
@@ -125,7 +128,7 @@ namespace CTSegmenter
             }
         }
 
-        #endregion
+        #endregion Properties
 
         public RangeSlider()
         {

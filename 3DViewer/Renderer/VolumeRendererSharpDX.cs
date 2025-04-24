@@ -1,21 +1,19 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
+using CTSegmenter.SharpDXIntegration;
 using SharpDX;
 using SharpDX.Direct3D;
 using SharpDX.Direct3D11;
 using SharpDX.DXGI;
-using System.Runtime.InteropServices;
-using System.Collections.Generic;
-using System.Linq;
-
 using Buffer = SharpDX.Direct3D11.Buffer;
 using Device = SharpDX.Direct3D11.Device;
 using Format = SharpDX.DXGI.Format;
-using System.Diagnostics.Metrics;
-using System.IO;
-using CTSegmenter.SharpDXIntegration;
-using System.Threading.Tasks;
-using System.Threading;
 using Timer = System.Windows.Forms.Timer;
 
 namespace CTSegmenter
@@ -23,11 +21,13 @@ namespace CTSegmenter
     public class SharpDXVolumeRenderer : IDisposable
     {
         #region Fields
+
         private bool debugMode = false;
         private readonly object textureLock = new object();
         private MainForm mainForm;
         private Panel renderPanel;
         private SharpDXControlPanel controlPanel;
+
         public void SetControlPanel(SharpDXControlPanel panel)
         {
             controlPanel = panel;
@@ -35,6 +35,7 @@ namespace CTSegmenter
 
         // Core DirectX objects
         private Device device;
+
         private DeviceContext context;
         private SwapChain swapChain;
         private RenderTargetView renderTargetView;
@@ -46,17 +47,20 @@ namespace CTSegmenter
 
         // Volume data textures
         private Texture3D volumeTexture;
+
         private ShaderResourceView volumeSRV;
         private Texture3D labelTexture;
         private ShaderResourceView labelSRV;
 
         // Cube geometry
         private Buffer cubeVertexBuffer;
+
         private Buffer cubeIndexBuffer;
         private int cubeIndexCount = 36;
 
         // Rendering states
         private RasterizerState solidRasterState;
+
         private RasterizerState wireframeRasterState;
         private BlendState alphaBlendState;
         private SamplerState linearSampler;
@@ -65,28 +69,33 @@ namespace CTSegmenter
 
         // Camera parameters
         private float cameraYaw = 0.8f;
+
         private float cameraPitch = 0.6f;
         private float cameraDistance = 500.0f;
         private Vector3 panOffset = Vector3.Zero;
 
         // Shaders for volume rendering
         private VertexShader volumeVertexShader;
+
         private PixelShader volumePixelShader;
         private InputLayout inputLayout;
         private Buffer constantBuffer;
 
         // Mouse interaction
         private bool isDragging = false;
+
         private System.Drawing.Point lastMousePosition;
         private bool isPanning = false;
 
         //Render Streamin Cancellation Token
         private CancellationTokenSource initStreamingCts;
+
         private Task streamingInitTask;
         private ProgressForm streamingProgressForm;
 
         // Label properties
         private const int MAX_LABELS = 256;
+
         private bool[] labelVisible = new bool[MAX_LABELS];
         private float[] labelOpacity = new float[MAX_LABELS];
         private Texture1D labelVisibilityTexture;
@@ -100,6 +109,7 @@ namespace CTSegmenter
 
         //RenderTimer
         private bool isRendering = false;
+
         private DateTime lastRenderTime = DateTime.MinValue;
         private int renderFailCount = 0;
         private const int MAX_FAILURES = 3;
@@ -107,6 +117,7 @@ namespace CTSegmenter
 
         // Volume rendering parameters
         private float minThresholdNorm = 0.1f;
+
         private float maxThresholdNorm = 1.0f;
         private float stepSize = 1.0f;
         private bool showGrayscale = true;
@@ -115,10 +126,12 @@ namespace CTSegmenter
 
         // Slices
         private int sliceX, sliceY, sliceZ;
+
         private bool showSlices = false;
 
         // Cutting planes
         private bool cutXEnabled = false;
+
         private bool cutYEnabled = false;
         private bool cutZEnabled = false;
         private float cutXPosition = 0.5f;
@@ -130,6 +143,7 @@ namespace CTSegmenter
 
         //Measures
         private bool measurementMode = false;
+
         public List<MeasurementLine> measurements = new List<MeasurementLine>();
         private bool isDrawingMeasurement = false;
         private SharpDX.Vector3 measureStartPoint;
@@ -144,6 +158,7 @@ namespace CTSegmenter
 
         //DirectX measurements
         private Buffer lineVertexBuffer;
+
         private VertexShader lineVertexShader;
         private PixelShader linePixelShader;
         private InputLayout lineInputLayout;
@@ -152,6 +167,7 @@ namespace CTSegmenter
 
         // LOD system for large datasets
         private bool useLodSystem = true;
+
         private int currentLodLevel = 0;
         private const int MAX_LOD_LEVELS = 3;
         private float[] lodStepSizes = new float[] { 0.5f, 1.0f, 2.0f, 4.0f }; // Different step sizes for each LOD level
@@ -161,6 +177,7 @@ namespace CTSegmenter
         private bool showXSlice = false;
         private bool showYSlice = false;
         private bool showZSlice = false;
+
         public bool ShowXSlice
         {
             get { return showXSlice; }
@@ -190,6 +207,7 @@ namespace CTSegmenter
                 NeedsRender = true;
             }
         }
+
         public bool ShowOrthoslices
         {
             get { return showXSlice || showYSlice || showZSlice; }
@@ -203,9 +221,9 @@ namespace CTSegmenter
             }
         }
 
-
         //Streaming rendering
         private bool useStreamingRenderer = false;
+
         private Dictionary<Vector3, Texture3D> loadedChunks = new Dictionary<Vector3, Texture3D>();
         private Dictionary<Vector3, ShaderResourceView> loadedChunkSRVs = new Dictionary<Vector3, ShaderResourceView>();
         private Queue<Vector3> chunkLoadQueue = new Queue<Vector3>();
@@ -215,13 +233,11 @@ namespace CTSegmenter
         private Vector3 cameraPositionPrevious;
         private float cameraDistancePrevious;
         private readonly object chunkLock = new object();
-  
+
         private Texture3D[] lodTextures = new Texture3D[5]; // Different LOD levels (0-4)
         private ShaderResourceView[] lodSRVs = new ShaderResourceView[5];
         private int currentStreamingLOD = 0;
         private bool isInitializingStreaming = false;
-
-
 
         public bool UseStreamingRenderer
         {
@@ -317,8 +333,6 @@ namespace CTSegmenter
             }
         }
 
-
-
         // Constant buffer structure - matches shader layout exactly
         [StructLayout(LayoutKind.Sequential)]
         private struct ConstantBufferData
@@ -338,9 +352,11 @@ namespace CTSegmenter
             public Vector4 CutPlaneY; // x=enabled, y=direction, z=position, w=unused
             public Vector4 CutPlaneZ; // x=enabled, y=direction, z=position, w=unused
         }
-        #endregion
+
+        #endregion Fields
 
         #region Properties
+
         public bool DebugMode
         {
             get { return debugMode; }
@@ -357,7 +373,7 @@ namespace CTSegmenter
             set
             {
                 minThresholdNorm = Math.Max(0.0f, Math.Min(1.0f, value / 255f));
-                NeedsRender = true; // Mark that rendering is needed 
+                NeedsRender = true; // Mark that rendering is needed
             }
         }
 
@@ -381,7 +397,6 @@ namespace CTSegmenter
             }
         }
 
-       
         public int ColorMapIndex
         {
             get { return colorMapIndex; }
@@ -495,9 +510,11 @@ namespace CTSegmenter
                 NeedsRender = true;
             }
         }
-        #endregion
+
+        #endregion Properties
 
         #region Initialization
+
         public SharpDXVolumeRenderer(MainForm mainForm, Panel panel)
         {
             this.mainForm = mainForm;
@@ -577,7 +594,6 @@ namespace CTSegmenter
                 panOffset = Vector3.Zero;
                 NeedsRender = true;
                 textRenderer = new MeasurementTextRenderer(renderPanel);
-
 
                 Logger.Log($"[SharpDXVolumeRenderer] Successfully created {volW}x{volH}x{volD} volume renderer");
             }
@@ -693,7 +709,7 @@ namespace CTSegmenter
                 Utilities.Dispose(ref depthView);
                 Utilities.Dispose(ref depthBuffer);
 
-                // Ensure valid dimensions 
+                // Ensure valid dimensions
                 int width = Math.Max(1, renderPanel.ClientSize.Width);
                 int height = Math.Max(1, renderPanel.ClientSize.Height);
 
@@ -917,22 +933,22 @@ struct VS_OUTPUT
 };
 
 // Ray-box intersection function
-bool IntersectBox(float3 rayOrigin, float3 rayDir, float3 boxMin, float3 boxMax, 
+bool IntersectBox(float3 rayOrigin, float3 rayDir, float3 boxMin, float3 boxMax,
                  out float tNear, out float tFar)
 {
     // Compute intersection with all planes
     float3 invRayDir = 1.0 / (rayDir + 0.0000001f); // Avoid division by zero
     float3 t1 = (boxMin - rayOrigin) * invRayDir;
     float3 t2 = (boxMax - rayOrigin) * invRayDir;
-    
+
     // Sort t values
     float3 tMin = min(t1, t2);
     float3 tMax = max(t1, t2);
-    
+
     // Find the largest tMin and smallest tMax
     tNear = max(max(tMin.x, tMin.y), tMin.z);
     tFar = min(min(tMax.x, tMax.y), tMax.z);
-    
+
     return tFar > tNear && tFar > 0.0;
 }
 
@@ -940,16 +956,16 @@ bool IntersectBox(float3 rayOrigin, float3 rayDir, float3 boxMin, float3 boxMax,
 VS_OUTPUT VSMain(VS_INPUT input)
 {
     VS_OUTPUT output;
-    
+
     // Transform vertex to clip space
     output.Position = mul(float4(input.Position, 1.0), worldViewProj);
-    
+
     // Pass through world position
     output.WorldPos = input.Position;
-    
+
     // Normalize texture coordinates to [0,1]
     output.TexCoord = input.Position / dimensions.xyz;
-    
+
     return output;
 }
 
@@ -959,23 +975,23 @@ bool IsOnSlicePlane(float3 pos, float3 slicePos, float epsilon, out int sliceTyp
     // sliceCoords.w now contains a bit field for slice visibility
     // We need to convert to int for bitwise operations
     int sliceFlags = (int)(sliceCoords.w + 0.5); // Round to nearest int
-    
+
     // Check which slices are enabled using integer bitwise operations
     bool xSliceEnabled = (sliceFlags & 1) != 0;
     bool ySliceEnabled = (sliceFlags & 2) != 0;
     bool zSliceEnabled = (sliceFlags & 4) != 0;
-    
+
     // Check if the position is on any of the three slice planes
     bool onXSlice = xSliceEnabled && abs(pos.x - slicePos.x * dimensions.x) < epsilon;
     bool onYSlice = ySliceEnabled && abs(pos.y - slicePos.y * dimensions.y) < epsilon;
     bool onZSlice = zSliceEnabled && abs(pos.z - slicePos.z * dimensions.z) < epsilon;
-    
+
     // Set slice type (1=X, 2=Y, 3=Z)
     sliceType = 0;
     if (onXSlice) sliceType = 1;
     else if (onYSlice) sliceType = 2;
     else if (onZSlice) sliceType = 3;
-    
+
     return (sliceType > 0);
 }
 
@@ -1014,7 +1030,7 @@ bool IsCutByPlane(float3 pos)
             if (pos.x < cutPlaneX.z * dimensions.x) return true;
         }
     }
-    
+
     // Check Y cutting plane
     if (cutPlaneY.x > 0.5) { // If enabled
         if (cutPlaneY.y > 0) { // Forward cut
@@ -1023,7 +1039,7 @@ bool IsCutByPlane(float3 pos)
             if (pos.y < cutPlaneY.z * dimensions.y) return true;
         }
     }
-    
+
     // Check Z cutting plane
     if (cutPlaneZ.x > 0.5) { // If enabled
         if (cutPlaneZ.y > 0) { // Forward cut
@@ -1032,7 +1048,7 @@ bool IsCutByPlane(float3 pos)
             if (pos.z < cutPlaneZ.z * dimensions.z) return true;
         }
     }
-    
+
     return false;
 }
 
@@ -1042,18 +1058,18 @@ float4 ApplyColorMap(float intensity, float minThreshold, float maxThreshold, in
     // Normalize intensity to 0-1 range based on thresholds
     float normalizedIntensity = (intensity - minThreshold) / (maxThreshold - minThreshold);
     normalizedIntensity = saturate(normalizedIntensity); // Clamp to [0,1]
-    
+
     // Sample from the color map based on the intensity
     // The colorMaps texture is a 1D texture with different color maps stacked
     // Each map has 256 entries, so we offset by mapIndex * 256
     float mapOffset = mapIndex * 256;
     float samplePos = (mapOffset + normalizedIntensity * 255) / 1024.0; // Assuming total size of 1024
     float4 color = colorMaps.SampleLevel(linearSampler, samplePos, 0);
-    
+
     // Adjust alpha based on intensity
     float alpha = normalizedIntensity * 0.5 + 0.2;
     color.a = min(0.7, alpha);
-    
+
     return color;
 }
 
@@ -1062,10 +1078,10 @@ bool IsOnBoundingBoxEdge(float3 texCoord, float edgeThickness)
 {
     // Check if we're near any of the 12 edges of the box
     // This approach is more precise than the previous one
-    
+
     // We need at least two coordinates to be near the edge
     int nearEdgeCount = 0;
-    
+
     // Check each dimension
     for (int i = 0; i < 3; i++)
     {
@@ -1075,7 +1091,7 @@ bool IsOnBoundingBoxEdge(float3 texCoord, float edgeThickness)
             nearEdgeCount++;
         }
     }
-    
+
     // We're on an edge if exactly two coordinates are at extremes
     return nearEdgeCount >= 2;
 }
@@ -1086,73 +1102,73 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
     // Get the ray origin and direction in world space
     float3 rayOrigin = cameraPosition.xyz;
     float3 rayDir = normalize(input.WorldPos - rayOrigin);
-    
+
     // Compute intersection with the volume bounding box
     float tNear, tFar;
     float3 boxMin = float3(0, 0, 0);
     float3 boxMax = dimensions.xyz;
-    
+
     // Check if ray actually hits the bounding box
     if (!IntersectBox(rayOrigin, rayDir, boxMin, boxMax, tNear, tFar))
     {
         // Ray completely misses the volume - return fully transparent
         return float4(0, 0, 0, 0);
     }
-    
+
     // Ensure we start inside the volume
     tNear = max(tNear, 0.0);
-    
+
     // Step size for ray marching - this must be small enough
     float stepSize = max(0.5, thresholds.z);
     int maxSteps = 2000; // Higher limit for quality
-    
+
     // Initialize accumulated color
     float4 accumulatedColor = float4(0, 0, 0, 0);
-    
+
     // Start ray marching from the near intersection point
     float t = tNear;
-    
+
     // Thresholds
     float minThreshold = thresholds.x;
     float maxThreshold = thresholds.y;
-    
+
     // Whether to show grayscale
     bool showGrayscale = thresholds.w > 0.5;
-    
+
     // Whether any slices are enabled (w component contains the bit flags)
     bool anySlicesEnabled = sliceCoords.w > 0.0;
-    
+
     // Slice positions
     float3 slicePos = sliceCoords.xyz;
-    
+
     // Color map index
     int mapIndex = (int)(colorMapIndex.x + 0.5);
-    
+
     // Border thickness for slices
     float borderThickness = colorMapIndex.y;
-    
+
     // Ray marching loop
     for (int i = 0; i < maxSteps && t < tFar; i++)
     {
         // Calculate current position along the ray
         float3 pos = rayOrigin + t * rayDir;
-        
+
         // Convert to texture coordinates [0,1]
         float3 texCoord = pos / dimensions.xyz;
-        
+
         // Robust bounds check - add extra safety margin
         if (any(texCoord < -0.001) || any(texCoord > 1.001))
         {
             break;
         }
-        
+
         // Check if this point is cut by any cutting plane
         if (IsCutByPlane(pos))
         {
             t += stepSize;
             continue;
         }
-        
+
         // Handle slice planes with higher priority
         int sliceType = 0;
         if (anySlicesEnabled && IsOnSlicePlane(pos, slicePos, stepSize * 1.5, sliceType))
@@ -1160,20 +1176,20 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             // We're on a slice plane - render it
             // Clamp coordinates to valid range to avoid sampling artifacts
             float3 safeCoord = clamp(texCoord, 0.001, 0.999);
-            
+
             // Sample the volume with clamped coordinates
             float intensity = volumeTexture.SampleLevel(linearSampler, safeCoord, 0);
             float labelValue = labelTexture.SampleLevel(pointSampler, safeCoord, 0);
-            
+
             // Convert label to material ID
             uint materialId = (uint)(labelValue + 0.5);
-            
+
             // Check if we're on a slice border
             bool onBorder = IsOnSliceBorder(pos, slicePos, borderThickness, sliceType);
-            
+
             // Create the slice color - either from material, grayscale, or border
             float4 sliceColor;
-            
+
             if (onBorder)
             {
                 // Use different colors for borders based on slice type
@@ -1198,36 +1214,36 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     sliceColor = ApplyColorMap(intensity, minThreshold, maxThreshold, mapIndex);
                 else
                     sliceColor = float4(intensity, intensity, intensity, 0.7);
-                
+
                 // Higher opacity for slices
                 sliceColor.a = 0.7;
             }
-            
+
             // Accumulate the slice color
             accumulatedColor = sliceColor;
-            
+
             // Early exit after hitting a slice
             break;
         }
-        
-        // Safety check before sampling the volume 
+
+        // Safety check before sampling the volume
         if (any(texCoord < 0.0) || any(texCoord > 1.0))
         {
             t += stepSize;
             continue;
         }
-        
+
         // Sample volume data
         float intensity = volumeTexture.SampleLevel(linearSampler, texCoord, 0);
         float labelValue = labelTexture.SampleLevel(pointSampler, texCoord, 0);
-        
+
         // Convert label to material ID
         uint materialId = (uint)(labelValue + 0.5);
-        
+
         // Initialize this sample's color to transparent
         float4 sampleColor = float4(0, 0, 0, 0);
-        
-        // Process the regular volume 
+
+        // Process the regular volume
         if (showGrayscale && intensity >= minThreshold && intensity <= maxThreshold)
         {
             // Apply color map based on selected index
@@ -1236,55 +1252,55 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             else
                 sampleColor = float4(intensity, intensity, intensity, intensity * 0.5 + 0.2);
         }
-        
+
         // Overlay material color if applicable
         if (materialId > 0 && materialVisibility[materialId] > 0.5)
         {
             // Use material color
             float4 matColor = materialColors[materialId];
             matColor.a *= materialOpacity[materialId];
-            
+
             // Replace grayscale with material color
             sampleColor = matColor;
         }
-        
+
         // Front-to-back compositing if the sample has color
         if (sampleColor.a > 0.01)
         {
             // Pre-multiply alpha
             sampleColor.rgb *= sampleColor.a;
-            
+
             // Accumulate color
             accumulatedColor += (1.0 - accumulatedColor.a) * sampleColor;
-            
+
             // Early ray termination for efficiency
             if (accumulatedColor.a > 0.95)
             {
                 break;
             }
         }
-        
+
         // Move along ray
         t += stepSize;
     }
-    
+
     // Draw wireframe if needed - only if we didn't hit anything solid
     if (accumulatedColor.a < 0.01)
     {
         // Use a much thinner wireframe
         float edgeThickness = 0.003;
-        
+
         // Check if we're on an edge of the bounding box
         if (IsOnBoundingBoxEdge(input.TexCoord, edgeThickness))
         {
             // Draw wireframe in bright white with low opacity
             return float4(1.0, 1.0, 1.0, 0.3);
         }
-        
+
         // For non-edge pixels, return fully transparent color
         return float4(0, 0, 0, 0);
     }
-    
+
     // Return the final accumulated color
     return accumulatedColor;
 }";
@@ -1756,6 +1772,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 useLodSystem = false; // Disable LOD on error
             }
         }
+
         private bool RaycastToVolume(int screenX, int screenY, out Vector3 worldPos)
         {
             worldPos = Vector3.Zero;
@@ -1842,6 +1859,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
             return false;
         }
+
         private bool IntersectBox(Vector3 rayOrigin, Vector3 rayDir,
                          Vector3 boxMin, Vector3 boxMax,
                          out float tNear, out float tFar)
@@ -1885,6 +1903,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
             return true; // If we get here, there is an intersection
         }
+
         public void ForceInitialRender()
         {
             // Store previous state
@@ -2126,7 +2145,6 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 // Non-critical, continue without color maps
             }
         }
-
 
         private Texture3D CreateTexture3DFromChunkedVolume(ChunkedVolume volume, Format format)
         {
@@ -2502,7 +2520,8 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 throw;
             }
         }
-        #endregion
+
+        #endregion Initialization
 
         #region Rendering
 
@@ -2632,7 +2651,6 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             }
         }
 
-
         private System.Drawing.Point? WorldToScreen(Vector3 worldPos)
         {
             try
@@ -2740,6 +2758,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 throw;
             }
         }
+
         private void RecreateDevice()
         {
             // Clean up existing resources first
@@ -2760,6 +2779,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
             Logger.Log("[SharpDXVolumeRenderer] Device and resources recreated after device removed error");
         }
+
         private void CleanupDirectXResources()
         {
             // Clean up render states
@@ -2806,6 +2826,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             // Don't dispose the device or swapchain yet - we'll recreate them
             Logger.Log("[SharpDXVolumeRenderer] Device resources cleaned up for recreation");
         }
+
         private void RenderVolume()
         {
             try
@@ -2896,6 +2917,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 debugMode = true;
             }
         }
+
         /// <summary>
         /// Draws a scale bar and pixel size information in the corner of the render target.
         /// </summary>
@@ -2978,7 +3000,6 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             }
         }
 
-
         /// <summary>
         /// Formats a pixel size in meters into a human-readable string
         /// </summary>
@@ -2992,6 +3013,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
             return $"{(meters * 1e9):0.###} nm";
         }
+
         private void UpdateConstantBuffer(float overrideStepSize = -1.0f)
         {
             try
@@ -3083,7 +3105,6 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             }
         }
 
-
         private void UpdateLabelTextures()
         {
             try
@@ -3168,9 +3189,11 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 Logger.Log("[SharpDXVolumeRenderer] UpdateLabelTextures error: " + ex.Message);
             }
         }
-        #endregion
+
+        #endregion Rendering
 
         #region Public Methods
+
         public void OnResize()
         {
             if (device == null || swapChain == null) return;
@@ -3465,9 +3488,11 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 Logger.Log("[SharpDXVolumeRenderer] Screenshot error: " + ex.Message);
             }
         }
-        #endregion
+
+        #endregion Public Methods
 
         #region Mouse Handlers
+
         private void OnMouseDown(object sender, MouseEventArgs e)
         {
             // If in measurement mode, only handle measurement creation and block all other interactions
@@ -3518,8 +3543,6 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 NeedsRender = true;
             }
         }
-
-
 
         private void OnMouseMove(object sender, MouseEventArgs e)
         {
@@ -3584,8 +3607,6 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 }
             }
         }
-
-
 
         private void OnMouseUp(object sender, MouseEventArgs e)
         {
@@ -3705,7 +3726,8 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                             try
                             {
                                 // Use BeginInvoke to ensure UI update happens on UI thread
-                                renderPanel.BeginInvoke(new Action(() => {
+                                renderPanel.BeginInvoke(new Action(() =>
+                                {
                                     controlPanel.RefreshMeasurementsList();
                                 }));
                             }
@@ -3724,7 +3746,8 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     {
                         try
                         {
-                            renderPanel.BeginInvoke(new Action(() => {
+                            renderPanel.BeginInvoke(new Action(() =>
+                            {
                                 controlPanel.UpdateMeasurementUI(false);
                             }));
                         }
@@ -3758,8 +3781,6 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             }
         }
 
-
-
         private void OnMouseWheel(object sender, MouseEventArgs e)
         {
             // Zoom in/out with smoother response
@@ -3786,9 +3807,11 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 NeedsRender = true;
             }
         }
-        #endregion
+
+        #endregion Mouse Handlers
 
         #region IDisposable Implementation
+
         public void Dispose()
         {
             try
@@ -3934,8 +3957,11 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 Logger.Log("[SharpDXVolumeRenderer] Error during disposal: " + ex.Message);
             }
         }
-        #endregion
+
+        #endregion IDisposable Implementation
+
         #region DXMeasurements
+
         public void SetMeasurementMode(bool enabled)
         {
             measurementMode = enabled;
@@ -3947,6 +3973,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
             Logger.Log($"[SharpDXVolumeRenderer] Measurement mode {(enabled ? "enabled" : "disabled")}");
         }
+
         private void CreateMeasurementResources()
         {
             try
@@ -4121,6 +4148,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 Logger.Log("[SharpDXVolumeRenderer] Error updating measurement buffer: " + ex.Message);
             }
         }
+
         private void EnsureTextRenderer()
         {
             try
@@ -4136,6 +4164,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 Logger.Log("[SharpDXVolumeRenderer] Error creating text renderer: " + ex.Message);
             }
         }
+
         private void UpdateMeasurementLabels()
         {
             try
@@ -4302,6 +4331,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 Logger.Log($"[SharpDXVolumeRenderer] Error rendering measurements: {ex.Message}");
             }
         }
+
         private void DrawMeasurementLabelsDirectly()
         {
             // We'll manually draw measurement labels by creating overlay controls
@@ -4393,6 +4423,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 Logger.Log($"[SharpDXVolumeRenderer] Error drawing measurement labels: {ex.Message}");
             }
         }
+
         private List<Label> measurementLabels = new List<Label>();
 
         // Method to add a measurement text control
@@ -4457,7 +4488,6 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 Logger.Log($"[SharpDXVolumeRenderer] Error removing measurement labels: {ex.Message}");
             }
         }
-
 
         private void UpdateMeasurementVertexBuffer()
         {
@@ -4551,8 +4581,10 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             }
         }
 
-        #endregion
+        #endregion DXMeasurements
+
         #region shader reset
+
         private void ResetShaderResources()
         {
             try
@@ -4566,6 +4598,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 Logger.Log("[SharpDXVolumeRenderer] Error resetting shader resources: " + ex.Message);
             }
         }
+
         [StructLayout(LayoutKind.Sequential)]
         private struct LineVertex
         {
@@ -4578,8 +4611,11 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 Color = color;
             }
         }
-        #endregion
+
+        #endregion shader reset
+
         #region Streaming Rendering
+
         private void InitializeStreamingRenderer()
         {
             if (isInitializingStreaming || device == null)
@@ -4724,6 +4760,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 useStreamingRenderer = false;
             }
         }
+
         private void RenderVolumeWithStreaming()
         {
             if (isInitializingStreaming)
@@ -4924,8 +4961,6 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             }
         }
 
-
-
         private void LoadLowResolutionOverview()
         {
             // Create heavily downsampled overview of the entire volume
@@ -5061,6 +5096,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
             Logger.Log($"[SharpDXVolumeRenderer] Visible chunks: {visibleChunks.Count}, Loaded: {loadedChunks.Count}, Queued: {chunkLoadQueue.Count}");
         }
+
         private Vector3 GetCameraPosition()
         {
             // Calculate current camera position
@@ -5077,6 +5113,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
             return volumeCenter - (cameraDirection * cameraDistance) + panOffset;
         }
+
         private ViewFrustum CalculateViewFrustum()
         {
             // Calculate the camera's view frustum for chunk visibility tests
@@ -5106,6 +5143,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 AspectRatio = aspectRatio
             };
         }
+
         private bool IsChunkVisible(Vector3 minBounds, Vector3 maxBounds, ViewFrustum frustum)
         {
             // Simple frustum culling check for a chunk
@@ -5297,7 +5335,6 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             }
         }
 
-
         private void UnloadChunk(Vector3 chunkKey)
         {
             try
@@ -5337,6 +5374,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             public float FOV;
             public float AspectRatio;
         }
+
         private void RenderVolumeStreaming()
         {
             // Update which chunks are visible based on the current view
@@ -5394,7 +5432,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 else
                 {
                     // Use streaming chunks
-                    // Note: This is oversimplified - ideally we would need to modify the shader 
+                    // Note: This is oversimplified - ideally we would need to modify the shader
                     // to handle multiple chunk textures together
 
                     // For now, we'll just use one of the loaded chunks
@@ -5452,11 +5490,13 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 debugMode = true;
             }
         }
+
         public void ClearMeasurementLabels()
         {
             // Clear any existing measurement label controls
             RemoveAllMeasurementTextControls();
         }
+
         private void DisposeStreamingResources()
         {
             try
@@ -5517,6 +5557,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 Logger.Log($"[SharpDXVolumeRenderer] Error disposing streaming resources: {ex.Message}");
             }
         }
+
         // Fixed code with renamed progress variable to avoid naming conflict
         private void InitializeStreamingRendererAsync()
         {
@@ -5536,9 +5577,11 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             }
 
             // Create and show the progress form on the UI thread
-            mainForm.Invoke((Action)(() => {
+            mainForm.Invoke((Action)(() =>
+            {
                 streamingProgressForm = new ProgressForm("Initializing Streaming Renderer...");
-                streamingProgressForm.FormClosed += (s, e) => {
+                streamingProgressForm.FormClosed += (s, e) =>
+                {
                     // If the user closes the form, cancel the initialization
                     if (!initStreamingCts.IsCancellationRequested)
                     {
@@ -5555,14 +5598,16 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             isInitializingStreaming = true;
 
             // Start the async task
-            streamingInitTask = Task.Run(() => {
+            streamingInitTask = Task.Run(() =>
+            {
                 try
                 {
                     Logger.Log("[InitializeStreamingRendererAsync] Starting initialization on background thread");
 
                     // Set a timer to update the progress UI periodically
                     int progressPercent = 0;
-                    var timer = new System.Threading.Timer(state => {
+                    var timer = new System.Threading.Timer(state =>
+                    {
                         if (streamingProgressForm != null && !streamingProgressForm.IsDisposed)
                         {
                             progressPercent = (progressPercent + 3) % 100; // Simple progress simulation
@@ -5574,7 +5619,8 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     {
                         // Create a series of progressively lower-resolution versions of the volume
                         // These will be used during camera movement and then progressively refined
-                        CreateStreamingLODTexturesAsync(token, progressValue => {
+                        CreateStreamingLODTexturesAsync(token, progressValue =>
+                        {
                             if (streamingProgressForm != null && !streamingProgressForm.IsDisposed)
                             {
                                 streamingProgressForm.SafeUpdateProgress(progressValue, 100);
@@ -5598,8 +5644,10 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                         streamingProgressForm.SafeUpdateProgress(100, 100, "Initialization complete!");
 
                         // Close the form after a short delay
-                        Task.Delay(1000).ContinueWith(_ => {
-                            mainForm.Invoke((Action)(() => {
+                        Task.Delay(1000).ContinueWith(_ =>
+                        {
+                            mainForm.Invoke((Action)(() =>
+                            {
                                 if (streamingProgressForm != null && !streamingProgressForm.IsDisposed)
                                 {
                                     streamingProgressForm.Close();
@@ -5623,7 +5671,8 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     Logger.Log($"[InitializeStreamingRendererAsync] Error initializing streaming renderer: {ex.Message}");
 
                     // Show error message to user
-                    mainForm.Invoke((Action)(() => {
+                    mainForm.Invoke((Action)(() =>
+                    {
                         MessageBox.Show(mainForm,
                             $"Failed to initialize streaming renderer: {ex.Message}\n\nFalling back to standard renderer.",
                             "Initialization Error",
@@ -5640,7 +5689,8 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     isInitializingStreaming = false;
 
                     // Close progress form if still open
-                    mainForm.Invoke((Action)(() => {
+                    mainForm.Invoke((Action)(() =>
+                    {
                         if (streamingProgressForm != null && !streamingProgressForm.IsDisposed)
                         {
                             streamingProgressForm.Close();
@@ -5650,6 +5700,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 }
             }, token);
         }
+
         private void CreateStreamingLODTexturesAsync(CancellationToken token, Action<int> progressCallback)
         {
             // Clean up any existing textures first
@@ -5712,7 +5763,8 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     byte[] lodData = new byte[width * height * depth];
 
                     // Use parallel processing for faster downsampling
-                    Parallel.For(0, depth, new ParallelOptions { CancellationToken = token, MaxDegreeOfParallelism = Environment.ProcessorCount }, z => {
+                    Parallel.For(0, depth, new ParallelOptions { CancellationToken = token, MaxDegreeOfParallelism = Environment.ProcessorCount }, z =>
+                    {
                         // Check cancellation occasionally but not on every iteration
                         if (z % 10 == 0) token.ThrowIfCancellationRequested();
 
@@ -5788,6 +5840,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 throw new InvalidOperationException("Failed to create any LOD textures for streaming");
             }
         }
+
         private void HandleRenderException(SharpDXException ex)
         {
             try
@@ -5815,6 +5868,6 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             }
         }
 
-        #endregion
+        #endregion Streaming Rendering
     }
 }

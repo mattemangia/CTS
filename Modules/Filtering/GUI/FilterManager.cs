@@ -1,15 +1,15 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using ILGPU;
-using ILGPU.Runtime;
 using ILGPU.Algorithms;
+using ILGPU.Runtime;
 using ILGPU.Runtime.CPU;
-using System.Collections.Generic;
-using System.Threading;
 
 namespace CTSegmenter
 {
@@ -25,6 +25,7 @@ namespace CTSegmenter
 
         // ILGPU-related fields
         private Context gpuContext;
+
         private Accelerator accelerator;
         private bool useGPU = true;
         private bool gpuInitialized = false;
@@ -32,6 +33,7 @@ namespace CTSegmenter
 
         // UI components
         private Panel previewPanel;
+
         private PictureBox xyPreview;
         private Panel controlsPanel;
         private ComboBox cmbFilterType;
@@ -52,6 +54,7 @@ namespace CTSegmenter
 
         //Preview Slice navigation
         private TrackBar sliceTrackBar;
+
         private Label lblSliceNumber;
         private System.Threading.Timer renderTimer;
         private bool sliderDragging = false;
@@ -60,6 +63,7 @@ namespace CTSegmenter
 
         //ROI Fields
         private bool useRoi = false;
+
         private Rectangle roi = new Rectangle(100, 100, 200, 200); // Default ROI size and position
         private bool isDraggingRoi = false;
         private bool isResizingRoi = false;
@@ -82,7 +86,6 @@ namespace CTSegmenter
         private bool isPanning = false;
         private Point lastPanPoint;
         private Button btnResetZoom;
-        
 
         /// <summary>
         /// Constructor that takes a reference to the MainForm, so we can access the loaded volume data.
@@ -147,7 +150,7 @@ namespace CTSegmenter
             gpuInitialized = false;
         }
 
-        #endregion
+        #endregion GPU Init / Dispose
 
         #region Form Initialization
 
@@ -894,7 +897,7 @@ namespace CTSegmenter
             currentY += 30;
         }
 
-        #endregion
+        #endregion Form Initialization
 
         #region Preview Logic
 
@@ -986,7 +989,6 @@ namespace CTSegmenter
             }
         }
 
-
         private ProgressForm GetPreviewProgressForm(string filterName)
         {
             // Only create progress indicator for expensive filters
@@ -999,6 +1001,7 @@ namespace CTSegmenter
             }
             return null;
         }
+
         /// <summary>
         /// Called when the user presses "Preview Filter" – applies the chosen filter just to the currently displayed XY slice,
         /// so they can see how it would look, without altering the rest of the volume.
@@ -1050,8 +1053,6 @@ namespace CTSegmenter
             byte[] originalSlice = new byte[sliceData.Length];
             Array.Copy(sliceData, originalSlice, sliceData.Length);
             byte[] filteredSlice;
-
-            
 
             if (useRoi)
             {
@@ -1124,8 +1125,7 @@ namespace CTSegmenter
             filterForm.Cursor = Cursors.Default;
         }
 
-
-        #endregion
+        #endregion Preview Logic
 
         #region Apply To All Slices
 
@@ -1179,7 +1179,7 @@ namespace CTSegmenter
             {
                 if (do3D)
                 {
-                    // We do a genuine 3D filter. 
+                    // We do a genuine 3D filter.
                     await Task.Run(() =>
                     {
                         ApplyFilter3D(filterName, kernelSize, sigma, h,
@@ -1294,7 +1294,7 @@ namespace CTSegmenter
             }
         }
 
-        #endregion
+        #endregion Apply To All Slices
 
         #region Filter Implementation
 
@@ -1340,7 +1340,7 @@ namespace CTSegmenter
                         return GaussianFilter2D_CPU(sliceData, width, height, kernelSize, sigma);
 
                 case "Smoothing":
-                    
+
                     if (useGPUFlag && gpuInitialized)
                         return SmoothingFilter2D_GPU(sliceData, width, height, kernelSize);
                     else
@@ -1380,7 +1380,7 @@ namespace CTSegmenter
                     }
                     else
                     {
-                        // Try the direct 2D CPU implementation first 
+                        // Try the direct 2D CPU implementation first
                         byte[] resultCPU = NonLocalMeans2D_CPU(sliceData, width, height, kernelSize, h, templateSize, searchSize);
 
                         // Check if the filter had a visible effect
@@ -1415,11 +1415,13 @@ namespace CTSegmenter
                         return UnsharpMask2D_GPU(sliceData, width, height, unsharpAmount, kernelSize / 2, sigma);
                     else
                         return UnsharpMask2D_CPU(sliceData, width, height, unsharpAmount, kernelSize / 2, sigma);
+
                 case "Edge Detection":
                     if (useGPUFlag && gpuInitialized)
                         return EdgeDetection2D_GPU(sliceData, width, height, normalizeEdges);
                     else
                         return EdgeDetection2D_CPU(sliceData, width, height, normalizeEdges);
+
                 default:
                     return sliceData; // unfiltered
             }
@@ -1494,7 +1496,7 @@ namespace CTSegmenter
                     string modeText = useGPUFlag ? "GPU" : "CPU";
                     pForm.SafeUpdateProgress(0, 1, $"Running 3D Non-Local Means on {modeText}...");
 
-                    // The NLM3DFilter.RunNLM3D method handles both CPU and GPU 
+                    // The NLM3DFilter.RunNLM3D method handles both CPU and GPU
                     // implementation selection internally, now with progress updates
                     dstVolume = nlmFilter.RunNLM3D(
                         srcVolume,
@@ -1596,8 +1598,7 @@ namespace CTSegmenter
             }
         }
 
-
-        #endregion
+        #endregion Filter Implementation
 
         #region 3D Bilateral Filter
 
@@ -1745,7 +1746,7 @@ namespace CTSegmenter
         /// <summary>
         /// ILGPU kernel for 3D bilateral filtering
         /// </summary>
-        static void BilateralFilter3D_Kernel(
+        private static void BilateralFilter3D_Kernel(
             Index1D idx,
             ArrayView<byte> src,
             ArrayView<byte> dst,
@@ -1763,7 +1764,7 @@ namespace CTSegmenter
 
             // Convert 1D index to 3D coordinates
             int z = (int)(idx / sliceSize);
-            int remainder = (int)(idx % sliceSize);
+            int remainder = idx % sliceSize;
             int y = remainder / width;
             int x = remainder % width;
 
@@ -1823,7 +1824,8 @@ namespace CTSegmenter
                 dst[idx] = src[idx]; // Fallback to original
             }
         }
-        #endregion
+
+        #endregion 3D Bilateral Filter
 
         #region 3D Unsharp Masking
 
@@ -1910,7 +1912,7 @@ namespace CTSegmenter
         /// <summary>
         /// ILGPU kernel for 3D unsharp masking (same as 2D version)
         /// </summary>
-        static void UnsharpMask3D_Kernel(
+        private static void UnsharpMask3D_Kernel(
             Index1D idx,
             ArrayView<byte> src,
             ArrayView<byte> blurred,
@@ -1933,12 +1935,10 @@ namespace CTSegmenter
 
             dst[idx] = (byte)result;
         }
-        #endregion
+
+        #endregion 3D Unsharp Masking
 
         #region ROI Implementation
-
-
-
 
         /// <summary>
         /// Initializes the ROI to a reasonable default size and position based on the current image
@@ -1991,7 +1991,7 @@ namespace CTSegmenter
                             return new Point(-1, -1); // Outside image area
 
                         return new Point(
-                            (int)(screenPoint.X * xyPreview.Image.Width / xyPreview.Width),
+                            screenPoint.X * xyPreview.Image.Width / xyPreview.Width,
                             (int)((screenPoint.Y - yOffset) * xyPreview.Image.Height / scaledHeight)
                         );
                     }
@@ -2006,7 +2006,7 @@ namespace CTSegmenter
 
                         return new Point(
                             (int)((screenPoint.X - xOffset) * xyPreview.Image.Width / scaledWidth),
-                            (int)(screenPoint.Y * xyPreview.Image.Height / xyPreview.Height)
+                            screenPoint.Y * xyPreview.Image.Height / xyPreview.Height
                         );
                     }
                 }
@@ -2044,8 +2044,6 @@ namespace CTSegmenter
                 return GetDisplayRectangle(imageRect);
             }
         }
-
-
 
         /// <summary>
         /// Converts image coordinates to display coordinates for rendering the ROI
@@ -2167,6 +2165,7 @@ namespace CTSegmenter
                     RESIZE_HANDLE_SIZE);
             }
         }
+
         /// <summary>
         /// Draws the ROI when in automatic zoom mode
         /// </summary>
@@ -2193,8 +2192,6 @@ namespace CTSegmenter
                     RESIZE_HANDLE_SIZE);
             }
         }
-
-
 
         /// <summary>
         /// Mouse down handler for ROI interaction
@@ -2312,10 +2309,9 @@ namespace CTSegmenter
             xyPreview.MouseUp += XyPreview_MouseUpForPan;
         }
 
-        #endregion
+        #endregion ROI Implementation
 
-
-        #region 2D CPU Methods 
+        #region 2D CPU Methods
 
         private byte[] GaussianFilter2D_CPU(byte[] src, int width, int height, int kSize, float sigma)
         {
@@ -2633,7 +2629,7 @@ namespace CTSegmenter
             return dist2;
         }
 
-        #endregion
+        #endregion 2D CPU Methods
 
         #region 3D CPU Methods (Examples)
 
@@ -2730,9 +2726,10 @@ namespace CTSegmenter
             }
         }
 
-        #endregion
+        #endregion 3D CPU Methods (Examples)
 
-        #region 2D GPU Methods 
+        #region 2D GPU Methods
+
         /// <summary>
         /// Builds a complete 2D Gaussian kernel of size kSize x kSize and returns it as a
         /// flattened float[]. Also returns the sum of all weights (kernelSum) if needed.
@@ -2765,6 +2762,7 @@ namespace CTSegmenter
             kernelSum = 1f; // after normalization
             return kernel;
         }
+
         private byte[] NonLocalMeans2D_GPU(byte[] src, int width, int height,
                                   float h, int templateSize, int searchSize)
         {
@@ -2799,6 +2797,7 @@ namespace CTSegmenter
 
             return dst;
         }
+
         private byte[] GaussianFilter2D_GPU(byte[] src, int width, int height, int kSize, float sigma)
         {
             int radius = kSize / 2;
@@ -2843,7 +2842,7 @@ namespace CTSegmenter
             return dst;
         }
 
-        static void NLM2D_Kernel(
+        private static void NLM2D_Kernel(
     Index1D idx,
     ArrayView<byte> src,
     ArrayView<byte> dst,
@@ -2937,14 +2936,14 @@ namespace CTSegmenter
         /// it loops over the local window of size (kSize x kSize) and multiplies
         /// each neighbor by the corresponding kernel weight. Then writes the
         /// resulting sum back to dst.
-        /// 
+        ///
         /// src      = original image bytes
         /// dst      = filtered image bytes
         /// kernel   = 2D Gaussian weights, flattened (kSize*kSize)
         /// radius   = half the kernel size (kSize/2)
         /// width, height = image dimensions
         /// </summary>
-        static void GaussianConvolutionKernel(
+        private static void GaussianConvolutionKernel(
     Index1D idx,                // This is the pixel index in [0..width*height-1]
     ArrayView<byte> src,        // flattened source image
     ArrayView<byte> dst,        // flattened destination image
@@ -3022,7 +3021,7 @@ namespace CTSegmenter
         }
 
         // Box filter kernel implementation
-        static void BoxFilterKernel(
+        private static void BoxFilterKernel(
             Index1D idx,
             ArrayView<byte> src,
             ArrayView<byte> dst,
@@ -3076,15 +3075,15 @@ namespace CTSegmenter
             return dst;
         }
 
-        // Example kernel that just copies data. 
+        // Example kernel that just copies data.
         // Replace with convolution/memory pattern for GPU filtering.
-        static void CopyKernel(Index1D idx, ArrayView<byte> src, ArrayView<byte> dst)
+        private static void CopyKernel(Index1D idx, ArrayView<byte> src, ArrayView<byte> dst)
         {
             if (idx < src.Length)
                 dst[idx] = src[idx];
         }
 
-        #endregion
+        #endregion 2D GPU Methods
 
         #region Edge Detection Filter
 
@@ -3253,7 +3252,7 @@ namespace CTSegmenter
         /// <summary>
         /// ILGPU kernel for calculating Sobel gradients in 2D
         /// </summary>
-        static void EdgeDetection2D_GradientKernel(
+        private static void EdgeDetection2D_GradientKernel(
             Index1D idx,
             ArrayView<byte> src,
             ArrayView<int> gradients,
@@ -3304,7 +3303,7 @@ namespace CTSegmenter
             pixelY += 1 * src[(y + 1) * width + (x + 1)];
 
             // Calculate gradient magnitude
-            gradients[idx] = (int)XMath.Sqrt((float)(pixelX * pixelX + pixelY * pixelY));
+            gradients[idx] = (int)XMath.Sqrt(pixelX * pixelX + pixelY * pixelY);
         }
 
         /// <summary>
@@ -3519,7 +3518,7 @@ namespace CTSegmenter
         /// <summary>
         /// ILGPU kernel for calculating Sobel gradients in 3D
         /// </summary>
-        static void EdgeDetection3D_GradientKernel(
+        private static void EdgeDetection3D_GradientKernel(
             Index1D idx,
             ArrayView<byte> src,
             ArrayView<int> gradients,
@@ -3532,7 +3531,7 @@ namespace CTSegmenter
 
             int sliceSize = width * height;
             int z = (int)(idx / sliceSize);
-            int remainder = (int)(idx % sliceSize);
+            int remainder = idx % sliceSize;
             int y = remainder / width;
             int x = remainder % width;
 
@@ -3581,13 +3580,13 @@ namespace CTSegmenter
             pixelZ += 1 * src[(z + 1) * sliceSize + (y + 1) * width + (x)];
 
             // Calculate gradient magnitude (3D)
-            gradients[idx] = (int)XMath.Sqrt((float)(pixelX * pixelX + pixelY * pixelY + pixelZ * pixelZ));
+            gradients[idx] = (int)XMath.Sqrt(pixelX * pixelX + pixelY * pixelY + pixelZ * pixelZ);
         }
 
         /// <summary>
         /// ILGPU kernel for normalizing gradient values to 0-255 range
         /// </summary>
-        static void NormalizeKernel(
+        private static void NormalizeKernel(
             Index1D idx,
             ArrayView<int> gradients,
             ArrayView<byte> dst,
@@ -3596,7 +3595,7 @@ namespace CTSegmenter
             if (idx >= gradients.Length)
                 return;
 
-            float normalizedValue = (float)gradients[idx] * 255.0f / maxGradient;
+            float normalizedValue = gradients[idx] * 255.0f / maxGradient;
             int result = (int)(normalizedValue + 0.5f);
 
             if (result < 0) result = 0;
@@ -3608,7 +3607,7 @@ namespace CTSegmenter
         /// <summary>
         /// ILGPU kernel for clamping gradient values to 0-255 range
         /// </summary>
-        static void ClampKernel(
+        private static void ClampKernel(
             Index1D idx,
             ArrayView<int> gradients,
             ArrayView<byte> dst)
@@ -3626,7 +3625,7 @@ namespace CTSegmenter
         /// <summary>
         /// ILGPU kernel for clearing an array (setting to zero)
         /// </summary>
-        static void ClearKernel(
+        private static void ClearKernel(
             Index1D idx,
             ArrayView<byte> dst)
         {
@@ -3634,8 +3633,7 @@ namespace CTSegmenter
                 dst[idx] = 0;
         }
 
-        #endregion
-
+        #endregion Edge Detection Filter
 
         #region Bilateral Filter
 
@@ -3757,7 +3755,7 @@ namespace CTSegmenter
         /// <summary>
         /// ILGPU kernel for bilateral filtering
         /// </summary>
-        static void BilateralFilter2D_Kernel(
+        private static void BilateralFilter2D_Kernel(
             Index1D idx,
             ArrayView<byte> src,
             ArrayView<byte> dst,
@@ -3821,7 +3819,8 @@ namespace CTSegmenter
                 dst[idx] = src[idx]; // Fallback to original
             }
         }
-        #endregion
+
+        #endregion Bilateral Filter
 
         #region Unsharp Masking
 
@@ -3895,7 +3894,7 @@ namespace CTSegmenter
         /// <summary>
         /// ILGPU kernel for unsharp masking
         /// </summary>
-        static void UnsharpMask2D_Kernel(
+        private static void UnsharpMask2D_Kernel(
             Index1D idx,
             ArrayView<byte> src,
             ArrayView<byte> blurred,
@@ -3917,8 +3916,8 @@ namespace CTSegmenter
 
             dst[idx] = (byte)result;
         }
-        #endregion
 
+        #endregion Unsharp Masking
 
         #region Helpers
 
@@ -3942,13 +3941,16 @@ namespace CTSegmenter
             }
             return kernel;
         }
+
         public void Show()
         {
             filterForm?.Show();
         }
 
-        #endregion
+        #endregion Helpers
+
         #region 3DKernels
+
         /// <summary>
         /// Builds a naive 3D Gaussian kernel of size kSize^3, normalized so sum=1.
         /// Example: if kSize=3, we get a small 3x3x3 kernel. If kSize=5, we get 5x5x5, etc.
@@ -4036,7 +4038,7 @@ namespace CTSegmenter
         /// Flattened volume: index = x + y*width + z*(width*height).
         /// We'll do a triple loop over [-radius..radius] in x, y, z, read from src, multiply by kernel.
         /// </summary>
-        static void Gaussian3D_Kernel(
+        private static void Gaussian3D_Kernel(
             Index1D threadIndex,        // 0..(width*height*depth-1)
             ArrayView<byte> src,
             ArrayView<byte> dst,
@@ -4052,19 +4054,11 @@ namespace CTSegmenter
 
             // Compute (x,y,z)
             int z = (int)(threadIndex / (width * height));
-            int rem = (int)(threadIndex % (width * height));
+            int rem = threadIndex % (width * height);
             int y = rem / width;
             int x = rem % width;
 
             float accum = 0f;
-
-            // For indexing into kernel: we do a smaller triple loop
-            // We map (dx,dy,dz) -> index in [0..kSize^3-1]
-            // We'll do it as:
-            //   kernelIndex = (dz + radius)* (kSize^2) + (dy + radius)*kSize + (dx + radius)
-            // with dx,dy,dz in [-radius..radius].
-            int i = 0;
-            int kernelIndex = 0; // We'll compute it inside the loops
             for (int dz = -radius; dz <= radius; dz++)
             {
                 int z2 = z + dz;
@@ -4105,6 +4099,7 @@ namespace CTSegmenter
 
             dst[threadIndex] = (byte)val;
         }
+
         /// <summary>
         /// Runs a naive 3D Median filter on the GPU:
         /// - Expects a flattened volume array (width*height*depth).
@@ -4150,12 +4145,12 @@ namespace CTSegmenter
         /// <summary>
         /// A naive 3D median kernel in ILGPU, with no placeholders:
         /// Each thread (Index1D) processes one voxel. We gather up to kSize^3 neighbors,
-        /// store them in a local array, sort, pick the middle. 
+        /// store them in a local array, sort, pick the middle.
         /// For large kSize, this is expensive but fully functional.
-        /// 
+        ///
         /// Flattened volume index -> (x,y,z). Then triple loop over [-radius..radius].
         /// </summary>
-        static void Median3D_Kernel(
+        private static void Median3D_Kernel(
             Index1D threadIndex,
             ArrayView<byte> src,
             ArrayView<byte> dst,
@@ -4170,11 +4165,11 @@ namespace CTSegmenter
 
             // Flattened -> (x,y,z)
             int z = (int)(threadIndex / (width * height));
-            int rem = (int)(threadIndex % (width * height));
+            int rem = threadIndex % (width * height);
             int y = rem / width;
             int x = rem % width;
 
-            // We gather kSize^3 neighbors in a local array. 
+            // We gather kSize^3 neighbors in a local array.
             // For safety, we'll do dynamic stackalloc here:
             int windowSize = kSize * kSize * kSize;
             Span<byte> window = stackalloc byte[windowSize];
@@ -4205,8 +4200,7 @@ namespace CTSegmenter
             }
 
             // Sort the local array. ILGPU supports 'XMath.Sort', but it's easier to do bubble or
-            
-            
+
             for (int i = 1; i < idx; i++)
             {
                 byte key = window[i];
@@ -4219,11 +4213,12 @@ namespace CTSegmenter
                 window[j + 1] = key;
             }
 
-            // The median is window[idx/2], 
+            // The median is window[idx/2],
             // since idx == kSize^3
             byte medianVal = window[idx / 2];
             dst[threadIndex] = medianVal;
         }
+
         /// <summary>
         /// CPU-based 3D Gaussian for a flattened volume. No placeholders: triple nested loops,
         /// plus triple nested neighbor loops. Very expensive for large kernel but fully naive.
@@ -4242,29 +4237,9 @@ namespace CTSegmenter
                     for (int x = 0; x < width; x++)
                     {
                         float accum = 0f;
-                        // neighbor loops
-                        int kIndex = 0;
                         int idxDst = z * width * height + y * width + x;
 
-                        int kernelPos = 0;
-                        int index = 0;
-
-                        int i = 0;
-                        int outIndex = 0;
-
                         int offsetBase = z * (width * height);
-
-                        float sumVal = 0f;
-                        int bigIndex = 0;
-
-                        float val = 0f;
-
-                        float total = 0f;
-
-                        // We'll do it more directly:
-                        float localSum = 0f;
-                        int kernelIndexBaseZ = 0;
-                        int zIndex = 0;
 
                         for (int dz = -radius; dz <= radius; dz++)
                         {
@@ -4365,7 +4340,8 @@ namespace CTSegmenter
             return dst;
         }
 
-        #endregion
+        #endregion 3DKernels
+
         /// <summary>
         /// Optimized version of slice rendering to minimize UI thread work
         /// </summary>
@@ -4421,7 +4397,8 @@ namespace CTSegmenter
             renderTimer = new System.Threading.Timer(RenderPendingSlice, null, Timeout.Infinite, Timeout.Infinite);
 
             // Keyboard navigation for slices
-            filterForm.KeyDown += (s, e) => {
+            filterForm.KeyDown += (s, e) =>
+            {
                 if (e.KeyCode == Keys.Left || e.KeyCode == Keys.Down)
                 {
                     if (sliceTrackBar.Value > sliceTrackBar.Minimum)
@@ -4457,7 +4434,8 @@ namespace CTSegmenter
             };
 
             // Configure events with performance in mind
-            sliceTrackBar.ValueChanged += (s, e) => {
+            sliceTrackBar.ValueChanged += (s, e) =>
+            {
                 // Update the slice number immediately for better responsiveness feel
                 lblSliceNumber.Text = $"{sliceTrackBar.Value + 1}/{mainForm.GetDepth()}";
 
@@ -4475,6 +4453,7 @@ namespace CTSegmenter
             // Make form focusable to enable keyboard navigation
             filterForm.KeyPreview = true;
         }
+
         /// <summary>
         /// Optimized slice rendering that minimizes memory allocations and UI thread work
         /// </summary>
@@ -4491,12 +4470,13 @@ namespace CTSegmenter
                 Bitmap newBitmap = CreateBitmapDirectlyFromVolume(sliceToRender);
 
                 // Update UI on the UI thread but keep it minimal
-                filterForm.BeginInvoke(new Action(() => {
+                filterForm.BeginInvoke(new Action(() =>
+                {
                     try
                     {
                         if (filterForm == null || filterForm.IsDisposed) return;
 
-                        // Update the MainForm's current slice 
+                        // Update the MainForm's current slice
                         mainForm.CurrentSlice = sliceToRender;
 
                         // Swap the image
@@ -4523,6 +4503,7 @@ namespace CTSegmenter
                 Logger.Log($"[FilterManager] Error in RenderPendingSlice: {ex.Message}");
             }
         }
+
         /// <summary>
         /// Creates a bitmap directly from the volume data without intermediate copies
         /// </summary>
@@ -4633,6 +4614,7 @@ namespace CTSegmenter
 
         // Add field to track if we have a filtered slice displayed
         private byte[] lastFilteredSlice = null;
+
         private void UpdateForNewVolumeData()
         {
             if (sliceTrackBar != null)
@@ -4646,6 +4628,7 @@ namespace CTSegmenter
             lastFilteredSlice = null;
             RenderPreviewSlice();
         }
+
         public void UpdateVolumeData()
         {
             UpdateForNewVolumeData();
@@ -4698,6 +4681,7 @@ namespace CTSegmenter
             // Apply the zoom with the mouse position as focus
             ApplyZoomWithFocus(mousePos, oldZoom);
         }
+
         /// <summary>
         /// Calculates the initial zoom to fit the image to the PictureBox
         /// </summary>
@@ -4733,6 +4717,7 @@ namespace CTSegmenter
                 xyPreview.Cursor = Cursors.Hand;
             }
         }
+
         private byte[] NonLocalMeansWithNLM3DFilterClass(byte[] src, int width, int height,
     float h, int templateSize, int searchSize, bool useGPU)
         {
@@ -4765,7 +4750,7 @@ namespace CTSegmenter
                     height,
                     3,                   // Just 3 slices
                     Math.Min(1, templateSize),  // Keep template small for preview
-                    Math.Min(3, searchSize),    // Keep search small for preview 
+                    Math.Min(3, searchSize),    // Keep search small for preview
                     h,
                     useGPU,
                     null);             // No progress form for preview
@@ -4787,6 +4772,7 @@ namespace CTSegmenter
 
             return centerSlice;
         }
+
         /// <summary>
         /// Handles mouse move for panning with middle button only
         /// </summary>
@@ -4953,6 +4939,7 @@ namespace CTSegmenter
                 }
             }
         }
+
         /// <summary>
         /// Sets up the mouse wheel zoom and pan functionality
         /// </summary>
@@ -5021,7 +5008,5 @@ namespace CTSegmenter
             controlsPanel.Controls.Add(lblSection);
             currentY += 25;
         }
-
-
     }
 }

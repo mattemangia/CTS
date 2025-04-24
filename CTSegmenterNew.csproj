@@ -104,6 +104,7 @@
       <Generator>SettingsSingleFileGenerator</Generator>
       <LastGenOutput>Settings1.Designer.cs</LastGenOutput>
     </None>
+    <None Include="Ruleset.ruleset" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Interfaces\IMaterialOperations.cs" />

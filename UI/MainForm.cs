@@ -1,19 +1,16 @@
 ﻿using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using Krypton.Toolkit;                     
 using Krypton.Docking;
 using Krypton.Navigator;
+using Krypton.Toolkit;
 
 namespace CTSegmenter
 {
@@ -23,7 +20,7 @@ namespace CTSegmenter
     public partial class MainForm : KryptonForm
     {
         #region Fields
-        private KryptonManager _kryptonManager;                
+        private KryptonManager _kryptonManager;
         private KryptonDockingManager _dockingManager;
         // Volume metadata
         private int width, height, depth;
@@ -175,10 +172,10 @@ namespace CTSegmenter
         public enum OrthogonalView { XZ, YZ }
 
         //Dark theme
-        
+
         private readonly KryptonManager _km = new KryptonManager();     // one per application
-        private KryptonDockingManager _dock;           
-        
+        private KryptonDockingManager _dock;
+
         #endregion
 
         #region Initialization and Setup
@@ -186,7 +183,7 @@ namespace CTSegmenter
         {
             try
             {
-                
+
                 Logger.Log("[MainForm] Constructor start.");
                 try
                 {
@@ -199,9 +196,9 @@ namespace CTSegmenter
                 this.Text = "CT Segmentation Suite - Main Viewer";
                 this.Size = new Size(1700, 800);
                 this.DoubleBuffered = true;
-                var km=new KryptonManager();
+                var km = new KryptonManager();
                 km.GlobalPaletteMode = PaletteMode.Office2010BlackDarkMode;
-                
+
                 // Create and configure the main layout
                 SetupMainLayout();
                 InitializeDocking();
@@ -213,7 +210,7 @@ namespace CTSegmenter
                 {
                     _ = LoadDatasetAsync(args[0]);
                 }
-                
+
                 Logger.Log("[MainForm] Constructor end.");
             }
             catch (Exception ex)
@@ -298,7 +295,8 @@ namespace CTSegmenter
                          KryptonPageFlags.DockingAllowDocked);
 
             // Handle form closing to exit the application
-            ctrlForm.FormClosing += (s, e) => {
+            ctrlForm.FormClosing += (s, e) =>
+            {
                 Application.Exit();
             };
 
@@ -316,7 +314,8 @@ namespace CTSegmenter
             }
 
             // Add a custom handler to the docking manager to handle page removal
-            _dockingManager.PageCloseRequest += (s, e) => {
+            _dockingManager.PageCloseRequest += (s, e) =>
+            {
                 // When any page is requested to close, exit the application
                 Application.Exit();
             };
@@ -365,7 +364,8 @@ namespace CTSegmenter
                          KryptonPageFlags.DockingAllowDocked);
 
             // Handle form closing to exit the application
-            ctrl.FormClosing += (s, e) => {
+            ctrl.FormClosing += (s, e) =>
+            {
                 Application.Exit();
             };
 
@@ -378,7 +378,8 @@ namespace CTSegmenter
             _dock.ManageControl("MainHost", this);
 
             // Add a custom handler to the docking manager to handle page removal
-            _dock.PageCloseRequest += (s, e) => {
+            _dock.PageCloseRequest += (s, e) =>
+            {
                 // When any page is requested to close, exit the application
                 Application.Exit();
             };
@@ -532,7 +533,8 @@ namespace CTSegmenter
                 yzView.Paint += (s, e) => ViewPaint(ViewType.YZ, e);
 
                 // Set resize handler for the form
-                this.Resize += (s, e) => {
+                this.Resize += (s, e) =>
+                {
                     // Clamp pan values when resizing
                     foreach (ViewType viewType in Enum.GetValues(typeof(ViewType)))
                     {
@@ -617,7 +619,8 @@ namespace CTSegmenter
             SetupViewEvents(yzView, ViewType.YZ);
 
             // Set up form resize event
-            this.Resize += (s, e) => {
+            this.Resize += (s, e) =>
+            {
                 foreach (ViewType viewType in Enum.GetValues(typeof(ViewType)))
                 {
                     if (viewType != ViewType.All)
@@ -739,7 +742,8 @@ namespace CTSegmenter
             xyView.Invalidate();
 
             // Auto-hide overlay after a delay
-            Task.Delay(1000).ContinueWith(_ => {
+            Task.Delay(1000).ContinueWith(_ =>
+            {
                 showBrushOverlay = false;
                 xyView.Invalidate();
             }, TaskScheduler.FromCurrentSynchronizationContext());
@@ -1557,13 +1561,15 @@ namespace CTSegmenter
             if (viewType == ViewType.XY || viewType == ViewType.All)
             {
                 // Render XY view (current slice)
-                Task.Run(() => {
+                Task.Run(() =>
+                {
                     try
                     {
                         var bitmap = RenderSlice(ViewType.XY, ct);
                         if (!ct.IsCancellationRequested)
                         {
-                            this.SafeInvokeAsync(() => {
+                            this.SafeInvokeAsync(() =>
+                            {
                                 UpdateView(xyView, bitmap, ref xyBitmap);
                             });
                         }
@@ -1583,13 +1589,15 @@ namespace CTSegmenter
             if (ShowProjections && (viewType == ViewType.XZ || viewType == ViewType.All))
             {
                 // Render XZ view
-                Task.Run(() => {
+                Task.Run(() =>
+                {
                     try
                     {
                         var bitmap = RenderSlice(ViewType.XZ, ct);
                         if (!ct.IsCancellationRequested)
                         {
-                            this.SafeInvokeAsync(() => {
+                            this.SafeInvokeAsync(() =>
+                            {
                                 UpdateView(xzView, bitmap, ref xzBitmap);
                             });
                         }
@@ -1609,13 +1617,15 @@ namespace CTSegmenter
             if (ShowProjections && (viewType == ViewType.YZ || viewType == ViewType.All))
             {
                 // Render YZ view
-                Task.Run(() => {
+                Task.Run(() =>
+                {
                     try
                     {
                         var bitmap = RenderSlice(ViewType.YZ, ct);
                         if (!ct.IsCancellationRequested)
                         {
-                            this.SafeInvokeAsync(() => {
+                            this.SafeInvokeAsync(() =>
+                            {
                                 UpdateView(yzView, bitmap, ref yzBitmap);
                             });
                         }
@@ -3246,7 +3256,7 @@ namespace CTSegmenter
 
             return mask;
         }
-        
+
         private void CleanupSparseSelections()
         {
             const int maxEntries = 100; // Maximum number of slices to store
@@ -3364,8 +3374,8 @@ namespace CTSegmenter
             RenderViews(ViewType.All);
         }
 
-        
-        
+
+
 
         private void DrawAnnotations(Graphics g, ViewType viewType)
         {
@@ -3982,10 +3992,10 @@ namespace CTSegmenter
                 Z = z;
             }
         }
-    
-    #endregion
-    #region Material Merging
-    public void MergeMaterials(byte targetID, byte sourceID)
+
+        #endregion
+        #region Material Merging
+        public void MergeMaterials(byte targetID, byte sourceID)
         {
             Logger.Log($"[MainForm] Merging material {sourceID} into {targetID}");
             int w = width, h = height, d = depth;

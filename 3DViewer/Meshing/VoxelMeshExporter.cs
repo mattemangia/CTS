@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using System.IO;
 using SharpDX;
-using CTSegmenter;
 
 namespace CTSegmenter.SharpDXIntegration
 {
@@ -154,7 +153,6 @@ namespace CTSegmenter.SharpDXIntegration
 
         private static void AddCube(Vector3 pos, List<Vector3> verts, List<int> inds, ref int vIdx)
         {
-            float size = 1f;
             var p = pos;
             var cubeVerts = new Vector3[]
             {

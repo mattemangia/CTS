@@ -1,13 +1,11 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Drawing;
+using System.IO;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using SharpDX; // for Vector3, etc.
-using CTSegmenter;
-using Point = System.Drawing.Point;
 using Color = System.Drawing.Color;
-using System.Collections.Generic;
-using System.IO;
+using Point = System.Drawing.Point;
 
 namespace CTSegmenter.SharpDXIntegration
 {
@@ -25,13 +23,14 @@ namespace CTSegmenter.SharpDXIntegration
         private const int MAX_FAILURES = 3;
 
         private bool measurementMode = false;
-        
+
         private bool isDrawingMeasurement = false;
         private SharpDX.Vector3 measureStartPoint;
         private SharpDX.Vector3 measureEndPoint;
 
         //Slice controls
         private bool showXSlice = false;
+
         private bool showYSlice = false;
         private bool showZSlice = false;
 
@@ -59,7 +58,9 @@ namespace CTSegmenter.SharpDXIntegration
 
         // Method to get visibility state for UI sync
         public bool GetSliceXEnabled() => showXSlice;
+
         public bool GetSliceYEnabled() => showYSlice;
+
         public bool GetSliceZEnabled() => showZSlice;
 
         // Modified method to handle global slice toggle
@@ -90,7 +91,8 @@ namespace CTSegmenter.SharpDXIntegration
             renderTimer = new Timer();
             renderTimer.Interval = 33; // Increase responsiveness to ~30fps (from 100ms/10fps)
 
-            renderTimer.Tick += (s, e) => {
+            renderTimer.Tick += (s, e) =>
+            {
                 if (volumeRenderer != null && !isRendering)
                 {
                     try
@@ -122,7 +124,7 @@ namespace CTSegmenter.SharpDXIntegration
                                 RecreateRenderer();
                                 renderFailCount = 0;
                             }
-                            catch (Exception recreateEx)
+                            catch (Exception)
                             {
                                 renderTimer.Stop();
                                 MessageBox.Show("3D rendering disabled due to failures. Please reopen the viewer.",
@@ -190,7 +192,8 @@ namespace CTSegmenter.SharpDXIntegration
             // Add render timer
             renderTimer = new Timer();
             renderTimer.Interval = 50; // 20 fps
-            renderTimer.Tick += (s, e) => {
+            renderTimer.Tick += (s, e) =>
+            {
                 if (volumeRenderer != null)
                 {
                     volumeRenderer.Render();
@@ -324,7 +327,6 @@ namespace CTSegmenter.SharpDXIntegration
                 }
                 volumeRenderer.SetRaymarchStepSize(stepSize);
 
-             
                 volumeRenderer.NeedsRender = true;
 
                 // Allow the render timer to handle the actual rendering
@@ -338,15 +340,13 @@ namespace CTSegmenter.SharpDXIntegration
                 throw;
             }
         }
+
         // Called by control panel for show/hide grayscale
         public void SetGrayscaleVisible(bool isVisible)
         {
             volumeRenderer.ShowGrayscale = isVisible;
             volumeRenderer.NeedsRender = true;
         }
-
-        
-        
 
         public void SetSliceIndices(int xSlice, int ySlice, int zSlice)
         {
@@ -379,6 +379,7 @@ namespace CTSegmenter.SharpDXIntegration
             if (volumeRenderer == null) return 1.0f;
             return volumeRenderer.GetMaterialOpacity(matId);
         }
+
         public void SetLodEnabled(bool enabled)
         {
             if (volumeRenderer != null)
@@ -388,6 +389,7 @@ namespace CTSegmenter.SharpDXIntegration
                 Logger.Log($"[SharpDXViewerForm] LOD system {(enabled ? "enabled" : "disabled")}");
             }
         }
+
         // New methods for dataset cutting
         public void SetCutXEnabled(bool enabled)
         {
@@ -487,6 +489,7 @@ namespace CTSegmenter.SharpDXIntegration
                 volumeRenderer.NeedsRender = true;
             }
         }
+
         public bool ToggleMeasurementMode()
         {
             measurementMode = !measurementMode;
@@ -515,6 +518,7 @@ namespace CTSegmenter.SharpDXIntegration
             volumeRenderer.NeedsRender = true;
             return measurementMode;
         }
+
         public void SetMeasurementsVisible(bool visible)
         {
             Logger.Log($"[SharpDXViewerForm] Setting all measurements visibility to {visible}");
@@ -536,7 +540,8 @@ namespace CTSegmenter.SharpDXIntegration
             {
                 try
                 {
-                    controlPanel.BeginInvoke(new Action(() => {
+                    controlPanel.BeginInvoke(new Action(() =>
+                    {
                         // Update checkboxes in the measurements list to match new visibility
                         controlPanel.RefreshMeasurementsList();
                     }));
@@ -596,7 +601,8 @@ namespace CTSegmenter.SharpDXIntegration
                 {
                     try
                     {
-                        controlPanel.BeginInvoke(new Action(() => {
+                        controlPanel.BeginInvoke(new Action(() =>
+                        {
                             controlPanel.RefreshMeasurementsList();
                         }));
                     }
@@ -649,6 +655,7 @@ namespace CTSegmenter.SharpDXIntegration
                 throw;
             }
         }
+
         // Called by control panel for "Export Model" (OBJ or STL)
         public async Task ExportModelAsync(bool exportLabels, bool exportGrayscaleSurface,
                                    string filePath, float isoLevel, IProgress<int> progress = null)
@@ -663,7 +670,8 @@ namespace CTSegmenter.SharpDXIntegration
                     bool[] labelVisibility = volumeRenderer.GetLabelVisibilityArray();
 
                     // Create export callback for progress updates
-                    Action<int> progressCallback = percent => {
+                    Action<int> progressCallback = percent =>
+                    {
                         progress?.Report(percent);
                         Logger.Log($"[SharpDXViewerForm] Export progress: {percent}%");
                     };
@@ -680,7 +688,8 @@ namespace CTSegmenter.SharpDXIntegration
                     {
                         // Must invoke on UI thread since we're in a Task
                         var dialogResult = DialogResult.Yes; // Default value
-                        this.Invoke((Action)(() => {
+                        this.Invoke((Action)(() =>
+                        {
                             dialogResult = MessageBox.Show(
                                 "One or more cutting planes are active. What would you like to export?\n\n" +
                                 "Yes - Export only the visible part (after cuts)\n" +
@@ -734,6 +743,7 @@ namespace CTSegmenter.SharpDXIntegration
                 this.Enabled = true;
             }
         }
+
         public async Task ApplyDownsampling(int downsampleFactor, IProgress<int> progress = null)
         {
             if (volumeRenderer == null || mainForm == null)
@@ -757,7 +767,8 @@ namespace CTSegmenter.SharpDXIntegration
                 // Force garbage collection to free memory
                 GC.Collect();
 
-                await Task.Run(() => {
+                await Task.Run(() =>
+                {
                     // Report progress
                     progress?.Report(10);
 
@@ -869,6 +880,7 @@ namespace CTSegmenter.SharpDXIntegration
                 throw;
             }
         }
+
         public void SetStreamingRendererEnabled(bool enabled)
         {
             if (volumeRenderer != null)
@@ -889,6 +901,7 @@ namespace CTSegmenter.SharpDXIntegration
                 Logger.Log($"[SharpDXViewerForm] Streaming renderer {(enabled ? "enabled" : "disabled")}");
             }
         }
+
         // Called by control panel for screenshot
         public void TakeScreenshot(string filePath)
         {

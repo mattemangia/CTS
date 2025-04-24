@@ -1,18 +1,16 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
-using System.Drawing.Drawing2D;
-using System.Text;
-using System.Windows.Input;
-using System.ComponentModel;
 
 namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
 {
@@ -34,17 +32,19 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
         [Description("Box Fill")]
         BoxFill
     }
-    
+
     internal class GroundingDINODetector
     {
         // Loading form
         private ProgressBar loadingProgressBar;
+
         private Label loadingLabel;
         private Panel loadingPanel;
         private bool isLoading = false;
 
         // Main form components
         private Form dinoForm;
+
         private TableLayoutPanel mainLayout;
         private Panel viewPanel;
         private PictureBox imageViewer;
@@ -62,10 +62,12 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
 
         // Scrollbar controls
         private HScrollBar hScroll;
+
         private VScrollBar vScroll;
 
         // Zoom and pan state variables
         private float zoom = 1.0f;
+
         private Point pan = Point.Empty;
 
         // Image bounds tracking
@@ -73,16 +75,19 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
 
         // References to parent application components
         private MainForm mainForm;
+
         private Material selectedMaterial;
         private AnnotationManager annotationManager;
 
         // ONNX model components
         private InferenceSession session;
+
         private string modelPath;
         private bool useGPU = false;
 
         // Tokenizer Configuration
         private Dictionary<string, int> vocabDict;
+
         private string clsToken = "[CLS]";
         private string sepToken = "[SEP]";
         private string padToken = "[PAD]";
@@ -94,7 +99,9 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
         private int maxTextLen = 256;  // From config.json
 
         // Views
-        private enum ViewMode { XY, XZ, YZ }
+        private enum ViewMode
+        { XY, XZ, YZ }
+
         private ViewMode currentViewMode = ViewMode.XY;
         private Button btnXYView, btnXZView, btnYZView;
 
@@ -106,6 +113,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             public string Label { get; set; }
             public bool Selected { get; set; } = false; // Added Selected property
         }
+
         private List<Detection> detections = new List<Detection>();
         private float confidenceThreshold = 0.3f;
 
@@ -389,7 +397,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 Height = 30,
                 BackColor = Color.LightSkyBlue  // Indicates this is the active view
             };
-            btnXYView.Click += (s, e) => {
+            btnXYView.Click += (s, e) =>
+            {
                 currentViewMode = ViewMode.XY;
                 UpdateViewButtons();
                 UpdateViewer();
@@ -402,7 +411,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 Width = 90,
                 Height = 30
             };
-            btnXZView.Click += (s, e) => {
+            btnXZView.Click += (s, e) =>
+            {
                 currentViewMode = ViewMode.XZ;
                 UpdateViewButtons();
                 UpdateViewer();
@@ -415,7 +425,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 Width = 90,
                 Height = 30
             };
-            btnYZView.Click += (s, e) => {
+            btnYZView.Click += (s, e) =>
+            {
                 currentViewMode = ViewMode.YZ;
                 UpdateViewButtons();
                 UpdateViewer();
@@ -488,7 +499,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 Value = 30,
                 TickFrequency = 10
             };
-            confidenceSlider.ValueChanged += (s, e) => {
+            confidenceSlider.ValueChanged += (s, e) =>
+            {
                 confidenceThreshold = confidenceSlider.Value / 100.0f;
                 confidenceLabel.Text = confidenceThreshold.ToString("F2");
                 UpdateDetectionDisplay();
@@ -535,7 +547,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             };
 
             // Add event handlers for slice controls
-            sliceSlider.Scroll += (s, e) => {
+            sliceSlider.Scroll += (s, e) =>
+            {
                 currentSlice = sliceSlider.Value;
                 numSlice.Value = currentSlice;
                 lblSlice.Text = $"Slice: {currentSlice} / {sliceSlider.Maximum}";
@@ -544,7 +557,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 detections.Clear();
             };
 
-            numSlice.ValueChanged += (s, e) => {
+            numSlice.ValueChanged += (s, e) =>
+            {
                 if (numSlice.Value != currentSlice)
                 {
                     currentSlice = (int)numSlice.Value;
@@ -608,7 +622,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 TextAlign = ContentAlignment.MiddleRight,
                 TextImageRelation = TextImageRelation.ImageBeforeText
             };
-            btnSelectAll.Click += (s, e) => {
+            btnSelectAll.Click += (s, e) =>
+            {
                 if (detections != null && detections.Count > 0)
                 {
                     foreach (var detection in detections.Where(d => d.Score >= confidenceThreshold))
@@ -631,7 +646,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 TextAlign = ContentAlignment.MiddleRight,
                 TextImageRelation = TextImageRelation.ImageBeforeText
             };
-            btnClearSelection.Click += (s, e) => {
+            btnClearSelection.Click += (s, e) =>
+            {
                 if (detections != null && detections.Count > 0)
                 {
                     foreach (var detection in detections)
@@ -779,7 +795,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             dinoForm.Controls.Add(mainLayout);
 
             // Handle form events
-            dinoForm.FormClosing += (s, e) => {
+            dinoForm.FormClosing += (s, e) =>
+            {
                 // Clean up resources
                 session?.Dispose();
                 imageViewer.Image?.Dispose();
@@ -876,21 +893,25 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 titleLabel.Text = $"CT {currentViewMode} View";
             }
         }
+
         private void SetupViewerEvents()
         {
             // Scroll events
-            hScroll.Scroll += (s, e) => {
+            hScroll.Scroll += (s, e) =>
+            {
                 pan.X = -hScroll.Value;
                 imageViewer.Invalidate();
             };
 
-            vScroll.Scroll += (s, e) => {
+            vScroll.Scroll += (s, e) =>
+            {
                 pan.Y = -vScroll.Value;
                 imageViewer.Invalidate();
             };
 
             // Mouse wheel for zooming
-            imageViewer.MouseWheel += (s, e) => {
+            imageViewer.MouseWheel += (s, e) =>
+            {
                 float oldZoom = zoom;
                 // Adjust zoom based on wheel direction
                 if (e.Delta > 0)
@@ -910,7 +931,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             Point lastPos = Point.Empty;
             bool isPanning = false;
 
-            imageViewer.MouseDown += (s, e) => {
+            imageViewer.MouseDown += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Right)
                 {
                     // Start panning with right mouse button
@@ -919,7 +941,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 }
             };
 
-            imageViewer.MouseMove += (s, e) => {
+            imageViewer.MouseMove += (s, e) =>
+            {
                 if (isPanning && e.Button == MouseButtons.Right)
                 {
                     // Calculate the move delta
@@ -936,7 +959,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 }
             };
 
-            imageViewer.MouseUp += (s, e) => {
+            imageViewer.MouseUp += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Right)
                 {
                     isPanning = false;
@@ -944,7 +968,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             };
 
             // Add mouse click handler for box selection
-            imageViewer.MouseClick += (s, e) => {
+            imageViewer.MouseClick += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Left && detections != null && detections.Count > 0)
                 {
                     // Convert screen coordinates to image coordinates
@@ -1006,7 +1031,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             };
 
             // Paint event for custom rendering with detections
-            imageViewer.Paint += (s, e) => {
+            imageViewer.Paint += (s, e) =>
+            {
                 // Clear background
                 e.Graphics.Clear(Color.Black);
 
@@ -1149,9 +1175,11 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 case ViewMode.XY:
                     viewBitmap = CreateSliceBitmap(currentSlice);
                     break;
+
                 case ViewMode.XZ:
                     viewBitmap = CreateXZSliceBitmap();
                     break;
+
                 case ViewMode.YZ:
                     viewBitmap = CreateYZSliceBitmap();
                     break;
@@ -1266,7 +1294,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                         options.EnableMemoryPattern = true;
                         options.EnableCpuMemArena = true;
 
-                        // Set intra-op and inter-op thread count for CPU 
+                        // Set intra-op and inter-op thread count for CPU
                         int cpuThreads = Environment.ProcessorCount;
                         options.IntraOpNumThreads = Math.Max(1, cpuThreads / 2);
 
@@ -1317,6 +1345,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 isLoading = false;
             }
         }
+
         private static DenseTensor<int> ToInt32(DenseTensor<long> src)
         {
             var dst = new DenseTensor<int>(src.Dimensions);
@@ -1325,6 +1354,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             for (int i = 0; i < s.Length; i++) d[i] = (int)s[i];
             return dst;
         }
+
         private async Task PerformDetection()
         {
             if (session == null)
@@ -1388,7 +1418,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 UpdateDetectionDisplay();
                 int validDetections = detections.Count(d => d.Score >= confidenceThreshold);
                 statusLabel.Text = $"Found {validDetections} detections. Click on boxes to select them.";
-                
+
                 imageViewer.Invalidate();
             }
             catch (Exception ex)
@@ -1402,6 +1432,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 btnDetect.Enabled = true;
             }
         }
+
         private Detection DetectBorderOrLabelClick(Point imagePoint, List<Detection> detections)
         {
             const int borderThreshold = 3; // Pixels from border to consider a border click
@@ -1464,6 +1495,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             sb.Append($"| len={span.Length}  min={min}  max={max}  distinct={string.Join(",", distinct.Take(10))}");
             Logger.Log(sb.ToString());
         }
+
         private List<Detection> ProcessDetectionOutputs(Tensor<float> logits, Tensor<float> predBoxes)
         {
             var result = new List<Detection>();
@@ -1601,6 +1633,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
 
             return result;
         }
+
         private float CalculateIoU(Rectangle a, Rectangle b)
         {
             // Calculate intersection area
@@ -1621,6 +1654,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
 
             return (float)intersectionArea / unionArea;
         }
+
         private DenseTensor<long> CreatePixelMask(int width, int height)
         {
             // Create a pixel mask where 1 indicates a valid pixel
@@ -1637,6 +1671,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
 
             return pixelMask;
         }
+
         private unsafe DenseTensor<float> PreprocessImage()
         {
             // Get the current slice as a bitmap
@@ -1699,6 +1734,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 }
             }
         }
+
         private TokenizationResult TokenizeText(string text)
         {
             // Normalise prompt
@@ -1790,6 +1826,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 AttentionMask = attentionMask
             };
         }
+
         // ─── Helpers - GroundingDINODetector ──────────────
 
         private void LogIntTensorStats(string label, DenseTensor<long> tensor)
@@ -1855,7 +1892,6 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                        "  mean=" + mean.ToString("F4") +
                        "  sample=" + sb.ToString());
         }
-
 
         private static DenseTensor<int> ToInt32Tensor(DenseTensor<long> src)
         {
@@ -1961,9 +1997,11 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                     case ViewMode.XY:
                         ApplyXYDetections();
                         break;
+
                     case ViewMode.XZ:
                         ApplyXZDetections();
                         break;
+
                     case ViewMode.YZ:
                         ApplyYZDetections();
                         break;
@@ -2168,6 +2206,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 }
             }
         }
+
         // Methods to create XZ and YZ slice bitmaps
         private unsafe Bitmap CreateXZSliceBitmap()
         {
@@ -2244,6 +2283,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             bmp.UnlockBits(bmpData);
             return bmp;
         }
+
         private void LoadVocabulary()
         {
             vocabDict = new Dictionary<string, int>();
@@ -2277,11 +2317,11 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             }
         }
 
-
         public void Show()
         {
             dinoForm.Show();
         }
+
         private void InspectModelIO()
         {
             if (session == null)
@@ -2313,6 +2353,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 Logger.Log($"[GroundingDINO] Error inspecting model: {ex.Message}");
             }
         }
+
         private void SendSelectedBoxesToSAM()
         {
             if (detections == null || detections.Count == 0)
@@ -2355,6 +2396,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 Logger.Log($"[GroundingDINO] Error sending to SAM: {ex.Message}");
             }
         }
+
         // Helper method to clear existing annotation points
         private void ClearAnnotationPoints()
         {
@@ -2538,7 +2580,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
         }
     }
 
-    class TokenizationResult
+    internal class TokenizationResult
     {
         public DenseTensor<long> InputIds { get; set; }
         public DenseTensor<long> TokenTypeIds { get; set; }

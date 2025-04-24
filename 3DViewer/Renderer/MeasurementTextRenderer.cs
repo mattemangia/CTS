@@ -1,12 +1,11 @@
 ﻿// This would typically go in a separate file
 
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Windows.Forms;
-using System.Collections.Generic;
-using SharpDX;
-using RectangleF = System.Drawing.RectangleF;
 using Color = System.Drawing.Color;
+using RectangleF = System.Drawing.RectangleF;
 
 namespace CTSegmenter
 {

@@ -1,8 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Drawing;
-
-namespace CTSegmenter
+﻿namespace CTSegmenter
 {
     /// <summary>
     /// Interface for material and voxel operations on volume data.
@@ -12,16 +8,24 @@ namespace CTSegmenter
     {
         // Material management
         byte GetNextMaterialID();
+
         void RemoveMaterial(byte materialID);
 
         // Voxel operations
         void AddVoxelsByThreshold(IGrayscaleVolumeData volumeData, byte materialID, byte minVal, byte maxVal);
+
         void AddVoxelsByThresholdForSlice(IGrayscaleVolumeData volumeData, byte materialID, byte minVal, byte maxVal, int slice);
+
         void RemoveVoxelsByThreshold(IGrayscaleVolumeData volumeData, byte materialID, byte minVal, byte maxVal);
+
         void RemoveVoxelsByThresholdForSlice(IGrayscaleVolumeData volumeData, byte materialID, byte minVal, byte maxVal, int slice);
+
         void ApplySelection(byte[,] selection, int slice);
+
         void SubtractSelection(byte[,] selection, int slice);
+
         void ApplyOrthogonalSelection(byte[,] selection, int fixedIndex, OrthogonalView view);
+
         void SubtractOrthogonalSelection(byte[,] selection, int fixedIndex, OrthogonalView view);
     }
 

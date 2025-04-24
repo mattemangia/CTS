@@ -26,7 +26,7 @@ namespace CTSegmenter
                 buffer[x] = vol[x, rowIndex, sliceIndex];
             }
         }
-        
+
 
         // Get methods for ChunkedLabelVolume
         public static byte GetVoxel(this IVolumeData volume, int x, int y, int z)

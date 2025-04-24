@@ -1,10 +1,10 @@
 ﻿using System;
+using System.Diagnostics;
 using System.Windows.Forms;
 using SharpDX;
 using SharpDX.Direct3D;
 using SharpDX.Direct3D11;
 using SharpDX.DXGI;
-using System.Diagnostics;
 
 namespace CTSegmenter.SharpDXIntegration
 {
@@ -18,6 +18,7 @@ namespace CTSegmenter.SharpDXIntegration
 
         // For simple triangle
         private VertexShader vertexShader;
+
         private PixelShader pixelShader;
         private InputLayout inputLayout;
         private SharpDX.Direct3D11.Buffer vertexBuffer;
@@ -72,22 +73,22 @@ namespace CTSegmenter.SharpDXIntegration
             string shaderCode = @"
                 struct VS_INPUT { float4 Pos : POSITION; };
                 struct PS_INPUT { float4 Pos : SV_POSITION; float4 Col : COLOR; };
-                
+
                 PS_INPUT VSMain(VS_INPUT input)
                 {
                     PS_INPUT output = (PS_INPUT)0;
                     output.Pos = input.Pos;
-                    
+
                     // Generate color based on position
                     output.Col = float4(
-                        (input.Pos.x + 1.0) * 0.5, 
-                        (input.Pos.y + 1.0) * 0.5, 
-                        0.5, 
+                        (input.Pos.x + 1.0) * 0.5,
+                        (input.Pos.y + 1.0) * 0.5,
+                        0.5,
                         1.0);
-                    
+
                     return output;
                 }
-                
+
                 float4 PSMain(PS_INPUT input) : SV_Target
                 {
                     return input.Col;

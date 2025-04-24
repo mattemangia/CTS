@@ -1,6 +1,6 @@
 ﻿using System;
-using System.Windows.Forms;
 using System.Drawing;
+using System.Windows.Forms;
 
 namespace CTSegmenter
 {
@@ -8,6 +8,7 @@ namespace CTSegmenter
     {
         // UI controls
         private ComboBox axisComboBox;
+
         private NumericUpDown viscosityNumeric;
         private NumericUpDown inputPressureNumeric;
         private NumericUpDown outputPressureNumeric;
@@ -16,6 +17,7 @@ namespace CTSegmenter
 
         // Public properties to access the selected values
         public PermeabilitySimulator.FlowAxis SelectedAxis { get; private set; }
+
         public double Viscosity { get; private set; }
         public double InputPressure { get; private set; }
         public double OutputPressure { get; private set; }

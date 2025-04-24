@@ -1,8 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Runtime.InteropServices;
 using ILGPU;
 using ILGPU.Algorithms;
 using ILGPU.Runtime;
@@ -17,12 +13,14 @@ namespace CTSegmenter
     public class NLM3DFilter : IDisposable
     {
         #region Fields
+
         private Context _context;
         private Accelerator _accelerator;
         private bool _useGPU;
         private bool _initialized;
         private long _availableGPUMemoryBytes; // To choose chunk size
-        #endregion
+
+        #endregion Fields
 
         #region Constructor / Dispose
 
@@ -61,7 +59,7 @@ namespace CTSegmenter
                     // We'll approximate from dev memory or fallback to 1.5GB if unknown.
                     try
                     {
-                        _availableGPUMemoryBytes = (long)_accelerator.MemorySize;
+                        _availableGPUMemoryBytes = _accelerator.MemorySize;
                     }
                     catch
                     {
@@ -96,13 +94,13 @@ namespace CTSegmenter
             _context?.Dispose();
         }
 
-        #endregion
+        #endregion Constructor / Dispose
 
         #region Public API
 
         /// <summary>
         /// Perform a 3D Non-Local Means filtering on the volume (width x height x depth).
-        /// 
+        ///
         /// Parameters:
         /// - volume: input 3D volume as [width * height * depth] array
         /// - width, height, depth: dimensions
@@ -112,7 +110,7 @@ namespace CTSegmenter
         /// - useGPUOverride: forcibly use or skip GPU. Pass null to use constructor setting.
         ///
         /// Return: newly allocated 3D array with filtered results.
-        /// 
+        ///
         /// This function automatically splits large volumes into overlapping chunks if
         /// the GPU memory is not large enough. Overlaps are blended to avoid seams.
         /// If GPU is unavailable or disabled, does a full CPU-based NLM.
@@ -151,9 +149,10 @@ namespace CTSegmenter
             return RunNLM3D_GPU_WithChunking(volume, width, height, depth, templateSize, searchSize, h, progressForm);
         }
 
-        #endregion
+        #endregion Public API
 
         #region GPU Implementation (Chunked)
+
         public static double Cbrt(double x)
         {
             if (x < 0)
@@ -162,10 +161,11 @@ namespace CTSegmenter
             }
             return Math.Pow(x, 1.0 / 3.0);
         }
+
         /// <summary>
         /// Splits volume into overlapping 3D chunks that fit into GPU memory, applies
-        /// GPU NLM on each chunk, then blends overlaps.  
-        /// 
+        /// GPU NLM on each chunk, then blends overlaps.
+        ///
         /// Overlap is set to searchSize + templateSize to ensure complete patch coverage.
         /// </summary>
         private byte[] RunNLM3D_GPU_WithChunking(
@@ -203,7 +203,6 @@ namespace CTSegmenter
             double factor = 20.0;
             double chunkVol = targetMemoryUse / factor;
             double chunkDimD = Cbrt(chunkVol);
-            
 
             // Round down to a multiple of 32
             int chunkDim = Math.Min(width, Math.Min(height, Math.Min(depth, (int)(chunkDimD / 32) * 32)));
@@ -362,7 +361,7 @@ namespace CTSegmenter
             // We'll do a 1D indexing kernel, where each thread processes exactly one voxel.
             // We store the result in the same-size dst array. The "NLM" searching is done
             // by a triple nested loop in the kernel, which can be expensive if searchSize is large.
-            // We'll do a naive approach that sorts or does a weighted average. 
+            // We'll do a naive approach that sorts or does a weighted average.
             // Because typical patch sizes are small, we do direct sums.
 
             int totalVoxels = width * height * depth;
@@ -406,19 +405,19 @@ namespace CTSegmenter
         /// by exp(-dist^2/(h^2)), accumulate. The "templateSize" is half-size for local patch.
         /// This is naive (O(search^3 * template^3) per voxel). For large search sizes, it's
         /// extremely heavy but is truly NLM with no placeholders.
-        /// 
+        ///
         /// volume is 1D in [0..width*height*depth-1], index -> (x,y,z) by:
         ///   z = index / (width*height)
         ///   remainder = index % (width*height)
         ///   y = remainder / width
         ///   x = remainder % width
-        /// 
+        ///
         /// we then do the search within [x±search, y±search, z±search].
         /// For each neighbor center, we compare patch in [x±template, y±template, z±template].
-        /// 
+        ///
         /// output = sum( neighborVal * weight ) / sum(weight )
         /// weight = exp( - patchDist^2 / (h^2 * patchSize^3) )  [ typical NLM normalization for robust weighting ]
-        /// 
+        ///
         /// We clamp x,y,z in bounds.
         /// </summary>
         public static void NLM3D_Kernel(
@@ -535,7 +534,7 @@ namespace CTSegmenter
             }
         }
 
-        #endregion
+        #endregion GPU Implementation (Chunked)
 
         #region CPU Implementation
 
@@ -651,6 +650,6 @@ namespace CTSegmenter
             return dst;
         }
 
-        #endregion
+        #endregion CPU Implementation
     }
 }

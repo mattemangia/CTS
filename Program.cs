@@ -1,12 +1,11 @@
-﻿using CTSegmenter;
-using System;
-using System.Windows.Controls;
+﻿using System;
 using System.Windows.Forms;
+using CTSegmenter;
 
-static class Program
+internal static class Program
 {
     [STAThread]
-    static void Main(string[] args)
+    private static void Main(string[] args)
     {
         string logPath = System.IO.Path.Combine(Application.StartupPath, "log.txt");
         if (System.IO.File.Exists(logPath))
@@ -18,7 +17,7 @@ static class Program
 
         MainForm mainForm = new MainForm(args);
         ControlForm controlForm = new ControlForm(mainForm);
-        
+
         Application.Run(mainForm);
         mainForm.DockExternalControlForm(controlForm);
         Logger.Log("Application ended.");

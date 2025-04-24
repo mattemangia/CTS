@@ -1,10 +1,5 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
-namespace CTSegmenter
+﻿namespace CTSegmenter
 {
-    public enum SegmentationTool { Pan, Brush, Eraser, Thresholding, Point }
+    public enum SegmentationTool
+    { Pan, Brush, Eraser, Thresholding, Point }
 }

@@ -4,7 +4,6 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -18,16 +17,19 @@ namespace CTSegmenter
 
         // Adjustment parameters
         private int brightness = 0;
+
         private int contrast = 100;
         private byte blackPoint = 0;
         private byte whitePoint = 255;
 
         // Image processing
         private Bitmap displayBitmap;
+
         private int[] histogram = new int[256];
 
         // UI elements
         private PictureBox slicePreview;
+
         private PictureBox histogramPreview;
         private TrackBar sliceTrackBar;
         private TrackBar brightnessTrackBar;
@@ -48,6 +50,7 @@ namespace CTSegmenter
 
         // Histogram interaction
         private bool isDraggingBlack = false;
+
         private bool isDraggingWhite = false;
 
         public BrightnessContrastForm(MainForm form)
@@ -411,7 +414,7 @@ namespace CTSegmenter
                 for (int i = 0; i < 256; i++)
                 {
                     int x = i * width / 256;
-                    int barHeight = maxCount > 0 ? (int)(histogram[i] * height / maxCount) : 0;
+                    int barHeight = maxCount > 0 ? histogram[i] * height / maxCount : 0;
                     e.Graphics.DrawLine(pen, x, height, x, height - barHeight);
                 }
             }
@@ -851,10 +854,12 @@ namespace CTSegmenter
                 ChunkedVolume newVolume = new ChunkedVolume(width, height, depth, chunkDim);
 
                 // Process all slices in parallel
-                await Task.Run(() => {
+                await Task.Run(() =>
+                {
                     ConcurrentBag<Exception> exceptions = new ConcurrentBag<Exception>();
 
-                    Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, z => {
+                    Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, z =>
+                    {
                         try
                         {
                             // Process each slice
@@ -874,7 +879,8 @@ namespace CTSegmenter
                             }
 
                             // Update progress
-                            this.Invoke(new Action(() => {
+                            this.Invoke(new Action(() =>
+                            {
                                 progressBar.Value = Math.Min(progressBar.Maximum, progressBar.Value + 1);
                             }));
                         }
@@ -962,13 +968,15 @@ namespace CTSegmenter
                     Logger.Log($"[BrightnessContrastForm] Starting dataset export to {exportFolder}...");
 
                     // Process all slices in parallel
-                    await Task.Run(() => {
+                    await Task.Run(() =>
+                    {
                         ConcurrentBag<Exception> exceptions = new ConcurrentBag<Exception>();
                         int width = mainForm.GetWidth();
                         int height = mainForm.GetHeight();
                         int depth = mainForm.GetDepth();
 
-                        Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, z => {
+                        Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, z =>
+                        {
                             try
                             {
                                 // Create a bitmap for this slice
@@ -1016,7 +1024,8 @@ namespace CTSegmenter
                                 }
 
                                 // Update progress on the UI thread
-                                this.Invoke(new Action(() => {
+                                this.Invoke(new Action(() =>
+                                {
                                     progressBar.Value = Math.Min(progressBar.Maximum, progressBar.Value + 1);
                                 }));
                             }

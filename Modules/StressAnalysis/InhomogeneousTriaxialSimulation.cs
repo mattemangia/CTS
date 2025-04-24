@@ -1,21 +1,15 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
-using System.Numerics;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using ILGPU;
 using ILGPU.Runtime;
-using ILGPU.Algorithms;
-using ILGPU.Runtime.OpenCL;
-using SharpDX;
-using Vector3 = System.Numerics.Vector3;
 using Color = System.Drawing.Color;
 using Rectangle = System.Drawing.Rectangle;
+using Vector3 = System.Numerics.Vector3;
 
 namespace CTSegmenter
 {
@@ -28,7 +22,9 @@ namespace CTSegmenter
 
         // Additional properties for inhomogeneous density
         private readonly bool _useInhomogeneousDensity;
+
         private readonly ConcurrentDictionary<Vector3, float> _densityMap;
+
         private Action<Index1D,
        ArrayView<System.Numerics.Vector3>,
        ArrayView<System.Numerics.Vector3>,
@@ -38,19 +34,22 @@ namespace CTSegmenter
        float, float, float, // cohesion, sinPhi, cosPhi
        ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<int>>
        _inhomogeneousStressKernel;
+
         // Density statistics
         public float MinimumDensity { get; private set; }
+
         public float MaximumDensity { get; private set; }
         public float AverageDensity { get; private set; }
 
         // Derived properties accounting for density variations
         public Dictionary<Triangle, float> TriangleDensities { get; private set; }
+
         public Dictionary<Triangle, float> TriangleStressFactors { get; private set; }
 
         // Flag for density model initialization
         private bool _hasInitializedInhomogeneousModels = false;
 
-        #endregion
+        #endregion Properties and Fields
 
         #region Constructor and Initialization
 
@@ -71,7 +70,7 @@ namespace CTSegmenter
         {
             _useInhomogeneousDensity = useInhomogeneousDensity;
             _densityMap = densityMap;
-            
+
             // Initialize density-dependent collections
             TriangleDensities = new Dictionary<Triangle, float>();
             TriangleStressFactors = new Dictionary<Triangle, float>();
@@ -204,7 +203,7 @@ namespace CTSegmenter
             return nearestDensity;
         }
 
-        #endregion
+        #endregion Constructor and Initialization
 
         #region Simulation Override Methods
 
@@ -269,7 +268,8 @@ namespace CTSegmenter
                     // Instead of calling a separate kernel, perform CPU-based calculation
                     Logger.Log($"[InhomogeneousTriaxialSimulation] Performing CPU-based calculation with {n} triangles");
 
-                    Parallel.For(0, n, i => {
+                    Parallel.For(0, n, i =>
+                    {
                         float stressFactor = stressFactors[i];
                         float scaledPConf = ConfiningPressure * stressFactor;
                         float scaledPAxial = axialPressure * stressFactor;
@@ -338,7 +338,8 @@ namespace CTSegmenter
                 // Fallback with more basic CPU calculation in case of any error
                 Logger.Log("[InhomogeneousTriaxialSimulation] Falling back to basic CPU calculation");
 
-                Parallel.For(0, n, i => {
+                Parallel.For(0, n, i =>
+                {
                     float stressFactor = stressFactors[i];
                     float scaledPConf = ConfiningPressure * stressFactor;
                     float scaledPAxial = axialPressure * stressFactor;
@@ -511,6 +512,7 @@ namespace CTSegmenter
             s3Arr[idx] = sigma3;
             fracArr[idx] = failed;
         }
+
         /// <summary>
         /// ILGPU kernel for inhomogeneous density stress calculation
         /// </summary>
@@ -658,6 +660,7 @@ namespace CTSegmenter
             s3Arr[idx] = σ3;
             fracArr[idx] = failed ? 1 : 0;
         }
+
         private static void ComputeInhomogeneousStressKernelSimple(
     Index1D idx,
     ArrayView<Vector3> v1Arr,
@@ -730,6 +733,7 @@ namespace CTSegmenter
             s3Arr[idx] = sigma3;
             fracArr[idx] = fractured ? 1 : 0;
         }
+
         /// <summary>
         /// Calculate fracture probability with density-adjusted strengths
         /// </summary>
@@ -996,6 +1000,7 @@ namespace CTSegmenter
 
             return new PointF(projX, projY);
         }
+
         /// <summary>
         /// Get a color from a heatmap gradient based on a value
         /// </summary>
@@ -1078,8 +1083,8 @@ namespace CTSegmenter
                 Logger.Log($"[InhomogeneousTriaxialSimulation] Error in GetHeatMapColor: {ex.Message}");
                 return Color.DarkGray;
             }
-
         }
+
         /// <summary>
         /// Add a method to get the projection matrix based on test direction
         /// </summary>
@@ -1104,6 +1109,7 @@ namespace CTSegmenter
             // Return the rotation matrix (as a structure)
             return new Matrix3x3(xAxis, yAxis, zAxis);
         }
+
         /// <summary>
         /// Helper structure for a 3x3 matrix
         /// </summary>
@@ -1129,6 +1135,7 @@ namespace CTSegmenter
                 );
             }
         }
-        #endregion
+
+        #endregion Simulation Override Methods
     }
 }

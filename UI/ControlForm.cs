@@ -20,6 +20,7 @@ namespace CTSegmenter
 
         // New Tools menu items.
         private ToolStripMenuItem toolsMenu;
+
         private ToolStripMenuItem panMenuItem;
         private ToolStripMenuItem eraserMenuItem;
         private ToolStripMenuItem brushMenuItem;
@@ -27,6 +28,7 @@ namespace CTSegmenter
 
         // New UI elements in the left panel.
         private Button btnInterpolate;
+
         private TrackBar toolSizeSlider;
         private Label toolSizeLabel;
         private Timer brushOverlayTimer;
@@ -42,7 +44,7 @@ namespace CTSegmenter
         private Button btnAddSelection;
         private Button btnSubSelection;
         //private Button btnSegmentAnything;
-       
+
         private Button btnRefresh;
         private Label lblSlice;
         private TrackBar sliceSlider;
@@ -83,8 +85,10 @@ namespace CTSegmenter
         private ToolStripMenuItem showMaskMenuItem;
         private ToolStripMenuItem enableThresholdMaskMenuItem; // This now is "Render Materials"
         private ToolStripMenuItem showHistogramMenuItem;
+
         //private ToolStripMenuItem showOrthoviewsMenuItem;
         private ToolStripMenuItem resetZoomMenuItem;
+
         private ToolStripMenuItem helpMenu;
         private ToolStripMenuItem dbgConsole;
         private ToolStripMenuItem about;
@@ -94,8 +98,7 @@ namespace CTSegmenter
         private ToolStripMenuItem stressAnalysisMenuItem;
 
         //Annotations for SAM2
-        AnnotationManager sharedAnnotationManager = new AnnotationManager();
-        
+        private AnnotationManager sharedAnnotationManager = new AnnotationManager();
 
         public ControlForm(MainForm form)
         {
@@ -110,6 +113,7 @@ namespace CTSegmenter
             PaletteMode = PaletteMode.Office2010Black;
             MakeEverythingDark(this);
         }
+
         private void MakeEverythingDark(Control root)
         {
             root.BackColor = Color.FromArgb(45, 45, 48);
@@ -117,9 +121,9 @@ namespace CTSegmenter
 
             foreach (Control c in root.Controls) MakeEverythingDark(c);
         }
+
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-
             Logger.ShuttingDown = true;
             if (Logger.LogWindowInstance != null && !Logger.LogWindowInstance.IsDisposed)
             {
@@ -128,6 +132,7 @@ namespace CTSegmenter
             System.Diagnostics.Process.GetCurrentProcess().Kill();
             Application.Exit();
         }
+
         private void InitializeSliceControls()
         {
             // Calculate the maximum slice index
@@ -165,6 +170,7 @@ namespace CTSegmenter
             lblYz.Text = $"YZ Projection Col: {middleYZ} / {sliderYZ.Maximum}";
             mainForm.YzSliceX = middleYZ;
         }
+
         private void InitializeComponent()
         {
             this.FormBorderStyle = FormBorderStyle.None;
@@ -292,7 +298,6 @@ namespace CTSegmenter
             // This menu item now toggles RenderMaterials.
             enableThresholdMaskMenuItem = new ToolStripMenuItem("Render Materials")
             {
-
                 CheckOnClick = true,
                 Checked = false
             };
@@ -598,7 +603,6 @@ namespace CTSegmenter
                 });
             };
 
-
             chkLoadFull = new CheckBox
             {
                 Text = "Load Full (no mapping)",
@@ -661,7 +665,8 @@ namespace CTSegmenter
             };
 
             // Add event handler for the RangeChanged event
-            thresholdRangeSlider.RangeChanged += (s, e) => {
+            thresholdRangeSlider.RangeChanged += (s, e) =>
+            {
                 numThresholdMin.Value = thresholdRangeSlider.RangeMinimum;
                 numThresholdMax.Value = thresholdRangeSlider.RangeMaximum;
                 UpdateSelectedMaterialRange();
@@ -680,7 +685,8 @@ namespace CTSegmenter
                 Value = thresholdRangeSlider.RangeMinimum,
                 Location = new Point(0, 50)
             };
-            numThresholdMin.ValueChanged += (s, e) => {
+            numThresholdMin.ValueChanged += (s, e) =>
+            {
                 if ((int)numThresholdMin.Value != thresholdRangeSlider.RangeMinimum)
                 {
                     thresholdRangeSlider.RangeMinimum = (int)numThresholdMin.Value;
@@ -700,7 +706,8 @@ namespace CTSegmenter
                 Value = thresholdRangeSlider.RangeMaximum,
                 Location = new Point(180, 50)
             };
-            numThresholdMax.ValueChanged += (s, e) => {
+            numThresholdMax.ValueChanged += (s, e) =>
+            {
                 if ((int)numThresholdMax.Value != thresholdRangeSlider.RangeMaximum)
                 {
                     thresholdRangeSlider.RangeMaximum = (int)numThresholdMax.Value;
@@ -740,7 +747,7 @@ namespace CTSegmenter
                 // Otherwise, fallback to the threshold-based selection.
                 else
                 {
-                    mainForm.AddThresholdSelection(mat.Min, mat.Max, (byte)mat.ID);
+                    mainForm.AddThresholdSelection(mat.Min, mat.Max, mat.ID);
                 }
                 mainForm.SaveLabelsChk();
             };
@@ -766,7 +773,7 @@ namespace CTSegmenter
                 }
                 else
                 {
-                    mainForm.RemoveThresholdSelection(mat.Min, mat.Max, (byte)mat.ID);
+                    mainForm.RemoveThresholdSelection(mat.Min, mat.Max, mat.ID);
                 }
                 mainForm.SaveLabelsChk();
             };
@@ -849,7 +856,6 @@ namespace CTSegmenter
                         mainForm.CurrentSlice = pendingXySliceValue;
                     };
                 }
-
                 else xySliceUpdateTimer.Stop();
                 xySliceUpdateTimer.Start();
             };
@@ -860,8 +866,6 @@ namespace CTSegmenter
                 sliceSlider.Value = (int)numSlice.Value;
                 mainForm.CurrentSlice = sliceSlider.Value;
                 lblSlice.Text = $"XY Slice: {sliceSlider.Value} / {sliceSlider.Maximum}";
-
-
             };
             rightPanel.Controls.Add(numSlice);
             lblXz = new Label { Text = "XZ Projection Row: 0 / 0", AutoSize = true };
@@ -920,7 +924,6 @@ namespace CTSegmenter
             btnScreenshot.Click += (s, e) => mainForm.SaveScreenshot();
             rightPanel.Controls.Add(btnScreenshot);
 
-
             table.Controls.Add(rightPanel, 1, 0);
             RefreshMaterialList();
 
@@ -937,6 +940,7 @@ namespace CTSegmenter
             };
             this.ActiveControl = menuStrip;
         }
+
         private void ToolsMenuItem_Click(object sender, EventArgs e)
         {
             // Uncheck all tool menu items.
@@ -1024,6 +1028,7 @@ namespace CTSegmenter
             // Add submenu to Tools menu
             toolsMenu.DropDownItems.Add(labelOperationsMenu);
         }
+
         private void OpenParticleSeparator()
         {
             // Check if a material is selected
@@ -1041,6 +1046,7 @@ namespace CTSegmenter
             ParticleSeparatorForm separatorForm = new ParticleSeparatorForm(mainForm, selectedMaterial);
             separatorForm.Show();
         }
+
         private void ToolSizeSlider_Scroll(object sender, EventArgs e)
         {
             int size = toolSizeSlider.Value;
@@ -1048,7 +1054,6 @@ namespace CTSegmenter
             // Simply show the overlay – MainForm will handle its own timer.
             mainForm.ShowBrushOverlay(size);
         }
-
 
         private void OnCloseDataset()
         {
@@ -1244,6 +1249,7 @@ namespace CTSegmenter
             }
             mainForm.SaveLabelsChk();
         }
+
         private void OpenTextureClassifier()
         {
             if (mainForm.volumeData == null)
@@ -1286,6 +1292,7 @@ namespace CTSegmenter
             numThresholdMin.Value = mat.Min;
             numThresholdMax.Value = mat.Max;
         }
+
         private void UpdateSelectedMaterialRange()
         {
             int idx = lstMaterials.SelectedIndex;
@@ -1307,6 +1314,7 @@ namespace CTSegmenter
             mainForm.RenderViews();
             _ = mainForm.RenderOrthoViewsAsync();
         }
+
         private void AddThresholdedSelection()
         {
             if (mainForm.currentTool == SegmentationTool.Brush)
@@ -1323,7 +1331,7 @@ namespace CTSegmenter
                     return;
                 }
                 Material mat = mainForm.Materials[idx];
-                mainForm.AddThresholdSelection(mat.Min, mat.Max, (byte)mat.ID);
+                mainForm.AddThresholdSelection(mat.Min, mat.Max, mat.ID);
             }
             mainForm.RenderViews();
             _ = mainForm.RenderOrthoViewsAsync();
@@ -1346,7 +1354,7 @@ namespace CTSegmenter
                     return;
                 }
                 Material mat = mainForm.Materials[idx];
-                mainForm.RemoveThresholdSelection(mat.Min, mat.Max, (byte)mat.ID);
+                mainForm.RemoveThresholdSelection(mat.Min, mat.Max, mat.ID);
             }
             mainForm.RenderViews();
             _ = mainForm.RenderOrthoViewsAsync();
@@ -1432,6 +1440,7 @@ namespace CTSegmenter
                 isUpdatingHistogram = false;
             }
         }
+
         private void AddBrightnessContrastMenu()
         {
             // Create menu item for Brightness/Contrast tool
@@ -1489,6 +1498,7 @@ namespace CTSegmenter
             MaterialStatisticsForm statsForm = new MaterialStatisticsForm(mainForm);
             statsForm.Show();
         }
+
         private void AddPoreNetworkModelingMenu()
         {
             // Create menu item for Pore Network Modeling
@@ -1512,6 +1522,7 @@ namespace CTSegmenter
             // Add to Tools menu
             toolsMenu.DropDownItems.Add(poreNetworkMenuItem);
         }
+
         public void RefreshMaterialList()
         {
             lstMaterials.Items.Clear();
@@ -1525,6 +1536,7 @@ namespace CTSegmenter
             else if (lstMaterials.Items.Count > 0)
                 lstMaterials.SelectedIndex = 0;
         }
+
         private void AddSimulationMenu()
         {
             // Create the Simulation menu
@@ -1582,6 +1594,7 @@ namespace CTSegmenter
             // Add to Simulation menu
             simulationMenu.DropDownItems.Add(poreNetworkMenuItem);
         }
+
         private void AddStressAnalysisToMenu()
         {
             // Create Stress Analysis menu item
@@ -1618,6 +1631,7 @@ namespace CTSegmenter
                 simulationMenu.DropDownItems.Add(stressAnalysisMenuItem);
             }
         }
+
         private void OnMergeMaterial()
         {
             int idxTarget = lstMaterials.SelectedIndex;
@@ -1663,6 +1677,5 @@ namespace CTSegmenter
                 }
             }
         }
-
     }
 }

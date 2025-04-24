@@ -31,21 +31,21 @@ public static class MaterialDensityLibrary
         {
             // Gases
             new MaterialDensity("Air", 1.225, "Gas"),
-            
+
             // Liquids
             new MaterialDensity("Water", 1000, "Liquid"),
             new MaterialDensity("Seawater", 1025, "Liquid"),
             new MaterialDensity("Oil (light)", 850, "Liquid"),
-            
+
             // Organic Materials
             new MaterialDensity("Wood (light)", 300, "Organic"),
             new MaterialDensity("Wood (dense)", 900, "Organic"),
-            
+
             // Plastics
             new MaterialDensity("PLA", 1250, "Plastic"),
             new MaterialDensity("ABS", 1050, "Plastic"),
             new MaterialDensity("PVC", 1400, "Plastic"),
-            
+
             // Common Minerals & Rocks
             new MaterialDensity("Quartz", 2650, "Mineral"),
             new MaterialDensity("Calcite", 2710, "Mineral"),
@@ -55,14 +55,14 @@ public static class MaterialDensityLibrary
             new MaterialDensity("Sandstone", 2350, "Rock"),
             new MaterialDensity("Granite", 2700, "Rock"),
             new MaterialDensity("Basalt", 3000, "Rock"),
-            
+
             // Metals
             new MaterialDensity("Aluminum", 2700, "Metal"),
             new MaterialDensity("Iron", 7850, "Metal"),
             new MaterialDensity("Steel", 7800, "Metal"),
             new MaterialDensity("Copper", 8960, "Metal"),
             new MaterialDensity("Gold", 19300, "Metal"),
-            
+
             // Dense Minerals
             new MaterialDensity("Diamond", 3510, "Dense Mineral"),
             new MaterialDensity("Pyrite", 5000, "Dense Mineral"),
@@ -79,6 +79,7 @@ public static class MaterialDensityLibrary
     {
         return Materials.Select(m => m.Category).Distinct().ToList();
     }
+
     public class CalibrationPoint
     {
         public string Region { get; set; }

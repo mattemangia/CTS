@@ -23,7 +23,7 @@ namespace CTSegmenter
                     // Optionally log that the icon file wasn't found.
                 }
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 // Optionally log or handle the exception.
             }
@@ -39,7 +39,7 @@ namespace CTSegmenter
                 ReadOnly = true,
                 BackColor = Color.Black,
                 ForeColor = Color.LightCyan,
-                Font = new Font("Consolas", 10,FontStyle.Bold),
+                Font = new Font("Consolas", 10, FontStyle.Bold),
             };
             Controls.Add(textBox);
         }
@@ -77,7 +77,7 @@ namespace CTSegmenter
             this.Name = "LogWindow";
             this.Load += new System.EventHandler(this.LogWindow_Load);
             this.ResumeLayout(false);
-            
+
 
         }
 
@@ -85,6 +85,6 @@ namespace CTSegmenter
         {
 
         }
-        
+
     }
 }

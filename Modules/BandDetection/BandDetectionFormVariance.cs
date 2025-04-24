@@ -4,15 +4,14 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+
 // Add ILGPU references
 using ILGPU;
 using ILGPU.Runtime;
-using ILGPU.Algorithms;
 
 namespace CTSegmenter
 {
@@ -20,10 +19,12 @@ namespace CTSegmenter
     {
         // Fields for variance-based detection
         private bool useVarianceDetection = false;
+
         private int slicesToIntegrate = 10;
 
         // Separate variance maps and images for each view
         private float[,] xyVarianceMap = null;
+
         private float[,] xzVarianceMap = null;
         private float[,] yzVarianceMap = null;
 
@@ -36,6 +37,7 @@ namespace CTSegmenter
 
         // Arrays for variance-based peaks
         private int[] xyVarianceDarkPeaks = null;
+
         private int[] xyVarianceBrightPeaks = null;
         private int[] xzVarianceDarkPeaks = null;
         private int[] xzVarianceBrightPeaks = null;
@@ -44,6 +46,7 @@ namespace CTSegmenter
 
         // UI components for variance-based detection
         private TabControl tabControl;
+
         private CheckBox chkUseVariance;
         private NumericUpDown numSlicesToIntegrate;
         private Label lblSlicesToIntegrate;
@@ -60,6 +63,7 @@ namespace CTSegmenter
 
         // ILGPU fields
         private bool gpuAvailable = false;
+
         private Context ilgpuContext = null;
         private Accelerator accelerator = null;
         private Action<Index1D, ArrayView<byte>, ArrayView<float>, int, int, int, int, int> calculateVarianceKernel = null;
@@ -299,7 +303,7 @@ namespace CTSegmenter
                 numVarianceThreshold.ValueChanged += (s, e) =>
                 {
                     // Prevent exact zero values - choose a small positive number instead
-                    if ((decimal)numVarianceThreshold.Value <= 0m)
+                    if (numVarianceThreshold.Value <= 0m)
                     {
                         Logger.Log("[BandDetectionForm] Warning: Zero threshold detected, using minimum safe value");
                         numVarianceThreshold.Value = 0.000001m; // Use 1e-6 as minimum
@@ -577,7 +581,8 @@ namespace CTSegmenter
                 ShowVarianceMaps();
 
                 // Update UI
-                this.Invoke(new Action(() => {
+                this.Invoke(new Action(() =>
+                {
                     btnSwitchToNormal.Text = "Show Normal View";
                     btnVarianceComposite.Enabled = true;
                 }));
@@ -641,7 +646,6 @@ namespace CTSegmenter
                               "View Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
-
 
         // Method to restore normal views
         private void RestoreNormalViews()
@@ -837,7 +841,7 @@ namespace CTSegmenter
             }
         }
 
-        // Method to update YZ chart with variance data  
+        // Method to update YZ chart with variance data
         private void UpdateVarianceYZChart()
         {
             if (yzVarianceMap == null || yzChart == null)
@@ -1171,7 +1175,7 @@ namespace CTSegmenter
             token.ThrowIfCancellationRequested();
 
             // Get current slice
-            int centerSlice = (int)xySliceTrackBar.Value;
+            int centerSlice = xySliceTrackBar.Value;
 
             // Calculate starting slice centered around current slice
             int startSlice = Math.Max(0, centerSlice - sliceCount / 2);
@@ -1244,7 +1248,7 @@ namespace CTSegmenter
             token.ThrowIfCancellationRequested();
 
             // Get current XZ slice position (Y value)
-            int centerY = (int)xzSliceTrackBar.Value;
+            int centerY = xzSliceTrackBar.Value;
 
             // Calculate Y range centered around current Y
             int startY = Math.Max(0, centerY - sliceCount / 2);
@@ -1350,7 +1354,7 @@ namespace CTSegmenter
             token.ThrowIfCancellationRequested();
 
             // Get current YZ slice position (X value)
-            int centerX = (int)yzSliceTrackBar.Value;
+            int centerX = yzSliceTrackBar.Value;
 
             // Calculate X range centered around current X
             int startX = Math.Max(0, centerX - sliceCount / 2);
@@ -1460,7 +1464,7 @@ namespace CTSegmenter
             xyVarianceMap = new float[width, height];
 
             // Get current slice
-            int centerSlice = (int)xySliceTrackBar.Value;
+            int centerSlice = xySliceTrackBar.Value;
 
             // Calculate starting slice centered around current slice
             int startSlice = Math.Max(0, centerSlice - sliceCount / 2);
@@ -1540,7 +1544,7 @@ namespace CTSegmenter
             xzVarianceMap = new float[width, depth];
 
             // Get current XZ slice position (Y value)
-            int centerY = (int)xzSliceTrackBar.Value;
+            int centerY = xzSliceTrackBar.Value;
 
             // Calculate Y range centered around current Y
             int startY = Math.Max(0, centerY - sliceCount / 2);
@@ -1620,7 +1624,7 @@ namespace CTSegmenter
             yzVarianceMap = new float[height, depth];
 
             // Get current YZ slice position (X value)
-            int centerX = (int)yzSliceTrackBar.Value;
+            int centerX = yzSliceTrackBar.Value;
 
             // Calculate X range centered around current X
             int startX = Math.Max(0, centerX - sliceCount / 2);
@@ -2111,6 +2115,7 @@ namespace CTSegmenter
                 Logger.Log($"[BandDetectionForm] Saved {label} variance composite to {filePath}");
             }
         }
+
         private async void ExportVarianceData()
         {
             if (xyVarianceMap == null || xyVarianceDarkPeaks == null)
@@ -2167,6 +2172,7 @@ namespace CTSegmenter
                 progressBar.Value = 0;
             }
         }
+
         private async Task ExportVarianceToExcel(string fileName)
         {
             await Task.Run(() =>
@@ -2775,7 +2781,6 @@ namespace CTSegmenter
             xml.AppendLine("</WorksheetOptions>");
             xml.AppendLine("</Worksheet>");
         }
-
 
         private async Task ExportVarianceToCSV(string fileName)
         {

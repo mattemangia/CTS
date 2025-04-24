@@ -1,15 +1,14 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
-using System.Drawing.Drawing2D;
 
 namespace CTSegmenter
 {
@@ -17,6 +16,7 @@ namespace CTSegmenter
     {
         // Main form components
         private Form samForm;
+
         private TableLayoutPanel mainLayout;
         private Panel xyPanel, xzPanel, yzPanel;
         private PictureBox xyViewer, xzViewer, yzViewer;
@@ -36,19 +36,23 @@ namespace CTSegmenter
         private HashSet<int> cachedYZKeys = new HashSet<int>();
         private const int CACHE_SIZE = 30; // Number of slices to cache
 
-        private enum ActiveView { XY, XZ, YZ }
+        private enum ActiveView
+        { XY, XZ, YZ }
+
         private ActiveView currentActiveView = ActiveView.XY;
 
-        
         private Button btnXYView, btnXZView, btnYZView;
-        // Slice control components 
+
+        // Slice control components
         private Label lblSliceXY;
+
         private TrackBar sliderXY;
         private NumericUpDown numXY;
         private CheckBox chkSyncWithMainView;
 
         // Orthoslice controls
         private Label lblSliceXZ;
+
         private TrackBar sliderXZ;
         private NumericUpDown numXZ;
 
@@ -58,25 +62,30 @@ namespace CTSegmenter
 
         // Scrollbar controls
         private HScrollBar xyHScroll, xzHScroll, yzHScroll;
+
         private VScrollBar xyVScroll, xzVScroll, yzVScroll;
 
         // Zoom and pan state variables
         private float xyZoom = 1.0f, xzZoom = 1.0f, yzZoom = 1.0f;
+
         private Point xyPan = Point.Empty, xzPan = Point.Empty, yzPan = Point.Empty;
 
         // Image bounds tracking
         private Rectangle xyImageBounds = Rectangle.Empty;
+
         private Rectangle xzImageBounds = Rectangle.Empty;
         private Rectangle yzImageBounds = Rectangle.Empty;
 
         // References to parent application components
         private MainForm mainForm;
+
         private Material selectedMaterial;
         private AnnotationManager annotationManager;
         private Dictionary<int, bool> pointTypes = new Dictionary<int, bool>(); // Maps point ID to isPositive
 
         // ONNX model components
         private InferenceSession encoderSession;
+
         private InferenceSession decoderSession;
         private string encoderPath;
         private string decoderPath;
@@ -90,15 +99,19 @@ namespace CTSegmenter
         private DenseTensor<float> cachedHighResFeats1 = null;
         private int cachedFeatureSlice = -1;
         private int featureCacheRadius = 3; // How many slices to reuse encoder features for
+
         // Segmentation results
         private byte[,] segmentationMask;
 
         // Prompt mode
-        private enum PromptMode { Positive, Negative }
+        private enum PromptMode
+        { Positive, Negative }
+
         private PromptMode currentMode = PromptMode.Positive;
 
         // Slice change callback
         private Action<int> sliceChangeCallback;
+
         /// <summary>
         /// Constructor that allows using SegmentAnythingCT without showing the UI
         /// </summary>
@@ -164,10 +177,10 @@ namespace CTSegmenter
                 }
             }
         }
+
         public SegmentAnythingCT(MainForm mainForm, Material selectedMaterial, AnnotationManager annotationManager)
      : this(mainForm, selectedMaterial, annotationManager, true)
         {
-            
         }
 
         private void InitializeForm()
@@ -281,7 +294,8 @@ namespace CTSegmenter
                 Height = 30,
                 BackColor = Color.LightGreen
             };
-            btnPositivePrompt.Click += (s, e) => {
+            btnPositivePrompt.Click += (s, e) =>
+            {
                 currentMode = PromptMode.Positive;
                 btnPositivePrompt.BackColor = Color.LightGreen;
                 btnNegativePrompt.BackColor = SystemColors.Control;
@@ -295,7 +309,8 @@ namespace CTSegmenter
                 Width = 140,
                 Height = 30
             };
-            btnNegativePrompt.Click += (s, e) => {
+            btnNegativePrompt.Click += (s, e) =>
+            {
                 currentMode = PromptMode.Negative;
                 btnPositivePrompt.BackColor = SystemColors.Control;
                 btnNegativePrompt.BackColor = Color.LightPink;
@@ -327,7 +342,8 @@ namespace CTSegmenter
                 Height = 30,
                 BackColor = Color.LightSkyBlue
             };
-            btnXYView.Click += (s, e) => {
+            btnXYView.Click += (s, e) =>
+            {
                 currentActiveView = ActiveView.XY;
                 UpdateActiveViewButtons();
                 Logger.Log("[SegmentAnythingCT] Switched to XY view for segmentation");
@@ -350,7 +366,8 @@ namespace CTSegmenter
                 Width = 80,
                 Height = 30
             };
-            btnXZView.Click += (s, e) => {
+            btnXZView.Click += (s, e) =>
+            {
                 currentActiveView = ActiveView.XZ;
                 UpdateActiveViewButtons();
                 Logger.Log("[SegmentAnythingCT] Switched to XZ view for segmentation");
@@ -373,7 +390,8 @@ namespace CTSegmenter
                 Width = 80,
                 Height = 30
             };
-            btnYZView.Click += (s, e) => {
+            btnYZView.Click += (s, e) =>
+            {
                 currentActiveView = ActiveView.YZ;
                 UpdateActiveViewButtons();
                 Logger.Log("[SegmentAnythingCT] Switched to YZ view for segmentation");
@@ -451,13 +469,15 @@ namespace CTSegmenter
             };
 
             // Add event handlers for XY slice controls
-            sliderXY.Scroll += (s, e) => {
+            sliderXY.Scroll += (s, e) =>
+            {
                 xySlice = sliderXY.Value;
                 UpdateSliceControls();
                 UpdateViewers();
             };
 
-            numXY.ValueChanged += (s, e) => {
+            numXY.ValueChanged += (s, e) =>
+            {
                 if (numXY.Value != xySlice)
                 {
                     xySlice = (int)numXY.Value;
@@ -494,13 +514,15 @@ namespace CTSegmenter
             };
 
             // Add event handlers for XZ slice controls
-            sliderXZ.Scroll += (s, e) => {
+            sliderXZ.Scroll += (s, e) =>
+            {
                 xzRow = sliderXZ.Value;
                 UpdateSliceControls();
                 UpdateViewers();
             };
 
-            numXZ.ValueChanged += (s, e) => {
+            numXZ.ValueChanged += (s, e) =>
+            {
                 if (numXZ.Value != xzRow)
                 {
                     xzRow = (int)numXZ.Value;
@@ -537,13 +559,15 @@ namespace CTSegmenter
             };
 
             // Add event handlers for YZ slice controls
-            sliderYZ.Scroll += (s, e) => {
+            sliderYZ.Scroll += (s, e) =>
+            {
                 yzCol = sliderYZ.Value;
                 UpdateSliceControls();
                 UpdateViewers();
             };
 
-            numYZ.ValueChanged += (s, e) => {
+            numYZ.ValueChanged += (s, e) =>
+            {
                 if (numYZ.Value != yzCol)
                 {
                     yzCol = (int)numYZ.Value;
@@ -561,7 +585,8 @@ namespace CTSegmenter
                 AutoSize = true
             };
 
-            chkSyncWithMainView.CheckedChanged += (s, e) => {
+            chkSyncWithMainView.CheckedChanged += (s, e) =>
+            {
                 // If synchronization is turned on, update the main view
                 if (chkSyncWithMainView.Checked)
                 {
@@ -599,30 +624,30 @@ namespace CTSegmenter
             controlPanel.Controls.AddRange(new Control[] {
         // Model Loading
         lblModelPath, modelPathTextBox, btnBrowse,
-        
+
         // Device Selection
         lblDevice, rbCPU, rbGPU, btnLoadModel,
-        
+
         // Prompt Mode
         lblPromptMode, btnPositivePrompt, btnNegativePrompt,
-        
+
         // Auto-Update
         chkAutoUpdate,
-        
+
         // Active View Selection
         lblActiveView, btnXYView, btnXZView, btnYZView,
-        
+
         // Action Buttons
         btnApply, btnClose, statusLabel,
-        
+
         // Slice Controls
         lblSliceXY, sliderXY, numXY,
         lblSliceXZ, sliderXZ, numXZ,
         lblSliceYZ, sliderYZ, numYZ,
-        
+
         // Sync Checkbox
         chkSyncWithMainView,
-        
+
         // Help and Material Info
         lblHelp, lblMaterial
     });
@@ -636,7 +661,8 @@ namespace CTSegmenter
             samForm.Controls.Add(mainLayout);
 
             // Handle form events
-            samForm.FormClosing += (s, e) => {
+            samForm.FormClosing += (s, e) =>
+            {
                 // Clean up resources
                 encoderSession?.Dispose();
                 decoderSession?.Dispose();
@@ -655,7 +681,6 @@ namespace CTSegmenter
                 Logger.Log("[SegmentAnythingCT] Form closing, resources cleaned up");
             };
 
-
             // Initially load the slices
             UpdateViewers();
         }
@@ -666,6 +691,7 @@ namespace CTSegmenter
             btnXZView.BackColor = currentActiveView == ActiveView.XZ ? Color.LightSkyBlue : SystemColors.Control;
             btnYZView.BackColor = currentActiveView == ActiveView.YZ ? Color.LightSkyBlue : SystemColors.Control;
         }
+
         private Panel CreateViewerPanel(string title)
         {
             Panel container = new Panel
@@ -744,18 +770,21 @@ namespace CTSegmenter
         private void SetupXYViewerEvents()
         {
             // XY viewer scroll events
-            xyHScroll.Scroll += (s, e) => {
+            xyHScroll.Scroll += (s, e) =>
+            {
                 xyPan.X = -xyHScroll.Value;
                 xyViewer.Invalidate();
             };
 
-            xyVScroll.Scroll += (s, e) => {
+            xyVScroll.Scroll += (s, e) =>
+            {
                 xyPan.Y = -xyVScroll.Value;
                 xyViewer.Invalidate();
             };
 
             // XY viewer mouse wheel for zooming
-            xyViewer.MouseWheel += (s, e) => {
+            xyViewer.MouseWheel += (s, e) =>
+            {
                 float oldZoom = xyZoom;
                 // Adjust zoom based on wheel direction
                 if (e.Delta > 0)
@@ -776,7 +805,8 @@ namespace CTSegmenter
             bool isPanning = false;
 
             // Replace the mousDown handler in SetupXYViewerEvents method:
-            xyViewer.MouseDown += (s, e) => {
+            xyViewer.MouseDown += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Left)
                 {
                     // Convert mouse coordinates to image coordinates
@@ -865,9 +895,8 @@ namespace CTSegmenter
                 }
             };
 
-
-
-            xyViewer.MouseMove += (s, e) => {
+            xyViewer.MouseMove += (s, e) =>
+            {
                 if (isPanning && e.Button == MouseButtons.Right)
                 {
                     // Calculate the move delta
@@ -884,7 +913,8 @@ namespace CTSegmenter
                 }
             };
 
-            xyViewer.MouseUp += (s, e) => {
+            xyViewer.MouseUp += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Right)
                 {
                     isPanning = false;
@@ -892,7 +922,8 @@ namespace CTSegmenter
             };
 
             // Paint event for custom rendering with checkerboard background
-            xyViewer.Paint += (s, e) => {
+            xyViewer.Paint += (s, e) =>
+            {
                 // Clear background
                 e.Graphics.Clear(Color.Black);
 
@@ -930,18 +961,21 @@ namespace CTSegmenter
         private void SetupXZViewerEvents()
         {
             // XZ viewer scroll events
-            xzHScroll.Scroll += (s, e) => {
+            xzHScroll.Scroll += (s, e) =>
+            {
                 xzPan.X = -xzHScroll.Value;
                 xzViewer.Invalidate();
             };
 
-            xzVScroll.Scroll += (s, e) => {
+            xzVScroll.Scroll += (s, e) =>
+            {
                 xzPan.Y = -xzVScroll.Value;
                 xzViewer.Invalidate();
             };
 
             // XZ viewer mouse wheel for zooming
-            xzViewer.MouseWheel += (s, e) => {
+            xzViewer.MouseWheel += (s, e) =>
+            {
                 float oldZoom = xzZoom;
                 // Adjust zoom based on wheel direction
                 if (e.Delta > 0)
@@ -961,7 +995,8 @@ namespace CTSegmenter
             Point lastPos = Point.Empty;
             bool isPanning = false;
 
-            xzViewer.MouseDown += (s, e) => {
+            xzViewer.MouseDown += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Left)
                 {
                     // Convert mouse coordinates to image coordinates
@@ -1053,8 +1088,8 @@ namespace CTSegmenter
                 }
             };
 
-
-            xzViewer.MouseMove += (s, e) => {
+            xzViewer.MouseMove += (s, e) =>
+            {
                 if (isPanning && e.Button == MouseButtons.Right)
                 {
                     // Calculate the move delta
@@ -1071,7 +1106,8 @@ namespace CTSegmenter
                 }
             };
 
-            xzViewer.MouseUp += (s, e) => {
+            xzViewer.MouseUp += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Right)
                 {
                     isPanning = false;
@@ -1079,7 +1115,8 @@ namespace CTSegmenter
             };
 
             // Paint event for custom rendering with checkerboard background
-            xzViewer.Paint += (s, e) => {
+            xzViewer.Paint += (s, e) =>
+            {
                 // Clear background
                 e.Graphics.Clear(Color.Black);
 
@@ -1108,7 +1145,7 @@ namespace CTSegmenter
                         e.Graphics.DrawRectangle(borderPen, xzImageBounds);
                     }
 
-                    // Draw annotations 
+                    // Draw annotations
                     DrawAnnotationsOnXZ(e.Graphics);
                 }
             };
@@ -1117,18 +1154,21 @@ namespace CTSegmenter
         private void SetupYZViewerEvents()
         {
             // YZ viewer scroll events
-            yzHScroll.Scroll += (s, e) => {
+            yzHScroll.Scroll += (s, e) =>
+            {
                 yzPan.X = -yzHScroll.Value;
                 yzViewer.Invalidate();
             };
 
-            yzVScroll.Scroll += (s, e) => {
+            yzVScroll.Scroll += (s, e) =>
+            {
                 yzPan.Y = -yzVScroll.Value;
                 yzViewer.Invalidate();
             };
 
             // YZ viewer mouse wheel for zooming
-            yzViewer.MouseWheel += (s, e) => {
+            yzViewer.MouseWheel += (s, e) =>
+            {
                 float oldZoom = yzZoom;
                 // Adjust zoom based on wheel direction
                 if (e.Delta > 0)
@@ -1148,7 +1188,8 @@ namespace CTSegmenter
             Point lastPos = Point.Empty;
             bool isPanning = false;
 
-            yzViewer.MouseDown += (s, e) => {
+            yzViewer.MouseDown += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Left)
                 {
                     // Convert mouse coordinates to image coordinates
@@ -1240,8 +1281,8 @@ namespace CTSegmenter
                 }
             };
 
-
-            yzViewer.MouseMove += (s, e) => {
+            yzViewer.MouseMove += (s, e) =>
+            {
                 if (isPanning && e.Button == MouseButtons.Right)
                 {
                     // Calculate the move delta
@@ -1258,7 +1299,8 @@ namespace CTSegmenter
                 }
             };
 
-            yzViewer.MouseUp += (s, e) => {
+            yzViewer.MouseUp += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Right)
                 {
                     isPanning = false;
@@ -1266,7 +1308,8 @@ namespace CTSegmenter
             };
 
             // Paint event for custom rendering with checkerboard background
-            yzViewer.Paint += (s, e) => {
+            yzViewer.Paint += (s, e) =>
+            {
                 // Clear background
                 e.Graphics.Clear(Color.Black);
 
@@ -1300,6 +1343,7 @@ namespace CTSegmenter
                 }
             };
         }
+
         private void DrawAnnotationsOnXZ(Graphics g)
         {
             // Get all points
@@ -1464,7 +1508,6 @@ namespace CTSegmenter
             }
         }
 
-
         private void BrowseForModelDirectory()
         {
             using (FolderBrowserDialog dialog = new FolderBrowserDialog())
@@ -1533,7 +1576,7 @@ namespace CTSegmenter
                 options.EnableMemoryPattern = true;
                 options.EnableCpuMemArena = true;
 
-                // Set intra-op and inter-op thread count for CPU 
+                // Set intra-op and inter-op thread count for CPU
                 int cpuThreads = Environment.ProcessorCount;
                 options.IntraOpNumThreads = Math.Max(1, cpuThreads / 2);
 
@@ -1693,7 +1736,6 @@ namespace CTSegmenter
             xzViewer.Invalidate();
             yzViewer.Invalidate();
         }
-
 
         private unsafe Bitmap CreateSliceBitmap(int sliceZ)
         {
@@ -1883,12 +1925,15 @@ namespace CTSegmenter
                 case ActiveView.XY:
                     viewBitmap = CreateSliceBitmap(xySlice);
                     break;
+
                 case ActiveView.XZ:
                     viewBitmap = CreateXZSliceBitmap(xzRow);
                     break;
+
                 case ActiveView.YZ:
                     viewBitmap = CreateYZSliceBitmap(yzCol);
                     break;
+
                 default:
                     viewBitmap = CreateSliceBitmap(xySlice);
                     break;
@@ -1944,7 +1989,6 @@ namespace CTSegmenter
             }
         }
 
-
         private async Task PerformSegmentation()
         {
             if (encoderSession == null || decoderSession == null)
@@ -1963,10 +2007,12 @@ namespace CTSegmenter
                     // Points on the current XY slice
                     relevantPoints.AddRange(allPoints.Where(p => p.Z == xySlice));
                     break;
+
                 case ActiveView.XZ:
                     // Points on the current XZ row
                     relevantPoints.AddRange(allPoints.Where(p => Math.Abs(p.Y - xzRow) <= 1));
                     break;
+
                 case ActiveView.YZ:
                     // Points on the current YZ column
                     relevantPoints.AddRange(allPoints.Where(p => Math.Abs(p.X - yzCol) <= 1));
@@ -2027,14 +2073,17 @@ namespace CTSegmenter
                             scaleX = 1024.0f / mainForm.GetWidth();
                             scaleY = 1024.0f / mainForm.GetHeight();
                             break;
+
                         case ActiveView.XZ:
                             scaleX = 1024.0f / mainForm.GetWidth();
                             scaleY = 1024.0f / mainForm.GetDepth();
                             break;
+
                         case ActiveView.YZ:
                             scaleX = 1024.0f / mainForm.GetDepth();
                             scaleY = 1024.0f / mainForm.GetHeight();
                             break;
+
                         default:
                             scaleX = scaleY = 1.0f;
                             break;
@@ -2055,14 +2104,17 @@ namespace CTSegmenter
                                 x = point.X;
                                 y = point.Y;
                                 break;
+
                             case ActiveView.XZ:
                                 x = point.X;
                                 y = point.Z;
                                 break;
+
                             case ActiveView.YZ:
                                 x = point.Z;
                                 y = point.Y;
                                 break;
+
                             default:
                                 x = point.X;
                                 y = point.Y;
@@ -2094,14 +2146,17 @@ namespace CTSegmenter
                             origWidth = mainForm.GetWidth();
                             origHeight = mainForm.GetHeight();
                             break;
+
                         case ActiveView.XZ:
                             origWidth = mainForm.GetWidth();
                             origHeight = mainForm.GetDepth();
                             break;
+
                         case ActiveView.YZ:
                             origWidth = mainForm.GetDepth();
                             origHeight = mainForm.GetHeight();
                             break;
+
                         default:
                             origWidth = mainForm.GetWidth();
                             origHeight = mainForm.GetHeight();
@@ -2132,7 +2187,8 @@ namespace CTSegmenter
                         byte[,] tempMask = null;
                         float bestIoU = 0;
 
-                        await Task.Run(() => {
+                        await Task.Run(() =>
+                        {
                             var masks = decoderOutputs.First(x => x.Name == "masks").AsTensor<float>();
                             var iouPredictions = decoderOutputs.First(x => x.Name == "iou_predictions").AsTensor<float>();
 
@@ -2192,7 +2248,8 @@ namespace CTSegmenter
                         });
 
                         // Update UI on the UI thread
-                        samForm.Invoke(new Action(() => {
+                        samForm.Invoke(new Action(() =>
+                        {
                             segmentationMask = tempMask;
                             UpdateViewers();
                             statusLabel.Text = $"Segmentation complete (IoU: {bestIoU:F3})";
@@ -2212,7 +2269,8 @@ namespace CTSegmenter
             }
             catch (Exception ex)
             {
-                samForm.Invoke(new Action(() => {
+                samForm.Invoke(new Action(() =>
+                {
                     MessageBox.Show($"Error during segmentation: {ex.Message}");
                     statusLabel.Text = $"Error: {ex.Message}";
                 }));
@@ -2220,7 +2278,6 @@ namespace CTSegmenter
                 Logger.Log($"[SegmentAnythingCT] Segmentation error: {ex.Message}");
             }
         }
-
 
         private unsafe void SaveAllMasks(Tensor<float> masks, Tensor<float> iouPredictions)
         {
@@ -2514,6 +2571,7 @@ namespace CTSegmenter
                 Logger.Log($"[SegmentAnythingCT] Error applying mask: {ex.Message}");
             }
         }
+
         private List<AnnotationPoint> GetRelevantPointsForCurrentView()
         {
             var allPoints = annotationManager.GetAllPoints();
@@ -2525,10 +2583,12 @@ namespace CTSegmenter
                     // Points on the current XY slice
                     relevantPoints.AddRange(allPoints.Where(p => p.Z == xySlice));
                     break;
+
                 case ActiveView.XZ:
                     // Points on the current XZ row
                     relevantPoints.AddRange(allPoints.Where(p => Math.Abs(p.Y - xzRow) <= 1));
                     break;
+
                 case ActiveView.YZ:
                     // Points on the current YZ column
                     relevantPoints.AddRange(allPoints.Where(p => Math.Abs(p.X - yzCol) <= 1));
@@ -2537,6 +2597,7 @@ namespace CTSegmenter
 
             return relevantPoints;
         }
+
         private unsafe void ApplySegmentationOverlay(Bitmap bitmap, byte[,] mask, ActiveView viewType)
         {
             if (mask == null || currentActiveView != viewType)
@@ -2750,7 +2811,8 @@ namespace CTSegmenter
                 grpProcessing.Controls.AddRange(new Control[] { lblProcessStrategy, cboStrategy });
 
                 // Add event handler to control sub-option visibility
-                rbCreateMaterial.CheckedChanged += (s, e) => {
+                rbCreateMaterial.CheckedChanged += (s, e) =>
+                {
                     chkNewMaterial.Enabled = rbCreateMaterial.Checked;
                 };
 
@@ -2845,7 +2907,8 @@ namespace CTSegmenter
                             {
                                 if (form.GetType().Name == "ControlForm")
                                 {
-                                    form.Invoke(new Action(() => {
+                                    form.Invoke(new Action(() =>
+                                    {
                                         var refreshMethod = form.GetType().GetMethod("RefreshMaterialList");
                                         if (refreshMethod != null)
                                             refreshMethod.Invoke(form, null);
@@ -2883,7 +2946,7 @@ namespace CTSegmenter
                                                           relevantPoints, progressForm);
                                 break;
 
-                            case 2:  // Forward only 
+                            case 2:  // Forward only
                                 await SegmentVolumeForwardOnly(xySlice, endSlice, materialID,
                                                              relevantPoints, progressForm);
                                 break;
@@ -2909,6 +2972,7 @@ namespace CTSegmenter
                 }
             }
         }
+
         private async Task SegmentVolumeSequential(int startSlice, int endSlice, int currentSlice,
                                            byte materialID, List<AnnotationPoint> relevantPoints,
                                            ProgressForm progressForm)
@@ -2968,6 +3032,7 @@ namespace CTSegmenter
                 ApplyMaskToVolume(currentMask, slice, materialID);
             }
         }
+
         private async Task SegmentVolumeParallel(int startSlice, int endSlice, int currentSlice,
                                         byte materialID, List<AnnotationPoint> relevantPoints,
                                         ProgressForm progressForm)
@@ -2979,7 +3044,8 @@ namespace CTSegmenter
             byte[,] backwardMask = segmentationMask;
 
             // Create progress reporting
-            var progress = new Progress<(int processed, string message)>(update => {
+            var progress = new Progress<(int processed, string message)>(update =>
+            {
                 processedSlices = update.processed;
                 progressForm.SafeUpdateProgress(processedSlices, totalSlices, update.message);
             });
@@ -2990,6 +3056,7 @@ namespace CTSegmenter
                 SegmentBackward(currentSlice - 1, startSlice, backwardMask, materialID, relevantPoints, progress)
             );
         }
+
         private async Task SegmentForward(int startSlice, int endSlice, byte[,] initialMask,
                                 byte materialID, List<AnnotationPoint> relevantPoints,
                                 IProgress<(int, string)> progress)
@@ -3044,6 +3111,7 @@ namespace CTSegmenter
                 ApplyMaskToVolume(currentMask, slice, materialID);
             }
         }
+
         // Process forward direction only
         private async Task SegmentVolumeForwardOnly(int startSlice, int endSlice, byte materialID,
                                            List<AnnotationPoint> relevantPoints, ProgressForm progressForm)
@@ -3157,7 +3225,8 @@ namespace CTSegmenter
             int maxX = int.MinValue, maxY = int.MinValue, maxZ = int.MinValue;
 
             // Calculate the bounds and check if this is a "dark" or "bright" segmentation
-            bool isDarkSegmentation = await Task.Run(() => {
+            bool isDarkSegmentation = await Task.Run(() =>
+            {
                 long totalPixelValue = 0;
                 long totalPixelCount = 0;
 
@@ -3232,11 +3301,13 @@ namespace CTSegmenter
             progressForm.UpdateProgress(0, croppedDepth, "Saving cropped slices...");
 
             // Use parallel processing for saving the images
-            await Task.Run(() => {
+            await Task.Run(() =>
+            {
                 object lockObj = new object();
                 int saved = 0;
 
-                Parallel.For(minZ, maxZ + 1, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, z => {
+                Parallel.For(minZ, maxZ + 1, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, z =>
+                {
                     try
                     {
                         // Check if we have a mask for this slice
@@ -3327,7 +3398,6 @@ namespace CTSegmenter
             MessageBox.Show($"Successfully exported {croppedDepth} slices to {outputFolder}.", "Export Complete",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
-
 
         // Apply mask to a specific slice in the volume
         private void ApplyMaskToVolume(byte[,] mask, int sliceZ, byte materialID)
@@ -3489,7 +3559,8 @@ namespace CTSegmenter
                 {
                     byte[,] resultMask = null;
 
-                    await Task.Run(() => {
+                    await Task.Run(() =>
+                    {
                         var masks = decoderOutputs.First(x => x.Name == "masks").AsTensor<float>();
                         var iouPredictions = decoderOutputs.First(x => x.Name == "iou_predictions").AsTensor<float>();
 
@@ -3612,6 +3683,7 @@ namespace CTSegmenter
                 }
             }
         }
+
         // Preprocess a slice image for the SAM model
         private unsafe Tensor<float> PreprocessSliceImage(int sliceZ)
         {
@@ -3666,7 +3738,6 @@ namespace CTSegmenter
             }
         }
 
-
         private void ClearCaches()
         {
             // Clear XY cache
@@ -3695,7 +3766,6 @@ namespace CTSegmenter
 
             Logger.Log("[SegmentAnythingCT] All slice caches cleared");
         }
-
 
         public void Show()
         {

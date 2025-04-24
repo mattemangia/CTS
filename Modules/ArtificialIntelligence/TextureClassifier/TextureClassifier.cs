@@ -1,18 +1,11 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
-using System.IO;
-using System.Linq;
-using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using System.Drawing.Drawing2D;
-using System.Threading;
-using System.Numerics;
 using ILGPU;
 using ILGPU.Runtime;
-using ILGPU.Algorithms;
 using ILGPU.Runtime.CPU;
 
 namespace CTSegmenter
@@ -24,8 +17,10 @@ namespace CTSegmenter
         private bool useGPU = true;
         private bool gpuInitialized = false;
         private CheckBox chkUseGPU;
+
         // Main form components
         private Form textureForm;
+
         private TableLayoutPanel mainLayout;
         private Panel xyPanel, xzPanel, yzPanel;
         private PictureBox xyViewer, xzViewer, yzViewer;
@@ -39,19 +34,23 @@ namespace CTSegmenter
 
         private const int CACHE_SIZE = 10; // Number of slices to cache
 
-        private enum ActiveView { XY, XZ, YZ }
+        private enum ActiveView
+        { XY, XZ, YZ }
+
         private ActiveView currentActiveView = ActiveView.XY;
 
         private Button btnXYView, btnXZView, btnYZView;
 
-        // Slice control components 
+        // Slice control components
         private Label lblSliceXY;
+
         private TrackBar sliderXY;
         private NumericUpDown numXY;
         private CheckBox chkSyncWithMainView;
 
         // Orthoslice controls
         private Label lblSliceXZ;
+
         private TrackBar sliderXZ;
         private NumericUpDown numXZ;
 
@@ -61,25 +60,31 @@ namespace CTSegmenter
 
         // Scrollbar controls
         private HScrollBar xyHScroll, xzHScroll, yzHScroll;
+
         private VScrollBar xyVScroll, xzVScroll, yzVScroll;
 
         // Zoom and pan state variables
         private float xyZoom = 1.0f, xzZoom = 1.0f, yzZoom = 1.0f;
+
         private Point xyPan = Point.Empty, xzPan = Point.Empty, yzPan = Point.Empty;
 
         //Quantization levels
         private bool useQuantization = true;
+
         private int quantizationLevels = 32;
         private CheckBox chkQuantization;
         private NumericUpDown numQuantizationLevels;
+
         // Rectangle selection
         private bool isSelectingRectangle = false;
+
         private Point startPoint;
         private Point endPoint;
         private Rectangle selectionRectangle = Rectangle.Empty;
 
         // Texture classification
         private byte[,] classificationMask;
+
         private double[] referenceFeatures;
         private double threshold = 0.85;
         private NumericUpDown numThreshold;
@@ -88,6 +93,7 @@ namespace CTSegmenter
 
         // References to parent application components
         private MainForm mainForm;
+
         private Material selectedMaterial;
 
         // Slices information
@@ -95,6 +101,7 @@ namespace CTSegmenter
 
         // Classification parameters
         private GroupBox grpParameters;
+
         private RadioButton rbGlcm, rbLbp, rbHistogram;
         private Label lblPatchSize;
         private NumericUpDown numPatchSize;
@@ -102,6 +109,7 @@ namespace CTSegmenter
 
         // Propagation options
         private GroupBox grpPropagation;
+
         private RadioButton rbCurrentSlice, rbWholeVolume, rbRange;
         private Label lblRange;
         private NumericUpDown numRange;
@@ -273,7 +281,8 @@ namespace CTSegmenter
                 Height = 30,
                 BackColor = Color.LightSkyBlue
             };
-            btnXYView.Click += (s, e) => {
+            btnXYView.Click += (s, e) =>
+            {
                 currentActiveView = ActiveView.XY;
                 UpdateActiveViewButtons();
                 Logger.Log("[TextureClassifier] Switched to XY view");
@@ -287,7 +296,8 @@ namespace CTSegmenter
                 Width = 80,
                 Height = 30
             };
-            btnXZView.Click += (s, e) => {
+            btnXZView.Click += (s, e) =>
+            {
                 currentActiveView = ActiveView.XZ;
                 UpdateActiveViewButtons();
                 Logger.Log("[TextureClassifier] Switched to XZ view");
@@ -301,7 +311,8 @@ namespace CTSegmenter
                 Width = 80,
                 Height = 30
             };
-            btnYZView.Click += (s, e) => {
+            btnYZView.Click += (s, e) =>
+            {
                 currentActiveView = ActiveView.YZ;
                 UpdateActiveViewButtons();
                 Logger.Log("[TextureClassifier] Switched to YZ view");
@@ -353,7 +364,7 @@ namespace CTSegmenter
                 AutoSize = true
             };
             controlPanel.Controls.Add(lblPatchSize);
-            
+
             CheckBox chkQuantization = new CheckBox
             {
                 Text = "Use Quantization (faster)",
@@ -383,7 +394,6 @@ namespace CTSegmenter
             };
             grpParameters.Controls.Add(numQuantizationLevels);
 
-
             numPatchSize = new NumericUpDown
             {
                 Location = new Point(90, 228),
@@ -393,7 +403,8 @@ namespace CTSegmenter
                 Value = patchSize,
                 Increment = 2 // Only odd values
             };
-            numPatchSize.ValueChanged += (s, e) => {
+            numPatchSize.ValueChanged += (s, e) =>
+            {
                 // Ensure patch size is odd
                 if (numPatchSize.Value % 2 == 0)
                     numPatchSize.Value += 1;
@@ -447,7 +458,8 @@ namespace CTSegmenter
                 Maximum = 100,
                 Value = propagationRange
             };
-            numRange.ValueChanged += (s, e) => {
+            numRange.ValueChanged += (s, e) =>
+            {
                 propagationRange = (int)numRange.Value;
             };
             grpPropagation.Controls.Add(numRange);
@@ -471,7 +483,8 @@ namespace CTSegmenter
                 Value = (int)(threshold * 100),
                 TickFrequency = 5
             };
-            trkThreshold.Scroll += (s, e) => {
+            trkThreshold.Scroll += (s, e) =>
+            {
                 threshold = trkThreshold.Value / 100.0;
                 lblThreshold.Text = $"Similarity Threshold: {threshold:F2}";
                 numThreshold.Value = (decimal)threshold;
@@ -488,7 +501,8 @@ namespace CTSegmenter
                 DecimalPlaces = 2,
                 Increment = 0.05m
             };
-            numThreshold.ValueChanged += (s, e) => {
+            numThreshold.ValueChanged += (s, e) =>
+            {
                 threshold = (double)numThreshold.Value;
                 lblThreshold.Text = $"Similarity Threshold: {threshold:F2}";
                 trkThreshold.Value = (int)(threshold * 100);
@@ -503,7 +517,8 @@ namespace CTSegmenter
                 Enabled = false,
                 Checked = true
             };
-            chkUseGPU.CheckedChanged += (s, e) => {
+            chkUseGPU.CheckedChanged += (s, e) =>
+            {
                 useGPU = chkUseGPU.Checked;
                 Logger.Log($"[TextureClassifier] GPU acceleration set to: {useGPU}");
             };
@@ -567,7 +582,8 @@ namespace CTSegmenter
                 Width = 220,
                 TickStyle = TickStyle.None
             };
-            sliderXY.Scroll += (s, e) => {
+            sliderXY.Scroll += (s, e) =>
+            {
                 xySlice = sliderXY.Value;
                 UpdateSliceControls();
                 UpdateViewers();
@@ -582,7 +598,8 @@ namespace CTSegmenter
                 Location = new Point(240, 590),
                 Width = 60
             };
-            numXY.ValueChanged += (s, e) => {
+            numXY.ValueChanged += (s, e) =>
+            {
                 if (numXY.Value != xySlice)
                 {
                     xySlice = (int)numXY.Value;
@@ -610,7 +627,8 @@ namespace CTSegmenter
                 Width = 220,
                 TickStyle = TickStyle.None
             };
-            sliderXZ.Scroll += (s, e) => {
+            sliderXZ.Scroll += (s, e) =>
+            {
                 xzRow = sliderXZ.Value;
                 UpdateSliceControls();
                 UpdateViewers();
@@ -625,7 +643,8 @@ namespace CTSegmenter
                 Location = new Point(240, 640),
                 Width = 60
             };
-            numXZ.ValueChanged += (s, e) => {
+            numXZ.ValueChanged += (s, e) =>
+            {
                 if (numXZ.Value != xzRow)
                 {
                     xzRow = (int)numXZ.Value;
@@ -653,7 +672,8 @@ namespace CTSegmenter
                 Width = 220,
                 TickStyle = TickStyle.None
             };
-            sliderYZ.Scroll += (s, e) => {
+            sliderYZ.Scroll += (s, e) =>
+            {
                 yzCol = sliderYZ.Value;
                 UpdateSliceControls();
                 UpdateViewers();
@@ -668,7 +688,8 @@ namespace CTSegmenter
                 Location = new Point(240, 690),
                 Width = 60
             };
-            numYZ.ValueChanged += (s, e) => {
+            numYZ.ValueChanged += (s, e) =>
+            {
                 if (numYZ.Value != yzCol)
                 {
                     yzCol = (int)numYZ.Value;
@@ -686,7 +707,8 @@ namespace CTSegmenter
                 Checked = true,
                 AutoSize = true
             };
-            chkSyncWithMainView.CheckedChanged += (s, e) => {
+            chkSyncWithMainView.CheckedChanged += (s, e) =>
+            {
                 if (chkSyncWithMainView.Checked)
                 {
                     mainForm.CurrentSlice = xySlice;
@@ -720,7 +742,8 @@ namespace CTSegmenter
             textureForm.Controls.Add(mainLayout);
 
             // Handle form events
-            textureForm.FormClosing += (s, e) => {
+            textureForm.FormClosing += (s, e) =>
+            {
                 // Unregister callback
                 mainForm.UnregisterSliceChangeCallback(sliceChangeCallback);
 
@@ -733,12 +756,14 @@ namespace CTSegmenter
             };
             this.chkQuantization = chkQuantization;
             this.numQuantizationLevels = numQuantizationLevels;
-            chkQuantization.CheckedChanged += (s, e) => {
+            chkQuantization.CheckedChanged += (s, e) =>
+            {
                 useQuantization = chkQuantization.Checked;
                 numQuantizationLevels.Enabled = useQuantization;
             };
 
-            numQuantizationLevels.ValueChanged += (s, e) => {
+            numQuantizationLevels.ValueChanged += (s, e) =>
+            {
                 quantizationLevels = (int)numQuantizationLevels.Value;
             };
             // Initially load the slices
@@ -759,7 +784,8 @@ namespace CTSegmenter
             {
                 if (textureForm.InvokeRequired)
                 {
-                    textureForm.BeginInvoke(new Action(() => {
+                    textureForm.BeginInvoke(new Action(() =>
+                    {
                         statusLabel.Text = message;
                         Application.DoEvents();
                     }));
@@ -933,7 +959,7 @@ namespace CTSegmenter
         }
 
         // Updated GPU kernel for GLCM calculation with quantization support
-        static void CalculateQuantizedGLCMKernel(
+        private static void CalculateQuantizedGLCMKernel(
             Index1D index,
             ArrayView1D<byte, Stride1D.Dense> region,
             ArrayView1D<int, Stride1D.Dense> glcm0,
@@ -986,11 +1012,9 @@ namespace CTSegmenter
             }
         }
 
-
-
         // GPU kernel for GLCM calculation
         // Updated GPU kernel for GLCM calculation
-        static void CalculateGLCMKernel(
+        private static void CalculateGLCMKernel(
             Index1D index,
             ArrayView1D<byte, Stride1D.Dense> region,
             ArrayView1D<int, Stride1D.Dense> glcm0,
@@ -1037,7 +1061,6 @@ namespace CTSegmenter
                 }
             }
         }
-
 
         private double[] ExtractLBPFeaturesGPU()
         {
@@ -1110,7 +1133,7 @@ namespace CTSegmenter
         }
 
         // GPU kernel for LBP calculation
-        static void CalculateLBPKernel(
+        private static void CalculateLBPKernel(
             Index1D index,
             ArrayView1D<byte, Stride1D.Dense> region,
             ArrayView1D<int, Stride1D.Dense> histogram,
@@ -1255,7 +1278,7 @@ namespace CTSegmenter
         }
 
         // GPU kernel for histogram calculation
-        static void CalculateHistogramKernel(
+        private static void CalculateHistogramKernel(
             Index1D index,
             ArrayView1D<byte, Stride1D.Dense> region,
             ArrayView1D<int, Stride1D.Dense> histogram)
@@ -1345,18 +1368,21 @@ namespace CTSegmenter
         private void SetupXYViewerEvents()
         {
             // XY viewer scroll events
-            xyHScroll.Scroll += (s, e) => {
+            xyHScroll.Scroll += (s, e) =>
+            {
                 xyPan.X = -xyHScroll.Value;
                 xyViewer.Invalidate();
             };
 
-            xyVScroll.Scroll += (s, e) => {
+            xyVScroll.Scroll += (s, e) =>
+            {
                 xyPan.Y = -xyVScroll.Value;
                 xyViewer.Invalidate();
             };
 
             // XY viewer mouse wheel for zooming
-            xyViewer.MouseWheel += (s, e) => {
+            xyViewer.MouseWheel += (s, e) =>
+            {
                 float oldZoom = xyZoom;
                 // Adjust zoom based on wheel direction
                 if (e.Delta > 0)
@@ -1375,7 +1401,8 @@ namespace CTSegmenter
             Point lastPos = Point.Empty;
             bool isPanning = false;
 
-            xyViewer.MouseDown += (s, e) => {
+            xyViewer.MouseDown += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Left)
                 {
                     // Convert mouse coordinates to image coordinates
@@ -1401,7 +1428,8 @@ namespace CTSegmenter
                 }
             };
 
-            xyViewer.MouseMove += (s, e) => {
+            xyViewer.MouseMove += (s, e) =>
+            {
                 if (isSelectingRectangle)
                 {
                     // Update the end point of the rectangle as the mouse moves
@@ -1439,7 +1467,8 @@ namespace CTSegmenter
                 }
             };
 
-            xyViewer.MouseUp += (s, e) => {
+            xyViewer.MouseUp += (s, e) =>
+            {
                 if (isSelectingRectangle && e.Button == MouseButtons.Left)
                 {
                     isSelectingRectangle = false;
@@ -1464,7 +1493,8 @@ namespace CTSegmenter
             };
 
             // Paint event for custom rendering
-            xyViewer.Paint += (s, e) => {
+            xyViewer.Paint += (s, e) =>
+            {
                 // Clear background
                 e.Graphics.Clear(Color.Black);
 
@@ -1539,18 +1569,21 @@ namespace CTSegmenter
         private void SetupXZViewerEvents()
         {
             // XZ viewer scroll events
-            xzHScroll.Scroll += (s, e) => {
+            xzHScroll.Scroll += (s, e) =>
+            {
                 xzPan.X = -xzHScroll.Value;
                 xzViewer.Invalidate();
             };
 
-            xzVScroll.Scroll += (s, e) => {
+            xzVScroll.Scroll += (s, e) =>
+            {
                 xzPan.Y = -xzVScroll.Value;
                 xzViewer.Invalidate();
             };
 
             // XZ viewer mouse wheel for zooming
-            xzViewer.MouseWheel += (s, e) => {
+            xzViewer.MouseWheel += (s, e) =>
+            {
                 float oldZoom = xzZoom;
                 if (e.Delta > 0)
                     xzZoom = Math.Min(10.0f, xzZoom * 1.1f);
@@ -1565,7 +1598,8 @@ namespace CTSegmenter
             Point lastPos = Point.Empty;
             bool isPanning = false;
 
-            xzViewer.MouseDown += (s, e) => {
+            xzViewer.MouseDown += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Right)
                 {
                     isPanning = true;
@@ -1573,7 +1607,8 @@ namespace CTSegmenter
                 }
             };
 
-            xzViewer.MouseMove += (s, e) => {
+            xzViewer.MouseMove += (s, e) =>
+            {
                 if (isPanning && e.Button == MouseButtons.Right)
                 {
                     int dx = e.X - lastPos.X;
@@ -1588,7 +1623,8 @@ namespace CTSegmenter
                 }
             };
 
-            xzViewer.MouseUp += (s, e) => {
+            xzViewer.MouseUp += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Right)
                 {
                     isPanning = false;
@@ -1596,7 +1632,8 @@ namespace CTSegmenter
             };
 
             // Paint event for XZ view
-            xzViewer.Paint += (s, e) => {
+            xzViewer.Paint += (s, e) =>
+            {
                 e.Graphics.Clear(Color.Black);
 
                 if (xzViewer.Image != null)
@@ -1627,18 +1664,21 @@ namespace CTSegmenter
         private void SetupYZViewerEvents()
         {
             // YZ viewer scroll events
-            yzHScroll.Scroll += (s, e) => {
+            yzHScroll.Scroll += (s, e) =>
+            {
                 yzPan.X = -yzHScroll.Value;
                 yzViewer.Invalidate();
             };
 
-            yzVScroll.Scroll += (s, e) => {
+            yzVScroll.Scroll += (s, e) =>
+            {
                 yzPan.Y = -yzVScroll.Value;
                 yzViewer.Invalidate();
             };
 
             // YZ viewer mouse wheel for zooming
-            yzViewer.MouseWheel += (s, e) => {
+            yzViewer.MouseWheel += (s, e) =>
+            {
                 float oldZoom = yzZoom;
                 if (e.Delta > 0)
                     yzZoom = Math.Min(10.0f, yzZoom * 1.1f);
@@ -1653,7 +1693,8 @@ namespace CTSegmenter
             Point lastPos = Point.Empty;
             bool isPanning = false;
 
-            yzViewer.MouseDown += (s, e) => {
+            yzViewer.MouseDown += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Right)
                 {
                     isPanning = true;
@@ -1661,7 +1702,8 @@ namespace CTSegmenter
                 }
             };
 
-            yzViewer.MouseMove += (s, e) => {
+            yzViewer.MouseMove += (s, e) =>
+            {
                 if (isPanning && e.Button == MouseButtons.Right)
                 {
                     int dx = e.X - lastPos.X;
@@ -1676,7 +1718,8 @@ namespace CTSegmenter
                 }
             };
 
-            yzViewer.MouseUp += (s, e) => {
+            yzViewer.MouseUp += (s, e) =>
+            {
                 if (e.Button == MouseButtons.Right)
                 {
                     isPanning = false;
@@ -1684,7 +1727,8 @@ namespace CTSegmenter
             };
 
             // Paint event for YZ view
-            yzViewer.Paint += (s, e) => {
+            yzViewer.Paint += (s, e) =>
+            {
                 e.Graphics.Clear(Color.Black);
 
                 if (yzViewer.Image != null)
@@ -2027,7 +2071,6 @@ namespace CTSegmenter
             return bmp;
         }
 
-
         private void TrainClassifier()
         {
             if (selectionRectangle.IsEmpty)
@@ -2042,14 +2085,16 @@ namespace CTSegmenter
             Application.DoEvents();
 
             // Run the intensive operation in a background thread
-            Task.Run(() => {
+            Task.Run(() =>
+            {
                 try
                 {
                     // Extract features on background thread
                     double[] extractedFeatures = ExtractFeaturesFromSelection();
 
                     // Update UI on main thread when done
-                    textureForm.BeginInvoke(new Action(() => {
+                    textureForm.BeginInvoke(new Action(() =>
+                    {
                         referenceFeatures = extractedFeatures;
                         btnApply.Enabled = true;
                         btnTrain.Enabled = true;
@@ -2059,7 +2104,8 @@ namespace CTSegmenter
                 }
                 catch (Exception ex)
                 {
-                    textureForm.BeginInvoke(new Action(() => {
+                    textureForm.BeginInvoke(new Action(() =>
+                    {
                         btnTrain.Enabled = true;
                         statusLabel.Text = "Error extracting features.";
                         MessageBox.Show($"Error: {ex.Message}", "Feature Extraction Error",
@@ -2068,7 +2114,6 @@ namespace CTSegmenter
                 }
             });
         }
-
 
         private double[] ExtractFeaturesFromSelection()
         {
@@ -2690,7 +2735,8 @@ namespace CTSegmenter
                 int completedWork = 0;
 
                 // Process each slice in the range
-                await Task.Run(() => {
+                await Task.Run(() =>
+                {
                     for (int z = startSlice; z <= endSlice; z++)
                     {
                         byte[,] sliceMask = ClassifySlice(z);

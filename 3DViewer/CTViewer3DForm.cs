@@ -289,7 +289,9 @@ namespace CTSegmenter.SharpDXIntegration
             }
         }
 
+#pragma warning disable CS0114 // Il membro nasconde il membro ereditato. Manca la parola chiave override
         private void OnFormClosing(FormClosingEventArgs e)
+#pragma warning restore CS0114 // Il membro nasconde il membro ereditato. Manca la parola chiave override
         {
             try
             {

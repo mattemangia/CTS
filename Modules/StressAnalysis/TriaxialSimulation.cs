@@ -1,4 +1,6 @@
-﻿using System;
+﻿using ILGPU;
+using ILGPU.Runtime;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -6,8 +8,6 @@ using System.Drawing.Drawing2D;
 using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
-using ILGPU;
-using ILGPU.Runtime;
 
 namespace CTSegmenter
 {
@@ -169,94 +169,6 @@ namespace CTSegmenter
                 throw new InvalidOperationException("Failed to initialize ILGPU. The simulation cannot continue.", ex);
             }
         }
-
-        // Add this much simpler kernel method to TriaxialSimulation.cs
-        private static void ComputeStressKernelSimple(
-            Index1D idx,
-            ArrayView<Vector3> v1Arr,
-            ArrayView<Vector3> v2Arr,
-            ArrayView<Vector3> v3Arr,
-            float pConf,                  // Confining pressure [MPa]
-            float pAxial,                 // Applied axial pressure [MPa]
-            Vector3 axis,                 // Test axis (unit)
-            float cohesion,               // Cohesion strength [MPa]
-            float frictionAngleRad,       // Friction angle [radians]
-            ArrayView<float> vmArr,       // Von‑Mises σₑ [MPa]
-            ArrayView<float> s1Arr,       // σ₁
-            ArrayView<float> s2Arr,       // σ₂
-            ArrayView<float> s3Arr,       // σ₃
-            ArrayView<int> fracArr)       // 1 = failed, 0 = intact
-        {
-            // Get triangle vertices and calculate normal
-            Vector3 v1 = v1Arr[idx];
-            Vector3 v2 = v2Arr[idx];
-            Vector3 v3 = v3Arr[idx];
-
-            Vector3 e1 = v2 - v1;
-            Vector3 e2 = v3 - v1;
-            Vector3 normal = Vector3.Cross(e1, e2);
-
-            // Normalize the normal vector safely
-            float normalLength = normal.Length();
-            if (normalLength > 0.0001f)
-            {
-                normal = normal / normalLength;
-            }
-
-            // Direct calculation based on axis orientation
-            // This is the key change - we calculate how much of the triangle
-            // is oriented along the axis direction
-
-            // First, determine the alignment of the normal to the test axis
-            float alignment = Math.Abs(Vector3.Dot(normal, axis));
-
-            // CRITICAL CHANGE - Triangle normal alignment highly affects stress distribution
-            // Make the direction effect more pronounced to create visible differences
-            float directionalFactor = alignment * alignment; // Square it to amplify differences
-
-            // Set principal stresses based on axis alignment
-            // A factor of 1.0 means perfectly aligned with axis (gets full axial pressure)
-            // A factor of 0.0 means perpendicular to axis (gets only confining pressure)
-            float sigma1 = pConf + (pAxial - pConf) * directionalFactor;
-            float sigma3 = pConf;
-            float sigma2 = pConf;
-
-            // Increase stress difference by a fixed factor to make fractures more likely
-            // This will help show differences between axes
-            const float stressAmplification = 1.5f;
-            sigma1 = pConf + (sigma1 - pConf) * stressAmplification;
-
-            // Calculate von Mises stress - simple formula
-            float vonMises = (float)Math.Sqrt(0.5f * (
-                (sigma1 - sigma2) * (sigma1 - sigma2) +
-                (sigma2 - sigma3) * (sigma2 - sigma3) +
-                (sigma3 - sigma1) * (sigma3 - sigma1)
-            ));
-
-            // Mohr-Coulomb failure criterion
-            float sinPhi = (float)Math.Sin(frictionAngleRad);
-            float cosPhi = (float)Math.Cos(frictionAngleRad);
-            float threshold = (2.0f * cohesion * cosPhi + (sigma1 + sigma3) * sinPhi) / (1.0f - sinPhi);
-            bool fractured = (sigma1 - sigma3) >= threshold;
-
-            // Store results
-            vmArr[idx] = vonMises;
-            s1Arr[idx] = sigma1;
-            s2Arr[idx] = sigma2;
-            s3Arr[idx] = sigma3;
-            fracArr[idx] = fractured ? 1 : 0;
-        }
-
-        /// <summary>
-        /// Load ILGPU kernels
-        /// </summary>
-        /*private void LoadKernelsOld()
-        {
-            // Load stress computation kernel - updated to use int instead of bool
-            _computeStressKernel = _accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<Vector3>, ArrayView<Vector3>, ArrayView<Vector3>,
-                                                                             float, float, Vector3, ArrayView<float>, ArrayView<float>,
-                                                                             ArrayView<float>, ArrayView<float>, ArrayView<int>>(ComputeStressKernel);
-        }*/
 
         /// <summary>
         /// Estimate material properties based on density
@@ -849,99 +761,7 @@ namespace CTSegmenter
             return fracturePercentage > 0.02f; // Reduced threshold: only 2% required for fracture detection
         }
 
-        /// <summary>
-        /// ILGPU kernel –– **complete** Mohr–Coulomb stress evaluation per
-        /// triangle.  The formulation follows the classical criterion
-        ///
-        ///     (σ₁ − σ₃) ≥ 2 c cos φ / (1 − sin φ) + (σ₁ + σ₃) sin φ / (1 − sin φ)
-        ///
-        /// with σ₁ ≥ σ₂ ≥ σ₃ the principal stresses, *c* the cohesion, and φ the
-        /// internal friction angle (in radians).  No empirical shortcuts, no
-        /// hidden scale factors.
-        /// </summary>
-        private static void ComputeStressKernel(
-            Index1D idx,
-            ArrayView<Vector3> v1Arr,
-            ArrayView<Vector3> v2Arr,
-            ArrayView<Vector3> v3Arr,
-            float pConf,                  // Confining pressure [MPa]
-            float pAxial,                 // Applied axial pressure [MPa]
-            Vector3 axis,                 // Test axis (unit)
-            ArrayView<float> vmArr,       // Von‑Mises σₑ [MPa]
-            ArrayView<float> s1Arr,       // σ₁
-            ArrayView<float> s2Arr,       // σ₂
-            ArrayView<float> s3Arr,       // σ₃
-            ArrayView<int> fracArr)       // 1 = failed, 0 = intact
-        {
-            // -----------------------------------------------------------------
-            // 1. Geometry helpers
-            // -----------------------------------------------------------------
-            Vector3 v1 = v1Arr[idx];
-            Vector3 v2 = v2Arr[idx];
-            Vector3 v3 = v3Arr[idx];
-
-            Vector3 e1 = v2 - v1;
-            Vector3 e2 = v3 - v1;
-            Vector3 n = Vector3.Normalize(Vector3.Cross(e1, e2));
-
-            // Orientation factor ∈ [0,1]
-            float align = Math.Abs(Vector3.Dot(n, axis));
-
-            // -----------------------------------------------------------------
-            // 2. Construct the stress tensor σ.  We assume axisymmetric loading:
-            //    σ = σₐ (axis ⊗ axis) + σ_c (I − axis ⊗ axis)
-            //    where σₐ = pAxial, σ_c = pConf.
-            // -----------------------------------------------------------------
-            //   σₐ affects the component parallel to the test axis, σ_c the two
-            //   transverse directions.  The principal values are therefore:
-            //      σ₁ = σₐ   (most compressive, taken positive here)
-            //      σ₂ = σ₃ = σ_c
-            //   We nevertheless perturb the tensor according to the facet
-            //   orientation to obtain visual variation (no empirical noise!).
-            // -----------------------------------------------------------------
-            float sigma1_raw = pAxial;
-            float sigmaT_raw = pConf;
-
-            // Interpolate based on orientation so that facets oblique to the
-            // axis experience a mixture of axial and confining stress.
-            float sigma_n = sigma1_raw * align + sigmaT_raw * (1f - align);
-            float sigma_t = sigmaT_raw * align + sigma1_raw * (1f - align);
-
-            // Assemble a diagonalised representation where we treat the facet‑
-            // normal as the local 3‑axis (for colour mapping only):
-            float σ1 = Math.Max(sigma_n, sigma_t);   // largest
-            float σ3 = Math.Min(sigma_n, sigma_t);   // smallest
-            float σ2 = sigma_t;                      // intermediate
-
-            // -----------------------------------------------------------------
-            // 3. Von‑Mises equivalent stress for colouring (exact formula).
-            // -----------------------------------------------------------------
-            float vm = 0.5f * ((σ1 - σ2) * (σ1 - σ2) +
-                               (σ2 - σ3) * (σ2 - σ3) +
-                               (σ3 - σ1) * (σ3 - σ1));
-            vm = MathF.Sqrt(vm);
-
-            // -----------------------------------------------------------------
-            // 4. Full Mohr–Coulomb failure check (no shortcuts).
-            // -----------------------------------------------------------------
-            // Convert internal angle to radians on the host side –> here assume
-            // φ already provided in radians in <FrictionAngle> field.  Because
-            // GPUs can’t access instance fields, pass via static readonly below.
-            //float sinφ = MathF.Sin(_frictionAngleRad);
-            //float cosφ = MathF.Cos(_frictionAngleRad);
-            //float rhs = (2f * _cohesion * cosφ + (σ1 + σ3) * sinφ) / (1f - sinφ);
-            //bool failed = (σ1 - σ3) >= rhs;
-
-            // -----------------------------------------------------------------
-            // 5. Persist to global memory.
-            // -----------------------------------------------------------------
-            vmArr[idx] = vm;
-            s1Arr[idx] = σ1;
-            s2Arr[idx] = σ2;
-            s3Arr[idx] = σ3;
-            //fracArr[idx] = failed ? 1 : 0;
-        }
-
+       
         /// <summary>
         /// Specialized kernel method for inhomogeneous simulation that can be used by the child class
         /// </summary>
@@ -2219,68 +2039,7 @@ namespace CTSegmenter
             }
         }
 
-        private void DrawMohrCircleSafe(Graphics g, float stress1, float stress3,
-                                       Func<float, float, PointF> converter,
-                                       Color color, string label, float maxTau,
-                                       Rectangle plotArea)
-        {
-            try
-            {
-                // Safety checks
-                if (float.IsNaN(stress1) || float.IsInfinity(stress1)) stress1 = 100.0f;
-                if (float.IsNaN(stress3) || float.IsInfinity(stress3)) stress3 = 10.0f;
-                if (stress1 < stress3)
-                {
-                    float temp = stress1;
-                    stress1 = stress3;
-                    stress3 = temp;
-                }
-
-                // Calculate circle parameters
-                float center = (stress1 + stress3) / 2;
-                float radius = (stress1 - stress3) / 2;
-                if (radius < 0.1f) radius = 0.1f;
-
-                // Convert to screen coordinates
-                PointF centerPoint = converter(center, 0);
-                float screenRadius = (radius / maxTau) * plotArea.Height;
-
-                // Draw the UPPER HALF of the circle ONLY
-                using (Pen circlePen = new Pen(color, 2))
-                {
-                    // Ensure the circle fits within the plot area
-                    RectangleF circleRect = new RectangleF(
-                        centerPoint.X - screenRadius,
-                        centerPoint.Y - screenRadius,
-                        screenRadius * 2,
-                        screenRadius * 2
-                    );
-
-                    // Draw upper semicircle only
-                    g.DrawArc(circlePen, circleRect, 0, 180);
-
-                    // Draw diameter line along x-axis
-                    PointF rightPoint = converter(stress1, 0);
-                    PointF leftPoint = converter(stress3, 0);
-                    g.DrawLine(circlePen, leftPoint, rightPoint);
-
-                    // Label principal stresses
-                    g.DrawString($"σ₁={stress1:F1}", new Font("Arial", 8), new SolidBrush(color),
-                        rightPoint.X - 20, rightPoint.Y + 5);
-                    g.DrawString($"σ₃={stress3:F1}", new Font("Arial", 8), new SolidBrush(color),
-                        leftPoint.X - 20, leftPoint.Y + 5);
-
-                    // Add circle label
-                    g.DrawString(label, new Font("Arial", 9), new SolidBrush(color),
-                        centerPoint.X - 15, centerPoint.Y - screenRadius - 20);
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Log($"[TriaxialSimulation] Error in DrawMohrCircleSafe: {ex.Message}");
-            }
-        }
-
+        
         public bool ExportFullCompositeImage(string filePath)
         {
             try

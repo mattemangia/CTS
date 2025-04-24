@@ -1,4 +1,6 @@
-﻿using System;
+﻿using ILGPU;
+using ILGPU.Runtime;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -11,8 +13,6 @@ using System.Numerics;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using ILGPU;
-using ILGPU.Runtime;
 
 namespace CTSegmenter
 {
@@ -1061,18 +1061,7 @@ namespace CTSegmenter
             Logger.Log($"[AcousticVelocitySimulation] Created velocity gradient along {(isDirX ? "X" : isDirY ? "Y" : "Z")}-axis (Test direction: {TestDirection})");
         }
 
-        /// <summary>
-        /// Calculate distance from a point to a triangle
-        /// </summary>
-        private float DistanceToTriangle(Vector3 point, Triangle tri)
-        {
-            // Simple distance check - minimum distance to any vertex
-            float dist1 = Vector3Distance(point, tri.V1);
-            float dist2 = Vector3Distance(point, tri.V2);
-            float dist3 = Vector3Distance(point, tri.V3);
-
-            return Math.Min(dist1, Math.Min(dist2, dist3));
-        }
+       
 
         /// <summary>
         /// Calculate distance between two Vector3 points
@@ -1639,18 +1628,7 @@ namespace CTSegmenter
             }
         }
 
-        /// <summary>
-        /// Builds a minimal 3-D wave-field from a 1-D displacement vector so the
-        /// renderer always has something to visualise.
-        /// </summary>
-        private static float[,,] BuildMiniField(float[] line)
-        {
-            var field = new float[line.Length, 1, 1];
-            for (int i = 0; i < line.Length; i++)
-                field[i, 0, 0] = line[i];
-            return field;
-        }
-
+       
         public void DumpSimulationData(string filePath)
         {
             try
@@ -1687,32 +1665,6 @@ namespace CTSegmenter
             catch (Exception ex)
             {
                 Logger.Log($"[AcousticVelocitySimulation] Failed to dump debug data: {ex.Message}");
-            }
-        }
-
-        private static void InjectSourceToFieldKernel(
-    Index1D index,
-    ArrayView<int> sourceIndex,
-    ArrayView<float> wavelet,
-    int timeStep,
-    ArrayView<float> field)
-        {
-            if (index == 0 && timeStep < wavelet.Length)
-            {
-                field[sourceIndex[0]] = wavelet[timeStep];
-            }
-        }
-
-        private static void ExtractReceiverDataFromFieldKernel(
-    Index1D index,
-    ArrayView<int> receiverIndex,
-    ArrayView<float> field,
-    int timeStep,
-    ArrayView<float> receiverData)
-        {
-            if (index == 0 && timeStep < receiverData.Length)
-            {
-                receiverData[timeStep] = field[receiverIndex[0]];
             }
         }
 
@@ -3158,90 +3110,6 @@ namespace CTSegmenter
             }
         }
 
-        private void DrawAxes(Graphics g, int width, int height, int leftMargin, int rightMargin, int topMargin, int bottomMargin, int plotWidth, int plotHeight)
-        {
-            using (var font = new Font("Arial", 9f))
-            using (var textBrush = new SolidBrush(Color.LightGray))
-            using (var axisPen = new Pen(Color.Gray, 1f))
-            {
-                // X-axis
-                g.DrawLine(axisPen, leftMargin, height - bottomMargin, width - rightMargin, height - bottomMargin);
-
-                // X-axis labels
-                for (int i = 0; i <= 4; i++)
-                {
-                    float x = leftMargin + i * plotWidth / 4f;
-                    float percent = i * 25f;
-                    g.DrawLine(axisPen, x, height - bottomMargin, x, height - bottomMargin + 5);
-                    g.DrawString($"{percent}%", font, textBrush, x - 15, height - bottomMargin + 7);
-                }
-
-                // Y-axis
-                g.DrawLine(axisPen, leftMargin, topMargin, leftMargin, height - bottomMargin);
-
-                // Y-axis labels
-                for (int i = 0; i <= 4; i++)
-                {
-                    float y = height - bottomMargin - i * plotHeight / 4f;
-                    float percent = i * 25f;
-                    g.DrawLine(axisPen, leftMargin - 5, y, leftMargin, y);
-                    g.DrawString($"{percent}%", font, textBrush, leftMargin - 30, y - 7);
-                }
-
-                // Axis titles
-                using (var axisFont = new Font("Arial", 10f, FontStyle.Bold))
-                {
-                    g.DrawString("Position", axisFont, textBrush, width / 2 - 20, height - bottomMargin / 2);
-
-                    // Rotated Y-axis label
-                    g.TranslateTransform(leftMargin / 3, height / 2);
-                    g.RotateTransform(-90);
-                    g.DrawString("Position", axisFont, textBrush, -30, 0);
-                    g.ResetTransform();
-                }
-            }
-        }
-
-        private void DrawColorbar(Graphics g, int x, int y, int barWidth, int barHeight)
-        {
-            // Draw colorbar with proper position to avoid overlap
-            using (LinearGradientBrush lgb = new LinearGradientBrush(
-                new Rectangle(x, y, barWidth, barHeight),
-                Color.Blue, Color.Red, 90f))
-            {
-                ColorBlend cb = new ColorBlend
-                {
-                    Colors = new[] { Color.Blue, Color.Cyan, Color.White, Color.Yellow, Color.Red },
-                    Positions = new[] { 0f, 0.25f, 0.5f, 0.75f, 1f }
-                };
-                lgb.InterpolationColors = cb;
-                g.FillRectangle(lgb, x, y, barWidth, barHeight);
-            }
-
-            using (Pen pen = new Pen(Color.Gray, 1f))
-                g.DrawRectangle(pen, x, y, barWidth, barHeight);
-
-            using (var font = new Font("Arial", 8f))
-            using (var br = new SolidBrush(Color.White))
-            {
-                g.DrawString("Max", font, br, x + barWidth + 4, y - 2);
-                g.DrawString("0", font, br, x + barWidth + 4, y + barHeight / 2 - font.Height / 2);
-                g.DrawString("Min", font, br, x + barWidth + 4, y + barHeight - font.Height);
-            }
-        }
-
-        // Helper method for drawing title and statistics
-        private void DrawTitleAndStats(Graphics g, int width, int height, int topMargin, int leftMargin, int plotWidth)
-        {
-            string title = (_isPWave ? "P-Wave" : "S-Wave") + " – Mid-Slice";
-            using (var font = new Font("Arial", 14f, FontStyle.Bold))
-            using (var br = new SolidBrush(Color.White))
-            {
-                SizeF sz = g.MeasureString(title, font);
-                g.DrawString(title, font, br, leftMargin + (plotWidth - sz.Width) / 2, topMargin / 3);
-            }
-        }
-
         private void DrawDebugInfo(Graphics g, int x, int y)
         {
             using (var font = new Font("Arial", 8f))
@@ -3426,127 +3294,6 @@ namespace CTSegmenter
             return field;
         }
 
-        /// <summary>
-        /// Draw a 2D slice of the wave field
-        /// </summary>
-        private void DrawWaveFieldSlice(Graphics g, float[,,] waveField, int sliceIndex, string sliceAxis,
-                                int x, int y, int width, int height, float maxAmplitude,
-                                int sourcePos1, int sourcePos2, int receiverPos1, int receiverPos2)
-        {
-            // Create bitmap for the slice
-            using (Bitmap slice = new Bitmap(width, height))
-            {
-                // Get dimensions for the slice
-                int dim1, dim2;
-                if (sliceAxis == "X")
-                {
-                    dim1 = _gridSizeY;
-                    dim2 = _gridSizeZ;
-                }
-                else if (sliceAxis == "Y")
-                {
-                    dim1 = _gridSizeX;
-                    dim2 = _gridSizeZ;
-                }
-                else // Z
-                {
-                    dim1 = _gridSizeX;
-                    dim2 = _gridSizeY;
-                }
-
-                // Scale factors to fit the slice in the drawing area
-                float scaleX = width / (float)dim1;
-                float scaleY = height / (float)dim2;
-
-                // Apply sensitivity boost factor to make small waves more visible
-                float sensitivityBoost = 10.0f; // Increase this to make waves more visible
-
-                // Draw each pixel of the slice with enhanced visibility
-                for (int i = 0; i < dim1; i++)
-                {
-                    for (int j = 0; j < dim2; j++)
-                    {
-                        // Get the wave field value at this position
-                        float value;
-                        if (sliceAxis == "X")
-                        {
-                            value = waveField[sliceIndex, i, j];
-                        }
-                        else if (sliceAxis == "Y")
-                        {
-                            value = waveField[i, sliceIndex, j];
-                        }
-                        else // Z
-                        {
-                            value = waveField[i, j, sliceIndex];
-                        }
-
-                        // Apply sensitivity boost and normalize
-                        float normalizedValue = (value * sensitivityBoost) / maxAmplitude;
-
-                        // Clamp to valid range
-                        normalizedValue = Math.Max(-1.0f, Math.Min(1.0f, normalizedValue));
-
-                        // Use a bipolar colormap with more vibrant colors
-                        Color color = GetEnhancedBipolarColor(normalizedValue);
-
-                        // Calculate pixel position
-                        int pixelX = (int)(i * scaleX);
-                        int pixelY = (int)(j * scaleY);
-
-                        // Ensure within bounds
-                        pixelX = Math.Max(0, Math.Min(pixelX, width - 1));
-                        pixelY = Math.Max(0, Math.Min(pixelY, height - 1));
-
-                        // Set pixel color
-                        slice.SetPixel(pixelX, pixelY, color);
-                    }
-                }
-
-                // Draw the slice
-                g.DrawImage(slice, x, y, width, height);
-
-                // Draw borders, source/receiver markers, etc.
-                // (rest of method remains the same)
-
-                // Draw a border
-                using (Pen borderPen = new Pen(Color.Gray, 1))
-                {
-                    g.DrawRectangle(borderPen, x, y, width, height);
-                }
-
-                // Draw source and receiver positions
-                using (Brush sourceBrush = new SolidBrush(Color.Yellow))
-                using (Brush receiverBrush = new SolidBrush(Color.Cyan))
-                {
-                    int sourceX = x + (int)(sourcePos1 * scaleX);
-                    int sourceY = y + (int)(sourcePos2 * scaleY);
-                    int receiverX = x + (int)(receiverPos1 * scaleX);
-                    int receiverY = y + (int)(receiverPos2 * scaleY);
-
-                    // Draw source marker (diamond)
-                    g.FillEllipse(sourceBrush, sourceX - 4, sourceY - 4, 8, 8);
-
-                    // Draw receiver marker (circle)
-                    g.FillEllipse(receiverBrush, receiverX - 4, receiverY - 4, 8, 8);
-
-                    // Draw a line between source and receiver
-                    using (Pen rayPath = new Pen(Color.White, 1))
-                    {
-                        rayPath.DashStyle = System.Drawing.Drawing2D.DashStyle.Dash;
-                        g.DrawLine(rayPath, sourceX, sourceY, receiverX, receiverY);
-                    }
-                }
-
-                // Draw axis labels
-                using (Font font = new Font("Arial", 9))
-                using (SolidBrush textBrush = new SolidBrush(Color.White))
-                {
-                    string title = sliceAxis == "X" ? "Y-Z Slice" : (sliceAxis == "Y" ? "X-Z Slice" : "X-Y Slice");
-                    g.DrawString(title, font, textBrush, x + width / 2 - 20, y - 15);
-                }
-            }
-        }
 
         private Color GetEnhancedBipolarColor(float normalizedValue)
         {
@@ -3619,40 +3366,6 @@ namespace CTSegmenter
                 g.DrawString("Max", font, textBrush, x - 25, y);
                 g.DrawString("0", font, textBrush, x - 15, y + height / 2 - 6);
                 g.DrawString("Min", font, textBrush, x - 25, y + height - 8);
-            }
-        }
-
-        /// <summary>
-        /// Get a bipolar color (blue-white-red) based on normalized value (-1 to 1)
-        /// </summary>
-        private Color GetBipolarColor(float normalizedValue)
-        {
-            // Ensure value is in range [-1, 1]
-            normalizedValue = ClampValue(normalizedValue, -1, 1);
-
-            // Convert to [0, 1] range for the color mapping
-            float colorValue = (normalizedValue + 1) / 2;
-
-            // Blue (-1) to White (0) to Red (1)
-            if (colorValue < 0.5f)
-            {
-                // Blue to White [-1, 0] mapped to [0, 0.5]
-                float t = colorValue * 2; // Scale to [0, 1]
-                return Color.FromArgb(
-                    (int)(t * 255),     // R increases from 0 to 255
-                    (int)(t * 255),     // G increases from 0 to 255
-                    255                  // B stays at 255
-                );
-            }
-            else
-            {
-                // White to Red [0, 1] mapped to [0.5, 1]
-                float t = (colorValue - 0.5f) * 2; // Scale to [0, 1]
-                return Color.FromArgb(
-                    255,                // R stays at 255
-                    (int)((1 - t) * 255), // G decreases from 255 to 0
-                    (int)((1 - t) * 255)  // B decreases from 255 to 0
-                );
             }
         }
 
@@ -4987,104 +4700,6 @@ namespace CTSegmenter
             }
         }
 
-        /// <summary>
-        /// Draw a slice showing wave displacement vectors
-        /// </summary>
-        private void DrawWaveDisplacementSlice(Graphics g, Vector3[] displacements, int x, int y, int width, int height,
-                                              float maxDisplacement, float time)
-        {
-            // Create bitmap for the slice
-            using (Bitmap slice = new Bitmap(width, height))
-            {
-                // Scale factors
-                float scaleX = width / (float)_gridSizeX;
-                float scaleY = height / (float)_gridSizeZ; // Using X-Z plane for visualization
-
-                // Fill with background color
-                using (Graphics sliceG = Graphics.FromImage(slice))
-                {
-                    sliceG.Clear(Color.Black);
-                }
-
-                // Draw displacement for each grid point (use X-Z slice through Y/2)
-                int ySlice = _gridSizeY / 2;
-
-                for (int gx = 0; gx < _gridSizeX; gx++)
-                {
-                    for (int gz = 0; gz < _gridSizeZ; gz++)
-                    {
-                        // Calculate index in the displacement array
-                        int index = (gx * _gridSizeY + ySlice) * _gridSizeZ + gz;
-
-                        if (index >= 0 && index < displacements.Length)
-                        {
-                            Vector3 disp = displacements[index];
-
-                            // Calculate magnitude
-                            float magnitude = (float)Math.Sqrt(disp.X * disp.X + disp.Y * disp.Y + disp.Z * disp.Z);
-
-                            // Skip very small displacements
-                            if (magnitude < 0.01f * maxDisplacement)
-                                continue;
-
-                            // Normalize and get color
-                            float normalizedValue = magnitude / maxDisplacement;
-                            Color color = GetHeatMapColor(normalizedValue, 0, 1);
-
-                            // Calculate pixel position
-                            int pixelX = (int)(gx * scaleX);
-                            int pixelY = (int)(gz * scaleY);
-
-                            // Draw a dot
-                            int dotSize = 1 + (int)(2 * normalizedValue);
-                            for (int dx = -dotSize / 2; dx <= dotSize / 2; dx++)
-                            {
-                                for (int dy = -dotSize / 2; dy <= dotSize / 2; dy++)
-                                {
-                                    int px = pixelX + dx;
-                                    int py = pixelY + dy;
-
-                                    if (px >= 0 && px < width && py >= 0 && py < height)
-                                    {
-                                        slice.SetPixel(px, py, color);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Draw the slice
-                g.DrawImage(slice, x, y, width, height);
-
-                // Draw a border
-                using (Pen borderPen = new Pen(Color.Gray, 1))
-                {
-                    g.DrawRectangle(borderPen, x, y, width, height);
-                }
-
-                // Draw time label
-                using (Font font = new Font("Arial", 9))
-                using (SolidBrush textBrush = new SolidBrush(Color.White))
-                {
-                    string timeLabel = $"t = {time * 1000:F2} ms";
-                    g.DrawString(timeLabel, font, textBrush, x + width / 2 - 30, y + height + 5);
-                }
-
-                // Mark source and receiver positions
-                int sourceX = x + (int)(_sourceX * scaleX);
-                int sourceY = y + (int)(_sourceZ * scaleY);
-                int receiverX = x + (int)(_receiverX * scaleX);
-                int receiverY = y + (int)(_receiverZ * scaleY);
-
-                using (Brush sourceBrush = new SolidBrush(Color.Yellow))
-                using (Brush receiverBrush = new SolidBrush(Color.Cyan))
-                {
-                    g.FillEllipse(sourceBrush, sourceX - 4, sourceY - 4, 8, 8);
-                    g.FillEllipse(receiverBrush, receiverX - 4, receiverY - 4, 8, 8);
-                }
-            }
-        }
 
         /// <summary>
         /// Render the mesh with velocity information
@@ -5976,84 +5591,7 @@ namespace CTSegmenter
             }
         }
 
-        // Add this helper method to draw error panels
-        private void DrawErrorPanel(Graphics g, int x, int y, int width, int height, string title, string errorMessage)
-        {
-            using (SolidBrush backBrush = new SolidBrush(Color.FromArgb(30, 30, 30)))
-            {
-                g.FillRectangle(backBrush, x, y, width, height);
-            }
-
-            using (Pen borderPen = new Pen(Color.DarkRed, 2))
-            {
-                g.DrawRectangle(borderPen, x, y, width, height);
-            }
-
-            using (Font titleFont = new Font("Arial", 14, FontStyle.Bold))
-            using (Font errorFont = new Font("Arial", 12))
-            using (SolidBrush textBrush = new SolidBrush(Color.White))
-            using (SolidBrush errorBrush = new SolidBrush(Color.Red))
-            {
-                g.DrawString(title, titleFont, textBrush, x + 10, y + 10);
-                g.DrawString("Rendering Error:", errorFont, errorBrush, x + 10, y + 40);
-
-                // Draw the error message with word wrap
-                using (StringFormat format = new StringFormat())
-                {
-                    format.Alignment = StringAlignment.Near;
-                    format.LineAlignment = StringAlignment.Near;
-                    format.Trimming = StringTrimming.Word;
-
-                    Rectangle errorRect = new Rectangle(x + 10, y + 70, width - 20, height - 80);
-                    g.DrawString(errorMessage, errorFont, errorBrush, errorRect, format);
-                }
-            }
-        }
-
-        private void DrawCompositePanel(Graphics g, RenderMode mode, int x, int y, int width, int height, string title)
-        {
-            // Create a bitmap for this panel
-            using (Bitmap viewBitmap = new Bitmap(width, height))
-            {
-                using (Graphics viewGraphics = Graphics.FromImage(viewBitmap))
-                {
-                    // Clear the background
-                    viewGraphics.Clear(Color.Black);
-
-                    // Set high quality rendering
-                    viewGraphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                    viewGraphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-
-                    // Render the specific visualization
-                    RenderResults(viewGraphics, width, height, mode);
-
-                    // Add title to the view
-                    using (Font titleFont = new Font("Arial", 14, FontStyle.Bold))
-                    using (SolidBrush backBrush = new SolidBrush(Color.FromArgb(150, 0, 0, 0)))
-                    using (SolidBrush textBrush = new SolidBrush(Color.White))
-                    {
-                        SizeF titleSize = viewGraphics.MeasureString(title, titleFont);
-                        float titleX = (width - titleSize.Width) / 2;
-
-                        // Background for title
-                        viewGraphics.FillRectangle(backBrush, titleX - 5, 5, titleSize.Width + 10, titleSize.Height + 5);
-
-                        // Draw title text
-                        viewGraphics.DrawString(title, titleFont, textBrush, titleX, 8);
-                    }
-                }
-
-                // Draw the panel bitmap onto the composite bitmap
-                g.DrawImage(viewBitmap, x, y, width, height);
-
-                // Draw a border around the panel
-                using (Pen borderPen = new Pen(Color.DimGray, 2))
-                {
-                    g.DrawRectangle(borderPen, x, y, width, height);
-                }
-            }
-        }
-
+       
         #endregion Export Methods
 
         #region Event Handlers

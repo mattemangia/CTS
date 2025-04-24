@@ -1,12 +1,12 @@
-﻿using System;
+﻿using ILGPU;
+using ILGPU.Runtime;
+using ILGPU.Runtime.CPU;
+using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using ILGPU;
-using ILGPU.Runtime;
-using ILGPU.Runtime.CPU;
 
 namespace CTSegmenter
 {

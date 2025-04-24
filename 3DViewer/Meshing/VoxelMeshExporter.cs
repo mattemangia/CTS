@@ -1,7 +1,7 @@
-﻿using System;
+﻿using SharpDX;
+using System;
 using System.Collections.Generic;
 using System.IO;
-using SharpDX;
 
 namespace CTSegmenter.SharpDXIntegration
 {

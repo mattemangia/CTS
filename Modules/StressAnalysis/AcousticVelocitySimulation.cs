@@ -1061,7 +1061,7 @@ namespace CTSegmenter
             Logger.Log($"[AcousticVelocitySimulation] Created velocity gradient along {(isDirX ? "X" : isDirY ? "Y" : "Z")}-axis (Test direction: {TestDirection})");
         }
 
-       
+
 
         /// <summary>
         /// Calculate distance between two Vector3 points
@@ -1628,7 +1628,7 @@ namespace CTSegmenter
             }
         }
 
-       
+
         public void DumpSimulationData(string filePath)
         {
             try
@@ -5591,7 +5591,7 @@ namespace CTSegmenter
             }
         }
 
-       
+
         #endregion Export Methods
 
         #region Event Handlers

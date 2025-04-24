@@ -1,10 +1,10 @@
-﻿using System;
+﻿using ILGPU;
+using ILGPU.Runtime;
+using ILGPU.Runtime.CPU;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-using ILGPU;
-using ILGPU.Runtime;
-using ILGPU.Runtime.CPU;
 
 namespace CTSegmenter
 {

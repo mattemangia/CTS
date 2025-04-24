@@ -1,4 +1,7 @@
-﻿using System;
+﻿// Add ILGPU references
+using ILGPU;
+using ILGPU.Runtime;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -8,10 +11,6 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-
-// Add ILGPU references
-using ILGPU;
-using ILGPU.Runtime;
 
 namespace CTSegmenter
 {

@@ -1,6 +1,6 @@
-﻿using System;
+﻿using CTSegmenter;
+using System;
 using System.Windows.Forms;
-using CTSegmenter;
 
 internal static class Program
 {

@@ -1,8 +1,8 @@
-﻿using System;
-using ILGPU;
+﻿using ILGPU;
 using ILGPU.Algorithms;
 using ILGPU.Runtime;
 using ILGPU.Runtime.CPU;
+using System;
 
 namespace CTSegmenter
 {

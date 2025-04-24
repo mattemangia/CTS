@@ -1,10 +1,10 @@
-﻿using System;
-using System.Diagnostics;
-using System.Windows.Forms;
-using SharpDX;
+﻿using SharpDX;
 using SharpDX.Direct3D;
 using SharpDX.Direct3D11;
 using SharpDX.DXGI;
+using System;
+using System.Diagnostics;
+using System.Windows.Forms;
 
 namespace CTSegmenter.SharpDXIntegration
 {

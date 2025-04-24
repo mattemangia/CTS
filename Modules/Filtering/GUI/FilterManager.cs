@@ -1,4 +1,8 @@
-﻿using System;
+﻿using ILGPU;
+using ILGPU.Algorithms;
+using ILGPU.Runtime;
+using ILGPU.Runtime.CPU;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -6,10 +10,6 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using ILGPU;
-using ILGPU.Algorithms;
-using ILGPU.Runtime;
-using ILGPU.Runtime.CPU;
 
 namespace CTSegmenter
 {

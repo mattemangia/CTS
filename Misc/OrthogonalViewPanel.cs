@@ -1,8 +1,8 @@
 ﻿// Custom panel for 3D orthogonal view
+using CTSegmenter;
 using System;
 using System.Drawing;
 using System.Windows.Forms;
-using CTSegmenter;
 
 // Custom panel for 3D orthogonal view
 public class OrthogonalViewPanel : Panel

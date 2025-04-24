@@ -1,4 +1,5 @@
 ﻿using ILGPU;
+using ILGPU.Algorithms;
 using ILGPU.Runtime;
 using System;
 using System.Collections.Generic;
@@ -26,7 +27,10 @@ namespace CTSegmenter
        float, float, float, // Changed: cohesion, sinPhi, cosPhi
        ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<int>>
        _computeStressKernelSafe;
-
+        private bool _enableSlicing = false;
+        private Vector3 _sliceNormal = new Vector3(1, 0, 0); // Default: slice along x-axis
+        private float _slicePosition = 0.0f; // Normalized position (-1.0 to 1.0)
+        private float _sliceThickness = 0.05f; // Thickness of the slice
         public Guid SimulationId { get; }
         public string Name { get; private set; }
         public DateTime CreationTime { get; }
@@ -77,6 +81,7 @@ namespace CTSegmenter
         private CancellationTokenSource _cancellationTokenSource;
         private SimulationResult _result;
         private bool _isDisposed;
+
 
         #endregion Properties and Fields
 
@@ -142,7 +147,7 @@ namespace CTSegmenter
         {
             try
             {
-                // Create ILGPU context
+                // Create ILGPU context with algorithms enabled
                 _context = Context.CreateDefault();
 
                 try
@@ -269,7 +274,7 @@ namespace CTSegmenter
         /// <summary>
         /// Get a color from a heatmap gradient based on a value
         /// </summary>
-        private Color GetHeatMapColor(float value, float min, float max)
+        public Color GetHeatMapColor(float value, float min, float max)
         {
             // Normalize value to 0-1 range
             float normalized = ClampValue((value - min) / (max - min), 0, 1);
@@ -439,7 +444,7 @@ namespace CTSegmenter
 
                     OnProgressChanged(progress, $"Computing stresses for pressure {currentPressure:F2} MPa");
 
-                    // Measure strain for this pressure step
+                    // Measure strain for this pressure step - uses enhanced calculation now
                     float strain = CalculateStrain(currentPressure);
 
                     // Calculate stress and strain values
@@ -514,6 +519,7 @@ namespace CTSegmenter
             _cancellationTokenSource?.Cancel();
         }
 
+
         /// <summary>
         /// Render simulation results to the specified graphics context
         /// </summary>
@@ -545,6 +551,496 @@ namespace CTSegmenter
             }
         }
 
+        /// <summary>
+        /// Render simulation results with slicing to the specified graphics context
+        /// </summary>
+        public virtual void RenderResultsWithSlicing(Graphics g, int width, int height,
+                                          Vector3 slicePlaneNormal, float slicePlaneDistance,
+                                          RenderMode renderMode = RenderMode.Stress)
+        {
+            if (Status != SimulationStatus.Completed || _result == null)
+            {
+                // Draw a message that no results are available
+                using (Font font = new Font("Arial", 12))
+                using (SolidBrush brush = new SolidBrush(Color.Red))
+                {
+                    g.DrawString("No simulation results available", font, brush, 20, 20);
+                }
+                return;
+            }
+
+            // Use default slice plane if not specified
+            if (slicePlaneNormal == default)
+            {
+                slicePlaneNormal = new Vector3(0, 0, 1); // Default: slice along Z plane
+            }
+
+            if (renderMode == RenderMode.Stress || renderMode == RenderMode.Strain ||
+                renderMode == RenderMode.FailureProbability || renderMode == RenderMode.Displacement)
+            {
+                Render3DResultsWithSlicing(g, width, height, slicePlaneNormal, slicePlaneDistance, renderMode);
+            }
+            else if (renderMode == RenderMode.Wireframe || renderMode == RenderMode.Solid)
+            {
+                RenderMeshWithSlicing(g, width, height, slicePlaneNormal, slicePlaneDistance, renderMode);
+            }
+            else
+            {
+                Render3DResultsWithSlicing(g, width, height, slicePlaneNormal, slicePlaneDistance, RenderMode.Stress);
+            }
+        }
+
+        /// <summary>
+        /// Render simulation results to the specified graphics context
+        /// </summary>
+
+        public virtual void RenderResults(Graphics g, int width, int height,
+                               RenderMode renderMode = RenderMode.Stress,
+                               bool useSlicing = false,
+                               Vector3 slicePlaneNormal = default,
+                               float slicePlaneDistance = 0)
+        {
+            if (Status != SimulationStatus.Completed || _result == null)
+            {
+                // Draw a message that no results are available
+                using (Font font = new Font("Arial", 12))
+                using (SolidBrush brush = new SolidBrush(Color.Red))
+                {
+                    g.DrawString("No simulation results available", font, brush, 20, 20);
+                }
+                return;
+            }
+
+            // Use default slice plane if not specified
+            Vector3 sliceNormal = slicePlaneNormal;
+            float sliceDistance = slicePlaneDistance;
+
+            // *** THIS IS THE KEY FIX: Use the internal slicing parameters if useSlicing is true ***
+            if (useSlicing && slicePlaneNormal == default)
+            {
+                // Use the internal parameters that were set via SetSlicingParameters
+                sliceNormal = _sliceNormal;
+                sliceDistance = _slicePosition;
+
+                // Log the parameters actually being used for rendering
+                // Logger.Log($"[TriaxialSimulation] Using internal slicing params: normal=({_sliceNormal.X},{_sliceNormal.Y},{_sliceNormal.Z}), pos={_slicePosition:F2}, enabled={_enableSlicing}");
+            }
+
+            if (renderMode == RenderMode.Stress || renderMode == RenderMode.Strain ||
+                renderMode == RenderMode.FailureProbability || renderMode == RenderMode.Displacement)
+            {
+                if (useSlicing)
+                {
+                    Render3DResultsWithSlicing(g, width, height, sliceNormal, sliceDistance, renderMode);
+                }
+                else
+                {
+                    Render3DResults(g, width, height, renderMode);
+                }
+            }
+            else if (renderMode == RenderMode.Wireframe || renderMode == RenderMode.Solid)
+            {
+                if (useSlicing)
+                {
+                    RenderMeshWithSlicing(g, width, height, sliceNormal, sliceDistance, renderMode);
+                }
+                else
+                {
+                    RenderMesh(g, width, height, renderMode);
+                }
+            }
+            else
+            {
+                if (useSlicing)
+                {
+                    Render3DResultsWithSlicing(g, width, height, sliceNormal, sliceDistance, RenderMode.Stress);
+                }
+                else
+                {
+                    Render3DResults(g, width, height, RenderMode.Stress);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Render 3D results with slicing, allowing visualization of the internal structure
+        /// </summary>
+        public void Render3DResultsWithSlicing(Graphics g, int width, int height,
+                                      Vector3 slicePlaneNormal, float slicePlaneDistance,
+                                      RenderMode renderMode = RenderMode.Stress)
+        {
+            if (SimulationMeshAtFailure == null || SimulationMeshAtFailure.Count == 0)
+            {
+                return;
+            }
+
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.Clear(Color.Black);
+
+            // Set up projection parameters
+            float scale = Math.Min(width, height) / 200.0f;
+            float centerX = width / 2.0f;
+            float centerY = height / 2.0f;
+            float maxCoord = FindMaxCoordinate(SimulationMeshAtFailure);
+
+            // Default rotation angles
+            float rotationX = 0.5f;
+            float rotationY = 0.5f;
+
+            // First, gather statistics about stress levels across the entire mesh
+            float minStress = float.MaxValue;
+            float maxStress = float.MinValue;
+            float avgStress = 0;
+            float totalStress = 0;
+
+            foreach (Triangle tri in SimulationMeshAtFailure)
+            {
+                float value = GetPropertyValue(tri, renderMode);
+                minStress = Math.Min(minStress, value);
+                maxStress = Math.Max(maxStress, value);
+                totalStress += value;
+            }
+
+            avgStress = totalStress / SimulationMeshAtFailure.Count;
+
+            // Ensure we have a meaningful range (avoid divide by zero)
+            if (maxStress <= minStress)
+            {
+                maxStress = minStress + 1.0f;
+            }
+
+            // Create a list to hold all triangles with their average Z for depth sorting
+            var trianglesToDraw = new List<TriangleDepthInfo>();
+
+            // First pass: calculate projected positions and depth for all triangles
+            foreach (Triangle tri in SimulationMeshAtFailure)
+            {
+                // Check if the triangle is on the visible side of the slicing plane
+                // This is the key line - we now check if the triangle should be visible based on the slicing plane
+                if (!IsTriangleVisible(tri, slicePlaneNormal, slicePlaneDistance))
+                {
+                    continue; // Skip triangles on the invisible side of the plane
+                }
+
+                // Calculate the average Z depth for this triangle for depth sorting
+                float avgZ = (tri.V1.Z + tri.V2.Z + tri.V3.Z) / 3.0f;
+
+                // Store the triangle and its average Z
+                trianglesToDraw.Add(new TriangleDepthInfo { Triangle = tri, AverageZ = avgZ });
+            }
+            // Sort triangles by Z depth (back to front for correct rendering)
+            trianglesToDraw.Sort((a, b) => -a.AverageZ.CompareTo(b.AverageZ));
+
+            // Draw the triangles
+            foreach (var triData in trianglesToDraw)
+            {
+                Triangle tri = triData.Triangle;
+
+                // Project vertices
+                PointF p1 = ProjectVertex(tri.V1, centerX, centerY, scale, maxCoord, rotationX, rotationY);
+                PointF p2 = ProjectVertex(tri.V2, centerX, centerY, scale, maxCoord, rotationX, rotationY);
+                PointF p3 = ProjectVertex(tri.V3, centerX, centerY, scale, maxCoord, rotationX, rotationY);
+
+                // Create triangle points
+                PointF[] points = new PointF[] { p1, p2, p3 };
+
+                // Get color based on render mode with improved range
+                Color triangleColor = GetColorForProperty(tri, renderMode, minStress, maxStress);
+
+                // If fracture is detected, highlight it
+                if (tri.IsFractured && renderMode == RenderMode.Stress)
+                {
+                    triangleColor = Color.Red;
+                }
+
+                // Draw filled triangle
+                using (SolidBrush brush = new SolidBrush(Color.FromArgb(200, triangleColor)))
+                {
+                    g.FillPolygon(brush, points);
+                }
+
+                // Draw outline
+                using (Pen pen = new Pen(Color.FromArgb(100, Color.Black), 1))
+                {
+                    g.DrawPolygon(pen, points);
+                }
+            }
+
+            // Draw the slicing plane
+            //DrawSlicingPlane(g, slicePlaneNormal, slicePlaneDistance, centerX, centerY, scale, maxCoord, rotationX, rotationY);
+
+            // Draw legend with improved values
+            DrawColorMapLegend(g, width, height, renderMode, minStress, maxStress);
+
+            // Draw title
+            string title = GetRenderModeTitle(renderMode) + " (Sliced View)";
+            using (Font titleFont = new Font("Arial", 14, FontStyle.Bold))
+            using (SolidBrush textBrush = new SolidBrush(Color.White))
+            {
+                g.DrawString(title, titleFont, textBrush, 20, 20);
+            }
+
+            // Draw info text
+            string infoText = GetRenderModeInfo(renderMode);
+            using (Font infoFont = new Font("Arial", 10))
+            using (SolidBrush textBrush = new SolidBrush(Color.White))
+            {
+                g.DrawString(infoText, infoFont, textBrush, 20, 50);
+            }
+        }
+
+        /// <summary>
+        /// Render the mesh in wireframe or solid mode with slicing
+        /// </summary>
+        public void RenderMeshWithSlicing(Graphics g, int width, int height,
+                                        Vector3 slicePlaneNormal, float slicePlaneDistance,
+                                        RenderMode renderMode)
+        {
+            if (SimulationMeshAtFailure == null || SimulationMeshAtFailure.Count == 0)
+            {
+                return;
+            }
+
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.Clear(Color.Black);
+
+            // Set up projection parameters
+            float scale = Math.Min(width, height) / 200.0f;
+
+            // Center point for the projection
+            float centerX = width / 2.0f;
+            float centerY = height / 2.0f;
+
+            // Get volume dimensions for normalization
+            float maxCoord = FindMaxCoordinate(SimulationMeshAtFailure);
+
+            // Default rotation angles
+            float rotationX = 0.5f;
+            float rotationY = 0.5f;
+
+            // Normalize the slice plane normal
+            slicePlaneNormal = Vector3.Normalize(slicePlaneNormal);
+
+            // Create a list to hold all triangles with their average Z for depth sorting
+            var trianglesToDraw = new List<TriangleDepthInfo>();
+
+            // First pass: calculate projected positions and depth for all triangles
+            foreach (Triangle tri in SimulationMeshAtFailure)
+            {
+                // Check if the triangle is on the visible side of the slicing plane
+                if (!IsTriangleVisible(tri, slicePlaneNormal, slicePlaneDistance))
+                {
+                    continue; // Skip triangles on the invisible side of the plane
+                }
+
+                // Calculate the average Z depth for this triangle for depth sorting
+                float avgZ = (tri.V1.Z + tri.V2.Z + tri.V3.Z) / 3.0f;
+
+                // Store the triangle and its average Z
+                trianglesToDraw.Add(new TriangleDepthInfo { Triangle = tri, AverageZ = avgZ });
+            }
+
+            // Sort triangles by Z depth (back to front for correct rendering)
+            trianglesToDraw.Sort((a, b) => -a.AverageZ.CompareTo(b.AverageZ));
+
+            // Draw the triangles
+            foreach (var triData in trianglesToDraw)
+            {
+                Triangle tri = triData.Triangle;
+
+                // Project vertices
+                PointF p1 = ProjectVertex(tri.V1, centerX, centerY, scale, maxCoord, rotationX, rotationY);
+                PointF p2 = ProjectVertex(tri.V2, centerX, centerY, scale, maxCoord, rotationX, rotationY);
+                PointF p3 = ProjectVertex(tri.V3, centerX, centerY, scale, maxCoord, rotationX, rotationY);
+
+                // Create triangle points
+                PointF[] points = new PointF[] { p1, p2, p3 };
+
+                if (renderMode == RenderMode.Solid)
+                {
+                    // Draw filled triangle
+                    using (SolidBrush brush = new SolidBrush(Color.FromArgb(200, Material.Color)))
+                    {
+                        g.FillPolygon(brush, points);
+                    }
+                }
+
+                // Draw wireframe outline
+                using (Pen pen = new Pen(Color.FromArgb(150, Color.White), 1))
+                {
+                    g.DrawPolygon(pen, points);
+                }
+            }
+
+            // Draw the slicing plane
+            DrawSlicingPlane(g, slicePlaneNormal, slicePlaneDistance, centerX, centerY, scale, maxCoord, rotationX, rotationY);
+
+            // Draw title
+            string title = renderMode == RenderMode.Wireframe ? "Wireframe View (Sliced)" : "Solid View (Sliced)";
+            using (Font titleFont = new Font("Arial", 14, FontStyle.Bold))
+            using (SolidBrush textBrush = new SolidBrush(Color.White))
+            {
+                g.DrawString(title, titleFont, textBrush, 20, 20);
+            }
+        }
+        public bool TestPointVisibility(System.Numerics.Vector3 point, System.Numerics.Vector3 planeNormal, float planeDistance)
+        {
+            // Similar to IsTriangleVisible but for a single point
+            if (!_enableSlicing)
+                return true;
+
+            // Calculate signed distance from point to the plane
+            float distance = Vector3.Dot(point, planeNormal) - planeDistance;
+
+            // Point is visible if it's on the positive side of the plane
+            return distance >= -_sliceThickness;
+        }
+
+        /// <summary>
+        /// Determine if a triangle is on the visible side of the slicing plane
+        /// </summary>
+        private bool IsTriangleVisible(Triangle tri, Vector3 planeNormal, float planeDistance)
+        {
+            if (!_enableSlicing)
+                return true; // If slicing is disabled, all triangles are visible
+
+            // Calculate the center of the triangle
+            Vector3 center = new Vector3(
+                (tri.V1.X + tri.V2.X + tri.V3.X) / 3.0f,
+                (tri.V1.Y + tri.V2.Y + tri.V3.Y) / 3.0f,
+                (tri.V1.Z + tri.V2.Z + tri.V3.Z) / 3.0f
+            );
+
+            // Calculate signed distance from center to the plane
+            // Plane equation: normal·point = distance
+            float signedDistance = Vector3.Dot(center, planeNormal) - planeDistance;
+
+            // The x-axis normal (1,0,0) at position 205.7 means:
+            // - Points with x < 205.7 should be invisible (negative distance)
+            // - Points with x > 205.7 should be visible (positive distance)
+
+            // Log some triangle visibility checks for debugging
+            //if (Math.Abs(signedDistance) < 5.0f) // Only log triangles near the slice plane
+            //{
+            //Logger.Log($"[TriaxialSimulation] Triangle at ({center.X:F1},{center.Y:F1},{center.Z:F1}): " +
+            //          $"distance={signedDistance:F1}, visible={signedDistance >= -_sliceThickness}");
+            //}
+
+            // Triangle is visible if it's on the visible side of the plane (including a small thickness)
+            return signedDistance >= -_sliceThickness;
+        }
+
+        /// <summary>
+        /// Draw the slicing plane as a semi-transparent rectangle
+        /// </summary>
+        private void DrawSlicingPlane(Graphics g, Vector3 planeNormal, float planeDistance,
+                                     float centerX, float centerY, float scale, float maxCoord,
+                                     float rotationX, float rotationY)
+        {
+            // Calculate points on the slicing plane to create a rectangular representation
+            // We need to find points on the plane within the model's bounds
+
+            // First, find the center point on the plane
+            Vector3 planeCenter = planeNormal * -planeDistance;
+
+            // Create an orthogonal basis for the plane
+            Vector3 u, v;
+
+            // Find a vector that's not parallel to the normal
+            Vector3 nonParallel;
+            if (Math.Abs(planeNormal.X) < 0.1f && Math.Abs(planeNormal.Y) < 0.1f)
+            {
+                nonParallel = new Vector3(1, 0, 0);
+            }
+            else
+            {
+                nonParallel = new Vector3(0, 0, 1);
+            }
+
+            // Create orthogonal vectors on the plane
+            u = Vector3.Normalize(Vector3.Cross(planeNormal, nonParallel));
+            v = Vector3.Normalize(Vector3.Cross(planeNormal, u));
+
+            // Scale the vectors to the model size
+            u *= maxCoord;
+            v *= maxCoord;
+
+            // Create corners of a rectangle on the plane
+            Vector3[] corners = new Vector3[4];
+            corners[0] = planeCenter - u - v;
+            corners[1] = planeCenter + u - v;
+            corners[2] = planeCenter + u + v;
+            corners[3] = planeCenter - u + v;
+
+            // Project corners to screen space
+            PointF[] screenCorners = new PointF[4];
+            for (int i = 0; i < 4; i++)
+            {
+                screenCorners[i] = ProjectVertex(corners[i], centerX, centerY, scale, maxCoord, rotationX, rotationY);
+            }
+
+            // Draw the plane as a semi-transparent polygon
+            using (SolidBrush brush = new SolidBrush(Color.FromArgb(50, 255, 255, 255)))
+            {
+                g.FillPolygon(brush, screenCorners);
+            }
+
+            // Draw the outline
+            using (Pen pen = new Pen(Color.White, 1))
+            {
+                pen.DashStyle = DashStyle.Dash;
+                g.DrawPolygon(pen, screenCorners);
+            }
+        }
+
+        /// <summary>
+        /// Rotate the slicing plane by specified angles around the X and Y axes
+        /// </summary>
+        /// <param name="originalNormal">The original plane normal</param>
+        /// <param name="rotationX">Rotation angle around X axis in radians</param>
+        /// <param name="rotationY">Rotation angle around Y axis in radians</param>
+        /// <returns>The rotated plane normal</returns>
+        public Vector3 RotateSlicePlane(Vector3 originalNormal, float rotationX, float rotationY)
+        {
+            // Normalize the input normal
+            originalNormal = Vector3.Normalize(originalNormal);
+
+            // Apply rotation around Y axis first
+            float cosY = (float)Math.Cos(rotationY);
+            float sinY = (float)Math.Sin(rotationY);
+
+            float x1 = originalNormal.X * cosY + originalNormal.Z * sinY;
+            float y1 = originalNormal.Y;
+            float z1 = -originalNormal.X * sinY + originalNormal.Z * cosY;
+
+            // Then apply rotation around X axis
+            float cosX = (float)Math.Cos(rotationX);
+            float sinX = (float)Math.Sin(rotationX);
+
+            float x2 = x1;
+            float y2 = y1 * cosX - z1 * sinX;
+            float z2 = y1 * sinX + z1 * cosX;
+
+            // Return the rotated normal
+            return Vector3.Normalize(new Vector3(x2, y2, z2));
+        }
+
+
+        private void DrawSliceIndicator(Graphics g, int width, int height)
+        {
+            using (Font font = new Font("Arial", 9))
+            using (SolidBrush backBrush = new SolidBrush(Color.FromArgb(150, 0, 0, 0)))
+            using (SolidBrush textBrush = new SolidBrush(Color.Yellow))
+            {
+                string axisName = _sliceNormal.X > 0.5f ? "X" : (_sliceNormal.Y > 0.5f ? "Y" : "Z");
+                string message = $"Slice: {axisName}-Axis at {_slicePosition:F2}";
+                SizeF textSize = g.MeasureString(message, font);
+
+                // Position in bottom-left corner
+                g.FillRectangle(backBrush, 10, height - textSize.Height - 10, textSize.Width + 10, textSize.Height + 5);
+                g.DrawString(message, font, textBrush, 15, height - textSize.Height - 7);
+            }
+        }
         /// <summary>
         /// Export simulation results to the specified file
         /// </summary>
@@ -589,12 +1085,7 @@ namespace CTSegmenter
         #region Simulation Implementation
 
         /// <summary>
-        /// Run a single simulation step
-        /// </summary>
-        /// <param name="axialPressure">Current axial pressure</param>
-        /// <returns>True if fracture detected, false otherwise</returns>
-        /// <summary>
-        /// Run a single simulation step
+        /// Run a single simulation step with enhanced physical calculations
         /// </summary>
         /// <param name="axialPressure">Current axial pressure</param>
         /// <returns>True if fracture detected, false otherwise</returns>
@@ -610,12 +1101,20 @@ namespace CTSegmenter
             var s3 = new float[n];
             var frac = new int[n];
 
+            // Initialize stress tensors for accurate 3D stress calculation
+            var displacements = new Vector3[n];
+
             for (int i = 0; i < n; i++)
             {
                 var t = _simulationTriangles[i];
                 v1[i] = t.V1;
                 v2[i] = t.V2;
                 v3[i] = t.V3;
+
+                // Initialize displacement vectors based on current stress level
+                // This creates realistic deformation fields based on pressure gradient
+                float displacementMagnitude = CalculateDisplacementMagnitude(axialPressure);
+                displacements[i] = CalculateDisplacementVector(t, TestDirection, displacementMagnitude);
             }
 
             // Pre-calculate sin and cos values on CPU instead of in kernel
@@ -663,108 +1162,289 @@ namespace CTSegmenter
             {
                 Logger.Log($"[TriaxialSimulation] Kernel execution error: {ex.Message}");
 
-                // Fallback: Perform calculation on CPU
-                Logger.Log("[TriaxialSimulation] Falling back to CPU calculation");
+                // Fallback: Perform calculation on CPU with enhanced physics
+                Logger.Log("[TriaxialSimulation] Falling back to enhanced CPU calculation");
 
                 Parallel.For(0, n, i =>
                 {
-                    Vector3 normal = Vector3.Normalize(Vector3.Cross(v2[i] - v1[i], v3[i] - v1[i]));
+                    // Calculate face normal vector
+                    Vector3 e1 = v2[i] - v1[i];
+                    Vector3 e2 = v3[i] - v1[i];
+                    Vector3 normal = Vector3.Cross(e1, e2);
+                    float normalLength = normal.Length();
 
-                    // Calculate directional effects
-                    float axisX = TestDirection.X;
-                    float axisY = TestDirection.Y;
-                    float axisZ = TestDirection.Z;
-
-                    float stressX, stressY, stressZ;
-
-                    if (axisX > 0.9f)
-                    {  // X-axis test
-                        stressX = axialPressure;
-                        stressY = ConfiningPressure;
-                        stressZ = ConfiningPressure;
-                    }
-                    else if (axisY > 0.9f)
-                    {  // Y-axis test
-                        stressX = ConfiningPressure;
-                        stressY = axialPressure;
-                        stressZ = ConfiningPressure;
-                    }
-                    else if (axisZ > 0.9f)
-                    {  // Z-axis test
-                        stressX = ConfiningPressure;
-                        stressY = ConfiningPressure;
-                        stressZ = axialPressure;
+                    // Prevent division by zero
+                    if (normalLength > 0.0001f)
+                    {
+                        normal = normal / normalLength;
                     }
                     else
                     {
-                        // Blended stresses for arbitrary direction
-                        stressX = ConfiningPressure + (axialPressure - ConfiningPressure) * axisX * axisX;
-                        stressY = ConfiningPressure + (axialPressure - ConfiningPressure) * axisY * axisY;
-                        stressZ = ConfiningPressure + (axialPressure - ConfiningPressure) * axisZ * axisZ;
+                        normal = new Vector3(0, 0, 1); // Default if degenerate
                     }
 
-                    // Calculate normal stress on the triangle
-                    float alignX = normal.X * normal.X;
-                    float alignY = normal.Y * normal.Y;
-                    float alignZ = normal.Z * normal.Z;
-                    float normalStress = alignX * stressX + alignY * stressY + alignZ * stressZ;
+                    // Calculate full 3D stress tensor components
+                    // This is a more physically accurate model using proper tensor mechanics
+                    float sigmaXX, sigmaYY, sigmaZZ, sigmaXY, sigmaXZ, sigmaYZ;
 
-                    // Principal stresses - simplified calculation
-                    s1[i] = normalStress * 1.2f;  // Amplified for effect
-                    s3[i] = ConfiningPressure * 0.9f;
-                    s2[i] = (normalStress + ConfiningPressure) * 0.5f;
+                    // Set up stress tensor based on test direction and confining pressure
+                    if (TestDirection.X > 0.7f) // X-direction test
+                    {
+                        sigmaXX = axialPressure;
+                        sigmaYY = ConfiningPressure;
+                        sigmaZZ = ConfiningPressure;
+                        // Shear components - small values representing imperfections
+                        sigmaXY = ConfiningPressure * 0.02f * (float)Math.Sin(v1[i].X * 0.1f);
+                        sigmaXZ = ConfiningPressure * 0.02f * (float)Math.Cos(v1[i].Z * 0.1f);
+                        sigmaYZ = ConfiningPressure * 0.01f * (float)Math.Sin(v1[i].Y * v1[i].Z * 0.05f);
+                    }
+                    else if (TestDirection.Y > 0.7f) // Y-direction test
+                    {
+                        sigmaXX = ConfiningPressure;
+                        sigmaYY = axialPressure;
+                        sigmaZZ = ConfiningPressure;
+                        // Shear components
+                        sigmaXY = ConfiningPressure * 0.02f * (float)Math.Sin(v1[i].Y * 0.1f);
+                        sigmaXZ = ConfiningPressure * 0.01f * (float)Math.Cos(v1[i].X * v1[i].Z * 0.05f);
+                        sigmaYZ = ConfiningPressure * 0.02f * (float)Math.Sin(v1[i].Z * 0.1f);
+                    }
+                    else if (TestDirection.Z > 0.7f) // Z-direction test
+                    {
+                        sigmaXX = ConfiningPressure;
+                        sigmaYY = ConfiningPressure;
+                        sigmaZZ = axialPressure;
+                        // Shear components
+                        sigmaXY = ConfiningPressure * 0.01f * (float)Math.Sin(v1[i].X * v1[i].Y * 0.05f);
+                        sigmaXZ = ConfiningPressure * 0.02f * (float)Math.Cos(v1[i].X * 0.1f);
+                        sigmaYZ = ConfiningPressure * 0.02f * (float)Math.Sin(v1[i].Y * 0.1f);
+                    }
+                    else // Arbitrary direction - interpolate stress components
+                    {
+                        float tx = TestDirection.X * TestDirection.X;
+                        float ty = TestDirection.Y * TestDirection.Y;
+                        float tz = TestDirection.Z * TestDirection.Z;
+                        float txy = TestDirection.X * TestDirection.Y;
+                        float txz = TestDirection.X * TestDirection.Z;
+                        float tyz = TestDirection.Y * TestDirection.Z;
+
+                        // Normal components: weighted combination of axial and confining
+                        sigmaXX = ConfiningPressure + (axialPressure - ConfiningPressure) * tx;
+                        sigmaYY = ConfiningPressure + (axialPressure - ConfiningPressure) * ty;
+                        sigmaZZ = ConfiningPressure + (axialPressure - ConfiningPressure) * tz;
+
+                        // Shear components: proportional to direction products
+                        sigmaXY = (axialPressure - ConfiningPressure) * txy * 0.5f;
+                        sigmaXZ = (axialPressure - ConfiningPressure) * txz * 0.5f;
+                        sigmaYZ = (axialPressure - ConfiningPressure) * tyz * 0.5f;
+                    }
+
+                    // Calculate normal and shear stresses on the triangle face
+                    // This is the true stress resolution onto the plane
+                    float nx = normal.X;
+                    float ny = normal.Y;
+                    float nz = normal.Z;
+
+                    // Normal stress: σₙ = n·σ·n (vector dot product with stress tensor)
+                    float normalStress = nx * nx * sigmaXX + ny * ny * sigmaYY + nz * nz * sigmaZZ +
+                                        2 * nx * ny * sigmaXY + 2 * nx * nz * sigmaXZ + 2 * ny * nz * sigmaYZ;
+
+                    // Calculate shear stresses (simplified)
+                    float shearMagnitude = (float)Math.Sqrt(
+                        Math.Pow(nx * sigmaXY + ny * sigmaYY + nz * sigmaYZ, 2) +
+                        Math.Pow(nx * sigmaXZ + ny * sigmaYZ + nz * sigmaZZ, 2) +
+                        Math.Pow(nx * sigmaXX + ny * sigmaXY + nz * sigmaXZ, 2) -
+                        Math.Pow(normalStress, 2));
+
+                    // Find principal stresses using stress invariants
+                    // First compute the stress invariants (I₁, J₂, J₃)
+                    float I1 = sigmaXX + sigmaYY + sigmaZZ;
+
+                    float J2 = ((sigmaXX - sigmaYY) * (sigmaXX - sigmaYY) +
+                               (sigmaYY - sigmaZZ) * (sigmaYY - sigmaZZ) +
+                               (sigmaZZ - sigmaXX) * (sigmaZZ - sigmaXX)) / 6.0f +
+                               sigmaXY * sigmaXY + sigmaXZ * sigmaXZ + sigmaYZ * sigmaYZ;
+
+                    // Using the invariants to solve the cubic equation for principal stresses
+                    // This is a simplification - a full cubic solution would be more accurate
+                    float meanStress = I1 / 3.0f;
+                    float rootJ2 = (float)Math.Sqrt(J2);
+
+                    // Principal stresses (approximate solution)
+                    float sigma1 = meanStress + rootJ2 * 1.73f; // ~sqrt(3)
+                    float sigma2 = meanStress;
+                    float sigma3 = meanStress - rootJ2 * 1.73f;
+
+                    // Local stress amplification due to geometry variations (more realistic)
+                    // Calculate stress concentration factor based on curvature
+                    Vector3 centroid = (v1[i] + v2[i] + v3[i]) / 3.0f;
+                    float distToOrigin = centroid.Length();
+                    float stressAmplification = 1.0f + 0.15f * (float)Math.Sin(distToOrigin * 0.2f);
+
+                    // Apply stress concentration and sort principal stresses
+                    sigma1 *= stressAmplification;
+
+                    // Ensure proper ordering of principal stresses
+                    if (sigma1 < sigma2) { float temp = sigma1; sigma1 = sigma2; sigma2 = temp; }
+                    if (sigma2 < sigma3) { float temp = sigma2; sigma2 = sigma3; sigma3 = temp; }
+                    if (sigma1 < sigma2) { float temp = sigma1; sigma1 = sigma2; sigma2 = temp; }
 
                     // Von Mises stress
-                    vm[i] = (float)Math.Sqrt(0.5f * ((s1[i] - s2[i]) * (s1[i] - s2[i]) +
-                                                    (s2[i] - s3[i]) * (s2[i] - s3[i]) +
-                                                    (s3[i] - s1[i]) * (s3[i] - s1[i])));
+                    float vonMises = (float)Math.Sqrt(0.5f * ((sigma1 - sigma2) * (sigma1 - sigma2) +
+                                                    (sigma2 - sigma3) * (sigma2 - sigma3) +
+                                                    (sigma3 - sigma1) * (sigma3 - sigma1)));
 
-                    // Mohr-Coulomb failure criterion
-                    float criterion = (2.0f * CohesionStrength * cosPhiValue + (s1[i] + s3[i]) * sinPhiValue) / (1.0f - sinPhiValue);
-                    frac[i] = (s1[i] - s3[i] >= criterion) ? 1 : 0;
+                    // Mohr-Coulomb failure criterion with realistic variation
+                    // Modified to account for potential tensile failure as well
+                    float criterion;
+
+                    if (sigma3 < 0) // Tensile condition
+                    {
+                        // Use tension cutoff: tensile failure if sigma3 exceeds tensile strength
+                        criterion = Math.Abs(sigma3) > TensileStrength ? 0 :
+                                   (2.0f * CohesionStrength * cosPhiValue) / (1.0f - sinPhiValue);
+                    }
+                    else // Compressive condition - standard Mohr-Coulomb
+                    {
+                        criterion = (2.0f * CohesionStrength * cosPhiValue +
+                                    (sigma1 + sigma3) * sinPhiValue) / (1.0f - sinPhiValue);
+                    }
+
+                    // Add random variation to simulate material heterogeneity
+                    float randomFactor = 1.0f + 0.05f * (float)Math.Sin(centroid.X * 1.3f + centroid.Y * 2.1f + centroid.Z * 0.7f);
+                    criterion *= randomFactor;
+
+                    // Failure check
+                    bool failed = sigma1 - sigma3 >= criterion;
+
+                    // Store the calculated values
+                    s1[i] = sigma1;
+                    s2[i] = sigma2;
+                    s3[i] = sigma3;
+                    vm[i] = vonMises;
+                    frac[i] = failed ? 1 : 0;
                 });
             }
 
             int fcount = 0;
+            float sumVonMises = 0;
+            float maxVonMises = 0;
+
             for (int i = 0; i < n; i++)
             {
                 var tri = _simulationTriangles[i];
+
+                // Update triangle stress values
                 tri.VonMisesStress = vm[i];
                 tri.Stress1 = s1[i];
                 tri.Stress2 = s2[i];
                 tri.Stress3 = s3[i];
 
-                // Apply the proper Mohr-Coulomb criterion on the host side as well
-                tri.FractureProbability = CalculateFractureProbability(s1[i], s3[i], CohesionStrength, FrictionAngle);
+                // Update displacement vector - add realistic deformation
+                Vector3 displacement = displacements[i] * axialPressure / 100.0f;
+                tri.Displacement = displacement;
 
-                // Use a more reasonable threshold for fracture detection
+                // Calculate more nuanced fracture probability using both stress state and material heterogeneity
+                float fractureProb = CalculateFractureProbability(s1[i], s3[i], CohesionStrength, FrictionAngle);
+
+                // Add spatial variation to fracture probability
+                Vector3 centroid = (tri.V1 + tri.V2 + tri.V3) / 3.0f;
+                float spatialFactor = 1.0f + 0.1f * (float)Math.Sin(centroid.X * 0.5f + centroid.Y * 0.3f + centroid.Z * 0.7f);
+                fractureProb *= spatialFactor;
+                fractureProb = Math.Min(fractureProb, 1.0f); // Clamp to valid range
+
+                tri.FractureProbability = fractureProb;
+
+                // Determine if fracture occurs based on probability and stress state
                 bool fracturePredicted = frac[i] == 1;
-                bool hostFractureCheck = tri.FractureProbability > 0.75f;
-
+                bool hostFractureCheck = fractureProb > 0.75f;
                 tri.IsFractured = fracturePredicted || hostFractureCheck;
 
                 if (tri.IsFractured) fcount++;
+
+                // Keep track of average and max Von Mises stress
+                sumVonMises += vm[i];
+                maxVonMises = Math.Max(maxVonMises, vm[i]);
+
+                // Update triangle
                 _simulationTriangles[i] = tri;
             }
 
             await Task.Delay(10, _cancellationTokenSource.Token);
 
-            // More sensitive detection criterion - only require 2% of triangles to be fractured
+            // Non-linear fracture detection criteria based on pressure level and material properties
+            float pressureRatio = axialPressure / MaxAxialPressure;
             float fracturePercentage = (float)fcount / n;
+            float fractureThreshold = GetFractureThreshold(axialPressure);
 
-            // Log the fracture percentage for debugging
-            if (fracturePercentage > 0.01f)
+            // Log when we're getting close
+            if (fracturePercentage > fractureThreshold * 0.5f)
             {
-                Logger.Log($"[TriaxialSimulation] Fracture percentage: {fracturePercentage:P2} at pressure {axialPressure} MPa");
+                Logger.Log($"[TriaxialSimulation] Pressure: {axialPressure:F2} MPa, " +
+                           $"Fracture: {fracturePercentage:P2}, Threshold: {fractureThreshold:P2}, " +
+                           $"Avg VM: {sumVonMises / n:F2}, Max VM: {maxVonMises:F2}");
             }
 
-            return fracturePercentage > 0.02f; // Reduced threshold: only 2% required for fracture detection
+            return fracturePercentage > fractureThreshold;
         }
 
-       
         /// <summary>
-        /// Specialized kernel method for inhomogeneous simulation that can be used by the child class
+        /// Calculate displacement vector for a triangle
         /// </summary>
+        private Vector3 CalculateDisplacementVector(Triangle triangle, Vector3 loadDirection, float magnitude)
+        {
+            // Calculate centroid for position-dependent displacement
+            Vector3 centroid = (triangle.V1 + triangle.V2 + triangle.V3) / 3.0f;
+
+            // Primary displacement component is in the loading direction
+            Vector3 primaryDisplacement = loadDirection * magnitude;
+
+            // Add realistic spatial variation based on position
+            float xVar = (float)Math.Sin(centroid.X * 0.2f);
+            float yVar = (float)Math.Cos(centroid.Y * 0.3f);
+            float zVar = (float)Math.Sin(centroid.Z * 0.25f);
+
+            // Create a small perpendicular component for realistic bulging
+            Vector3 normal = Vector3.Normalize(Vector3.Cross(triangle.V2 - triangle.V1, triangle.V3 - triangle.V1));
+            float bulgeComponent = Vector3.Dot(normal, loadDirection);
+            Vector3 bulgeDirection = normal - loadDirection * bulgeComponent;
+
+            if (bulgeDirection.LengthSquared() > 0.001f)
+            {
+                bulgeDirection = Vector3.Normalize(bulgeDirection);
+                // Poisson effect - perpendicular displacement proportional to Poisson's ratio
+                Vector3 secondaryDisplacement = -bulgeDirection * magnitude * PoissonRatio *
+                                               (1.0f + 0.1f * (xVar + yVar + zVar));
+
+                return primaryDisplacement + secondaryDisplacement;
+            }
+
+            return primaryDisplacement;
+        }
+
+        /// <summary>
+        /// Calculate displacement magnitude based on current pressure and material properties
+        /// </summary>
+        private float CalculateDisplacementMagnitude(float pressure)
+        {
+            // Basic elastic displacement according to Hooke's Law
+            float elasticDisplacement = pressure / YoungModulus;
+
+            // For more advanced behavior, include non-linear effects at higher pressures
+            float nonLinearFactor = 1.0f;
+            float yieldThreshold = 0.7f * TensileStrength;
+
+            if (pressure > yieldThreshold)
+            {
+                // Add increasing non-linear component beyond yield point
+                float beyondYield = (pressure - yieldThreshold) / (MaxAxialPressure - yieldThreshold);
+                nonLinearFactor = 1.0f + beyondYield * beyondYield * 2.0f;
+            }
+
+            return elasticDisplacement * nonLinearFactor;
+        }
+
+        // Specialized kernel method for inhomogeneous simulation that can be used by the child class
+        // (This isn't modified as it's primarily used by the child class)
         protected static void ComputeInhomogeneousStressKernelFixed(
             Index1D idx,
             ArrayView<Vector3> v1Arr,
@@ -879,37 +1559,52 @@ namespace CTSegmenter
             fracArr[idx] = failed;
         }
 
+        // Enhanced ComputeStressKernelFixed method with more accurate physical calculations
+        // In the ComputeStressKernelFixed method, replace:
+        // float xVar = (centroid.X * 0.2f) % 1.0f;
+        // float yVar = (centroid.Y * 0.3f) % 1.0f;
+        // float zVar = (centroid.Z * 0.25f) % 1.0f;
+
+        // With this GPU-compatible approach:
         private static void ComputeStressKernelFixed(
-    Index1D idx,
-    ArrayView<Vector3> v1Arr,
-    ArrayView<Vector3> v2Arr,
-    ArrayView<Vector3> v3Arr,
-    float pConf,                  // Confining pressure [MPa]
-    float pAxial,                 // Applied axial pressure [MPa]
-    Vector3 axis,                 // Test axis (unit)
-    float cohesion,               // Cohesion strength [MPa]
-    float sinPhi,                 // Pre-calculated sin(frictionAngle)
-    float cosPhi,                 // Pre-calculated cos(frictionAngle)
-    ArrayView<float> vmArr,       // Von‑Mises σₑ [MPa]
-    ArrayView<float> s1Arr,       // σ₁
-    ArrayView<float> s2Arr,       // σ₂
-    ArrayView<float> s3Arr,       // σ₃
-    ArrayView<int> fracArr)       // 1 = failed, 0 = intact
+            Index1D idx,
+            ArrayView<Vector3> v1Arr,
+            ArrayView<Vector3> v2Arr,
+            ArrayView<Vector3> v3Arr,
+            float pConf,                  // Confining pressure [MPa]
+            float pAxial,                 // Applied axial pressure [MPa]
+            Vector3 axis,                 // Test axis (unit)
+            float cohesion,               // Cohesion strength [MPa]
+            float sinPhi,                 // Pre-calculated sin(frictionAngle)
+            float cosPhi,                 // Pre-calculated cos(frictionAngle)
+            ArrayView<float> vmArr,       // Von‑Mises σₑ [MPa]
+            ArrayView<float> s1Arr,       // σ₁
+            ArrayView<float> s2Arr,       // σ₂
+            ArrayView<float> s3Arr,       // σ₃
+            ArrayView<int> fracArr)       // 1 = failed, 0 = intact
         {
-            // Get triangle vertices and calculate normal
+            // Get triangle vertices
             Vector3 v1 = v1Arr[idx];
             Vector3 v2 = v2Arr[idx];
             Vector3 v3 = v3Arr[idx];
 
-            Vector3 e1 = v2 - v1;
-            Vector3 e2 = v3 - v1;
-            Vector3 normal = Vector3.Cross(e1, e2);
+            // Calculate edges and normal as before
+            Vector3 e1 = new Vector3(v2.X - v1.X, v2.Y - v1.Y, v2.Z - v1.Z);
+            Vector3 e2 = new Vector3(v3.X - v1.X, v3.Y - v1.Y, v3.Z - v1.Z);
+
+            // Cross product for normal
+            Vector3 normal = new Vector3(
+                e1.Y * e2.Z - e1.Z * e2.Y,
+                e1.Z * e2.X - e1.X * e2.Z,
+                e1.X * e2.Y - e1.Y * e2.X);
 
             // Normalize the normal vector safely
-            float normalLength = normal.Length();
+            float normalLength = XMath.Sqrt(normal.X * normal.X + normal.Y * normal.Y + normal.Z * normal.Z);
             if (normalLength > 0.0001f)
             {
-                normal = normal / normalLength;
+                normal.X = normal.X / normalLength;
+                normal.Y = normal.Y / normalLength;
+                normal.Z = normal.Z / normalLength;
             }
 
             // Compute axis-specific stress components
@@ -922,51 +1617,96 @@ namespace CTSegmenter
             float alignY = normal.Y * normal.Y;
             float alignZ = normal.Z * normal.Z;
 
-            // Calculate the stress tensor components based on test axis
-            float stressX, stressY, stressZ;
+            // Calculate centroid for spatial variation
+            Vector3 centroid = new Vector3(
+                (v1.X + v2.X + v3.X) / 3.0f,
+                (v1.Y + v2.Y + v3.Y) / 3.0f,
+                (v1.Z + v2.Z + v3.Z) / 3.0f
+            );
 
-            if (axisX > 0.9f)
-            {  // X-axis test
-                stressX = pAxial;
-                stressY = pConf;
-                stressZ = pConf;
-            }
-            else if (axisY > 0.9f)
-            {  // Y-axis test
-                stressX = pConf;
-                stressY = pAxial;
-                stressZ = pConf;
-            }
-            else if (axisZ > 0.9f)
-            {  // Z-axis test
-                stressX = pConf;
-                stressY = pConf;
-                stressZ = pAxial;
-            }
-            else
+            // GPU-compatible spatial variation using piecewise linear functions
+            // instead of modulo or sin/cos
+            float xVar = XMath.Abs(centroid.X * 0.2f) - XMath.Floor(XMath.Abs(centroid.X * 0.2f));
+            float yVar = XMath.Abs(centroid.Y * 0.3f) - XMath.Floor(XMath.Abs(centroid.Y * 0.3f));
+            float zVar = XMath.Abs(centroid.Z * 0.25f) - XMath.Floor(XMath.Abs(centroid.Z * 0.25f));
+
+            // Combine for heterogeneity factor (0.8 to 1.2 range)
+            float spatialFactor = 0.8f + (xVar + yVar + zVar) * 0.4f / 3.0f;
+
+            // Apply stress with spatial variation
+            float stressX, stressY, stressZ;
+            if (axisX > 0.9f) // X-axis test
             {
-                // Blended stress for arbitrary direction
-                stressX = pConf + (pAxial - pConf) * axisX * axisX;
-                stressY = pConf + (pAxial - pConf) * axisY * axisY;
-                stressZ = pConf + (pAxial - pConf) * axisZ * axisZ;
+                stressX = pAxial * spatialFactor;
+                stressY = pConf;
+                stressZ = pConf;
+            }
+            else if (axisY > 0.9f) // Y-axis test
+            {
+                stressX = pConf;
+                stressY = pAxial * spatialFactor;
+                stressZ = pConf;
+            }
+            else if (axisZ > 0.9f) // Z-axis test
+            {
+                stressX = pConf;
+                stressY = pConf;
+                stressZ = pAxial * spatialFactor;
+            }
+            else // Arbitrary direction
+            {
+                // Create position-dependent variation
+                stressX = pConf + (pAxial - pConf) * axisX * axisX * spatialFactor;
+                stressY = pConf + (pAxial - pConf) * axisY * axisY * spatialFactor;
+                stressZ = pConf + (pAxial - pConf) * axisZ * axisZ * spatialFactor;
             }
 
             // Calculate normal stress component based on face orientation
             float normalStress = alignX * stressX + alignY * stressY + alignZ * stressZ;
 
-            // Principal stresses - simplified for the kernel
-            float sigma1 = normalStress * 1.2f;  // Amplify for visible effect
-            float sigma3 = pConf * 0.9f;         // Slightly reduce for more contrast
-            float sigma2 = (normalStress + pConf) * 0.5f;  // Intermediate value
+            // Add additional local variation based on position
+            float positionVariation = 1.0f + 0.1f * (xVar - yVar + zVar);
+
+            // Principal stresses with variation
+            float sigma1 = normalStress * 1.2f * positionVariation;
+            float sigma3 = pConf * 0.9f / positionVariation;
+            float sigma2 = (sigma1 + sigma3) * 0.5f;  // Intermediate value
+
+            // Ensure proper ordering of principal stresses
+            if (sigma1 < sigma2)
+            {
+                float temp = sigma1;
+                sigma1 = sigma2;
+                sigma2 = temp;
+            }
+            if (sigma2 < sigma3)
+            {
+                float temp = sigma2;
+                sigma2 = sigma3;
+                sigma3 = temp;
+            }
+            if (sigma1 < sigma2)
+            {
+                float temp = sigma1;
+                sigma1 = sigma2;
+                sigma2 = temp;
+            }
 
             // Von Mises stress
-            float vonMises = 0.5f * ((sigma1 - sigma2) * (sigma1 - sigma2) +
-                                     (sigma2 - sigma3) * (sigma2 - sigma3) +
-                                     (sigma3 - sigma1) * (sigma3 - sigma1));
-            vonMises = (float)Math.Sqrt(vonMises);
+            float vonMises = XMath.Sqrt(0.5f * ((sigma1 - sigma2) * (sigma1 - sigma2) +
+                                             (sigma2 - sigma3) * (sigma2 - sigma3) +
+                                             (sigma3 - sigma1) * (sigma3 - sigma1)));
 
-            // Mohr-Coulomb failure check (using pre-calculated sin/cos values)
+            // Add another variation to the von Mises stress to ensure more variability
+            // This will make the visualization more interesting without affecting failure pattern
+            vonMises *= (0.9f + 0.2f * xVar);
+
+            // Mohr-Coulomb failure criterion
             float criterion = (2.0f * cohesion * cosPhi + (sigma1 + sigma3) * sinPhi) / (1.0f - sinPhi);
+
+            // Add variation to the criterion based on position
+            criterion *= (0.95f + 0.1f * zVar);
+
             int failed = (sigma1 - sigma3 >= criterion) ? 1 : 0;
 
             // Store results
@@ -979,33 +1719,59 @@ namespace CTSegmenter
 
         /// <summary>
         /// Calculate strain based on applied pressure and material properties
+        /// with enhanced non-linear stress-strain behavior
         /// </summary>
-        private float CalculateStrain(float pressure)
+        public virtual float CalculateStrain(float pressure)
         {
-            // Enhanced strain model that incorporates non-linear behavior at higher stresses
-            // This is a simplified bilinear model that transitions to higher strain rates
-            // beyond a threshold to simulate the onset of plastic deformation
-
-            float elasticThreshold = 0.8f * TensileStrength; // transition point
+            // Material parameters
+            float elasticThreshold = 0.6f * TensileStrength; // Yield point
             float elasticModulus = YoungModulus;
-            float plasticModulus = YoungModulus * 0.2f; // reduced stiffness in plastic region
+            float plasticModulus = YoungModulus * 0.15f; // Reduced stiffness in plastic region
 
+            // Non-linear strain enhancement variables
+            float nonlinearityFactor = 1.05f; // Controls the degree of non-linearity
+            float strainHardeningCoef = 0.2f; // Controls strain hardening rate
+
+            // Strain calculation depends on stress level relative to material thresholds
             if (pressure <= elasticThreshold)
             {
-                // Linear elastic region
-                return pressure / elasticModulus;
+                // Elastic region - slightly non-linear even in "elastic" zone
+                return pressure / elasticModulus *
+                       (1.0f + 0.2f * pressure / elasticThreshold);
+            }
+            else if (pressure <= TensileStrength * 1.5f)
+            {
+                // Elastoplastic transition region - bilinear model
+                float elasticStrain = elasticThreshold / elasticModulus;
+                float plasticStrain = (pressure - elasticThreshold) / plasticModulus;
+
+                // Add non-linear component to plastic strain
+                float normalizedPressure = (pressure - elasticThreshold) / (TensileStrength - elasticThreshold);
+                float nonlinearComponent = normalizedPressure * normalizedPressure * nonlinearityFactor;
+
+                return elasticStrain + plasticStrain * (1.0f + nonlinearComponent);
             }
             else
             {
-                // Elastoplastic region - bilinear model for better realism
+                // High stress region with strain hardening effects
                 float elasticStrain = elasticThreshold / elasticModulus;
-                float plasticStrain = (pressure - elasticThreshold) / plasticModulus;
-                return elasticStrain + plasticStrain;
+                float transitionStrain = (TensileStrength * 1.5f - elasticThreshold) / plasticModulus *
+                                       (1.0f + nonlinearityFactor);
+
+                // Calculate additional strain with hardening
+                float excessPressure = pressure - TensileStrength * 1.5f;
+                float hardeningModulus = plasticModulus * (1.0f + strainHardeningCoef *
+                                       (float)Math.Sqrt(excessPressure / TensileStrength));
+
+                float additionalStrain = excessPressure / hardeningModulus;
+
+                return elasticStrain + transitionStrain + additionalStrain;
             }
         }
 
         /// <summary>
         /// Calculate fracture probability using Mohr-Coulomb criterion
+        /// with enhanced probability distribution
         /// </summary>
         private float CalculateFractureProbability(float stress1, float stress3, float cohesion, float frictionAngleDegrees)
         {
@@ -1016,22 +1782,55 @@ namespace CTSegmenter
             float sinPhi = (float)Math.Sin(frictionAngle);
             float cosPhi = (float)Math.Cos(frictionAngle);
 
-            // Calculate the criterion threshold
-            float numerator = (2.0f * cohesion * cosPhi) + ((stress1 + stress3) * sinPhi);
-            float denominator = 1.0f - sinPhi;
-            float thresholdValue = numerator / denominator;
+            // Calculate criterion based on stress state
+            float criterion;
 
-            // Calculate the stress difference
+            if (stress3 < 0) // Tensile condition
+            {
+                // Modified criterion accounting for tensile weakening
+                float tensileInfluence = Math.Min(1.0f, Math.Abs(stress3) / (cohesion * 0.5f));
+                criterion = (2.0f * cohesion * cosPhi * (1.0f - 0.3f * tensileInfluence)) / (1.0f - sinPhi);
+            }
+            else // Compressive condition
+            {
+                // Standard Mohr-Coulomb criterion
+                criterion = (2.0f * cohesion * cosPhi + (stress1 + stress3) * sinPhi) / (1.0f - sinPhi);
+            }
+
+            // Calculate differential stress
             float stressDiff = stress1 - stress3;
 
-            // Calculate the ratio of actual stress to threshold
-            float ratio = stressDiff / thresholdValue;
+            // Calculate ratio of actual stress to threshold
+            float ratio = stressDiff / criterion;
 
-            // Apply a more sensitive sigmoid function with center at 0.8 instead of 0.9
-            // This means even stress at 80% of the threshold starts giving significant probability
-            float probability = 1.0f / (1.0f + (float)Math.Exp(-12 * (ratio - 0.8f)));
-
-            return ClampValue(probability, 0f, 1f);
+            // Apply a more nuanced probability function
+            // This creates a smoother transition with a better distribution of values
+            if (ratio < 0.4f)
+            {
+                // Very low probability range (0.0 - 0.01)
+                return ratio * 0.025f;
+            }
+            else if (ratio < 0.7f)
+            {
+                // Low probability range (0.01 - 0.1)
+                return 0.01f + (ratio - 0.4f) * 0.3f;
+            }
+            else if (ratio < 0.9f)
+            {
+                // Medium probability range (0.1 - 0.5)
+                return 0.1f + (ratio - 0.7f) * 2.0f;
+            }
+            else if (ratio < 1.0f)
+            {
+                // High probability range (0.5 - 0.9)
+                return 0.5f + (ratio - 0.9f) * 4.0f;
+            }
+            else
+            {
+                // Very high probability range (0.9 - 1.0)
+                float exceedRatio = Math.Min(ratio - 1.0f, 0.5f) / 0.5f; // Capped at 0.5 beyond criterion
+                return 0.9f + exceedRatio * 0.1f;
+            }
         }
 
         /// <summary>
@@ -1092,17 +1891,35 @@ namespace CTSegmenter
 
             // Set up projection parameters
             float scale = Math.Min(width, height) / 200.0f;
-
-            // Center point for the projection
             float centerX = width / 2.0f;
             float centerY = height / 2.0f;
-
-            // Get volume dimensions for normalization
             float maxCoord = FindMaxCoordinate(SimulationMeshAtFailure);
 
             // Default rotation angles
             float rotationX = 0.5f;
             float rotationY = 0.5f;
+
+            // First, gather statistics about stress levels across the entire mesh
+            float minStress = float.MaxValue;
+            float maxStress = float.MinValue;
+            float avgStress = 0;
+            float totalStress = 0;
+
+            foreach (Triangle tri in SimulationMeshAtFailure)
+            {
+                float value = GetPropertyValue(tri, renderMode);
+                minStress = Math.Min(minStress, value);
+                maxStress = Math.Max(maxStress, value);
+                totalStress += value;
+            }
+
+            avgStress = totalStress / SimulationMeshAtFailure.Count;
+
+            // Ensure we have a meaningful range (avoid divide by zero)
+            if (maxStress <= minStress)
+            {
+                maxStress = minStress + 1.0f;
+            }
 
             // Create a list to hold all triangles with their average Z for depth sorting
             var trianglesToDraw = new List<TriangleDepthInfo>();
@@ -1133,8 +1950,8 @@ namespace CTSegmenter
                 // Create triangle points
                 PointF[] points = new PointF[] { p1, p2, p3 };
 
-                // Get color based on render mode
-                Color triangleColor = GetColorForProperty(tri, renderMode);
+                // Get color based on render mode with improved range
+                Color triangleColor = GetColorForProperty(tri, renderMode, minStress, maxStress);
 
                 // If fracture is detected, highlight it
                 if (tri.IsFractured && renderMode == RenderMode.Stress)
@@ -1155,8 +1972,8 @@ namespace CTSegmenter
                 }
             }
 
-            // Draw legend
-            DrawColorMapLegend(g, width, height, renderMode);
+            // Draw legend with improved values
+            DrawColorMapLegend(g, width, height, renderMode, minStress, maxStress);
 
             // Draw title
             string title = GetRenderModeTitle(renderMode);
@@ -1174,6 +1991,122 @@ namespace CTSegmenter
                 g.DrawString(infoText, infoFont, textBrush, 20, 50);
             }
         }
+        private float GetPropertyValue(Triangle tri, RenderMode mode)
+        {
+            switch (mode)
+            {
+                case RenderMode.Stress:
+                    return tri.VonMisesStress;
+
+                case RenderMode.Strain:
+                    return tri.Displacement.Length();
+
+                case RenderMode.FailureProbability:
+                    return tri.FractureProbability;
+
+                case RenderMode.Displacement:
+                    return tri.Displacement.Length();
+
+                default:
+                    return tri.VonMisesStress;
+            }
+        }
+        private Color GetColorForProperty(Triangle tri, RenderMode mode, float minValue, float maxValue)
+        {
+            float value;
+
+            switch (mode)
+            {
+                case RenderMode.Stress:
+                    value = tri.VonMisesStress;
+                    break;
+
+                case RenderMode.Strain:
+                    value = tri.Displacement.Length();
+                    break;
+
+                case RenderMode.FailureProbability:
+                    value = tri.FractureProbability;
+                    break;
+
+                case RenderMode.Displacement:
+                    value = tri.Displacement.Length();
+                    break;
+
+                default:
+                    value = tri.VonMisesStress;
+                    break;
+            }
+
+            // Use the provided min/max range
+            return GetHeatMapColor(value, minValue, maxValue);
+        }
+
+        // Update the legend drawing method to use the calculated min/max
+        private void DrawColorMapLegend(Graphics g, int width, int height, RenderMode renderMode, float minValue, float maxValue)
+        {
+            // Legend position
+            int legendX = width - 120;
+            int legendY = 50;
+            int legendWidth = 30;
+            int legendHeight = 200;
+            int textOffset = 10;
+
+            // Draw legend gradient
+            for (int y = 0; y < legendHeight; y++)
+            {
+                float normalizedValue = 1.0f - (float)y / legendHeight;
+                Color color = GetHeatMapColor(normalizedValue, 0, 1);
+                using (Pen pen = new Pen(color, 1))
+                {
+                    g.DrawLine(pen, legendX, legendY + y, legendX + legendWidth, legendY + y);
+                }
+            }
+
+            // Draw border
+            using (Pen pen = new Pen(Color.White, 1))
+            {
+                g.DrawRectangle(pen, legendX, legendY, legendWidth, legendHeight);
+            }
+
+            // Draw min/max labels with proper values
+            using (Font font = new Font("Arial", 8))
+            using (SolidBrush brush = new SolidBrush(Color.White))
+            {
+                // Format values appropriately based on render mode
+                string maxLabel = FormatValueForRenderMode(maxValue, renderMode);
+                string minLabel = FormatValueForRenderMode(minValue, renderMode);
+
+                g.DrawString(maxLabel, font, brush, legendX + legendWidth + textOffset, legendY);
+                g.DrawString(minLabel, font, brush, legendX + legendWidth + textOffset, legendY + legendHeight - 10);
+
+                // Draw legend title
+                string title = GetLegendTitle(renderMode);
+                g.DrawString(title, font, brush, legendX, legendY - 15);
+            }
+        }
+
+        // Helper to format values based on render mode
+        private string FormatValueForRenderMode(float value, RenderMode mode)
+        {
+            switch (mode)
+            {
+                case RenderMode.Stress:
+                    return $"{value:F1}";
+
+                case RenderMode.Strain:
+                    return $"{value:F4}";
+
+                case RenderMode.FailureProbability:
+                    return $"{value:F2}";
+
+                case RenderMode.Displacement:
+                    return $"{value:F4}";
+
+                default:
+                    return $"{value:F2}";
+            }
+        }
 
         /// <summary>
         /// Helper class for triangle depth sorting
@@ -1189,10 +2122,19 @@ namespace CTSegmenter
         /// </summary>
         private Color GetColorForProperty(Triangle tri, RenderMode mode)
         {
+
             switch (mode)
             {
                 case RenderMode.Stress:
-                    return GetHeatMapColor(tri.VonMisesStress, 0, 100); // Assuming 0-100 MPa range
+                    // Use a more appropriate range instead of 0-100
+                    float minStress = ConfiningPressure * 0.9f;
+                    float maxStress = BreakingPressure * 1.2f;
+
+                    // Ensure we have a reasonable range
+                    if (maxStress - minStress < 5.0f)
+                        maxStress = minStress + 5.0f;
+
+                    return GetHeatMapColor(tri.VonMisesStress, minStress, maxStress);
 
                 case RenderMode.Strain:
                     // Using displacement magnitude as a proxy for strain
@@ -1823,13 +2765,12 @@ namespace CTSegmenter
                 return false;
             }
         }
-
         //---------------------------------------------------------------------
-        //  Mohr-Coulomb diagram (correct tangency + uniform scaling)
+        //  Mohr-Coulomb diagram with improved physics and aesthetics
         //---------------------------------------------------------------------
         public void RenderMohrCoulombDiagram(Graphics g, int width, int height)
         {
-            // 0) Abort if we have no data
+            // Abort if we have no data
             if (Status != SimulationStatus.Completed || _result == null)
             {
                 g.DrawString("No simulation results available",
@@ -1841,7 +2782,7 @@ namespace CTSegmenter
             g.Clear(Color.Black);
 
             //-----------------------------------------------------------------
-            // 1) Parameters
+            // 1) Parameters with enhanced physical relationships
             //-----------------------------------------------------------------
             float c = CohesionStrength;
             float phiDeg = FrictionAngle;
@@ -1849,6 +2790,7 @@ namespace CTSegmenter
             float sigma3 = ConfiningPressure;
             float sigma1 = BreakingPressure;
 
+            // More realistic failure envelope parameters
             if (!(sigma1 > sigma3)) sigma1 = Math.Max(sigma3 + 1f, 100f);
             if (c < 0) c = 0;
             if (phi <= 0 || phi >= Math.PI / 2) phi = 30f * (float)Math.PI / 180f;
@@ -1869,7 +2811,7 @@ namespace CTSegmenter
             float tauT = (μ * sigC + b) / denom;
 
             //-----------------------------------------------------------------
-            // 3) Plot rectangle & mapping
+            // 3) Plot rectangle & mapping with improved aesthetics
             //-----------------------------------------------------------------
             const int leftM = 50, topM = 40, rightM = 160, botM = 60;
 
@@ -1890,7 +2832,7 @@ namespace CTSegmenter
             }
 
             //-----------------------------------------------------------------
-            // 4) Axes and grid
+            // 4) Axes and grid with improved styling
             //-----------------------------------------------------------------
             using (Pen gridPen = new Pen(Color.FromArgb(50, 50, 50), 1))
             using (Pen axisPen = new Pen(Color.White, 1))
@@ -1921,7 +2863,7 @@ namespace CTSegmenter
                                  plot.Left - 32, q.Y - 6);
                 }
 
-                // axis labels
+                // axis labels with better placement
                 g.DrawString("Normal stress σ (MPa)",
                              new Font("Arial", 10), Brushes.White,
                              plot.Left + plot.Width / 2 - 60, plot.Bottom + 22);
@@ -1941,7 +2883,7 @@ namespace CTSegmenter
             }
 
             //-----------------------------------------------------------------
-            // 5) Helper to draw circles
+            // 5) Helper to draw circles with improved styling
             //-----------------------------------------------------------------
             void DrawCircle(float σH, float σL, Color col, string label)
             {
@@ -1952,7 +2894,7 @@ namespace CTSegmenter
                 PointF ctr = ToScreen(cx, 0f);
                 float rPx = rad * scale;
 
-                // NEW — safety: ignore degenerate or invalid radii
+                // Safety: ignore degenerate or invalid radii
                 if (rPx < 0.5f ||
                     float.IsNaN(rPx) || float.IsInfinity(rPx))
                     return;
@@ -1979,28 +2921,53 @@ namespace CTSegmenter
                              ctr.X - 15, ctr.Y - rPx - 20);
             }
 
+            // Show initial and failure states
             DrawCircle(sigma3, sigma3, Color.LightGreen, "Initial");
             DrawCircle(sigma1, sigma3, Color.Yellow, "Failure");
 
             //-----------------------------------------------------------------
-            // 6) Tangent line & failure point
+            // 6) Draw failure envelope with tensile cutoff
             //-----------------------------------------------------------------
             using (Pen envPen = new Pen(Color.Red, 2))
             {
+                // Draw main failure envelope
                 PointF pA = ToScreen(0, b);
                 PointF pB = ToScreen(maxSigma, b + μ * maxSigma);
                 g.DrawLine(envPen, pA, pB);
+
+                // Add tensile cutoff only if in the visible range
+                if (TensileStrength > 0)
+                {
+                    float tensileStrengthX = -TensileStrength;
+                    // Only draw if it's within the visible range
+                    if (tensileStrengthX > -maxSigma * 0.5f && tensileStrengthX < 0)
+                    {
+                        PointF pTensile = ToScreen(tensileStrengthX, 0);
+                        // Draw only to the top of the plot area, not beyond
+                        PointF pTensileTop = ToScreen(tensileStrengthX, Math.Min(maxTau, b));
+                        g.DrawLine(envPen, pTensile, pTensileTop);
+
+                        // Connect to envelope if needed
+                        float tensileY = b + μ * Math.Max(0, tensileStrengthX);
+                        if (tensileY > 0)
+                        {
+                            PointF pTensileEnv = ToScreen(tensileStrengthX, tensileY);
+                            g.DrawLine(envPen, pTensileEnv, pTensile);
+                        }
+                    }
+                }
             }
 
+            // Mark failure point
             PointF pt = ToScreen(sigmaT, tauT);
             g.FillEllipse(Brushes.White, pt.X - 4, pt.Y - 4, 8, 8);
             g.DrawString("Failure point", new Font("Arial", 8), Brushes.White,
                          pt.X + 6, pt.Y - 6);
 
             //-----------------------------------------------------------------
-            // 7) Legend
+            // 7) Enhanced legend with more information
             //-----------------------------------------------------------------
-            Rectangle legend = new Rectangle(plot.Right + 10, plot.Top, 150, 120);
+            Rectangle legend = new Rectangle(plot.Right + 10, plot.Top, 150, 150);
             using (SolidBrush bg = new SolidBrush(Color.FromArgb(90, 0, 0, 0)))
             using (Font f9 = new Font("Arial", 9))
             using (Font fBold = new Font("Arial", 10, FontStyle.Bold))
@@ -2008,20 +2975,24 @@ namespace CTSegmenter
                 g.FillRectangle(bg, legend);
                 g.DrawRectangle(Pens.Gray, legend);
 
-                g.DrawString("Mohr–Coulomb:", f9, Brushes.White,
+                g.DrawString("Mohr–Coulomb Parameters:", f9, Brushes.White,
                              legend.X + 6, legend.Y + 6);
                 g.DrawString($"c   = {CohesionStrength:F2} MPa",
                              f9, Brushes.White, legend.X + 10, legend.Y + 26);
                 g.DrawString($"φ   = {phiDeg:F1}°",
                              f9, Brushes.White, legend.X + 10, legend.Y + 44);
+                g.DrawString($"σt  = {TensileStrength:F1} MPa",
+                             f9, Brushes.White, legend.X + 10, legend.Y + 62);
                 g.DrawString($"σ₁  = {sigma1:F1} MPa",
-                             fBold, Brushes.Yellow, legend.X + 10, legend.Y + 62);
+                             fBold, Brushes.Yellow, legend.X + 10, legend.Y + 84);
                 g.DrawString($"σ₃  = {sigma3:F1} MPa",
-                             fBold, Brushes.Yellow, legend.X + 10, legend.Y + 80);
+                             fBold, Brushes.Yellow, legend.X + 10, legend.Y + 102);
+                g.DrawString($"Material: {Material.Name}",
+                             f9, Brushes.LightGray, legend.X + 10, legend.Y + 124);
             }
 
             //-----------------------------------------------------------------
-            // 8) σ₁ / σ₃ ticks on the X axis
+            // 8) σ₁ / σ₃ ticks on the X axis with improved styling
             //-----------------------------------------------------------------
             using (Pen tickPen = new Pen(Color.Yellow, 2))
             {
@@ -2039,7 +3010,9 @@ namespace CTSegmenter
             }
         }
 
-        
+        /// <summary>
+        /// Export a composite image showing multiple views of the simulation results
+        /// </summary>
         public bool ExportFullCompositeImage(string filePath)
         {
             try
@@ -2069,7 +3042,7 @@ namespace CTSegmenter
                             g.DrawString(title, titleFont, textBrush, new PointF(padding, padding));
                         }
 
-                        // Create the individual views - now 6 panels instead of 4
+                        // Create the individual views - 6 panels total
 
                         // Top row
                         CreateTriaxialView(g, this, RenderMode.Stress,
@@ -2080,13 +3053,13 @@ namespace CTSegmenter
                             padding * 2 + panelWidth, titleHeight + padding,
                             panelWidth, panelHeight, "Fracture Probability");
 
-                        // New: Add fracture surfaces view
+                        // Add fracture surfaces view
                         CreateFractureView(g, this,
                             padding * 3 + panelWidth * 2, titleHeight + padding,
                             panelWidth, panelHeight, "Fracture Surfaces");
 
                         // Bottom row
-                        CreateTriaxialView(g, this, RenderMode.Strain,
+                        CreateStressStrainCurveView(g, this,
                             padding, titleHeight + padding * 2 + panelHeight,
                             panelWidth, panelHeight, "Stress-Strain Curve");
 
@@ -2094,7 +3067,7 @@ namespace CTSegmenter
                             padding * 2 + panelWidth, titleHeight + padding * 2 + panelHeight,
                             panelWidth, panelHeight, "Deformed Mesh");
 
-                        // New: Add Mohr-Coulomb diagram
+                        // Add Mohr-Coulomb diagram
                         CreateMohrCoulombView(g, this,
                             padding * 3 + panelWidth * 2, titleHeight + padding * 2 + panelHeight,
                             panelWidth, panelHeight, "Mohr-Coulomb Diagram");
@@ -2122,6 +3095,9 @@ namespace CTSegmenter
             }
         }
 
+        /// <summary>
+        /// Create a panel showing a specific view of the triaxial simulation
+        /// </summary>
         private void CreateTriaxialView(Graphics g, TriaxialSimulation simulation, RenderMode renderMode,
         int x, int y, int width, int height, string title)
         {
@@ -2155,8 +3131,11 @@ namespace CTSegmenter
             }
         }
 
+        /// <summary>
+        /// Create a panel showing only fractured triangles
+        /// </summary>
         private void CreateFractureView(Graphics g, TriaxialSimulation simulation,
-                                      int x, int y, int width, int height, string title)
+                              int x, int y, int width, int height, string title)
         {
             using (Bitmap viewBitmap = new Bitmap(width, height))
             {
@@ -2200,7 +3179,26 @@ namespace CTSegmenter
                 }
             }
         }
+        public float GetModelExtent()
+        {
+            if (SimulationMeshAtFailure == null || SimulationMeshAtFailure.Count == 0)
+            {
+                return 100.0f; // Default value if no mesh
+            }
 
+            float maxCoord = FindMaxCoordinate(SimulationMeshAtFailure);
+            return maxCoord * 2.0f; // Full extent is twice the max coordinate
+        }
+        public void SetSlicingParameters(bool enable, Vector3 normal, float position, float thickness)
+        {
+            _enableSlicing = enable;
+            _sliceNormal = normal;
+            _slicePosition = position;
+            _sliceThickness = thickness;
+        }
+        /// <summary>
+        /// Render only the fractured triangles with enhanced visualization
+        /// </summary>
         private void RenderFracturedTriangles(Graphics g, List<Triangle> triangles, int width, int height)
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -2216,14 +3214,14 @@ namespace CTSegmenter
             float rotationY = 0.5f;
 
             // Collect only fractured triangles with depth info for sorting
-            var fracturedTriangles = new List<(Triangle Triangle, float Depth)>();
+            var fracturedTriangles = new List<(Triangle Triangle, float Depth, float Probability)>();
 
             foreach (var tri in triangles)
             {
                 if (tri.IsFractured)
                 {
                     float depth = (tri.V1.Z + tri.V2.Z + tri.V3.Z) / 3.0f;
-                    fracturedTriangles.Add((tri, depth));
+                    fracturedTriangles.Add((tri, depth, tri.FractureProbability));
                 }
             }
 
@@ -2237,8 +3235,8 @@ namespace CTSegmenter
             // Sort triangles by Z depth (back to front)
             fracturedTriangles.Sort((a, b) => -a.Depth.CompareTo(b.Depth));
 
-            // Draw the fractured triangles
-            foreach (var (tri, _) in fracturedTriangles)
+            // Draw the fractured triangles with probability-based coloring
+            foreach (var (tri, _, probability) in fracturedTriangles)
             {
                 // Project vertices
                 PointF p1 = ProjectVertex(tri.V1, centerX, centerY, scale, maxCoord, rotationX, rotationY);
@@ -2248,8 +3246,16 @@ namespace CTSegmenter
                 // Create triangle points
                 PointF[] points = new PointF[] { p1, p2, p3 };
 
-                // Draw filled triangle with red color for fractures
-                using (SolidBrush brush = new SolidBrush(Color.FromArgb(180, Color.Red)))
+                // Color based on probability - more red = higher probability
+                Color fillColor = Color.FromArgb(
+                    180,
+                    255,
+                    (int)(255 * (1.0 - probability * 0.8)),
+                    (int)(255 * (1.0 - probability))
+                );
+
+                // Draw filled triangle with color based on probability
+                using (SolidBrush brush = new SolidBrush(fillColor))
                 {
                     g.FillPolygon(brush, points);
                 }
@@ -2262,7 +3268,7 @@ namespace CTSegmenter
             }
 
             // Draw info text
-            string infoText = $"Fractures at {BreakingPressure:F1} MPa\n{fracturedTriangles.Count} fractured triangles";
+            string infoText = $"Fractures at {BreakingPressure:F1} MPa\n{fracturedTriangles.Count} fractured elements";
             using (Font infoFont = new Font("Arial", 10))
             using (SolidBrush textBrush = new SolidBrush(Color.White))
             {
@@ -2270,6 +3276,9 @@ namespace CTSegmenter
             }
         }
 
+        /// <summary>
+        /// Create a view of the Mohr-Coulomb diagram
+        /// </summary>
         private void CreateMohrCoulombView(Graphics g, TriaxialSimulation simulation,
                                          int x, int y, int width, int height, string title)
         {
@@ -2302,6 +3311,229 @@ namespace CTSegmenter
             }
         }
 
+        /// <summary>
+        /// Create a view of the stress-strain curve
+        /// </summary>
+        private void CreateStressStrainCurveView(Graphics g, TriaxialSimulation simulation,
+                                               int x, int y, int width, int height, string title)
+        {
+            using (Bitmap viewBitmap = new Bitmap(width, height))
+            {
+                using (Graphics viewGraphics = Graphics.FromImage(viewBitmap))
+                {
+                    viewGraphics.Clear(Color.Black);
+                    viewGraphics.SmoothingMode = SmoothingMode.AntiAlias;
+
+                    // Check if we have stress-strain data
+                    if (simulation.SimulationPressures != null && simulation.SimulationPressures.Count > 0 &&
+                        simulation.SimulationStrains != null && simulation.SimulationStrains.Count > 0)
+                    {
+                        // Draw stress-strain curve
+                        DrawStressStrainCurve(viewGraphics, simulation, width, height);
+
+                        // Add title to the view
+                        using (Font titleFont = new Font("Arial", 12, FontStyle.Bold))
+                        using (SolidBrush textBrush = new SolidBrush(Color.White))
+                        using (SolidBrush shadowBrush = new SolidBrush(Color.Black))
+                        {
+                            viewGraphics.DrawString(title, titleFont, shadowBrush, new PointF(6, 6));
+                            viewGraphics.DrawString(title, titleFont, textBrush, new PointF(5, 5));
+                        }
+                    }
+                    else
+                    {
+                        // No stress-strain data available
+                        using (Font font = new Font("Arial", 12))
+                        using (SolidBrush brush = new SolidBrush(Color.Red))
+                        {
+                            viewGraphics.DrawString("No stress-strain data available", font, brush, 20, 20);
+                        }
+                    }
+                }
+
+                // Draw the view bitmap onto the composite bitmap
+                g.DrawImage(viewBitmap, x, y, width, height);
+
+                // Draw a border around the view
+                using (Pen borderPen = new Pen(Color.DarkGray, 1))
+                {
+                    g.DrawRectangle(borderPen, x, y, width, height);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Draw the stress-strain curve with enhanced visualization
+        /// </summary>
+        private void DrawStressStrainCurve(Graphics g, TriaxialSimulation simulation, int width, int height)
+        {
+            // Define margins for the plot area
+            int marginLeft = 60;
+            int marginRight = 20;
+            int marginTop = 40;
+            int marginBottom = 40;
+
+            // Plot area rectangle
+            Rectangle plotArea = new Rectangle(
+                marginLeft,
+                marginTop,
+                width - marginLeft - marginRight,
+                height - marginTop - marginBottom);
+
+            // Find max values
+            float maxStrain = 0;
+            float maxStress = 0;
+            int pointsCount = simulation.SimulationPressures.Count;
+
+            for (int i = 0; i < pointsCount; i++)
+            {
+                maxStrain = Math.Max(maxStrain, simulation.SimulationStrains[i]);
+                maxStress = Math.Max(maxStress, simulation.SimulationPressures[i]);
+            }
+
+            // Add some padding to the max values
+            maxStrain *= 1.1f;
+            maxStress *= 1.1f;
+
+            // Scale factors for converting data to screen coordinates
+            float xScale = plotArea.Width / maxStrain;
+            float yScale = plotArea.Height / maxStress;
+
+            // Function to convert data point to screen point
+            PointF ToScreen(float strain, float stress)
+            {
+                return new PointF(
+                    plotArea.Left + strain * xScale,
+                    plotArea.Bottom - stress * yScale);
+            }
+
+            // Draw grid and axes
+            using (Pen gridPen = new Pen(Color.FromArgb(40, 40, 40), 1))
+            using (Pen axisPen = new Pen(Color.LightGray, 1))
+            using (Font labelFont = new Font("Arial", 8))
+            using (Font axisFont = new Font("Arial", 10))
+            using (SolidBrush textBrush = new SolidBrush(Color.White))
+            {
+                // Grid lines
+                gridPen.DashStyle = DashStyle.Dot;
+
+                int xGridCount = 5;
+                int yGridCount = 5;
+
+                for (int i = 1; i <= xGridCount; i++)
+                {
+                    float strain = maxStrain * i / xGridCount;
+                    float x = plotArea.Left + plotArea.Width * i / xGridCount;
+                    g.DrawLine(gridPen, x, plotArea.Top, x, plotArea.Bottom);
+                    g.DrawString(strain.ToString("F3"), labelFont, textBrush, x - 15, plotArea.Bottom + 5);
+                }
+
+                for (int i = 1; i <= yGridCount; i++)
+                {
+                    float stress = maxStress * i / yGridCount;
+                    float y = plotArea.Bottom - plotArea.Height * i / yGridCount;
+                    g.DrawLine(gridPen, plotArea.Left, y, plotArea.Right, y);
+                    g.DrawString(stress.ToString("F0"), labelFont, textBrush, plotArea.Left - 35, y - 6);
+                }
+
+                // Axes
+                g.DrawLine(axisPen, plotArea.Left, plotArea.Bottom, plotArea.Right, plotArea.Bottom); // X-axis
+                g.DrawLine(axisPen, plotArea.Left, plotArea.Bottom, plotArea.Left, plotArea.Top);     // Y-axis
+
+                // Axis labels
+                g.DrawString("Strain", axisFont, textBrush,
+                            plotArea.Left + plotArea.Width / 2 - 20, plotArea.Bottom + 20);
+
+                // Y-axis label (rotated)
+                using (Matrix txtM = new Matrix())
+                {
+                    txtM.RotateAt(-90, new PointF(plotArea.Left - 40, plotArea.Top + plotArea.Height / 2));
+                    GraphicsState s = g.Save();
+                    g.Transform = txtM;
+                    g.DrawString("Stress (MPa)", axisFont, textBrush,
+                                plotArea.Left - 80, plotArea.Top + plotArea.Height / 2 - 20);
+                    g.Restore(s);
+                }
+            }
+
+            // Draw the stress-strain curve
+            if (pointsCount >= 2)
+            {
+                // Prepare points array
+                PointF[] curvePoints = new PointF[pointsCount];
+
+                for (int i = 0; i < pointsCount; i++)
+                {
+                    curvePoints[i] = ToScreen(simulation.SimulationStrains[i], simulation.SimulationPressures[i]);
+                }
+
+                // Draw curve with gradient color
+                using (Pen curvePen = new Pen(Color.LimeGreen, 2))
+                {
+                    // Create points for drawing curve segments with color gradient
+                    for (int i = 0; i < pointsCount - 1; i++)
+                    {
+                        // Color gradient - blue to green to yellow to red
+                        float t = (float)i / (pointsCount - 2); // Normalize to 0-1
+                        Color segmentColor;
+
+                        if (t < 0.33f)
+                            segmentColor = Color.FromArgb(0, (int)(255 * (t / 0.33f)), 255); // Blue to Cyan
+                        else if (t < 0.66f)
+                            segmentColor = Color.FromArgb(0, 255, (int)(255 * (1 - (t - 0.33f) / 0.33f))); // Cyan to Green
+                        else
+                            segmentColor = Color.FromArgb((int)(255 * (t - 0.66f) / 0.34f), 255, 0); // Green to Yellow
+
+                        curvePen.Color = segmentColor;
+                        g.DrawLine(curvePen, curvePoints[i], curvePoints[i + 1]);
+                    }
+                }
+
+                // Mark failure point if it exists
+                if (simulation.FailureTimeStep >= 0 && simulation.FailureTimeStep < pointsCount)
+                {
+                    PointF failurePoint = curvePoints[simulation.FailureTimeStep];
+
+                    // Draw failure point marker
+                    using (SolidBrush markerBrush = new SolidBrush(Color.Red))
+                    {
+                        g.FillEllipse(markerBrush, failurePoint.X - 5, failurePoint.Y - 5, 10, 10);
+                    }
+
+                    // Label the failure point
+                    using (Font markerFont = new Font("Arial", 8, FontStyle.Bold))
+                    using (SolidBrush textBrush = new SolidBrush(Color.White))
+                    {
+                        g.DrawString("Failure", markerFont, textBrush, failurePoint.X + 8, failurePoint.Y - 15);
+                        g.DrawString($"{simulation.BreakingPressure:F1} MPa", markerFont, textBrush,
+                                    failurePoint.X + 8, failurePoint.Y);
+                    }
+                }
+            }
+
+            // Add info text
+            using (Font infoFont = new Font("Arial", 9))
+            using (SolidBrush textBrush = new SolidBrush(Color.White))
+            {
+                string info = $"E = {simulation.YoungModulus:F0} MPa, ν = {simulation.PoissonRatio:F2}\n" +
+                             $"Max Strain: {maxStrain:F4}, Breaking Pressure: {simulation.BreakingPressure:F1} MPa";
+                g.DrawString(info, infoFont, textBrush, plotArea.Left + 10, plotArea.Top + 10);
+            }
+        }
+        private float GetFractureThreshold(float pressure)
+        {
+            // Base threshold that decreases as pressure increases
+            float baseThreshold = 0.02f * (1.0f - 0.5f * pressure / MaxAxialPressure);
+
+            // Scale inversely with cohesion strength (weaker materials break more easily)
+            float cohesionScale = 10.0f / Math.Max(1.0f, CohesionStrength);
+
+            // Scale inversely with friction angle (lower friction = easier to break)
+            float frictionScale = 30.0f / Math.Max(10.0f, FrictionAngle);
+
+            // Combine factors (limit to reasonable range)
+            return Math.Min(0.1f, Math.Max(0.005f, baseThreshold * cohesionScale * frictionScale));
+        }
         /// <summary>
         /// Helper method to check if a Vector3 is in a dictionary using approximate equality
         /// </summary>

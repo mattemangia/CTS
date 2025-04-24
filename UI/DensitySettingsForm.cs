@@ -1,9 +1,9 @@
-﻿using System;
+﻿using CTSegmenter;
+using Krypton.Toolkit;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Windows.Forms;
-using CTSegmenter;
-using Krypton.Toolkit;
 using static MaterialDensityLibrary;
 
 public class DensitySettingsForm : KryptonForm

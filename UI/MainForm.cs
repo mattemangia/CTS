@@ -1,4 +1,7 @@
-﻿using System;
+﻿using Krypton.Docking;
+using Krypton.Navigator;
+using Krypton.Toolkit;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -8,9 +11,6 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using Krypton.Docking;
-using Krypton.Navigator;
-using Krypton.Toolkit;
 
 namespace CTSegmenter
 {

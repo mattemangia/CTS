@@ -1,19 +1,18 @@
-﻿using System;
+﻿using ILGPU;
+using ILGPU.Runtime;
+using Krypton.Docking;
+using Krypton.Navigator;
+using Krypton.Ribbon;
+using Krypton.Toolkit;
+using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
-using System.Threading.Tasks;
 using System.Windows.Forms;
-using Krypton.Toolkit;
-using Krypton.Ribbon;
-using ILGPU;
-using ILGPU.Runtime;
-using Krypton.Navigator;
-using Krypton.Docking;
 using static MaterialDensityLibrary;
-using System.Drawing.Drawing2D;
-using System.Collections.Concurrent;
 
 namespace CTSegmenter
 {
@@ -74,6 +73,12 @@ namespace CTSegmenter
         private KryptonCheckBox extendedSimulationCheckBox;
         private PictureBox wavePictureBox;
         private Panel waveScrollPanel;
+        private bool _enableSlicing = false;
+        private Vector3 _sliceNormal = new Vector3(1, 0, 0); // Default: slice along x-axis
+        private float _slicePosition = 0.0f; // Normalized position (-1.0 to 1.0)
+        private float _sliceThickness = 0.05f; // Thickness of the slice
+        private System.Windows.Forms.Timer _sliceDebounceTimer;
+        private float _pendingSlicePosition;
 
         // Properties to expose inhomogeneous density state
         public bool InhomogeneousDensityEnabled => inhomogeneousDensityEnabled;
@@ -156,6 +161,21 @@ namespace CTSegmenter
                 Y = y;
                 Z = z;
             }
+            public static float Dot(Vector3 a, Vector3 b)
+            {
+                return a.X * b.X + a.Y * b.Y + a.Z * b.Z;
+            }
+
+            private System.Numerics.Vector3 ConvertVector3(Vector3 v)
+            {
+                return new System.Numerics.Vector3(v.X, v.Y, v.Z);
+            }
+
+        }
+        public bool EnableSlicing
+        {
+            get { return _enableSlicing; }
+            set { _enableSlicing = value; }
         }
         private KryptonPage mohrCoulombPage;
         public StressAnalysisForm(MainForm mainForm)
@@ -286,7 +306,294 @@ namespace CTSegmenter
             tooltip.SetToolTip(wavePictureBox,
                 "Mouse Wheel: Zoom\nDrag: Pan\nRight-click: Reset View");
         }
+        private void InitializeSlicingControls(Panel targetPanel)
+        {
+            // Initialize debounce timer if it doesn't exist
+            if (_sliceDebounceTimer == null)
+            {
+                _sliceDebounceTimer = new System.Windows.Forms.Timer();
+                _sliceDebounceTimer.Interval = 300; // 300ms debounce time
+                _sliceDebounceTimer.Tick += SliceDebounceTimer_Tick;
+            }
 
+            // Create a slicing control panel
+            Panel sliceControlPanel = new Panel
+            {
+                BackColor = Color.FromArgb(60, 0, 0, 0),
+                Size = new Size(180, 150),
+                Location = new Point(10, targetPanel.Height - 160),
+                Padding = new Padding(5),
+                Anchor = AnchorStyles.Bottom | AnchorStyles.Left
+            };
+
+            Label sliceLabel = new Label
+            {
+                Text = "Slicing Controls:",
+                ForeColor = Color.White,
+                BackColor = Color.Transparent,
+                AutoSize = true,
+                Location = new Point(5, 5)
+            };
+            sliceControlPanel.Controls.Add(sliceLabel);
+
+            // Checkbox to enable/disable slicing
+            CheckBox enableSliceCheckbox = new CheckBox
+            {
+                Text = "Enable Slicing",
+                ForeColor = Color.White,
+                BackColor = Color.Transparent,
+                Location = new Point(5, 25),
+                Checked = _enableSlicing
+            };
+            enableSliceCheckbox.CheckedChanged += (s, e) =>
+            {
+                _enableSlicing = enableSliceCheckbox.Checked;
+                targetPanel.Invalidate(); // Immediately update when checkbox changes
+            };
+            sliceControlPanel.Controls.Add(enableSliceCheckbox);
+
+            // Dropdown for slice axis
+            Label axisLabel = new Label
+            {
+                Text = "Slice Axis:",
+                ForeColor = Color.White,
+                BackColor = Color.Transparent,
+                AutoSize = true,
+                Location = new Point(5, 50)
+            };
+            sliceControlPanel.Controls.Add(axisLabel);
+
+            ComboBox sliceAxisCombo = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Location = new Point(70, 47),
+                Width = 100
+            };
+            sliceAxisCombo.Items.AddRange(new object[] { "X-Axis", "Y-Axis", "Z-Axis" });
+            sliceAxisCombo.SelectedIndex = 0; // Default to X-axis
+            sliceAxisCombo.SelectedIndexChanged += (s, e) =>
+            {
+                switch (sliceAxisCombo.SelectedIndex)
+                {
+                    case 0: _sliceNormal = new Vector3(1, 0, 0); break; // X axis
+                    case 1: _sliceNormal = new Vector3(0, 1, 0); break; // Y axis
+                    case 2: _sliceNormal = new Vector3(0, 0, 1); break; // Z axis
+                }
+                targetPanel.Invalidate(); // Immediately update when axis changes
+            };
+            sliceControlPanel.Controls.Add(sliceAxisCombo);
+
+            // Slider for slice position with debouncing
+            Label positionLabel = new Label
+            {
+                Text = "Position:",
+                ForeColor = Color.White,
+                BackColor = Color.Transparent,
+                AutoSize = true,
+                Location = new Point(5, 80)
+            };
+            sliceControlPanel.Controls.Add(positionLabel);
+
+            // Status label to show when debouncing
+            Label sliceStatusLabel = new Label
+            {
+                Text = "",
+                ForeColor = Color.LightGray,
+                BackColor = Color.Transparent,
+                AutoSize = true,
+                Location = new Point(100, 80),
+                Font = new Font("Arial", 8)
+            };
+            sliceControlPanel.Controls.Add(sliceStatusLabel);
+
+            TrackBar slicePositionTrackBar = new TrackBar
+            {
+                Minimum = -100,
+                Maximum = 100,
+                Value = (int)(_slicePosition * 100),
+                TickFrequency = 10,
+                Location = new Point(5, 100),
+                Width = 170
+            };
+
+            // Use debounce pattern for slider
+            slicePositionTrackBar.ValueChanged += (s, e) =>
+            {
+                // Store the pending value
+                _pendingSlicePosition = slicePositionTrackBar.Value / 100.0f;
+
+                // Show status text
+                sliceStatusLabel.Text = "updating...";
+
+                // Reset the timer
+                _sliceDebounceTimer.Stop();
+                _sliceDebounceTimer.Tag = targetPanel; // Store which panel to update
+                _sliceDebounceTimer.Start();
+            };
+
+            sliceControlPanel.Controls.Add(slicePositionTrackBar);
+
+            // Add to target panel
+            targetPanel.Controls.Add(sliceControlPanel);
+            sliceControlPanel.BringToFront();
+
+            // Add a tooltip
+            viewerTooltip.SetToolTip(sliceControlPanel,
+                "Enable slicing to see inside the model.\nSelect an axis and adjust the position.");
+        }
+        private void SliceDebounceTimer_Tick(object sender, EventArgs e)
+        {
+            _sliceDebounceTimer.Stop();
+
+            // Update the actual position
+            _slicePosition = _pendingSlicePosition;
+
+            // Clear status text in all slice panels
+            ClearSliceStatusLabels();
+            DiagnoseSlicing();
+            // Get the panel to update
+            Panel targetPanel = _sliceDebounceTimer.Tag as Panel;
+            if (targetPanel != null)
+            {
+                // Always update the slicing parameters before invalidating
+                if (currentTriaxial != null)
+                {
+                    UpdateSliceParameters(RenderMode.Stress);
+                }
+
+                targetPanel.Invalidate(); // This triggers a repaint
+            }
+        }
+
+        public void UpdateSliceParameters(RenderMode renderMode)
+        {
+            if (currentTriaxial != null)
+            {
+                // Convert our Vector3 type to System.Numerics.Vector3
+                System.Numerics.Vector3 simSliceNormal = new System.Numerics.Vector3(
+                    _sliceNormal.X, _sliceNormal.Y, _sliceNormal.Z);
+
+                // Get model bounds
+                float modelExtent = currentTriaxial.GetModelExtent();
+
+                // For an x-axis slice with the model going from ~0 to ~264:
+                // - Slider at -1 should be at x=0
+                // - Slider at 0 should be at x=132
+                // - Slider at 1 should be at x=264
+
+                // Map slider range (-1 to 1) to actual model coordinates
+                // For example, with X-axis slicing:
+                // - If normal is (1,0,0) and model min=0, max=264:
+                //   - slider -1 → slice position at x=0
+                //   - slider 0 → slice position at x=132
+                //   - slider 1 → slice position at x=264
+
+                float minX = 0, maxX = modelExtent / 2;  // approximate model bounds
+                float scaledPosition = minX + (maxX - minX) * (_slicePosition + 1) / 2;
+
+                // Ensure this is within the model bounds
+                scaledPosition = Math.Max(minX, Math.Min(maxX, scaledPosition));
+
+                // Update the simulation's slicing parameters
+                currentTriaxial.SetSlicingParameters(_enableSlicing, simSliceNormal, scaledPosition, _sliceThickness);
+
+                //Logger.Log($"[StressAnalysisForm] Slice updated: enabled={_enableSlicing}, " +
+                //          $"normal=({_sliceNormal.X},{_sliceNormal.Y},{_sliceNormal.Z}), " +
+                //          $"slider={_slicePosition:F2}, pos={scaledPosition:F1}, " +
+                //          $"extent={modelExtent:F1}, bounds=({minX:F1},{maxX:F1})");
+            }
+        }
+        public void DiagnoseSlicing()
+        {
+            if (currentTriaxial == null)
+            {
+                Logger.Log("[StressAnalysisForm] Cannot diagnose slicing: no simulation");
+                return;
+            }
+
+            // Get model extent
+            float modelExtent = currentTriaxial.GetModelExtent();
+
+            // Get mesh bounds
+            Vector3 min = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+            Vector3 max = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+
+            foreach (var tri in currentTriaxial.MeshTriangles)
+            {
+                min.X = Math.Min(min.X, Math.Min(tri.V1.X, Math.Min(tri.V2.X, tri.V3.X)));
+                min.Y = Math.Min(min.Y, Math.Min(tri.V1.Y, Math.Min(tri.V2.Y, tri.V3.Y)));
+                min.Z = Math.Min(min.Z, Math.Min(tri.V1.Z, Math.Min(tri.V2.Z, tri.V3.Z)));
+
+                max.X = Math.Max(max.X, Math.Max(tri.V1.X, Math.Max(tri.V2.X, tri.V3.X)));
+                max.Y = Math.Max(max.Y, Math.Max(tri.V1.Y, Math.Max(tri.V2.Y, tri.V3.Y)));
+                max.Z = Math.Max(max.Z, Math.Max(tri.V1.Z, Math.Max(tri.V2.Z, tri.V3.Z)));
+            }
+
+            // Convert to System.Numerics.Vector3
+            System.Numerics.Vector3 simMin = new System.Numerics.Vector3(min.X, min.Y, min.Z);
+            System.Numerics.Vector3 simMax = new System.Numerics.Vector3(max.X, max.Y, max.Z);
+
+            // Log mesh bounds and current slice settings
+            Logger.Log($"[StressAnalysisForm] Mesh bounds: Min=({min.X:F1}, {min.Y:F1}, {min.Z:F1}), " +
+                      $"Max=({max.X:F1}, {max.Y:F1}, {max.Z:F1})");
+            Logger.Log($"[StressAnalysisForm] Model extent: {modelExtent:F1}");
+            Logger.Log($"[StressAnalysisForm] Current slice: pos={_slicePosition:F2} (scaled={_slicePosition * modelExtent * 0.5f:F1})");
+
+            // Check if any triangles would be visible
+            System.Numerics.Vector3 sliceNormal = new System.Numerics.Vector3(_sliceNormal.X, _sliceNormal.Y, _sliceNormal.Z);
+            float scaledPos = _slicePosition * modelExtent * 0.5f;
+
+            // Ask the simulation to test some points
+            bool testMinVisible = currentTriaxial.TestPointVisibility(simMin, sliceNormal, scaledPos);
+            bool testMaxVisible = currentTriaxial.TestPointVisibility(simMax, sliceNormal, scaledPos);
+            bool testCenterVisible = currentTriaxial.TestPointVisibility((simMin + simMax) * 0.5f, sliceNormal, scaledPos);
+
+            Logger.Log($"[StressAnalysisForm] Visibility test: Min={testMinVisible}, Max={testMaxVisible}, Center={testCenterVisible}");
+        }
+        private void ClearSliceStatusLabels()
+        {
+            foreach (Control c in this.Controls)
+            {
+                if (c is Panel panel)
+                {
+                    foreach (Control panelControl in panel.Controls)
+                    {
+                        if (panelControl is Panel slicePanel &&
+                            slicePanel.BackColor.A == 60 && // Simple way to identify slice panels
+                            slicePanel.Width == 180 &&
+                            slicePanel.Height == 150)
+                        {
+                            foreach (Control slicePanelControl in slicePanel.Controls)
+                            {
+                                if (slicePanelControl is Label label &&
+                                    label.Text == "updating...")
+                                {
+                                    label.Text = "";
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        private bool ShouldRenderTriangle(Triangle tri, Vector3 sliceNormal, float slicePosition, float sliceThickness)
+        {
+            if (!_enableSlicing)
+                return true;  // No slicing, show all triangles
+
+            // Calculate the center of the triangle
+            Vector3 center = new Vector3(
+                (tri.V1.X + tri.V2.X + tri.V3.X) / 3.0f,
+                (tri.V1.Y + tri.V2.Y + tri.V3.Y) / 3.0f,
+                (tri.V1.Z + tri.V2.Z + tri.V3.Z) / 3.0f
+            );
+
+            // Calculate distance to the slice plane
+            float distance = Vector3.Dot(center, sliceNormal) - slicePosition;
+
+            // Triangle is visible if it's on the positive side of the plane or within the slice thickness
+            return distance >= -sliceThickness;
+        }
         private void HookSimCompleted(AcousticVelocitySimulation sim)
         {
             if (sim == null || wavePictureBox == null) return;
@@ -494,7 +801,8 @@ namespace CTSegmenter
                 ImageSmall = CreateInhomogeneousDensityIcon(16),
                 ImageLarge = CreateInhomogeneousDensityIcon(32)
             };
-            toggleInhomogeneousBtn.Click += (s, e) => {
+            toggleInhomogeneousBtn.Click += (s, e) =>
+            {
                 inhomogeneousDensityEnabled = toggleInhomogeneousBtn.Checked;
                 statusHeader.Text = inhomogeneousDensityEnabled ?
                     "Inhomogeneous density mode enabled." :
@@ -771,11 +1079,11 @@ namespace CTSegmenter
             {
                 Text = "Calculate Varying Density",
                 Location = new Point(10, 340),
-                Width = 150,
+                Width = 200,
                 Values = { Image = CreateVaryingDensityIcon(16) }
             };
             btnAssignVaryingDensity.Click += BtnAssignVaryingDensity_Click;
-            
+
 
             // Add all controls to the controlsPanel
             controlsPanel.Controls.Add(materialLabel);
@@ -1053,7 +1361,7 @@ namespace CTSegmenter
                 MessageBox.Show("Main tabs cannot be closed.", "Information",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 e.Item.Visible = false; // Hide instead of remove
-                
+
             }
         }
 
@@ -1099,7 +1407,8 @@ namespace CTSegmenter
                 Button reopenButton = new Button();
                 reopenButton.Text = "Reopen Selected";
                 reopenButton.Dock = DockStyle.Bottom;
-                reopenButton.Click += (s, args) => {
+                reopenButton.Click += (s, args) =>
+                {
                     if (tabList.SelectedItem is KryptonPage selectedPage)
                     {
                         mainTabControl.Pages.Add(selectedPage);
@@ -1111,7 +1420,8 @@ namespace CTSegmenter
                 Button reopenAllButton = new Button();
                 reopenAllButton.Text = "Reopen All";
                 reopenAllButton.Dock = DockStyle.Bottom;
-                reopenAllButton.Click += (s, args) => {
+                reopenAllButton.Click += (s, args) =>
+                {
                     foreach (KryptonPage page in closedPages.ToList())
                     {
                         mainTabControl.Pages.Add(page);
@@ -3384,10 +3694,10 @@ namespace CTSegmenter
             {
                 Text = "Time-Step Factor:",
                 AutoSize = true,
-                
+
                 Location = new Point(10, 360)   // tweak Y as needed
             };
-            acousticTable.Controls.Add(dtFactorLabel,0,6);
+            acousticTable.Controls.Add(dtFactorLabel, 0, 6);
 
             dtFactorNumeric = new NumericUpDown
             {
@@ -3400,7 +3710,7 @@ namespace CTSegmenter
                 Width = 80,
                 Location = new Point(130, 358)
             };
-            acousticTable.Controls.Add(dtFactorNumeric,1,6);
+            acousticTable.Controls.Add(dtFactorNumeric, 1, 6);
 
             // Direction
             acousticTable.Controls.Add(new Label { Text = "Test Direction:", Dock = DockStyle.Fill }, 0, 7);
@@ -3701,6 +4011,9 @@ namespace CTSegmenter
                 TextTitle = "Fracture Surfaces"
             };
             var fracturePanel = new Panel { Dock = DockStyle.Fill };
+            fracturePanel.MouseDown += FracturePanel_MouseDown;
+            fracturePanel.MouseMove += FracturePanel_MouseMove;
+            fracturePanel.MouseUp += FracturePanel_MouseUp;
             fracturePanel.Paint += (s, e) => RenderFractureSurfaces(e.Graphics, fracturePanel.Width, fracturePanel.Height);
             fracturePage.Controls.Add(fracturePanel);
 
@@ -3756,16 +4069,61 @@ namespace CTSegmenter
 
             // Set up panel paint events
             stressPanel.Paint += (sender, e) =>
-                simulation.RenderResults(e.Graphics, stressPanel.Width, stressPanel.Height, RenderMode.Stress);
+            {
+                if (_enableSlicing)
+                {
+                    // Convert Vector3 type to System.Numerics.Vector3
+                    System.Numerics.Vector3 sliceNormalConverted = new System.Numerics.Vector3(_sliceNormal.X, _sliceNormal.Y, _sliceNormal.Z);
+
+                    // Update the simulation's slicing parameters
+                    UpdateSliceParameters(RenderMode.Stress);
+
+                    // Use the simulation's RenderResults method with useSlicing=true, which will use the parameters we just set
+                    simulation.RenderResults(e.Graphics, stressPanel.Width, stressPanel.Height, RenderMode.Stress, true);
+                }
+                else
+                    simulation.RenderResults(e.Graphics, stressPanel.Width, stressPanel.Height, RenderMode.Stress);
+            };
 
             strainStressPanel.Paint += (sender, e) =>
                 simulation.RenderResults(e.Graphics, strainStressPanel.Width, strainStressPanel.Height, RenderMode.Strain);
 
             fractureProbabilityPanel.Paint += (sender, e) =>
-                simulation.RenderResults(e.Graphics, fractureProbabilityPanel.Width, fractureProbabilityPanel.Height, RenderMode.FailureProbability);
+            {
+                if (_enableSlicing)
+                {
+                    // Convert Vector3 type to System.Numerics.Vector3
+                    System.Numerics.Vector3 sliceNormalConverted = new System.Numerics.Vector3(_sliceNormal.X, _sliceNormal.Y, _sliceNormal.Z);
+
+                    // Update the simulation's slicing parameters
+                    UpdateSliceParameters(RenderMode.FailureProbability);
+
+                    // Use the simulation's RenderResults method with useSlicing=true
+                    simulation.RenderResults(e.Graphics, fractureProbabilityPanel.Width, fractureProbabilityPanel.Height,
+                                            RenderMode.FailureProbability, true);
+                }
+                else
+                    simulation.RenderResults(e.Graphics, fractureProbabilityPanel.Width, fractureProbabilityPanel.Height,
+                                            RenderMode.FailureProbability);
+            };
 
             meshViewPanel.Paint += (sender, e) =>
-                simulation.RenderResults(e.Graphics, meshViewPanel.Width, meshViewPanel.Height, RenderMode.Solid);
+            {
+                if (_enableSlicing)
+                {
+                    // Convert Vector3 type to System.Numerics.Vector3
+                    System.Numerics.Vector3 sliceNormalConverted = new System.Numerics.Vector3(_sliceNormal.X, _sliceNormal.Y, _sliceNormal.Z);
+
+                    // Update the simulation's slicing parameters
+                    UpdateSliceParameters(RenderMode.Solid);
+
+                    // Use the simulation's RenderResults method with useSlicing=true
+                    simulation.RenderResults(e.Graphics, meshViewPanel.Width, meshViewPanel.Height, RenderMode.Solid, true);
+                }
+                else
+                    simulation.RenderResults(e.Graphics, meshViewPanel.Width, meshViewPanel.Height, RenderMode.Solid);
+            };
+
 
             // Create summary panel content
             TableLayoutPanel summaryLayout = new TableLayoutPanel
@@ -3792,7 +4150,9 @@ namespace CTSegmenter
             AddSummaryRow(summaryLayout, 9, "Test Direction:", result.Data["TestDirection"].ToString());
 
             summaryPanel.Controls.Add(summaryLayout);
-
+            InitializeSlicingControls(stressPanel);
+            InitializeSlicingControls(fractureProbabilityPanel);
+            InitializeSlicingControls(meshViewPanel);
             // Add export buttons panel at the bottom
             Panel exportPanel = new Panel
             {
@@ -3846,6 +4206,10 @@ namespace CTSegmenter
             if (cb?.SelectedItem is string s && s.Length > 0)
                 return s[0].ToString().ToUpper();   // "X-Axis" → "X"
             return "Z";                              // safe fallback
+        }
+        private Vector3 ConvertFromSystemVector3(System.Numerics.Vector3 v)
+        {
+            return new Vector3(v.X, v.Y, v.Z);
         }
         /// <summary>
         /// Render only the fractured facets in red for clear visualization.
@@ -3907,18 +4271,11 @@ namespace CTSegmenter
             {
                 if (tri.IsFractured) continue; // Skip fractured ones for background
 
-                var verts = new System.Numerics.Vector3[] { tri.V1, tri.V2, tri.V3 };
                 var pts = new PointF[3];
-                for (int i = 0; i < 3; i++)
-                {
-                    var v = verts[i];
-                    float nx = (v.X / maxC) - 0.5f;
-                    float ny = (v.Y / maxC) - 0.5f;
-                    pts[i] = new PointF(
-                        cx + nx * scale * 150,
-                        cy + ny * scale * 150
-                    );
-                }
+                // Convert each System.Numerics.Vector3 to StressAnalysisForm.Vector3
+                pts[0] = ProjectVertex(ConvertFromSystemVector3(tri.V1), cx, cy, scale, maxC, fractureRotationX, fractureRotationY);
+                pts[1] = ProjectVertex(ConvertFromSystemVector3(tri.V2), cx, cy, scale, maxC, fractureRotationX, fractureRotationY);
+                pts[2] = ProjectVertex(ConvertFromSystemVector3(tri.V3), cx, cy, scale, maxC, fractureRotationX, fractureRotationY);
 
                 using (var pen = new Pen(Color.FromArgb(40, Color.Gray), 1))
                     g.DrawPolygon(pen, pts);
@@ -3927,18 +4284,11 @@ namespace CTSegmenter
             // Draw fractured triangles in red
             foreach (var (tri, _) in fractured)
             {
-                var verts = new System.Numerics.Vector3[] { tri.V1, tri.V2, tri.V3 };
                 var pts = new PointF[3];
-                for (int i = 0; i < 3; i++)
-                {
-                    var v = verts[i];
-                    float nx = (v.X / maxC) - 0.5f;
-                    float ny = (v.Y / maxC) - 0.5f;
-                    pts[i] = new PointF(
-                        cx + nx * scale * 150,
-                        cy + ny * scale * 150
-                    );
-                }
+                // Convert each System.Numerics.Vector3 to StressAnalysisForm.Vector3
+                pts[0] = ProjectVertex(ConvertFromSystemVector3(tri.V1), cx, cy, scale, maxC, fractureRotationX, fractureRotationY);
+                pts[1] = ProjectVertex(ConvertFromSystemVector3(tri.V2), cx, cy, scale, maxC, fractureRotationX, fractureRotationY);
+                pts[2] = ProjectVertex(ConvertFromSystemVector3(tri.V3), cx, cy, scale, maxC, fractureRotationX, fractureRotationY);
 
                 using (var fill = new SolidBrush(Color.FromArgb(180, Color.Red)))
                     g.FillPolygon(fill, pts);
@@ -4440,7 +4790,8 @@ namespace CTSegmenter
                 };
 
                 // Refresh button handler
-                refreshButton.Click += (s, e) => {
+                refreshButton.Click += (s, e) =>
+                {
                     Logger.Log("[StressAnalysisForm] Refreshing density visualization");
                     topSlicePanel.Invalidate();
                     bottomSlicePanel.Invalidate();
@@ -4925,7 +5276,7 @@ namespace CTSegmenter
             // Set default selected page
             resultsTabs.SelectedPage = wavePropagationPage;
         }
-        
+
         private void ExportSimulationResults(AcousticVelocitySimulation simulation, ExportFormat format)
         {
             string fileExtension;
@@ -5016,6 +5367,59 @@ namespace CTSegmenter
                     }
                 }
             }
+        }
+        private void FracturePanel_MouseDown(object sender, MouseEventArgs e)
+        {
+            lastFractureMousePosition = e.Location;
+
+            if (e.Button == MouseButtons.Left)
+            {
+                isFractureRotating = true;
+            }
+            else if (e.Button == MouseButtons.Right)
+            {
+                isFracturePanning = true;
+            }
+        }
+        private float fractureRotationX = 0.5f;
+        private float fractureRotationY = 0.5f;
+        private bool isFractureRotating = false;
+        private bool isFracturePanning = false;
+        private Point lastFractureMousePosition;
+        private void FracturePanel_MouseMove(object sender, MouseEventArgs e)
+        {
+            if (currentTriaxial?.SimulationMeshAtFailure == null || currentTriaxial.SimulationMeshAtFailure.Count == 0)
+                return;
+
+            if (isFractureRotating)
+            {
+                // Calculate rotation change based on mouse movement
+                float deltaX = (e.X - lastFractureMousePosition.X) * 0.01f;
+                float deltaY = (e.Y - lastFractureMousePosition.Y) * 0.01f;
+
+                fractureRotationY += deltaX;
+                fractureRotationX += deltaY;
+
+                // Limit vertical rotation to avoid flipping
+                fractureRotationX = Math.Max(Math.Min(fractureRotationX, (float)Math.PI / 2), -(float)Math.PI / 2);
+
+                // Redraw the panel
+                Panel panel = sender as Panel;
+                if (panel != null)
+                    panel.Invalidate();
+            }
+            else if (isFracturePanning)
+            {
+                // You could implement panning here if needed
+            }
+
+            lastFractureMousePosition = e.Location;
+        }
+
+        private void FracturePanel_MouseUp(object sender, MouseEventArgs e)
+        {
+            isFractureRotating = false;
+            isFracturePanning = false;
         }
         private void WavePictureBox_MouseWheel(object sender, MouseEventArgs e)
         {
@@ -5183,6 +5587,7 @@ namespace CTSegmenter
                     "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
+
         private void ResetViewButton_Click(object sender, EventArgs e)
         {
             // Reset all view parameters

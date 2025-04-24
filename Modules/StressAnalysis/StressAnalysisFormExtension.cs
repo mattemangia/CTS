@@ -2,14 +2,11 @@
 //  TriaxialSimulationPatch.cs  –  add GPU‑safe kernel (no System.Numerics).
 // -----------------------------------------------------------------------------
 using ILGPU;
-using ILGPU.Algorithms;   // XMath
 using ILGPU.Runtime;
-using ILGPU.Runtime.CPU;
 using Krypton.Ribbon;
 using Krypton.Toolkit;
 using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
 using System.Numerics;
@@ -24,11 +21,7 @@ namespace CTSegmenter
         private bool v;
         private ConcurrentDictionary<Vector3, float> densityMap;
 
-        public TriaxialSimulation(Material material, List<Triangle> triangles, float confiningPressure, float minAxialPressure, float maxAxialPressure, int pressureSteps, string direction, bool v, ConcurrentDictionary<Vector3, float> densityMap) : this(material, triangles, confiningPressure, minAxialPressure, maxAxialPressure, pressureSteps, direction)
-        {
-            this.v = v;
-            this.densityMap = densityMap;
-        }
+
         private Action<Index1D,
        ArrayView<Vector3>,
        ArrayView<Vector3>,
@@ -58,7 +51,7 @@ namespace CTSegmenter
                     ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<int>>(
                     ComputeStressKernelFixed);
 
-                Logger.Log("[TriaxialSimulation] Kernel loaded successfully");
+                Logger.Log("[TriaxialSimulation] Regular kernel loaded successfully");
             }
             catch (Exception ex)
             {
@@ -67,7 +60,7 @@ namespace CTSegmenter
             }
         }
 
-        
+
     }
 }
 //  StressAnalysisFormPatch.cs  –  companion UI patch (re‑written to compile)
@@ -78,7 +71,7 @@ namespace CTSegmenter
 //  Krypton types have been fixed to the correct namespaces so the file builds
 //  cleanly under C# 7.3.
 // -----------------------------------------------------------------------------
-       
+
 
 namespace CTSegmenter
 {
@@ -124,6 +117,7 @@ namespace CTSegmenter
                 SetupRockStrengthUi();
                 SetupMohrCoulombDiagram();
                 HookExtendedHandlers();
+
                 Logger.Log("[StressAnalysisForm] Rock strength UI setup complete");
             }
             catch (Exception ex)
@@ -194,7 +188,8 @@ namespace CTSegmenter
             resultsPage.Controls.Add(mohrCoulombPanel);
 
             // Replace the placeholder with proper renderer
-            mohrCoulombPanel.Paint += (s, e) => {
+            mohrCoulombPanel.Paint += (s, e) =>
+            {
                 if (currentTriaxial != null && currentTriaxial.Status == SimulationStatus.Completed)
                     currentTriaxial.RenderMohrCoulombDiagram(e.Graphics, mohrCoulombPanel.Width, mohrCoulombPanel.Height);
                 else
@@ -224,7 +219,8 @@ namespace CTSegmenter
                     Checked = false,
                     ButtonType = GroupButtonType.Check
                 };
-                mcGraphButton.Click += (s, e) => {
+                mcGraphButton.Click += (s, e) =>
+                {
                     mcGraphButton.Checked = !mcGraphButton.Checked;
                     mohrCoulombPanel.Visible = mcGraphButton.Checked;
                     resultsPage.Refresh();
@@ -244,7 +240,7 @@ namespace CTSegmenter
             runTriaxialButton.Click += RunTriaxialButton_Extended;
 
             // overlay fracture rendering after original mesh paint
-            meshViewPanel.Paint += MeshViewPanel_ExtendedPaint;
+            //meshViewPanel.Paint += MeshViewPanel_ExtendedPaint;
         }
 
         // ------------------------------------------------------------------
@@ -262,14 +258,43 @@ namespace CTSegmenter
                 new System.Numerics.Vector3(t.V2.X, t.V2.Y, t.V2.Z),
                 new System.Numerics.Vector3(t.V3.X, t.V3.Y, t.V3.Z))).ToList();
 
-            currentTriaxial = new TriaxialSimulation(
-                selectedMaterial,
-                simMesh,
-                (float)confiningPressureNumeric.Value,
-                (float)pressureMinNumeric.Value,
-                (float)pressureMaxNumeric.Value,
-                (int)pressureStepsNumeric.Value,
-                testDirectionCombo.SelectedItem?.ToString() ?? "Z‑Axis");
+            // Check if we need to use inhomogeneous simulation
+            bool useInhomogeneousDensity = false; // This should come from your UI, e.g. a checkbox
+            ConcurrentDictionary<System.Numerics.Vector3, float> densityMap = null;
+
+            // This is where you would initialize densityMap if needed
+            if (useInhomogeneousDensity && densityMap == null)
+            {
+                densityMap = new ConcurrentDictionary<System.Numerics.Vector3, float>();
+                // Populate the density map based on your application's needs
+            }
+
+            if (useInhomogeneousDensity && densityMap != null && densityMap.Count > 0)
+            {
+                // Use the inhomogeneous simulation when density data is available
+                currentTriaxial = new InhomogeneousTriaxialSimulation(
+                    selectedMaterial,
+                    simMesh,
+                    (float)confiningPressureNumeric.Value,
+                    (float)pressureMinNumeric.Value,
+                    (float)pressureMaxNumeric.Value,
+                    (int)pressureStepsNumeric.Value,
+                    testDirectionCombo.SelectedItem?.ToString() ?? "Z-Axis",
+                    true,
+                    densityMap);
+            }
+            else
+            {
+                // Use the standard simulation otherwise
+                currentTriaxial = new TriaxialSimulation(
+                    selectedMaterial,
+                    simMesh,
+                    (float)confiningPressureNumeric.Value,
+                    (float)pressureMinNumeric.Value,
+                    (float)pressureMaxNumeric.Value,
+                    (int)pressureStepsNumeric.Value,
+                    testDirectionCombo.SelectedItem?.ToString() ?? "Z-Axis");
+            }
 
             // inject user‑defined rock‑strength values via reflection ----------
             ApplyPrivateSetter(currentTriaxial, "CohesionStrength", (float)cohesionNumeric.Value);
@@ -298,15 +323,24 @@ namespace CTSegmenter
         // ------------------------------------------------------------------
         //  4.  FRACTURE OVERLAY ON MESH VIEW
         // ------------------------------------------------------------------
-        private void MeshViewPanel_ExtendedPaint(object sender, PaintEventArgs e)
+        /*private void MeshViewPanel_ExtendedPaint(object sender, PaintEventArgs e)
         {
             if (!showFractureCheck.Checked || currentTriaxial == null || currentTriaxial.Status != SimulationStatus.Completed)
                 return;
 
-            currentTriaxial.RenderResults(e.Graphics, meshViewPanel.Width, meshViewPanel.Height, RenderMode.Stress);
-        }
+            // Use the appropriate render mode
+            RenderMode renderMode = RenderMode.Stress;
 
-        
+            // Consider adding UI controls to select different render modes:
+            // - RenderMode.Stress (Von Mises)
+            // - RenderMode.Strain
+            // - RenderMode.FailureProbability
+            // - RenderMode.Displacement
+
+            currentTriaxial.RenderResults(e.Graphics, meshViewPanel.Width, meshViewPanel.Height, renderMode);
+        }*/
+
+
     }
 
     // ----------------------------------------------------------------------
@@ -315,6 +349,6 @@ namespace CTSegmenter
     // ----------------------------------------------------------------------
     partial class StressAnalysisForm
     {
-        
+
     }
 }

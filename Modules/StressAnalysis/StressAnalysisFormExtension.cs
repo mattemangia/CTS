@@ -50,34 +50,150 @@ namespace CTSegmenter
         {
             try
             {
+                // Load kernel with pre-calculated trigonometric values
                 _computeStressKernelSafe = _accelerator.LoadAutoGroupedStreamKernel<Index1D,
-                    ArrayView<System.Numerics.Vector3>, ArrayView<System.Numerics.Vector3>, ArrayView<System.Numerics.Vector3>,
-                    float, float, System.Numerics.Vector3,
-                    float, float, // Added cohesion and frictionAngleRad
-                    ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<int>>(ComputeStressKernelSafe);
+                    ArrayView<Vector3>, ArrayView<Vector3>, ArrayView<Vector3>,
+                    float, float, Vector3,
+                    float, float, float, // cohesion, sinPhi, cosPhi
+                    ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<int>>(
+                    ComputeStressKernelFixed);
 
+                Logger.Log("[TriaxialSimulation] Kernel loaded successfully");
             }
             catch (Exception ex)
             {
-                // If GPU compile fails switch to CPU accelerator and try again.
-                if (!(_accelerator is CPUAccelerator))
-                {
-                    Logger.Log("[TriaxialSimulation] GPU kernel compile failed – falling back to CPU: " + ex.Message);
-                    _accelerator.Dispose();
-                    _accelerator = _context.GetPreferredDevice(preferCPU: true).CreateAccelerator(_context);
-                    _computeStressKernelSafe = _accelerator.LoadAutoGroupedStreamKernel<Index1D,
-                        ArrayView<System.Numerics.Vector3>, ArrayView<System.Numerics.Vector3>, ArrayView<System.Numerics.Vector3>,
-                        float, float, System.Numerics.Vector3,
-                        float, float, // Added cohesion and frictionAngleRad
-                        ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<int>>(ComputeStressKernelSafe);
-                }
-                else
-                {
-                    throw; // already on CPU – propagate
-                }
+                Logger.Log($"[TriaxialSimulation] Error loading kernels: {ex.Message}");
+                throw;
             }
         }
 
+        private static void ComputeStressKernelWithDirectionalTransform(
+    Index1D idx,
+    ArrayView<Vector3> v1Arr,
+    ArrayView<Vector3> v2Arr,
+    ArrayView<Vector3> v3Arr,
+    float pConf,                  // Confining pressure [MPa]
+    float pAxial,                 // Applied axial pressure [MPa]
+    Vector3 axis,                 // Test axis (unit)
+    float cohesion,               // Cohesion strength [MPa]
+    float frictionAngleRad,       // Friction angle [radians]
+    ArrayView<float> vmArr,       // Von‑Mises σₑ [MPa]
+    ArrayView<float> s1Arr,       // σ₁
+    ArrayView<float> s2Arr,       // σ₂
+    ArrayView<float> s3Arr,       // σ₃
+    ArrayView<int> fracArr)       // 1 = failed, 0 = intact
+        {
+            // Get triangle vertices
+            Vector3 v1 = v1Arr[idx];
+            Vector3 v2 = v2Arr[idx];
+            Vector3 v3 = v3Arr[idx];
+
+            // Calculate triangle normal
+            Vector3 edge1 = v2 - v1;
+            Vector3 edge2 = v3 - v1;
+            Vector3 normal = Vector3.Normalize(Vector3.Cross(edge1, edge2));
+
+            // DIRECT STRESS APPLICATION BASED ON AXIS
+            // Calculate stress components
+
+            // First, determine what stress to apply in each direction
+            float stressX, stressY, stressZ;
+
+            // Apply axial stress along the test direction and confining pressure in other directions
+            if (axis.X > 0.9f)
+            {  // X-axis test
+                stressX = pAxial;
+                stressY = pConf;
+                stressZ = pConf;
+            }
+            else if (axis.Y > 0.9f)
+            {  // Y-axis test
+                stressX = pConf;
+                stressY = pAxial;
+                stressZ = pConf;
+            }
+            else if (axis.Z > 0.9f)
+            {  // Z-axis test
+                stressX = pConf;
+                stressY = pConf;
+                stressZ = pAxial;
+            }
+            else
+            {  // Custom direction
+               // For custom directions, blend stresses based on axis components
+                float axisLength = MathF.Sqrt(axis.X * axis.X + axis.Y * axis.Y + axis.Z * axis.Z);
+                if (axisLength < 0.001f)
+                {
+                    // Default to Z-axis if direction is near zero
+                    stressX = pConf;
+                    stressY = pConf;
+                    stressZ = pAxial;
+                }
+                else
+                {
+                    // Normalize axis
+                    float nx = axis.X / axisLength;
+                    float ny = axis.Y / axisLength;
+                    float nz = axis.Z / axisLength;
+
+                    // Apply stress components proportionally
+                    stressX = pConf + (pAxial - pConf) * nx * nx;
+                    stressY = pConf + (pAxial - pConf) * ny * ny;
+                    stressZ = pConf + (pAxial - pConf) * nz * nz;
+                }
+            }
+
+            // Calculate normal stress on the triangle face (dot product of normal with stress vector)
+            float normalStress = normal.X * normal.X * stressX +
+                                 normal.Y * normal.Y * stressY +
+                                 normal.Z * normal.Z * stressZ;
+
+            // Calculate shear components - simplification for computation
+            float shearComponent = MathF.Sqrt(
+                MathF.Pow(normal.X * normal.Y * (stressX - stressY), 2) +
+                MathF.Pow(normal.Y * normal.Z * (stressY - stressZ), 2) +
+                MathF.Pow(normal.Z * normal.X * (stressZ - stressX), 2)
+            );
+
+            // Calculate principal stresses based on the normal and shear components
+            // Simplified from full tensor calculation
+            float meanStress = (stressX + stressY + stressZ) / 3.0f;
+            float devStress = MathF.Sqrt(
+                (stressX - meanStress) * (stressX - meanStress) +
+                (stressY - meanStress) * (stressY - meanStress) +
+                (stressZ - meanStress) * (stressZ - meanStress)
+            );
+
+            // σ1 is the largest principal stress, σ3 is the smallest
+            float σ1 = normalStress + shearComponent;
+            float σ3 = normalStress - shearComponent;
+            float σ2 = 3 * meanStress - σ1 - σ3;  // Ensures sum is 3*mean
+
+            // Ensure σ1 ≥ σ2 ≥ σ3
+            if (σ1 < σ2) { float temp = σ1; σ1 = σ2; σ2 = temp; }
+            if (σ2 < σ3) { float temp = σ2; σ2 = σ3; σ3 = temp; }
+            if (σ1 < σ2) { float temp = σ1; σ1 = σ2; σ2 = temp; }
+
+            // Calculate von Mises stress
+            float vm = MathF.Sqrt(0.5f * (
+                (σ1 - σ2) * (σ1 - σ2) +
+                (σ2 - σ3) * (σ2 - σ3) +
+                (σ3 - σ1) * (σ3 - σ1)
+            ));
+
+            // Mohr-Coulomb failure criterion
+            float sinPhi = MathF.Sin(frictionAngleRad);
+            float cosPhi = MathF.Cos(frictionAngleRad);
+            float rhs = (2.0f * cohesion * cosPhi + (σ1 + σ3) * sinPhi) / (1.0f - sinPhi);
+            bool failed = (σ1 - σ3) >= rhs;
+
+            // Store results
+            vmArr[idx] = vm;
+            s1Arr[idx] = σ1;
+            s2Arr[idx] = σ2;
+            s3Arr[idx] = σ3;
+            fracArr[idx] = failed ? 1 : 0;
+        }
         // --- GPU‑safe ComputeStressKernel ---------------------------------------
         private static void ComputeStressKernelSafe(
     Index1D index,
@@ -95,6 +211,7 @@ namespace CTSegmenter
     ArrayView<float> stress3Array,
     ArrayView<int> isFracturedArray)
         {
+
             int i = index;
 
             // local copies ----------------------------------------------------

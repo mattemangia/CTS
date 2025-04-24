@@ -28,8 +28,8 @@ namespace CTSegmenter
                 // Optionally log or handle the exception.
             }
             Text = "Log Window";
-            Width = 600;
-            Height = 400;
+            Width = 800;
+            Height = 600;
 
             textBox = new TextBox
             {

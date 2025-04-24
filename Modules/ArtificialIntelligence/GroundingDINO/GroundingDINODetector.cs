@@ -11,11 +11,38 @@ using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using System.Drawing.Drawing2D;
 using System.Text;
+using System.Windows.Input;
+using System.ComponentModel;
 
 namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
 {
+    // Enum for mask creation methods with descriptions
+    public enum MaskCreationMethod
+    {
+        [Description("Center Point")]
+        CenterPoint,
+
+        [Description("Corner Points")]
+        CornerPoints,
+
+        [Description("Box Outline")]
+        BoxOutline,
+
+        [Description("Weighted Grid")]
+        WeightedGrid,
+
+        [Description("Box Fill")]
+        BoxFill
+    }
+    
     internal class GroundingDINODetector
     {
+        // Loading form
+        private ProgressBar loadingProgressBar;
+        private Label loadingLabel;
+        private Panel loadingPanel;
+        private bool isLoading = false;
+
         // Main form components
         private Form dinoForm;
         private TableLayoutPanel mainLayout;
@@ -26,6 +53,9 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
         private TextBox promptTextBox;
         private RadioButton rbCPU, rbGPU;
         private Button btnLoadModel, btnDetect, btnApply, btnClose;
+        private Button btnSelectAll, btnClearSelection;
+        private Button btnSendToSAM; // New button for SAM integration
+        private ComboBox cboMaskCreationMethod; // New dropdown for mask creation method
         private TrackBar confidenceSlider;
         private Label confidenceLabel;
         private Label statusLabel;
@@ -44,6 +74,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
         // References to parent application components
         private MainForm mainForm;
         private Material selectedMaterial;
+        private AnnotationManager annotationManager;
 
         // ONNX model components
         private InferenceSession session;
@@ -73,6 +104,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             public Rectangle Box { get; set; }
             public float Score { get; set; }
             public string Label { get; set; }
+            public bool Selected { get; set; } = false; // Added Selected property
         }
         private List<Detection> detections = new List<Detection>();
         private float confidenceThreshold = 0.3f;
@@ -80,17 +112,19 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
         // Slice index
         private int currentSlice;
 
-        public GroundingDINODetector(MainForm mainForm, Material selectedMaterial)
+        public GroundingDINODetector(MainForm mainForm, Material selectedMaterial, AnnotationManager annotationManager = null)
         {
             Logger.Log("[GroundingDINO] Creating Grounding DINO detector interface");
             this.mainForm = mainForm;
             this.selectedMaterial = selectedMaterial;
+            this.annotationManager = annotationManager ?? new AnnotationManager();
 
             // Get current slice position from MainForm
             currentSlice = mainForm.CurrentSlice;
 
             // Initialize form and UI
             InitializeForm();
+            InitializeLoadingUI();
 
             // Set default model path
             string onnxDirectory = Path.Combine(Application.StartupPath, "ONNX");
@@ -102,7 +136,6 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             {
                 Logger.Log("[GroundingDINO] Attempting to load ONNX model");
                 LoadONNXModel();
-                statusLabel.Text = "Model loaded successfully";
             }
             catch (Exception ex)
             {
@@ -111,11 +144,68 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             }
         }
 
+        private void InitializeLoadingUI()
+        {
+            // Create a panel to hold the progress bar and label
+            loadingPanel = new Panel
+            {
+                BorderStyle = BorderStyle.FixedSingle,
+                BackColor = Color.FromArgb(240, 240, 240),
+                Size = new Size(300, 100),
+                Padding = new Padding(10),
+                Visible = false
+            };
+
+            // Position panel in center of form
+            loadingPanel.Location = new Point(
+                (dinoForm.ClientSize.Width - loadingPanel.Width) / 2,
+                (dinoForm.ClientSize.Height - loadingPanel.Height) / 2
+            );
+
+            // Create loading label
+            loadingLabel = new Label
+            {
+                Text = "Loading ONNX model...",
+                AutoSize = true,
+                Location = new Point(10, 15),
+                Font = new Font("Segoe UI", 9.75f, FontStyle.Bold)
+            };
+
+            // Create progress bar (marquee style)
+            loadingProgressBar = new ProgressBar
+            {
+                Style = ProgressBarStyle.Marquee,
+                MarqueeAnimationSpeed = 30,
+                Size = new Size(280, 25),
+                Location = new Point(10, 45)
+            };
+
+            // Add controls to panel
+            loadingPanel.Controls.Add(loadingLabel);
+            loadingPanel.Controls.Add(loadingProgressBar);
+
+            // Add panel to form (above other controls)
+            dinoForm.Controls.Add(loadingPanel);
+            loadingPanel.BringToFront();
+
+            // Handle form resize to keep the loading panel centered
+            dinoForm.Resize += (s, e) =>
+            {
+                if (loadingPanel.Visible)
+                {
+                    loadingPanel.Location = new Point(
+                        (dinoForm.ClientSize.Width - loadingPanel.Width) / 2,
+                        (dinoForm.ClientSize.Height - loadingPanel.Height) / 2
+                    );
+                }
+            };
+        }
+
         private void InitializeForm()
         {
             Logger.Log("[GroundingDINODetector] Module initialization called");
             Logger.Log("[GroundingDINO] Initializing form");
-            
+
             dinoForm = new Form
             {
                 Text = "Grounding DINO - CT",
@@ -198,7 +288,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 11,  // Add one more row for view selection
+                RowCount = 13,  // Increased row count for new SAM controls
                 Padding = new Padding(5),
                 CellBorderStyle = TableLayoutPanelCellBorderStyle.None
             };
@@ -270,9 +360,9 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             btnLoadModel.Click += (s, e) => LoadONNXModel();
 
             modelPanel.Controls.AddRange(new Control[] {
-        lblModelPath, modelPathTextBox, btnBrowse,
-        lblDevice, rbCPU, rbGPU, btnLoadModel
-    });
+                lblModelPath, modelPathTextBox, btnBrowse,
+                lblDevice, rbCPU, rbGPU, btnLoadModel
+            });
 
             // --------- View Selection Section ---------
             Panel viewSelectionPanel = new Panel
@@ -332,8 +422,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             };
 
             viewSelectionPanel.Controls.AddRange(new Control[] {
-        lblViewMode, btnXYView, btnXZView, btnYZView
-    });
+                lblViewMode, btnXYView, btnXZView, btnYZView
+            });
 
             // --------- Prompt Section ---------
             Panel promptPanel = new Panel
@@ -362,8 +452,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             };
 
             promptPanel.Controls.AddRange(new Control[] {
-        lblPrompt, promptTextBox
-    });
+                lblPrompt, promptTextBox
+            });
 
             // --------- Confidence Threshold ---------
             Panel confidencePanel = new Panel
@@ -405,8 +495,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             };
 
             confidencePanel.Controls.AddRange(new Control[] {
-        lblConfidence, confidenceLabel, confidenceSlider
-    });
+                lblConfidence, confidenceLabel, confidenceSlider
+            });
 
             // --------- Slice Controls ---------
             Panel slicePanel = new Panel
@@ -467,14 +557,14 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             };
 
             slicePanel.Controls.AddRange(new Control[] {
-        lblSlice, sliceSlider, numSlice
-    });
+                lblSlice, sliceSlider, numSlice
+            });
 
             // --------- Action Buttons ---------
             Panel buttonPanel = new Panel
             {
                 Width = 280,
-                Height = 70,
+                Height = 200, // Increased height for new buttons
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 Margin = new Padding(0, 0, 0, 10)
@@ -485,7 +575,11 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 Text = "Detect Objects",
                 Location = new Point(0, 0),
                 Width = 135,
-                Height = 30
+                Height = 30,
+                Image = CreateButtonIcon("detect"),
+                ImageAlign = ContentAlignment.MiddleLeft,
+                TextAlign = ContentAlignment.MiddleRight,
+                TextImageRelation = TextImageRelation.ImageBeforeText
             };
             btnDetect.Click += async (s, e) => await PerformDetection();
 
@@ -494,14 +588,106 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 Text = "Apply Selection",
                 Location = new Point(145, 0),
                 Width = 135,
-                Height = 30
+                Height = 30,
+                Image = CreateButtonIcon("apply"),
+                ImageAlign = ContentAlignment.MiddleLeft,
+                TextAlign = ContentAlignment.MiddleRight,
+                TextImageRelation = TextImageRelation.ImageBeforeText
             };
             btnApply.Click += (s, e) => ApplyDetectionResults();
+
+            // Add Select All / Clear Selection buttons
+            btnSelectAll = new Button
+            {
+                Text = "Select All",
+                Location = new Point(0, 40),
+                Width = 135,
+                Height = 30,
+                Image = CreateButtonIcon("selectAll"),
+                ImageAlign = ContentAlignment.MiddleLeft,
+                TextAlign = ContentAlignment.MiddleRight,
+                TextImageRelation = TextImageRelation.ImageBeforeText
+            };
+            btnSelectAll.Click += (s, e) => {
+                if (detections != null && detections.Count > 0)
+                {
+                    foreach (var detection in detections.Where(d => d.Score >= confidenceThreshold))
+                    {
+                        detection.Selected = true;
+                    }
+                    imageViewer.Invalidate();
+                    statusLabel.Text = "All valid detections selected";
+                }
+            };
+
+            btnClearSelection = new Button
+            {
+                Text = "Clear Selection",
+                Location = new Point(145, 40),
+                Width = 135,
+                Height = 30,
+                Image = CreateButtonIcon("clearSelection"),
+                ImageAlign = ContentAlignment.MiddleLeft,
+                TextAlign = ContentAlignment.MiddleRight,
+                TextImageRelation = TextImageRelation.ImageBeforeText
+            };
+            btnClearSelection.Click += (s, e) => {
+                if (detections != null && detections.Count > 0)
+                {
+                    foreach (var detection in detections)
+                    {
+                        detection.Selected = false;
+                    }
+                    imageViewer.Invalidate();
+                    statusLabel.Text = "Selection cleared";
+                }
+            };
+
+            // Add new controls for SAM integration
+            Label lblMaskCreationMethod = new Label
+            {
+                Text = "Mask Creation Method:",
+                Location = new Point(0, 80),
+                AutoSize = true
+            };
+
+            cboMaskCreationMethod = new ComboBox
+            {
+                Location = new Point(145, 78),
+                Width = 135,
+                DropDownStyle = ComboBoxStyle.DropDownList
+            };
+
+            // Add mask creation methods
+            cboMaskCreationMethod.Items.AddRange(new object[] {
+                "Center Point",
+                "Corner Points",
+                "Box Outline",
+                "Weighted Grid",
+                "Box Fill"
+            });
+            cboMaskCreationMethod.SelectedIndex = 0;
+
+            // Add Send to SAM button
+            btnSendToSAM = new Button
+            {
+                Text = "Send to SAM",
+                Location = new Point(0, 110),
+                Width = 280,
+                Height = 35,
+                BackColor = Color.LightGreen,
+                Image = CreateButtonIcon("sendToSAM"),
+                ImageAlign = ContentAlignment.MiddleLeft,
+                TextAlign = ContentAlignment.MiddleRight,
+                TextImageRelation = TextImageRelation.ImageBeforeText,
+                Font = new Font(SystemFonts.DefaultFont.FontFamily, 9, FontStyle.Bold)
+            };
+            btnSendToSAM.Click += (s, e) => SendSelectedBoxesToSAM();
 
             btnClose = new Button
             {
                 Text = "Close",
-                Location = new Point(0, 40),
+                Location = new Point(0, 155),
                 Width = 100,
                 Height = 25
             };
@@ -510,19 +696,23 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             statusLabel = new Label
             {
                 Text = "Ready",
-                Location = new Point(110, 45),
+                Location = new Point(110, 160),
                 AutoSize = true
             };
 
             buttonPanel.Controls.AddRange(new Control[] {
-        btnDetect, btnApply, btnClose, statusLabel
-    });
+                btnDetect, btnApply,
+                btnSelectAll, btnClearSelection,
+                lblMaskCreationMethod, cboMaskCreationMethod,
+                btnSendToSAM,
+                btnClose, statusLabel
+            });
 
             // --------- Help Text ---------
             Panel helpPanel = new Panel
             {
                 Width = 280,
-                Height = 140,
+                Height = 160, // Increased height for more instructions
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 Margin = new Padding(0, 0, 0, 10)
@@ -531,14 +721,19 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             Label lblHelp = new Label
             {
                 Text = "Instructions:\n" +
-                      "- Select view mode (XY, XZ, or YZ)\n" +
-                      "- Enter a text prompt describing what to detect\n" +
-                      "- Click 'Detect Objects' to run the detection\n" +
-                      "- Adjust confidence threshold as needed\n" +
-                      "- Use mousewheel to zoom, right-drag to pan\n" +
-                      "- Click 'Apply Selection' to create masks from detections",
+                    "- Select view mode (XY, XZ, or YZ)\n" +
+                    "- Enter a text prompt describing what to detect\n" +
+                    "- Click 'Detect Objects' to run the detection\n" +
+                    "- Click on boxes to select/deselect them\n" +
+                    "- Click on borders or labels to select specific boxes\n" +
+                    "- Hold Ctrl and click to cycle through overlapping boxes\n" +
+                    "- Adjust confidence threshold as needed\n" +
+                    "- Use mousewheel to zoom, right-drag to pan\n" +
+                    "- Apply selection directly or send to SAM for refinement\n" +
+                    "- The mask creation method determines how points are\n" +
+                    "  placed when sending boxes to SAM",
                 Location = new Point(0, 0),
-                Size = new Size(280, 120),
+                Size = new Size(280, 160),
                 BorderStyle = BorderStyle.FixedSingle
             };
 
@@ -566,7 +761,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
 
             // Add all panels to the table layout
             controlsTable.Controls.Add(modelPanel, 0, 0);
-            controlsTable.Controls.Add(viewSelectionPanel, 0, 1);  // Add view selection panel
+            controlsTable.Controls.Add(viewSelectionPanel, 0, 1);
             controlsTable.Controls.Add(promptPanel, 0, 2);
             controlsTable.Controls.Add(confidencePanel, 0, 3);
             controlsTable.Controls.Add(slicePanel, 0, 4);
@@ -594,6 +789,81 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             // Initially load the slice
             UpdateViewer();
         }
+
+        // Method to create button icons
+        private Image CreateButtonIcon(string iconType)
+        {
+            Bitmap iconBitmap = new Bitmap(24, 24);
+            using (Graphics g = Graphics.FromImage(iconBitmap))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.Clear(Color.Transparent);
+
+                Pen pen = new Pen(Color.Black, 2);
+                SolidBrush brush = new SolidBrush(Color.Black);
+
+                switch (iconType)
+                {
+                    case "detect":
+                        // Draw a magnifying glass
+                        g.DrawEllipse(pen, 4, 4, 12, 12);
+                        g.DrawLine(pen, 14, 14, 19, 19);
+                        break;
+
+                    case "apply":
+                        // Draw a checkmark
+                        g.DrawLine(pen, 5, 12, 10, 18);
+                        g.DrawLine(pen, 10, 18, 19, 6);
+                        break;
+
+                    case "selectAll":
+                        // Draw a selection of multiple boxes
+                        g.DrawRectangle(pen, 4, 4, 8, 8);
+                        g.DrawRectangle(pen, 8, 8, 8, 8);
+                        g.DrawRectangle(pen, 12, 12, 8, 8);
+                        break;
+
+                    case "clearSelection":
+                        // Draw an X
+                        g.DrawLine(pen, 6, 6, 18, 18);
+                        g.DrawLine(pen, 6, 18, 18, 6);
+                        break;
+
+                    case "sendToSAM":
+                        // Box with arrow pointing to a mask-like shape
+                        Color samColor = Color.FromArgb(0, 120, 215); // Blue
+                        pen.Color = samColor;
+                        brush.Color = samColor;
+
+                        // Draw a box
+                        g.DrawRectangle(pen, 3, 5, 8, 8);
+
+                        // Draw an arrow pointing right
+                        g.DrawLine(pen, 12, 9, 16, 9);
+                        g.FillPolygon(brush, new Point[] {
+                            new Point(15, 7),
+                            new Point(17, 9),
+                            new Point(15, 11)
+                        });
+
+                        // Draw "SAM" icon representation
+                        pen.Width = 1.5f;
+                        g.DrawEllipse(pen, 17, 4, 5, 10);
+                        g.DrawCurve(pen, new Point[] {
+                            new Point(18, 7),
+                            new Point(19, 9),
+                            new Point(20, 11)
+                        });
+                        break;
+                }
+
+                pen.Dispose();
+                brush.Dispose();
+            }
+
+            return iconBitmap;
+        }
+
         private void UpdateViewButtons()
         {
             btnXYView.BackColor = (currentViewMode == ViewMode.XY) ? Color.LightSkyBlue : SystemColors.Control;
@@ -673,6 +943,68 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 }
             };
 
+            // Add mouse click handler for box selection
+            imageViewer.MouseClick += (s, e) => {
+                if (e.Button == MouseButtons.Left && detections != null && detections.Count > 0)
+                {
+                    // Convert screen coordinates to image coordinates
+                    Point imagePoint = new Point(
+                        (int)((e.X - pan.X) / zoom),
+                        (int)((e.Y - pan.Y) / zoom)
+                    );
+
+                    // First check if we're clicking on a border or label
+                    Detection borderOrLabelClick = DetectBorderOrLabelClick(imagePoint, detections);
+
+                    if (borderOrLabelClick != null)
+                    {
+                        // Toggle the specifically clicked box
+                        borderOrLabelClick.Selected = !borderOrLabelClick.Selected;
+                        statusLabel.Text = $"Box '{borderOrLabelClick.Label}' {(borderOrLabelClick.Selected ? "selected" : "deselected")}";
+                        imageViewer.Invalidate();
+                        return;
+                    }
+
+                    // If not clicking on border/label, check all boxes that contain this point
+                    List<Detection> overlappingBoxes = detections
+                        .Where(d => d.Score >= confidenceThreshold && d.Box.Contains(imagePoint))
+                        .ToList();
+
+                    if (overlappingBoxes.Count > 0)
+                    {
+                        // If Ctrl key is pressed, cycle through overlapping boxes instead of just picking the top one
+                        bool isCtrlPressed = (Control.ModifierKeys & Keys.Control) == Keys.Control;
+
+                        if (isCtrlPressed && overlappingBoxes.Count > 1)
+                        {
+                            // Find first selected box
+                            int selectedIndex = overlappingBoxes.FindIndex(d => d.Selected);
+
+                            // Deselect all boxes
+                            foreach (var box in overlappingBoxes)
+                            {
+                                box.Selected = false;
+                            }
+
+                            // Select next box in cycle
+                            int nextIndex = (selectedIndex + 1) % overlappingBoxes.Count;
+                            overlappingBoxes[nextIndex].Selected = true;
+
+                            statusLabel.Text = $"Selected box {nextIndex + 1} of {overlappingBoxes.Count} overlapping boxes";
+                        }
+                        else
+                        {
+                            // Default behavior: select topmost box (last in the list)
+                            var topBox = overlappingBoxes.Last();
+                            topBox.Selected = !topBox.Selected;
+                            statusLabel.Text = $"Box '{topBox.Label}' {(topBox.Selected ? "selected" : "deselected")}";
+                        }
+
+                        imageViewer.Invalidate();
+                    }
+                }
+            };
+
             // Paint event for custom rendering with detections
             imageViewer.Paint += (s, e) => {
                 // Clear background
@@ -709,6 +1041,12 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             };
         }
 
+        // Helper method to get complementary color
+        private Color GetComplementaryColor(Color color)
+        {
+            return Color.FromArgb(color.A, 255 - color.R, 255 - color.G, 255 - color.B);
+        }
+
         private void DrawCheckerboardBackground(Graphics g, Rectangle bounds)
         {
             int cellSize = 10; // Size of checkerboard cells
@@ -742,16 +1080,33 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                     (int)(detection.Box.Width * zoom),
                     (int)(detection.Box.Height * zoom));
 
+                // Use different colors for selected vs. unselected boxes
+                Color boxColor = detection.Selected ?
+                    GetComplementaryColor(selectedMaterial.Color) :
+                    selectedMaterial.Color;
+
                 // Draw the bounding box
-                using (Pen boxPen = new Pen(selectedMaterial.Color, 2))
+                using (Pen boxPen = new Pen(boxColor, 2))
                 {
                     g.DrawRectangle(boxPen, scaledBox);
                 }
 
+                // Fill box with semi-transparent color if selected
+                if (detection.Selected)
+                {
+                    using (SolidBrush fillBrush = new SolidBrush(Color.FromArgb(50, boxColor)))
+                    {
+                        g.FillRectangle(fillBrush, scaledBox);
+                    }
+                }
+
                 // Draw the label with score
                 string labelText = $"{detection.Label} ({detection.Score:F2})";
+                if (detection.Selected)
+                    labelText += " ✓"; // Add checkmark to indicate selection
+
                 using (Font font = new Font("Arial", 8))
-                using (SolidBrush brush = new SolidBrush(selectedMaterial.Color))
+                using (SolidBrush brush = new SolidBrush(boxColor))
                 using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(128, Color.Black)))
                 {
                     SizeF textSize = g.MeasureString(labelText, font);
@@ -871,76 +1226,105 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             }
         }
 
-        private void LoadONNXModel()
+        private async void LoadONNXModel()
         {
+            if (isLoading) return; // Prevent multiple concurrent loads
+            isLoading = true;
+
+            // Show loading UI
+            loadingPanel.Visible = true;
+            btnLoadModel.Enabled = false;
+            statusLabel.Text = "Loading model...";
+
             try
             {
-                // Dispose existing session if any
-                session?.Dispose();
-
-                // Verify file exists
-                if (!File.Exists(modelPath))
-                {
-                    string errorMsg = $"Model not found at: {modelPath}";
-                    MessageBox.Show(errorMsg);
-                    Logger.Log($"[GroundingDINO] {errorMsg}");
-                    return;
-                }
-                // Load Vocabulary
-                LoadVocabulary();
-                // Create session options with enhanced performance settings
-                useGPU = rbGPU.Checked;
-                SessionOptions options = new SessionOptions();
-
-                // Set graph optimization level to maximum
-                options.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;
-
-                // Enable parallel execution
-                options.EnableMemoryPattern = true;
-                options.EnableCpuMemArena = true;
-
-                // Set intra-op and inter-op thread count for CPU 
-                int cpuThreads = Environment.ProcessorCount;
-                options.IntraOpNumThreads = Math.Max(1, cpuThreads / 2);
-
-                if (useGPU)
+                // Run the model loading in a background task
+                await Task.Run(() =>
                 {
                     try
                     {
-                        // ---------- CUDA first ------------------------------------------------
-                        options.AppendExecutionProvider_CUDA();   // deviceId = 0
-                        Logger.Log("[GroundingDINO] Using CUDA execution provider");
-                    }
-                    catch (Exception cudaEx)
-                    {
-                        Logger.Log($"[GroundingDINO] CUDA not available: {cudaEx.Message}");
-                        // ---------- fallback: leave the session on CPU ------------------------
-                        useGPU = false;
-                    }
-                }
+                        // Dispose existing session if any
+                        session?.Dispose();
 
-                // Create session with optimized settings
-                session = new InferenceSession(modelPath, options);
-                InspectModelIO();
-                Logger.Log("[GroundingDINO] Model loaded successfully with optimized settings");
+                        // Verify file exists
+                        if (!File.Exists(modelPath))
+                        {
+                            throw new FileNotFoundException($"Model not found at: {modelPath}");
+                        }
+
+                        // Load Vocabulary
+                        LoadVocabulary();
+
+                        // Create session options with enhanced performance settings
+                        useGPU = rbGPU.Checked;
+                        SessionOptions options = new SessionOptions();
+
+                        // Set graph optimization level to maximum
+                        options.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;
+
+                        // Enable parallel execution
+                        options.EnableMemoryPattern = true;
+                        options.EnableCpuMemArena = true;
+
+                        // Set intra-op and inter-op thread count for CPU 
+                        int cpuThreads = Environment.ProcessorCount;
+                        options.IntraOpNumThreads = Math.Max(1, cpuThreads / 2);
+
+                        if (useGPU)
+                        {
+                            try
+                            {
+                                // ---------- CUDA first ------------------------------------------------
+                                options.AppendExecutionProvider_CUDA();   // deviceId = 0
+                                Logger.Log("[GroundingDINO] Using CUDA execution provider");
+                            }
+                            catch (Exception cudaEx)
+                            {
+                                Logger.Log($"[GroundingDINO] CUDA not available: {cudaEx.Message}");
+                                // ---------- fallback: leave the session on CPU ------------------------
+                                useGPU = false;
+                            }
+                        }
+
+                        // Create session with optimized settings
+                        session = new InferenceSession(modelPath, options);
+                        InspectModelIO();
+                        Logger.Log("[GroundingDINO] Model loaded successfully with optimized settings");
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[GroundingDINO] Error loading model: {ex.Message}");
+                        throw; // Re-throw to be caught by outer try-catch
+                    }
+                });
+
+                // UI updates back on UI thread
                 statusLabel.Text = "Model loaded successfully";
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error loading model: {ex.Message}");
-                statusLabel.Text = $"Error: {ex.Message}";
-                Logger.Log($"[GroundingDINO] Error loading model: {ex.Message}");
-                throw; // Re-throw to allow caller to handle
+                dinoForm.Invoke((MethodInvoker)delegate
+                {
+                    MessageBox.Show($"Error loading model: {ex.Message}");
+                    statusLabel.Text = $"Error: {ex.Message}";
+                });
+            }
+            finally
+            {
+                // Hide loading UI and re-enable button
+                loadingPanel.Visible = false;
+                btnLoadModel.Enabled = true;
+                isLoading = false;
             }
         }
         private static DenseTensor<int> ToInt32(DenseTensor<long> src)
-{
-    var dst = new DenseTensor<int>(src.Dimensions);
-    var s   = src.Buffer.Span;
-    var d   = dst.Buffer.Span;
-    for (int i = 0; i < s.Length; i++) d[i] = (int)s[i];
-    return dst;
-}
+        {
+            var dst = new DenseTensor<int>(src.Dimensions);
+            var s = src.Buffer.Span;
+            var d = dst.Buffer.Span;
+            for (int i = 0; i < s.Length; i++) d[i] = (int)s[i];
+            return dst;
+        }
         private async Task PerformDetection()
         {
             if (session == null)
@@ -961,60 +1345,51 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 return;
             }
 
-            // UI feedback
             statusLabel.Text = "Detecting...";
             btnDetect.Enabled = false;
 
             try
             {
-                Logger.Log($"[GroundingDINO] Running detection with prompt: {promptTextBox.Text}");
-
-                // Preprocess image
+                // 1) Preprocess image → DenseTensor<float>[1,3,800,800]
                 DenseTensor<float> pixelValues = await Task.Run(() => PreprocessImage());
 
-                // Create pixel mask (all ones for valid pixels)
-                DenseTensor<long> pixelMask = new DenseTensor<long>(new[] { 1, 800, 800 });
+                // 2) Build pixel mask → DenseTensor<long>[1,800,800]
+                var pixelMask = new DenseTensor<long>(new[] { 1, 800, 800 });
                 for (int y = 0; y < 800; y++)
                     for (int x = 0; x < 800; x++)
                         pixelMask[0, y, x] = 1;
 
-                // Preprocess text prompt
-                string prompt = promptTextBox.Text.Trim();
-                TokenizationResult tokenized = await Task.Run(() => TokenizeText(prompt));
+                // 3) Tokenize prompt → InputIds, TokenTypeIds, AttentionMask
+                TokenizationResult tokenized = await Task.Run(() => TokenizeText(promptTextBox.Text.Trim()));
 
-                // Debug output
-                Logger.Log($"[GroundingDINO] Input shape: pixel_values={string.Join(",", pixelValues.Dimensions.ToArray())}");
-                Logger.Log($"[GroundingDINO] Input shape: input_ids={string.Join(",", tokenized.InputIds.Dimensions.ToArray())}");
-                Logger.Log($"[GroundingDINO] Input shape: token_type_ids={string.Join(",", tokenized.TokenTypeIds.Dimensions.ToArray())}");
-                Logger.Log($"[GroundingDINO] Input shape: attention_mask={string.Join(",", tokenized.AttentionMask.Dimensions.ToArray())}");
-                Logger.Log($"[GroundingDINO] Input shape: pixel_mask={string.Join(",", pixelMask.Dimensions.ToArray())}");
-                LogTensor("input_ids", tokenized.InputIds, 40);
-                LogTensor("token_type_ids", tokenized.TokenTypeIds, 40);
-                LogTensor("attention_mask", tokenized.AttentionMask, 40);
-
-
-                // Create input and run model
-                var inputs = new List<NamedOnnxValue> {
-            NamedOnnxValue.CreateFromTensor("pixel_values", pixelValues),
-            NamedOnnxValue.CreateFromTensor("input_ids", tokenized.InputIds),
+                // 4) Prepare ONNX inputs
+                var inputs = new List<NamedOnnxValue>
+        {
+            NamedOnnxValue.CreateFromTensor("pixel_values",   pixelValues),
+            NamedOnnxValue.CreateFromTensor("input_ids",      tokenized.InputIds),
             NamedOnnxValue.CreateFromTensor("token_type_ids", tokenized.TokenTypeIds),
             NamedOnnxValue.CreateFromTensor("attention_mask", tokenized.AttentionMask),
-            NamedOnnxValue.CreateFromTensor("pixel_mask", pixelMask)
+            NamedOnnxValue.CreateFromTensor("pixel_mask",     pixelMask)
         };
 
-                using (var outputs = await Task.Run(() => session.Run(inputs)))
+                // 5) Specify only the real outputs
+                var outputNames = new List<string> { "logits", "pred_boxes" };
+
+                // 6) Run inference: inputs first, then outputNames
+                using (var results = session.Run(inputs, outputNames))
                 {
-                    // Process outputs
-                    var logits = outputs.First(x => x.Name == "logits").AsTensor<float>();
-                    var predBoxes = outputs.First(x => x.Name == "pred_boxes").AsTensor<float>();
+                    var logitsTensor = results.First(x => x.Name == "logits").AsTensor<float>();
+                    var predBoxesTensor = results.First(x => x.Name == "pred_boxes").AsTensor<float>();
 
-                    // Convert to detections
-                    detections = ProcessDetectionOutputs(logits, predBoxes);
-
-                    UpdateDetectionDisplay();
-                    statusLabel.Text = $"Found {detections.Count} detections";
-                    Logger.Log($"[GroundingDINO] Detection completed: {detections.Count} objects found");
+                    // 7) Convert to Detection list
+                    detections = ProcessDetectionOutputs(logitsTensor, predBoxesTensor);
                 }
+
+                UpdateDetectionDisplay();
+                int validDetections = detections.Count(d => d.Score >= confidenceThreshold);
+                statusLabel.Text = $"Found {validDetections} detections. Click on boxes to select them.";
+                
+                imageViewer.Invalidate();
             }
             catch (Exception ex)
             {
@@ -1027,6 +1402,38 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 btnDetect.Enabled = true;
             }
         }
+        private Detection DetectBorderOrLabelClick(Point imagePoint, List<Detection> detections)
+        {
+            const int borderThreshold = 3; // Pixels from border to consider a border click
+
+            foreach (var detection in detections.Where(d => d.Score >= confidenceThreshold))
+            {
+                // Check if clicking on label area (above the box)
+                Rectangle box = detection.Box;
+                Rectangle labelArea = new Rectangle(
+                    box.X, box.Y - 20, box.Width, 20);
+
+                if (labelArea.Contains(imagePoint))
+                {
+                    return detection;
+                }
+
+                // Check if clicking on border (not deep inside box)
+                bool isOnBorder = box.Contains(imagePoint) &&
+                    (imagePoint.X <= box.X + borderThreshold ||
+                     imagePoint.X >= box.X + box.Width - borderThreshold ||
+                     imagePoint.Y <= box.Y + borderThreshold ||
+                     imagePoint.Y >= box.Y + box.Height - borderThreshold);
+
+                if (isOnBorder)
+                {
+                    return detection;
+                }
+            }
+
+            return null;
+        }
+
         /// <summary>
         /// Dumps the first <paramref name="count"/> elements of a DenseTensor<long>
         /// and logs min / max / distinct values – handy for spotting stray indices.
@@ -1146,7 +1553,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 {
                     Box = box,
                     Score = maxProb,
-                    Label = label
+                    Label = label,
+                    Selected = false // Default to not selected
                 });
             }
 
@@ -1368,6 +1776,7 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 inputIds[0, position] = sepTokenId;
                 attentionMask[0, position] = 1;
                 tokensLogged.Add(sepToken);
+                position++;
             }
 
             Logger.Log("[GroundingDINO] Tokenized prompt to " +
@@ -1380,6 +1789,71 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 TokenTypeIds = tokenTypeIds,
                 AttentionMask = attentionMask
             };
+        }
+        // ─── Helpers - GroundingDINODetector ──────────────
+
+        private void LogIntTensorStats(string label, DenseTensor<long> tensor)
+        {
+            var span = tensor.Buffer.Span;
+            long min = long.MaxValue, max = long.MinValue;
+
+            // frequency count
+            Dictionary<long, int> freq = new Dictionary<long, int>();
+            for (int i = 0; i < span.Length; i++)
+            {
+                long v = span[i];
+                if (v < min) min = v;
+                if (v > max) max = v;
+                int c;
+                if (!freq.TryGetValue(v, out c)) c = 0;
+                freq[v] = c + 1;
+            }
+
+            // build "value:count" string
+            StringBuilder sb = new StringBuilder();
+            bool first = true;
+            foreach (var kv in freq.OrderBy(kv => kv.Key))
+            {
+                if (!first) sb.Append(", ");
+                sb.Append(kv.Key).Append(':').Append(kv.Value);
+                first = false;
+            }
+
+            Logger.Log("[" + label + "] len=" + span.Length +
+                       "  min=" + min + "  max=" + max +
+                       "  values=(" + sb.ToString() + ")");
+
+            if (label == "token_type_ids" && (min < 0 || max > 1))
+                Logger.Log("[GroundingDINO][WARN] token_type_ids contains out-of-range values!");
+        }
+
+        private void LogFloatTensorStats(string label, DenseTensor<float> tensor, int sample = 20)
+        {
+            var span = tensor.Buffer.Span;
+            float min = span[0], max = span[0], sum = 0f;
+            for (int i = 0; i < span.Length; i++)
+            {
+                float v = span[i];
+                if (v < min) min = v;
+                if (v > max) max = v;
+                sum += v;
+            }
+            float mean = sum / span.Length;
+
+            // first <sample> values
+            StringBuilder sb = new StringBuilder();
+            int shown = Math.Min(sample, span.Length);
+            for (int i = 0; i < shown; i++)
+            {
+                if (i > 0) sb.Append(", ");
+                sb.Append(span[i].ToString("F4"));
+            }
+
+            Logger.Log("[" + label + "] len=" + span.Length +
+                       "  min=" + min.ToString("F4") +
+                       "  max=" + max.ToString("F4") +
+                       "  mean=" + mean.ToString("F4") +
+                       "  sample=" + sb.ToString());
         }
 
 
@@ -1444,7 +1918,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 {
                     Box = box,
                     Score = score,
-                    Label = label
+                    Label = label,
+                    Selected = false // Default to not selected
                 });
             }
 
@@ -1466,10 +1941,19 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 return;
             }
 
+            // Check if any boxes are selected
+            int selectedCount = detections.Count(d => d.Score >= confidenceThreshold && d.Selected);
+            if (selectedCount == 0)
+            {
+                MessageBox.Show("Please select at least one detection box first.");
+                statusLabel.Text = "No boxes selected. Click on boxes to select them.";
+                return;
+            }
+
             try
             {
-                Logger.Log("[GroundingDINO] Applying detection results");
-                statusLabel.Text = "Applying detections...";
+                Logger.Log("[GroundingDINO] Applying selected detection results");
+                statusLabel.Text = "Applying selected detections...";
 
                 // Different handling based on view mode
                 switch (currentViewMode)
@@ -1489,8 +1973,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 mainForm.RenderViews();
                 mainForm.SaveLabelsChk();
 
-                statusLabel.Text = "Detection results applied successfully";
-                Logger.Log("[GroundingDINO] Detection results applied");
+                statusLabel.Text = $"Applied {selectedCount} selected detection results";
+                Logger.Log("[GroundingDINO] Selected detection results applied");
             }
             catch (Exception ex)
             {
@@ -1505,8 +1989,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             // Create a mask for the current slice
             byte[,] mask = new byte[mainForm.GetWidth(), mainForm.GetHeight()];
 
-            // Fill in the mask areas corresponding to detection boxes
-            foreach (var detection in detections.Where(d => d.Score >= confidenceThreshold))
+            // Fill in the mask areas corresponding to SELECTED detection boxes only
+            foreach (var detection in detections.Where(d => d.Score >= confidenceThreshold && d.Selected))
             {
                 Rectangle box = detection.Box;
 
@@ -1566,8 +2050,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             // Create a temporary mask for XZ plane
             byte[,] mask = new byte[width, depth];
 
-            // Fill in mask from detections
-            foreach (var detection in detections.Where(d => d.Score >= confidenceThreshold))
+            // Fill in mask from SELECTED detections only
+            foreach (var detection in detections.Where(d => d.Score >= confidenceThreshold && d.Selected))
             {
                 Rectangle box = detection.Box;
 
@@ -1630,8 +2114,8 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
             // Create a temporary mask for YZ plane
             byte[,] mask = new byte[depth, height];
 
-            // Fill in mask from detections
-            foreach (var detection in detections.Where(d => d.Score >= confidenceThreshold))
+            // Fill in mask from SELECTED detections only
+            foreach (var detection in detections.Where(d => d.Score >= confidenceThreshold && d.Selected))
             {
                 Rectangle box = detection.Box;
 
@@ -1829,8 +2313,231 @@ namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
                 Logger.Log($"[GroundingDINO] Error inspecting model: {ex.Message}");
             }
         }
+        private void SendSelectedBoxesToSAM()
+        {
+            if (detections == null || detections.Count == 0)
+            {
+                MessageBox.Show("No detections available. Please detect objects first.");
+                return;
+            }
+
+            var selectedDetections = detections.Where(d => d.Score >= confidenceThreshold && d.Selected).ToList();
+
+            if (selectedDetections.Count == 0)
+            {
+                MessageBox.Show("Please select at least one detection box first.");
+                return;
+            }
+
+            try
+            {
+                // Get selected boxes
+                Rectangle[] boxes = selectedDetections.Select(d => d.Box).ToArray();
+
+                // Get selected mask creation method
+                string method = cboMaskCreationMethod.SelectedItem.ToString();
+
+                // Use our helper class
+                SAMPointsHelper.SendBoxesToSAM(
+                    mainForm,
+                    selectedMaterial,
+                    annotationManager ?? new AnnotationManager(),
+                    boxes,
+                    currentSlice,
+                    method
+                );
+
+                Logger.Log("[GroundingDINO] Selected boxes sent to SAM with integrated helper");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error sending to SAM: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Logger.Log($"[GroundingDINO] Error sending to SAM: {ex.Message}");
+            }
+        }
+        // Helper method to clear existing annotation points
+        private void ClearAnnotationPoints()
+        {
+            if (annotationManager == null) return;
+
+            var allPoints = annotationManager.GetAllPoints();
+            foreach (var point in allPoints.ToList())
+            {
+                annotationManager.RemovePoint(point.ID);
+            }
+            Logger.Log("[GroundingDINO] Cleared existing annotation points");
+        }
+
+        // Helper method to add annotation points based on the selected creation method
+        private void AddAnnotationPointsFromBox(Rectangle box)
+        {
+            if (annotationManager == null) return;
+
+            // Make sure to create POSITIVE points, not negative ones
+            string pointLabel = "Positive_" + selectedMaterial.Name;
+
+            // Get the currently selected mask creation method
+            string method = cboMaskCreationMethod.SelectedItem.ToString();
+
+            switch (method)
+            {
+                case "Center Point":
+                    // Add a single point at the center of the box
+                    float centerX = box.X + box.Width / 2f;
+                    float centerY = box.Y + box.Height / 2f;
+                    var centerPoint = annotationManager.AddPoint(centerX, centerY, currentSlice, pointLabel);
+
+                    // Make sure the point is registered as positive in SAM
+                    if (mainForm != null && mainForm.AnnotationMgr != null)
+                    {
+                        // If we're using the main annotation manager, update it
+                        AddPointToMainAnnotationManager(centerX, centerY, currentSlice, true);
+                    }
+
+                    Logger.Log($"[GroundingDINO] Added positive center point at ({centerX}, {centerY}, {currentSlice})");
+                    break;
+
+                case "Corner Points":
+                    // Add points at each corner of the box
+                    var topLeft = annotationManager.AddPoint(box.X, box.Y, currentSlice, pointLabel);
+                    var topRight = annotationManager.AddPoint(box.X + box.Width, box.Y, currentSlice, pointLabel);
+                    var bottomLeft = annotationManager.AddPoint(box.X, box.Y + box.Height, currentSlice, pointLabel);
+                    var bottomRight = annotationManager.AddPoint(box.X + box.Width, box.Y + box.Height, currentSlice, pointLabel);
+
+                    // Make sure all points are positive
+                    if (mainForm != null && mainForm.AnnotationMgr != null)
+                    {
+                        AddPointToMainAnnotationManager(box.X, box.Y, currentSlice, true);
+                        AddPointToMainAnnotationManager(box.X + box.Width, box.Y, currentSlice, true);
+                        AddPointToMainAnnotationManager(box.X, box.Y + box.Height, currentSlice, true);
+                        AddPointToMainAnnotationManager(box.X + box.Width, box.Y + box.Height, currentSlice, true);
+                    }
+
+                    Logger.Log($"[GroundingDINO] Added 4 positive corner points for box at ({box.X}, {box.Y})");
+                    break;
+
+                case "Box Outline":
+                    // Add points along the perimeter of the box
+                    int outlineStep = Math.Max(5, Math.Min(box.Width, box.Height) / 8);
+
+                    // Top and bottom edges
+                    for (int x = box.X; x <= box.X + box.Width; x += outlineStep)
+                    {
+                        annotationManager.AddPoint(x, box.Y, currentSlice, pointLabel); // Top edge
+                        annotationManager.AddPoint(x, box.Y + box.Height, currentSlice, pointLabel); // Bottom edge
+
+                        if (mainForm != null && mainForm.AnnotationMgr != null)
+                        {
+                            AddPointToMainAnnotationManager(x, box.Y, currentSlice, true);
+                            AddPointToMainAnnotationManager(x, box.Y + box.Height, currentSlice, true);
+                        }
+                    }
+
+                    // Left and right edges
+                    for (int y = box.Y + outlineStep; y < box.Y + box.Height; y += outlineStep)
+                    {
+                        annotationManager.AddPoint(box.X, y, currentSlice, pointLabel); // Left edge
+                        annotationManager.AddPoint(box.X + box.Width, y, currentSlice, pointLabel); // Right edge
+
+                        if (mainForm != null && mainForm.AnnotationMgr != null)
+                        {
+                            AddPointToMainAnnotationManager(box.X, y, currentSlice, true);
+                            AddPointToMainAnnotationManager(box.X + box.Width, y, currentSlice, true);
+                        }
+                    }
+
+                    Logger.Log($"[GroundingDINO] Added outline points for box at ({box.X}, {box.Y})");
+                    break;
+
+                case "Weighted Grid":
+                    // Create a grid of points with more weight in the center
+                    int gridSize = 5; // 5x5 grid
+                    for (int i = 0; i < gridSize; i++)
+                    {
+                        for (int j = 0; j < gridSize; j++)
+                        {
+                            // Calculate position in the grid
+                            float x = box.X + (box.Width * i) / (float)(gridSize - 1);
+                            float y = box.Y + (box.Height * j) / (float)(gridSize - 1);
+
+                            // Determine weight: center has highest weight
+                            int centerDistance = Math.Max(
+                                Math.Abs(i - gridSize / 2),
+                                Math.Abs(j - gridSize / 2)
+                            );
+
+                            int pointWeight = gridSize - centerDistance;
+
+                            // Add the point multiple times based on weight
+                            for (int w = 0; w < pointWeight; w++)
+                            {
+                                annotationManager.AddPoint(x, y, currentSlice, pointLabel);
+                                if (mainForm != null && mainForm.AnnotationMgr != null)
+                                {
+                                    AddPointToMainAnnotationManager(x, y, currentSlice, true);
+                                }
+                            }
+                        }
+                    }
+
+                    Logger.Log($"[GroundingDINO] Added weighted grid points for box at ({box.X}, {box.Y})");
+                    break;
+
+                case "Box Fill":
+                    // Fill the entire box with points
+                    int fillStep = Math.Max(4, Math.Min(box.Width, box.Height) / 10);
+
+                    for (int x = box.X; x <= box.X + box.Width; x += fillStep)
+                    {
+                        for (int y = box.Y; y <= box.Y + box.Height; y += fillStep)
+                        {
+                            annotationManager.AddPoint(x, y, currentSlice, pointLabel);
+                            if (mainForm != null && mainForm.AnnotationMgr != null)
+                            {
+                                AddPointToMainAnnotationManager(x, y, currentSlice, true);
+                            }
+                        }
+                    }
+
+                    Logger.Log($"[GroundingDINO] Added fill points for box at ({box.X}, {box.Y})");
+                    break;
+            }
+        }
+
+        // Helper method to ensure points are added to the main AnnotationManager and marked as positive
+        private void AddPointToMainAnnotationManager(float x, float y, int z, bool isPositive)
+        {
+            try
+            {
+                if (mainForm != null && mainForm.AnnotationMgr != null)
+                {
+                    string labelType = isPositive ? "Positive" : "Negative";
+                    string pointLabel = $"{labelType}_{selectedMaterial.Name}";
+
+                    AnnotationPoint point = mainForm.AnnotationMgr.AddPoint(x, y, z, pointLabel);
+
+                    // Set the point type in SAM's internal tracking
+                    // This is a bit of a hack but necessary to ensure points are properly recognized as positive
+                    var samClass = typeof(SegmentAnythingCT);
+                    var pointTypesField = samClass.GetField("pointTypes",
+                        System.Reflection.BindingFlags.NonPublic |
+                        System.Reflection.BindingFlags.Instance);
+
+                    if (pointTypesField != null)
+                    {
+                        // Try to set the point type directly in the SAM instance
+                        // This won't work until SAM is instantiated, but we'll handle that later
+                        Logger.Log($"[GroundingDINO] Added point to main annotation manager: {point.ID} (Positive: {isPositive})");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[GroundingDINO] Error adding point to main annotation manager: {ex.Message}");
+            }
+        }
     }
-    
+
     class TokenizationResult
     {
         public DenseTensor<long> InputIds { get; set; }

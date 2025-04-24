@@ -3479,151 +3479,120 @@ namespace CTSegmenter
         }
         private async void RunTriaxialButton_Click(object sender, EventArgs e)
         {
+            //--- guards -------------------------------------------------------------
             if (!meshGenerated || meshTriangles.Count == 0)
             {
                 MessageBox.Show("No mesh available for simulation. Please generate or import a mesh first.",
-                    "No Mesh", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                                "No Mesh", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-
             if (selectedMaterial == null || selectedMaterial.Density <= 0)
             {
                 MessageBox.Show("Please set material density before running simulation.",
-                    "Material Properties", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                                "Material Properties", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
             try
             {
-                // Get simulation parameters
+                //--- read UI --------------------------------------------------------
                 float confiningPressure = (float)confiningPressureNumeric.Value;
                 float minPressure = (float)pressureMinNumeric.Value;
                 float maxPressure = (float)pressureMaxNumeric.Value;
                 int steps = (int)pressureStepsNumeric.Value;
-                string direction = testDirectionCombo.SelectedItem.ToString();
 
-                statusHeader.Text = $"Running triaxial simulation ({direction}, {confiningPressure} MPa)...";
-                this.Cursor = Cursors.WaitCursor;
+                /*  FIX: map “X-Axis”/“Y-Axis”/“Z-Axis” → “X”/“Y”/“Z”  */
+                string directionFull = testDirectionCombo.SelectedItem?.ToString() ?? "Z-Axis";
+                string direction = directionFull.Substring(0, 1).ToUpper();   // token for the engine
 
-                // Create converter for mesh triangles
-                List<CTSegmenter.Triangle> simulationTriangles = new List<CTSegmenter.Triangle>();
-                foreach (var meshTri in meshTriangles)
-                {
-                    simulationTriangles.Add(new CTSegmenter.Triangle(
-                        new System.Numerics.Vector3(meshTri.V1.X, meshTri.V1.Y, meshTri.V1.Z),
-                        new System.Numerics.Vector3(meshTri.V2.X, meshTri.V2.Y, meshTri.V2.Z),
-                        new System.Numerics.Vector3(meshTri.V3.X, meshTri.V3.Y, meshTri.V3.Z)
-                    ));
-                }
+                statusHeader.Text = $"Running triaxial simulation ({directionFull}, {confiningPressure} MPa)…";
+                Cursor = Cursors.WaitCursor;
 
-                // Prepare density map if inhomogeneous density is enabled
+                //--- convert mesh ---------------------------------------------------
+                List<CTSegmenter.Triangle> simulationTriangles = meshTriangles
+                    .Select(t => new CTSegmenter.Triangle(
+                                new System.Numerics.Vector3(t.V1.X, t.V1.Y, t.V1.Z),
+                                new System.Numerics.Vector3(t.V2.X, t.V2.Y, t.V2.Z),
+                                new System.Numerics.Vector3(t.V3.X, t.V3.Y, t.V3.Z)))
+                    .ToList();
+
+                //--- optional density map ------------------------------------------
                 ConcurrentDictionary<System.Numerics.Vector3, float> densityMap = null;
                 if (inhomogeneousDensityEnabled && voxelDensities != null && voxelDensities.Count > 0)
                 {
-                    densityMap = new ConcurrentDictionary<System.Numerics.Vector3, float>();
-                    foreach (var kvp in voxelDensities)
-                    {
-                        densityMap[new System.Numerics.Vector3(kvp.Key.X, kvp.Key.Y, kvp.Key.Z)] = kvp.Value;
-                    }
-                    Logger.Log($"[StressAnalysisForm] Using inhomogeneous density with {densityMap.Count} density points");
+                    densityMap = new ConcurrentDictionary<System.Numerics.Vector3, float>(
+                        voxelDensities.ToDictionary(kvp =>
+                                 new System.Numerics.Vector3(kvp.Key.X, kvp.Key.Y, kvp.Key.Z),
+                                 kvp => kvp.Value));
+                    Logger.Log($"[StressAnalysisForm] Using inhomogeneous density with {densityMap.Count} points");
                 }
 
-                // Create simulation with appropriate constructor based on density mode
-                TriaxialSimulation simulation;
-                if (inhomogeneousDensityEnabled && densityMap != null)
-                {
-                    // Use the inhomogeneous simulation
-                    simulation = new InhomogeneousTriaxialSimulation(
-                        selectedMaterial,
-                        simulationTriangles,
-                        confiningPressure,
-                        minPressure,
-                        maxPressure,
-                        steps,
-                        direction,
-                        true,  // inhomogeneousDensityEnabled
-                        densityMap);
+                //--- choose simulation class ---------------------------------------
+                TriaxialSimulation simulation =
+                    (inhomogeneousDensityEnabled && densityMap != null)
+                    ? new InhomogeneousTriaxialSimulation(
+                            selectedMaterial,
+                            simulationTriangles,
+                            confiningPressure,
+                            minPressure,
+                            maxPressure,
+                            steps,
+                            direction,
+                            true,
+                            densityMap)
+                    : new TriaxialSimulation(
+                            selectedMaterial,
+                            simulationTriangles,
+                            confiningPressure,
+                            minPressure,
+                            maxPressure,
+                            steps,
+                            direction);
 
-                    Logger.Log("[StressAnalysisForm] Created inhomogeneous triaxial simulation");
-                }
-                else
-                {
-                    // Use the standard simulation
-                    simulation = new TriaxialSimulation(
-                        selectedMaterial,
-                        simulationTriangles,
-                        confiningPressure,
-                        minPressure,
-                        maxPressure,
-                        steps,
-                        direction);
+                //--- rock-strength overrides ---------------------------------------
+                if (cohesionNumeric != null) simulation.CohesionStrength = (float)cohesionNumeric.Value;
+                if (frictionAngleNumeric != null) simulation.FrictionAngle = (float)frictionAngleNumeric.Value;
+                if (tensileStrengthNumeric != null) simulation.TensileStrength = (float)tensileStrengthNumeric.Value;
 
-                    Logger.Log("[StressAnalysisForm] Created standard triaxial simulation");
-                }
+                Logger.Log($"[StressAnalysisForm] Strength: C={simulation.CohesionStrength} MPa, ϕ={simulation.FrictionAngle}°, T={simulation.TensileStrength} MPa");
 
-                // IMPORTANT: Set custom rock strength parameters from UI
-                // Check if rock strength UI controls exist and use their values
-                if (cohesionNumeric != null)
-                    simulation.CohesionStrength = (float)cohesionNumeric.Value;
-
-                if (frictionAngleNumeric != null)
-                    simulation.FrictionAngle = (float)frictionAngleNumeric.Value;
-
-                if (tensileStrengthNumeric != null)
-                    simulation.TensileStrength = (float)tensileStrengthNumeric.Value;
-
-                // Log the values for debugging
-                Logger.Log($"[StressAnalysisForm] Simulation rock strength parameters: Cohesion={simulation.CohesionStrength}MPa, " +
-                          $"Friction Angle={simulation.FrictionAngle}°, Tensile Strength={simulation.TensileStrength}MPa");
-
-                // Show progress in status bar
+                //--- progress callback ---------------------------------------------
                 simulation.ProgressChanged += (s, args) =>
-                {
-                    this.BeginInvoke(new Action(() =>
-                    {
-                        statusHeader.Text = args.StatusMessage;
-                    }));
-                };
+                    BeginInvoke(new Action(() => statusHeader.Text = args.StatusMessage));
 
-                // Initialize
+                //--- run ------------------------------------------------------------
                 if (!simulation.Initialize())
-                {
-                    throw new InvalidOperationException("Failed to initialize simulation");
-                }
+                    throw new InvalidOperationException("Failed to initialise simulation");
 
-                // Run the simulation
                 var result = await simulation.RunAsync();
-
                 currentTriaxial = simulation;
 
+                //--- results --------------------------------------------------------
                 if (result.IsSuccessful)
                 {
                     statusHeader.Text = "Triaxial simulation completed.";
-
-                    // Create results display on the results page
                     CreateTriaxialResultsDisplay(simulation, result);
-
-                    // Switch to results tab
                     mainTabControl.SelectedPage = resultsPage;
                 }
                 else
                 {
                     statusHeader.Text = "Simulation failed.";
                     MessageBox.Show($"Triaxial simulation failed: {result.ErrorMessage}",
-                        "Simulation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                                    "Simulation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
             catch (Exception ex)
             {
                 MessageBox.Show($"Error running triaxial simulation: {ex.Message}",
-                    "Simulation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                                "Simulation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 Logger.Log($"[StressAnalysisForm] Triaxial simulation error: {ex.Message}");
             }
             finally
             {
-                this.Cursor = Cursors.Default;
+                Cursor = Cursors.Default;
             }
         }
+
         private void ExportFullCompositeWithDensity(TriaxialSimulation simulation)
         {
             try
@@ -3871,6 +3840,13 @@ namespace CTSegmenter
             // Set default selected page
             resultsTabs.SelectedPage = stressPage;
         }
+
+        private static string GetAxisToken(ComboBox cb)
+        {
+            if (cb?.SelectedItem is string s && s.Length > 0)
+                return s[0].ToString().ToUpper();   // "X-Axis" → "X"
+            return "Z";                              // safe fallback
+        }
         /// <summary>
         /// Render only the fractured facets in red for clear visualization.
         /// </summary>
@@ -4058,151 +4034,88 @@ namespace CTSegmenter
 
         private async void RunAcousticButton_Click(object sender, EventArgs e)
         {
-            // 1) Sanity-check our UI controls before we even try to read them:
-            if (acousticConfiningNumeric == null)
+            //--- sanity checks on controls ----------------------------------------
+            if (acousticConfiningNumeric == null || waveTypeCombo == null ||
+                timeStepsNumeric == null || frequencyNumeric == null ||
+                amplitudeNumeric == null || energyNumeric == null ||
+                acousticDirectionCombo == null || dtFactorNumeric == null)
             {
-                Logger.Log("[StressAnalysisForm] acousticConfiningNumeric is null");
-                MessageBox.Show("Internal error: missing confining-pressure control.");
-                return;
-            }
-            if (waveTypeCombo == null)
-            {
-                Logger.Log("[StressAnalysisForm] waveTypeCombo is null");
-                MessageBox.Show("Internal error: missing wave-type selector.");
-                return;
-            }
-            if (timeStepsNumeric == null)
-            {
-                Logger.Log("[StressAnalysisForm] timeStepsNumeric is null");
-                MessageBox.Show("Internal error: missing time-steps control.");
-                return;
-            }
-            if (frequencyNumeric == null)
-            {
-                Logger.Log("[StressAnalysisForm] frequencyNumeric is null");
-                MessageBox.Show("Internal error: missing frequency control.");
-                return;
-            }
-            if (amplitudeNumeric == null)
-            {
-                Logger.Log("[StressAnalysisForm] amplitudeNumeric is null");
-                MessageBox.Show("Internal error: missing amplitude control.");
-                return;
-            }
-            if (energyNumeric == null)
-            {
-                Logger.Log("[StressAnalysisForm] energyNumeric is null");
-                MessageBox.Show("Internal error: missing energy control.");
-                return;
-            }
-            if (acousticDirectionCombo == null)
-            {
-                Logger.Log("[StressAnalysisForm] acousticDirectionCombo is null");
-                MessageBox.Show("Internal error: missing direction selector.");
-                return;
-            }
-            if (dtFactorNumeric == null)
-            {
-                Logger.Log("[StressAnalysisForm] dtFactorNumeric is null");
-                MessageBox.Show("Internal error: missing time-step factor control.");
+                MessageBox.Show("Internal error: one or more acoustic-simulation controls are missing.",
+                                "Internal Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
 
-            // 2) Check mesh/material as before:
+            //--- guards ------------------------------------------------------------
             if (!meshGenerated || meshTriangles.Count == 0)
             {
-                MessageBox.Show(
-                    "No mesh to analyze. Please generate or import a mesh first.",
-                    "No Mesh",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning
-                );
+                MessageBox.Show("No mesh to analyse. Please generate or import a mesh first.",
+                                "No Mesh", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-
             if (selectedMaterial == null || selectedMaterial.Density <= 0)
             {
-                MessageBox.Show(
-                    "Please set material density before running simulation.",
-                    "Material Properties",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning
-                );
+                MessageBox.Show("Please set material density before running simulation.",
+                                "Material Properties", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
             try
             {
-                // 3) Safely read each value, providing a fallback if SelectedItem is null:
+                //--- read UI --------------------------------------------------------
                 float confiningPressure = (float)acousticConfiningNumeric.Value;
-
-                string waveType;
-                if (waveTypeCombo.SelectedItem != null)
-                    waveType = waveTypeCombo.SelectedItem.ToString();
-                else
-                {
-                    waveType = "P-Wave";
-                    Logger.Log("[StressAnalysisForm] waveTypeCombo had no selection; defaulting to P-Wave");
-                }
-
+                string waveType = waveTypeCombo.SelectedItem as string ?? "P-Wave";
                 int timeSteps = (int)timeStepsNumeric.Value;
                 float frequency = (float)frequencyNumeric.Value;
                 float amplitude = (float)amplitudeNumeric.Value;
                 float energy = (float)energyNumeric.Value;
 
-                string direction;
-                if (acousticDirectionCombo.SelectedItem != null)
-                    direction = acousticDirectionCombo.SelectedItem.ToString();
-                else
-                {
-                    direction = "X-Axis";
-                    Logger.Log("[StressAnalysisForm] acousticDirectionCombo had no selection; defaulting to X-Axis");
-                }
+                /*  FIX: caption → token  */
+                string directionFull = acousticDirectionCombo.SelectedItem?.ToString() ?? "Z-Axis";
+                string direction = directionFull.Substring(0, 1).ToUpper();   // "X"/"Y"/"Z"
 
                 float dtFactor = (float)dtFactorNumeric.Value;
 
-                statusHeader.Text = $"Running acoustic velocity simulation ({waveType}, {direction})...";
+                statusHeader.Text = $"Running acoustic velocity simulation ({waveType}, {directionFull})…";
                 Cursor = Cursors.WaitCursor;
 
-                // 4) Convert the mesh for the sim
-                var simulationTriangles = meshTriangles
-                    .Select(tri => new CTSegmenter.Triangle(
-                        new System.Numerics.Vector3(tri.V1.X, tri.V1.Y, tri.V1.Z),
-                        new System.Numerics.Vector3(tri.V2.X, tri.V2.Y, tri.V2.Z),
-                        new System.Numerics.Vector3(tri.V3.X, tri.V3.Y, tri.V3.Z)
-                    ))
+                //--- convert mesh ---------------------------------------------------
+                List<CTSegmenter.Triangle> simulationTriangles = meshTriangles
+                    .Select(t => new CTSegmenter.Triangle(
+                                new System.Numerics.Vector3(t.V1.X, t.V1.Y, t.V1.Z),
+                                new System.Numerics.Vector3(t.V2.X, t.V2.Y, t.V2.Z),
+                                new System.Numerics.Vector3(t.V3.X, t.V3.Y, t.V3.Z)))
                     .ToList();
 
-                SimulationResult triaxialResult = null;
-
-                // 5) Prepare density map if inhomogeneous density is enabled
+                //--- optional density map ------------------------------------------
                 ConcurrentDictionary<System.Numerics.Vector3, float> densityMap = null;
                 if (inhomogeneousDensityEnabled && voxelDensities != null && voxelDensities.Count > 0)
                 {
-                    densityMap = new ConcurrentDictionary<System.Numerics.Vector3, float>();
-                    foreach (var kvp in voxelDensities)
-                    {
-                        densityMap[new System.Numerics.Vector3(kvp.Key.X, kvp.Key.Y, kvp.Key.Z)] = kvp.Value;
-                    }
-                    Logger.Log($"[StressAnalysisForm] Using inhomogeneous density with {densityMap.Count} density points for acoustic simulation");
+                    densityMap = new ConcurrentDictionary<System.Numerics.Vector3, float>(
+                        voxelDensities.ToDictionary(kvp =>
+                                 new System.Numerics.Vector3(kvp.Key.X, kvp.Key.Y, kvp.Key.Z),
+                                 kvp => kvp.Value));
+                    Logger.Log($"[StressAnalysisForm] Using inhomogeneous density with {densityMap.Count} points for acoustic sim");
                 }
 
-                // 6) Use the factory to create the appropriate simulation type
-                AcousticVelocitySimulation simulation = SimulationFactory.CreateAcousticSimulation(
-                    selectedMaterial,
-                    simulationTriangles,
-                    confiningPressure,
-                    waveType,
-                    timeSteps,
-                    frequency,
-                    amplitude,
-                    energy,
-                    direction,
-                    UseExtendedSimulationTime,
-                    inhomogeneousDensityEnabled,
-                    densityMap,
-                    triaxialResult,
-                    mainForm);
+                SimulationResult triaxialResult = null;   // remains null unless you set it elsewhere
+
+                //--- create sim via factory ----------------------------------------
+                AcousticVelocitySimulation simulation =
+                    SimulationFactory.CreateAcousticSimulation(
+                        selectedMaterial,
+                        simulationTriangles,
+                        confiningPressure,
+                        waveType,
+                        timeSteps,
+                        frequency,
+                        amplitude,
+                        energy,
+                        direction,                       // the correct token
+                        UseExtendedSimulationTime,
+                        inhomogeneousDensityEnabled,
+                        densityMap,
+                        triaxialResult,
+                        mainForm);
 
                 simulation.TimeStepFactor = dtFactor;
                 currentAcousticSim = simulation;
@@ -4211,14 +4124,13 @@ namespace CTSegmenter
                 simulation.ProgressChanged += (s, args) =>
                     BeginInvoke(new Action(() => statusHeader.Text = args.StatusMessage));
 
-                // 7) Initialize
+                //--- run ------------------------------------------------------------
                 if (!simulation.Initialize())
-                    throw new InvalidOperationException("Failed to initialize simulation");
+                    throw new InvalidOperationException("Failed to initialise simulation");
 
-                // 8) Run
                 var result = await simulation.RunAsync();
 
-                // 9) Handle results
+                //--- results --------------------------------------------------------
                 if (result.IsSuccessful)
                 {
                     statusHeader.Text = "Acoustic velocity simulation completed.";
@@ -4226,32 +4138,20 @@ namespace CTSegmenter
                     UpdateWaveVisualization(simulation);
                     mainTabControl.SelectedPage = resultsPage;
 
-                    // If we're using inhomogeneous density, add a button to visualize it
-                    if (inhomogeneousDensityEnabled && simulation is InhomogeneousAcousticSimulation inhomogeneousSim)
-                    {
-                        // Add a button to results page to visualize the density distribution
-                        AddDensityVisualizationButton(inhomogeneousSim);
-                    }
+                    if (inhomogeneousDensityEnabled && simulation is InhomogeneousAcousticSimulation inhSim)
+                        AddDensityVisualizationButton(inhSim);
                 }
                 else
                 {
                     statusHeader.Text = "Simulation failed.";
-                    MessageBox.Show(
-                        $"Acoustic velocity simulation failed: {result.ErrorMessage}",
-                        "Simulation Error",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Error
-                    );
+                    MessageBox.Show($"Acoustic velocity simulation failed: {result.ErrorMessage}",
+                                    "Simulation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
             catch (Exception ex)
             {
-                MessageBox.Show(
-                    $"Error running acoustic velocity simulation: {ex.Message}",
-                    "Simulation Error",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error
-                );
+                MessageBox.Show($"Error running acoustic velocity simulation: {ex.Message}",
+                                "Simulation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 Logger.Log($"[StressAnalysisForm] Acoustic simulation error: {ex.Message}");
             }
             finally
@@ -4259,6 +4159,7 @@ namespace CTSegmenter
                 Cursor = Cursors.Default;
             }
         }
+
         private void AddDensityVisualizationButton(InhomogeneousAcousticSimulation simulation)
         {
             try

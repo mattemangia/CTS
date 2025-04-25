@@ -3527,7 +3527,7 @@ namespace CTSegmenter
                 Minimum = 0,
                 Maximum = 200,
                 Value = 10,
-                DecimalPlaces = 1,
+                DecimalPlaces = 3,
                 Increment = 1,
                 Dock = DockStyle.Fill
             };
@@ -3540,7 +3540,7 @@ namespace CTSegmenter
                 Minimum = 0,
                 Maximum = 500,
                 Value = 0,
-                DecimalPlaces = 1,
+                DecimalPlaces = 3,
                 Increment = 5,
                 Dock = DockStyle.Fill
             };
@@ -3553,7 +3553,7 @@ namespace CTSegmenter
                 Minimum = 1,
                 Maximum = 500,
                 Value = 100,
-                DecimalPlaces = 1,
+                DecimalPlaces = 3,
                 Increment = 5,
                 Dock = DockStyle.Fill
             };
@@ -3622,7 +3622,7 @@ namespace CTSegmenter
                 Minimum = 0,
                 Maximum = 200,
                 Value = 10,
-                DecimalPlaces = 1,
+                DecimalPlaces = 3,
                 Increment = 1,
                 Dock = DockStyle.Fill
             };
@@ -3990,11 +3990,18 @@ namespace CTSegmenter
                 TextTitle = "Von Mises Stress Visualization"
             };
 
-            // Strain-stress curve page
-            KryptonPage strainStressPage = new KryptonPage
+            // Strain distribution page (new separate tab)
+            KryptonPage strainDistributionPage = new KryptonPage
+            {
+                Text = "Strain Distribution",
+                TextTitle = "Strain Distribution Visualization"
+            };
+
+            // Stress-strain curve page (modified to show actual curve)
+            KryptonPage stressStrainCurvePage = new KryptonPage
             {
                 Text = "Stress-Strain Curve",
-                TextTitle = "Stress vs. Strain"
+                TextTitle = "Stress vs. Strain Plot"
             };
 
             // Fracture probability page
@@ -4024,7 +4031,7 @@ namespace CTSegmenter
                 TextTitle = "Deformed Mesh"
             };
 
-            // Mohr-Coulomb page - NEW
+            // Mohr-Coulomb page
             mohrCoulombPage = new KryptonPage
             {
                 Text = "Mohr-Coulomb",
@@ -4044,25 +4051,28 @@ namespace CTSegmenter
             // Add all pages to the tab control
             resultsTabs.Pages.AddRange(new[]
             {
-                stressPage,
-                strainStressPage,
-                fractureProbabilityPage,
-                fracturePage,
-                meshViewPage,
-                mohrCoulombPage,
-                summaryPage
-            });
+        stressPage,
+        strainDistributionPage,
+        stressStrainCurvePage,
+        fractureProbabilityPage,
+        fracturePage,
+        meshViewPage,
+        mohrCoulombPage,
+        summaryPage
+    });
 
             // Create panels for each page
             Panel stressPanel = new Panel { Dock = DockStyle.Fill };
-            Panel strainStressPanel = new Panel { Dock = DockStyle.Fill };
+            Panel strainDistributionPanel = new Panel { Dock = DockStyle.Fill };
+            Panel stressStrainCurvePanel = new Panel { Dock = DockStyle.Fill };
             Panel fractureProbabilityPanel = new Panel { Dock = DockStyle.Fill };
             Panel meshViewPanel = new Panel { Dock = DockStyle.Fill };
             Panel summaryPanel = new Panel { Dock = DockStyle.Fill };
 
             // Add panels to pages
             stressPage.Controls.Add(stressPanel);
-            strainStressPage.Controls.Add(strainStressPanel);
+            strainDistributionPage.Controls.Add(strainDistributionPanel);
+            stressStrainCurvePage.Controls.Add(stressStrainCurvePanel);
             fractureProbabilityPage.Controls.Add(fractureProbabilityPanel);
             meshViewPage.Controls.Add(meshViewPanel);
             summaryPage.Controls.Add(summaryPanel);
@@ -4085,8 +4095,37 @@ namespace CTSegmenter
                     simulation.RenderResults(e.Graphics, stressPanel.Width, stressPanel.Height, RenderMode.Stress);
             };
 
-            strainStressPanel.Paint += (sender, e) =>
-                simulation.RenderResults(e.Graphics, strainStressPanel.Width, strainStressPanel.Height, RenderMode.Strain);
+            // Strain Distribution Panel - use RenderMode.Strain
+            strainDistributionPanel.Paint += (sender, e) =>
+            {
+                if (_enableSlicing)
+                {
+                    UpdateSliceParameters(RenderMode.Strain);
+                    simulation.RenderResults(e.Graphics, strainDistributionPanel.Width, strainDistributionPanel.Height,
+                        RenderMode.Strain, true);
+                }
+                else
+                    simulation.RenderResults(e.Graphics, strainDistributionPanel.Width, strainDistributionPanel.Height,
+                        RenderMode.Strain);
+            };
+
+            // Stress-Strain Curve Panel - draw the actual curve
+            stressStrainCurvePanel.Paint += (sender, e) =>
+            {
+                // Clear background
+                e.Graphics.Clear(Color.Black);
+                e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+
+                // Call the DrawStressStrainCurve method to render the actual curve
+                DrawStressStrainCurve(e.Graphics, simulation, stressStrainCurvePanel.Width, stressStrainCurvePanel.Height);
+
+                // Add title
+                using (Font titleFont = new Font("Arial", 14, FontStyle.Bold))
+                using (SolidBrush textBrush = new SolidBrush(Color.White))
+                {
+                    e.Graphics.DrawString("Stress-Strain Curve", titleFont, textBrush, 20, 20);
+                }
+            };
 
             fractureProbabilityPanel.Paint += (sender, e) =>
             {
@@ -4151,8 +4190,10 @@ namespace CTSegmenter
 
             summaryPanel.Controls.Add(summaryLayout);
             InitializeSlicingControls(stressPanel);
+            InitializeSlicingControls(strainDistributionPanel);
             InitializeSlicingControls(fractureProbabilityPanel);
             InitializeSlicingControls(meshViewPanel);
+
             // Add export buttons panel at the bottom
             Panel exportPanel = new Panel
             {
@@ -4200,7 +4241,6 @@ namespace CTSegmenter
             // Set default selected page
             resultsTabs.SelectedPage = stressPage;
         }
-
         private static string GetAxisToken(ComboBox cb)
         {
             if (cb?.SelectedItem is string s && s.Length > 0)

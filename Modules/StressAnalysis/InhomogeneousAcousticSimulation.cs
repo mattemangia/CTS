@@ -307,8 +307,10 @@ namespace CTSegmenter
             float baseSWaveVelocity = SWaveVelocity;
             float baseDensity = (float)Material.Density;
 
-            // Update velocities based on local density using the relationship:
-            // v ~ 1/√ρ for a given modulus
+            // Get direction components for directional scaling
+            Vector3 dir = Vector3.Normalize(TestDirection);
+
+            // Update velocities based on local density and direction
             Parallel.For(0, _gridSizeX, x =>
             {
                 for (int y = 0; y < _gridSizeY; y++)
@@ -318,19 +320,51 @@ namespace CTSegmenter
                         float density = _densityModel[x, y, z];
                         if (density > 0)
                         {
+                            // Physical relationship for velocity based on density: v ~ 1/√ρ
+                            // For elastic waves in solids, higher density generally means lower velocity
                             float densityRatio = (float)Math.Sqrt(baseDensity / density);
 
-                            // Adjust the scaling factor to get a reasonable variation
-                            densityRatio = 1.0f + (densityRatio - 1.0f) * 0.5f;
+                            // Apply directional scaling - more pronounced effect along test direction
+                            float dirX = Math.Abs(dir.X);
+                            float dirY = Math.Abs(dir.Y);
+                            float dirZ = Math.Abs(dir.Z);
 
-                            // Scale velocity by density ratio
+                            // Calculate position-dependent influence based on coordinates and test direction
+                            float positionFactor = 1.0f;
+
+                            // Create directional density influence
+                            if (dirX > 0.8f) // X is dominant direction
+                            {
+                                positionFactor = 1.0f + 0.2f * (float)Math.Sin(x * 0.2f);
+                            }
+                            else if (dirY > 0.8f) // Y is dominant direction
+                            {
+                                positionFactor = 1.0f + 0.2f * (float)Math.Sin(y * 0.2f);
+                            }
+                            else if (dirZ > 0.8f) // Z is dominant direction
+                            {
+                                positionFactor = 1.0f + 0.2f * (float)Math.Sin(z * 0.2f);
+                            }
+                            else // Mixed direction
+                            {
+                                positionFactor = 1.0f + 0.1f * (
+                                    dirX * (float)Math.Sin(x * 0.2f) +
+                                    dirY * (float)Math.Sin(y * 0.2f) +
+                                    dirZ * (float)Math.Sin(z * 0.2f)
+                                );
+                            }
+
+                            // Apply final scaling with enhanced physical effect
+                            float finalRatio = densityRatio * positionFactor;
+
+                            // Scale velocity by appropriate ratio for P or S waves
                             if (_isPWave)
                             {
-                                _velocityModel[x, y, z] = basePWaveVelocity * densityRatio;
+                                _velocityModel[x, y, z] = basePWaveVelocity * finalRatio;
                             }
                             else
                             {
-                                _velocityModel[x, y, z] = baseSWaveVelocity * densityRatio;
+                                _velocityModel[x, y, z] = baseSWaveVelocity * finalRatio;
                             }
                         }
                     }
@@ -355,8 +389,79 @@ namespace CTSegmenter
             }
 
             Logger.Log($"[InhomogeneousAcousticSimulation] Updated velocity range: {minVel:F1} to {maxVel:F1} m/s");
+
+            // Ensure source-receiver path reflects density variations appropriately
+            EnhanceSourceReceiverPath();
         }
 
+        /// <summary>
+        /// Ensures that the source-receiver path and source plane properly reflect density variations
+        /// </summary>
+        private void EnhanceSourceReceiverPath()
+        {
+            // Ensure the source and receiver have appropriate velocity values
+            _velocityModel[_sourceX, _sourceY, _sourceZ] = (_isPWave ? PWaveVelocity : SWaveVelocity) * 1.2f;
+            _velocityModel[_receiverX, _receiverY, _receiverZ] = (_isPWave ? PWaveVelocity : SWaveVelocity) * 1.2f;
+
+            // Create source plane transducers with density-appropriate velocities
+            List<int[]> sourcePlane = GenerateSourcePlane(TestDirection, _gridSizeX, _gridSizeY, _gridSizeZ);
+
+            // Base velocity
+            float baseVelocity = _isPWave ? PWaveVelocity : SWaveVelocity;
+
+            // Ensure each source point has appropriate velocity
+            foreach (var point in sourcePlane)
+            {
+                int x = point[0];
+                int y = point[1];
+                int z = point[2];
+
+                if (x >= 0 && x < _gridSizeX && y >= 0 && y < _gridSizeY && z >= 0 && z < _gridSizeZ)
+                {
+                    // Get density at this point
+                    float density = _densityModel[x, y, z];
+
+                    // Calculate velocity with density consideration
+                    float densityFactor = density > 0 ?
+                        (float)Math.Sqrt((float)Material.Density / density) : 1.0f;
+
+                    // Apply to source point with boost for better propagation
+                    _velocityModel[x, y, z] = baseVelocity * densityFactor * 1.1f;
+                }
+            }
+
+            // Enhanced path between source and receiver
+            int pathSteps = (int)Math.Ceiling(Math.Sqrt(
+                Math.Pow(_receiverX - _sourceX, 2) +
+                Math.Pow(_receiverY - _sourceY, 2) +
+                Math.Pow(_receiverZ - _sourceZ, 2)));
+
+            Logger.Log($"[InhomogeneousAcousticSimulation] Enhancing path between source and receiver with {pathSteps} steps");
+
+            for (int i = 0; i <= pathSteps; i++)
+            {
+                float t = i / (float)pathSteps;
+                int x = (int)Math.Round(_sourceX + (_receiverX - _sourceX) * t);
+                int y = (int)Math.Round(_sourceY + (_receiverY - _sourceY) * t);
+                int z = (int)Math.Round(_sourceZ + (_receiverZ - _sourceZ) * t);
+
+                if (x >= 0 && x < _gridSizeX && y >= 0 && y < _gridSizeY && z >= 0 && z < _gridSizeZ)
+                {
+                    // Get density at this point
+                    float density = _densityModel[x, y, z];
+
+                    // Calculate density factor
+                    float densityFactor = density > 0 ?
+                        (float)Math.Sqrt((float)Material.Density / density) : 1.0f;
+
+                    // Enhance path based on position, with highest enhancement in middle
+                    float positionBoost = 1.0f + 0.2f * (1.0f - Math.Abs(t - 0.5f) * 2.0f);
+
+                    // Apply both density and position factors
+                    _velocityModel[x, y, z] = baseVelocity * densityFactor * positionBoost;
+                }
+            }
+        }
         /// <summary>
         /// Override RenderResults to add density visualization options
         /// </summary>
@@ -470,8 +575,9 @@ namespace CTSegmenter
             DrawColorScale(g, width - margin, margin + plotHeight / 2, 20, plotHeight / 2, "Density (kg/m³)");
         }
 
+
         /// <summary>
-        /// Draw a 2D slice of the density model
+        /// Draw a 2D slice of the density model with wave propagation visualization
         /// </summary>
         private void DrawDensityModelSlice(Graphics g, string sliceAxis, int x, int y, int width, int height,
                                           float minDensity, float maxDensity)
@@ -496,24 +602,37 @@ namespace CTSegmenter
                 return;
             }
 
-            // Get slice index (middle of the model)
+            // Get slice index (middle of the model, or at source/receiver if close)
             int sliceIndex;
             string title;
 
             if (sliceAxis == "X")
             {
                 sliceIndex = _gridSizeX / 2;
-                title = "Y-Z Slice (X middle)";
+                // Check if source or receiver are near this slice
+                if (Math.Abs(_sourceX - sliceIndex) < _gridSizeX / 4)
+                    sliceIndex = _sourceX;
+                else if (Math.Abs(_receiverX - sliceIndex) < _gridSizeX / 4)
+                    sliceIndex = _receiverX;
+                title = "Y-Z Slice (X=" + sliceIndex + ")";
             }
             else if (sliceAxis == "Y")
             {
                 sliceIndex = _gridSizeY / 2;
-                title = "X-Z Slice (Y middle)";
+                if (Math.Abs(_sourceY - sliceIndex) < _gridSizeY / 4)
+                    sliceIndex = _sourceY;
+                else if (Math.Abs(_receiverY - sliceIndex) < _gridSizeY / 4)
+                    sliceIndex = _receiverY;
+                title = "X-Z Slice (Y=" + sliceIndex + ")";
             }
             else // Z
             {
                 sliceIndex = _gridSizeZ / 2;
-                title = "X-Y Slice (Z middle)";
+                if (Math.Abs(_sourceZ - sliceIndex) < _gridSizeZ / 4)
+                    sliceIndex = _sourceZ;
+                else if (Math.Abs(_receiverZ - sliceIndex) < _gridSizeZ / 4)
+                    sliceIndex = _receiverZ;
+                title = "X-Y Slice (Z=" + sliceIndex + ")";
             }
 
             try
@@ -548,7 +667,7 @@ namespace CTSegmenter
                     {
                         sliceG.Clear(Color.Black);
 
-                        // Draw rectangles for each cell
+                        // Draw density variations first
                         for (int i = 0; i < dim1; i++)
                         {
                             for (int j = 0; j < dim2; j++)
@@ -572,21 +691,97 @@ namespace CTSegmenter
                                 if (density < 100)
                                     continue;
 
-                                // Normalize and get color with bounds checking
+                                // Normalize and get color
                                 float normalizedValue = (density - minDensity) / (maxDensity - minDensity);
                                 normalizedValue = Math.Max(0, Math.Min(1, normalizedValue));
                                 Color color = GetHeatMapColor(normalizedValue, 0, 1);
 
-                                // Calculate rectangle position and size
-                                int rectX = (int)(i * scaleX);
-                                int rectY = (int)(j * scaleY);
-                                int rectWidth = Math.Max(1, (int)scaleX + 1);
-                                int rectHeight = Math.Max(1, (int)scaleY + 1);
+                                // Calculate pixel position
+                                int pixelX = (int)(i * scaleX);
+                                int pixelY = (int)(j * scaleY);
+                                int pixelWidth = Math.Max(1, (int)scaleX + 1);
+                                int pixelHeight = Math.Max(1, (int)scaleY + 1);
 
-                                // Draw the rectangle
+                                // Draw density rectangle
                                 using (SolidBrush brush = new SolidBrush(color))
                                 {
-                                    sliceG.FillRectangle(brush, rectX, rectY, rectWidth, rectHeight);
+                                    sliceG.FillRectangle(brush, pixelX, pixelY, pixelWidth, pixelHeight);
+                                }
+                            }
+                        }
+
+                        // Also overlay wave field information if available
+                        float[,,] waveField = _isPWave ? PWaveField : SWaveField;
+                        if (waveField != null)
+                        {
+                            // Find max amplitude for normalization
+                            float maxAmplitude = 0.000001f;
+
+                            if (sliceAxis == "X" && sliceIndex < waveField.GetLength(0))
+                            {
+                                for (int yi = 0; yi < Math.Min(dim1, waveField.GetLength(1)); yi++)
+                                    for (int zi = 0; zi < Math.Min(dim2, waveField.GetLength(2)); zi++)
+                                        maxAmplitude = Math.Max(maxAmplitude, Math.Abs(waveField[sliceIndex, yi, zi]));
+                            }
+                            else if (sliceAxis == "Y" && sliceIndex < waveField.GetLength(1))
+                            {
+                                for (int xi = 0; xi < Math.Min(dim1, waveField.GetLength(0)); xi++)
+                                    for (int zi = 0; zi < Math.Min(dim2, waveField.GetLength(2)); zi++)
+                                        maxAmplitude = Math.Max(maxAmplitude, Math.Abs(waveField[xi, sliceIndex, zi]));
+                            }
+                            else if (sliceAxis == "Z" && sliceIndex < waveField.GetLength(2))
+                            {
+                                for (int xi = 0; xi < Math.Min(dim1, waveField.GetLength(0)); xi++)
+                                    for (int yi = 0; yi < Math.Min(dim2, waveField.GetLength(1)); yi++)
+                                        maxAmplitude = Math.Max(maxAmplitude, Math.Abs(waveField[xi, yi, sliceIndex]));
+                            }
+
+                            // Draw wave contours
+                            for (int i = 0; i < dim1; i++)
+                            {
+                                for (int j = 0; j < dim2; j++)
+                                {
+                                    float waveValue = 0;
+                                    bool hasWaveValue = false;
+
+                                    // Get wave value at this position
+                                    if (sliceAxis == "X" && sliceIndex < waveField.GetLength(0) &&
+                                        i < waveField.GetLength(1) && j < waveField.GetLength(2))
+                                    {
+                                        waveValue = waveField[sliceIndex, i, j];
+                                        hasWaveValue = true;
+                                    }
+                                    else if (sliceAxis == "Y" && i < waveField.GetLength(0) &&
+                                            sliceIndex < waveField.GetLength(1) && j < waveField.GetLength(2))
+                                    {
+                                        waveValue = waveField[i, sliceIndex, j];
+                                        hasWaveValue = true;
+                                    }
+                                    else if (sliceAxis == "Z" && i < waveField.GetLength(0) &&
+                                            j < waveField.GetLength(1) && sliceIndex < waveField.GetLength(2))
+                                    {
+                                        waveValue = waveField[i, j, sliceIndex];
+                                        hasWaveValue = true;
+                                    }
+
+                                    if (hasWaveValue && Math.Abs(waveValue) > maxAmplitude * 0.3f)
+                                    {
+                                        // Calculate pixel position
+                                        int pixelX = (int)(i * scaleX);
+                                        int pixelY = (int)(j * scaleY);
+
+                                        // Draw wave highlight - more visible for stronger waves
+                                        float intensity = Math.Min(1f, Math.Abs(waveValue) / maxAmplitude);
+
+                                        // Draw contour as a small circle
+                                        int dotSize = 1 + (int)(3 * intensity);
+                                        using (SolidBrush waveBrush = new SolidBrush(Color.FromArgb(
+                                            (int)(180 * intensity), Color.White)))
+                                        {
+                                            sliceG.FillEllipse(waveBrush, pixelX - dotSize / 2, pixelY - dotSize / 2,
+                                                             dotSize, dotSize);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -606,6 +801,95 @@ namespace CTSegmenter
                     using (SolidBrush textBrush = new SolidBrush(Color.White))
                     {
                         g.DrawString(title, font, textBrush, x + width / 2 - 60, y - 15);
+                    }
+
+                    // Draw source and receiver positions if they are in this slice
+                    PointF sourcePoint = new PointF();
+                    PointF receiverPoint = new PointF();
+                    bool sourceVisible = false;
+                    bool receiverVisible = false;
+
+                    // Calculate positions in visualization
+                    if (sliceAxis == "X" && sliceIndex == _sourceX)
+                    {
+                        sourcePoint.X = x + (_sourceY / (float)dim1) * width;
+                        sourcePoint.Y = y + (_sourceZ / (float)dim2) * height;
+                        sourceVisible = true;
+
+                        using (Brush sourceBrush = new SolidBrush(Color.Yellow))
+                        {
+                            g.FillEllipse(sourceBrush, sourcePoint.X - 4, sourcePoint.Y - 4, 8, 8);
+                        }
+                    }
+
+                    if (sliceAxis == "X" && sliceIndex == _receiverX)
+                    {
+                        receiverPoint.X = x + (_receiverY / (float)dim1) * width;
+                        receiverPoint.Y = y + (_receiverZ / (float)dim2) * height;
+                        receiverVisible = true;
+
+                        using (Brush receiverBrush = new SolidBrush(Color.Cyan))
+                        {
+                            g.FillEllipse(receiverBrush, receiverPoint.X - 4, receiverPoint.Y - 4, 8, 8);
+                        }
+                    }
+
+                    if (sliceAxis == "Y" && sliceIndex == _sourceY)
+                    {
+                        sourcePoint.X = x + (_sourceX / (float)dim1) * width;
+                        sourcePoint.Y = y + (_sourceZ / (float)dim2) * height;
+                        sourceVisible = true;
+
+                        using (Brush sourceBrush = new SolidBrush(Color.Yellow))
+                        {
+                            g.FillEllipse(sourceBrush, sourcePoint.X - 4, sourcePoint.Y - 4, 8, 8);
+                        }
+                    }
+
+                    if (sliceAxis == "Y" && sliceIndex == _receiverY)
+                    {
+                        receiverPoint.X = x + (_receiverX / (float)dim1) * width;
+                        receiverPoint.Y = y + (_receiverZ / (float)dim2) * height;
+                        receiverVisible = true;
+
+                        using (Brush receiverBrush = new SolidBrush(Color.Cyan))
+                        {
+                            g.FillEllipse(receiverBrush, receiverPoint.X - 4, receiverPoint.Y - 4, 8, 8);
+                        }
+                    }
+
+                    if (sliceAxis == "Z" && sliceIndex == _sourceZ)
+                    {
+                        sourcePoint.X = x + (_sourceX / (float)dim1) * width;
+                        sourcePoint.Y = y + (_sourceY / (float)dim2) * height;
+                        sourceVisible = true;
+
+                        using (Brush sourceBrush = new SolidBrush(Color.Yellow))
+                        {
+                            g.FillEllipse(sourceBrush, sourcePoint.X - 4, sourcePoint.Y - 4, 8, 8);
+                        }
+                    }
+
+                    if (sliceAxis == "Z" && sliceIndex == _receiverZ)
+                    {
+                        receiverPoint.X = x + (_receiverX / (float)dim1) * width;
+                        receiverPoint.Y = y + (_receiverY / (float)dim2) * height;
+                        receiverVisible = true;
+
+                        using (Brush receiverBrush = new SolidBrush(Color.Cyan))
+                        {
+                            g.FillEllipse(receiverBrush, receiverPoint.X - 4, receiverPoint.Y - 4, 8, 8);
+                        }
+                    }
+
+                    // Draw the direction line if both source and receiver are on this slice
+                    if (sourceVisible && receiverVisible)
+                    {
+                        using (Pen dirPen = new Pen(Color.Yellow, 1))
+                        {
+                            dirPen.DashStyle = DashStyle.Dash;
+                            g.DrawLine(dirPen, sourcePoint, receiverPoint);
+                        }
                     }
                 }
             }

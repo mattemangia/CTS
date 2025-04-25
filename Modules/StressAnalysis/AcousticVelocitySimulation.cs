@@ -142,8 +142,8 @@ namespace CTSegmenter
         public float[,,] _densityModel;
         private Vector3 _sourcePosition;
         private Vector3 _receiverPosition;
-        private int _sourceX, _sourceY, _sourceZ;
-        private int _receiverX, _receiverY, _receiverZ;
+        public int _sourceX, _sourceY, _sourceZ;
+        public int _receiverX, _receiverY, _receiverZ;
         public float TimeStepFactor { get; set; } = 1.0f;
 
         private MainForm mainForm;
@@ -721,7 +721,7 @@ namespace CTSegmenter
         }
 
         /// <summary>
-        /// Calculate the dimensions of the 3D simulation grid
+        /// Calculate the dimensions of the 3D simulation grid and position transducers
         /// </summary>
         private void CalculateGridDimensions()
         {
@@ -855,25 +855,31 @@ namespace CTSegmenter
             float physicalSizeY = _gridSizeY * _gridSpacing;
             float physicalSizeZ = _gridSizeZ * _gridSpacing;
 
-            // FIXED: Position source and receiver specifically along the test direction
+            // Position source and receiver along the test direction
             Vector3 normalizedDir = Vector3.Normalize(TestDirection);
             Vector3 center = new Vector3(_gridSizeX / 2, _gridSizeY / 2, _gridSizeZ / 2);
             int safeMargin = 5; // Safety margin from grid edges
 
             // Calculate grid distance for sufficient source-receiver spacing
-            int gridDistance = Math.Min(
-                Math.Min(_gridSizeX, _gridSizeY),
-                _gridSizeZ) / 3; // Use 1/3 of the smallest dimension
+            // Use 40% of the grid size along the test direction for better propagation visibility
+            float gridSizeAlongDirection = Math.Abs(normalizedDir.X * _gridSizeX) +
+                                          Math.Abs(normalizedDir.Y * _gridSizeY) +
+                                          Math.Abs(normalizedDir.Z * _gridSizeZ);
+            int gridDistance = (int)(gridSizeAlongDirection * 0.4f);
+
+            // Ensure a minimum distance and cap maximum distance
+            gridDistance = Math.Max(Math.Min(_gridSizeX, Math.Min(_gridSizeY, _gridSizeZ)) / 4,
+                                  Math.Min(gridDistance, Math.Min(_gridSizeX, Math.Min(_gridSizeY, _gridSizeZ)) / 2));
 
             Logger.Log($"[AcousticVelocitySimulation] Using grid distance of {gridDistance} units along direction {normalizedDir}");
 
-            // Calculate source position (1/3 of the way from center in negative direction)
+            // Calculate source position (from center in negative direction)
             Vector3 sourceOffset = -normalizedDir * gridDistance;
             _sourceX = (int)Math.Round(center.X + sourceOffset.X);
             _sourceY = (int)Math.Round(center.Y + sourceOffset.Y);
             _sourceZ = (int)Math.Round(center.Z + sourceOffset.Z);
 
-            // Calculate receiver position (1/3 of the way from center in positive direction)
+            // Calculate receiver position (from center in positive direction)
             Vector3 receiverOffset = normalizedDir * gridDistance;
             _receiverX = (int)Math.Round(center.X + receiverOffset.X);
             _receiverY = (int)Math.Round(center.Y + receiverOffset.Y);
@@ -912,7 +918,7 @@ namespace CTSegmenter
         }
 
         /// <summary>
-        /// Create the velocity and density models in the 3D grid
+        /// Create the velocity and density models in the 3D grid with direction-specific properties
         /// </summary>
         private void CreateVelocityModel()
         {
@@ -927,7 +933,7 @@ namespace CTSegmenter
             float baseVelocityValue = _isPWave ? PWaveVelocity : SWaveVelocity;
             float densityValue = (float)Material.Density;
 
-            // Fill with material values by default (not air)
+            // Fill with material values by default
             for (int x = 0; x < _gridSizeX; x++)
             {
                 for (int y = 0; y < _gridSizeY; y++)
@@ -950,8 +956,22 @@ namespace CTSegmenter
             bool isDirY = Math.Abs(dir.Y) > Math.Abs(dir.X) && Math.Abs(dir.Y) > Math.Abs(dir.Z);
             bool isDirZ = Math.Abs(dir.Z) > Math.Abs(dir.X) && Math.Abs(dir.Z) > Math.Abs(dir.Y);
 
-            // Create velocity gradients with large variations along the test direction
+            // Create velocity gradient along the test direction (primary variation)
+            // Plus minor variations in other directions (secondary variations)
             Random rand = new Random(12345); // Fixed seed for reproducibility
+
+            // Normalization factors to create directional influence
+            float dirXFactor = Math.Abs(dir.X);
+            float dirYFactor = Math.Abs(dir.Y);
+            float dirZFactor = Math.Abs(dir.Z);
+
+            // Ensure we have meaningful factors even for axis-aligned directions
+            float totalFactor = dirXFactor + dirYFactor + dirZFactor;
+            if (totalFactor < 0.01f) totalFactor = 1.0f;
+
+            dirXFactor = Math.Max(0.1f, dirXFactor / totalFactor);
+            dirYFactor = Math.Max(0.1f, dirYFactor / totalFactor);
+            dirZFactor = Math.Max(0.1f, dirZFactor / totalFactor);
 
             for (int x = 0; x < _gridSizeX; x++)
             {
@@ -959,35 +979,58 @@ namespace CTSegmenter
                 {
                     for (int z = 0; z < _gridSizeZ; z++)
                     {
-                        // Calculate normalized position along the dominant axis (0-1)
-                        float position;
-                        if (isDirX)
-                            position = (float)x / _gridSizeX;
-                        else if (isDirY)
-                            position = (float)y / _gridSizeY;
-                        else // Z direction
-                            position = (float)z / _gridSizeZ;
+                        // Calculate normalized position along each axis (0-1)
+                        float posX = (float)x / _gridSizeX;
+                        float posY = (float)y / _gridSizeY;
+                        float posZ = (float)z / _gridSizeZ;
 
-                        // Create strong variation (±50%) based on position
-                        float gradientFactor = 0.5f + position;  // 0.5 to 1.5 range
+                        // Combined position value along test direction
+                        float position = posX * dirXFactor + posY * dirYFactor + posZ * dirZFactor;
+
+                        // Create strong variation (±30%) based on position along test direction
+                        float gradientFactor = 0.7f + position * 0.6f;  // 0.7 to 1.3 range
+
+                        // Add directional layers perpendicular to test direction
+                        // This creates layers of different velocity that waves must pass through
+                        float layerEffect = 0.0f;
+
+                        if (isDirX)
+                        {
+                            // Create layers perpendicular to X direction
+                            layerEffect = 0.1f * (float)Math.Sin(posY * 10) * (float)Math.Sin(posZ * 8);
+                        }
+                        else if (isDirY)
+                        {
+                            // Create layers perpendicular to Y direction
+                            layerEffect = 0.1f * (float)Math.Sin(posX * 10) * (float)Math.Sin(posZ * 8);
+                        }
+                        else
+                        {
+                            // Create layers perpendicular to Z direction
+                            layerEffect = 0.1f * (float)Math.Sin(posX * 10) * (float)Math.Sin(posY * 8);
+                        }
 
                         // Add small random variation for texture
                         float randomVariation = 1.0f + (float)(rand.NextDouble() - 0.5) * 0.05f;
 
                         // Apply the combined factors
-                        _velocityModel[x, y, z] = baseVelocityValue * gradientFactor * randomVariation;
+                        _velocityModel[x, y, z] = baseVelocityValue * (gradientFactor + layerEffect) * randomVariation;
+
+                        // Also create density variations
+                        float densityVariation = 1.0f + (gradientFactor - 1.0f) * 0.5f; // Density varies less than velocity
+                        _densityModel[x, y, z] = densityValue * densityVariation * randomVariation;
                     }
                 }
             }
 
-            // Ensure source and receiver cells have sufficient velocity
+            // Ensure source and receiver cells have good propagation properties
             _velocityModel[_sourceX, _sourceY, _sourceZ] = baseVelocityValue * 1.2f;  // 20% boost at source
             _densityModel[_sourceX, _sourceY, _sourceZ] = densityValue;
 
             _velocityModel[_receiverX, _receiverY, _receiverZ] = baseVelocityValue * 1.2f;  // 20% boost at receiver
             _densityModel[_receiverX, _receiverY, _receiverZ] = densityValue;
 
-            // Ensure path between source and receiver is enhanced for clear signal propagation
+            // Create an enhanced path between source and receiver
             int pathSteps = (int)Math.Ceiling(Math.Sqrt(
                 Math.Pow(_receiverX - _sourceX, 2) +
                 Math.Pow(_receiverY - _sourceY, 2) +
@@ -1005,7 +1048,7 @@ namespace CTSegmenter
                 if (x >= 0 && x < _gridSizeX && y >= 0 && y < _gridSizeY && z >= 0 && z < _gridSizeZ)
                 {
                     // Create a clear path with optimized velocity
-                    float pathBoost = 1.0f + 0.4f * (1.0f - Math.Abs(t - 0.5f) * 2.0f); // Peak boost in the middle
+                    float pathBoost = 1.0f + 0.3f * (1.0f - Math.Abs(t - 0.5f) * 2.0f); // Peak boost in the middle
                     _velocityModel[x, y, z] = baseVelocityValue * pathBoost;
                     _densityModel[x, y, z] = densityValue;
 
@@ -1060,8 +1103,6 @@ namespace CTSegmenter
             Logger.Log($"[AcousticVelocitySimulation] Velocity range: {minVel:F1} to {maxVel:F1} m/s, avg: {avgVelocity:F1} m/s");
             Logger.Log($"[AcousticVelocitySimulation] Created velocity gradient along {(isDirX ? "X" : isDirY ? "Y" : "Z")}-axis (Test direction: {TestDirection})");
         }
-
-
 
         /// <summary>
         /// Calculate distance between two Vector3 points
@@ -1999,168 +2040,377 @@ namespace CTSegmenter
         {
             // Calculate simulation parameters
             float velocity = _isPWave ? PWaveVelocity : SWaveVelocity;
-            float dt = _gridSpacing / (1.2f * velocity * (float)Math.Sqrt(3));
+            float dt = _gridSpacing / (2.0f * velocity * (float)Math.Sqrt(3)); // CFL stability condition
             int waveletLength = (int)(5.0f / (Frequency * 1000 * dt));
 
-            // Generate Ricker wavelet as source
+            // Generate Ricker wavelet as source with higher amplitude for better visibility
             float[] sourceWavelet = GenerateRickerWavelet(dt, Frequency, waveletLength);
             for (int i = 0; i < sourceWavelet.Length; i++)
-                sourceWavelet[i] *= 1000.0f;
+                sourceWavelet[i] *= 2000.0f; // Increased amplitude for better propagation
 
             // Host-side buffers
-            var u = new float[_gridSizeX, _gridSizeY, _gridSizeZ];
+            var currentField = new float[_gridSizeX, _gridSizeY, _gridSizeZ];
             var receiverData = new float[TimeSteps];
 
             // Ensure valid source/receiver indices
-            _sourceX = Math.Max(0, Math.Min(_sourceX, _gridSizeX - 1));
-            _sourceY = Math.Max(0, Math.Min(_sourceY, _gridSizeY - 1));
-            _sourceZ = Math.Max(0, Math.Min(_sourceZ, _gridSizeZ - 1));
-            _receiverX = Math.Max(0, Math.Min(_receiverX, _gridSizeX - 1));
-            _receiverY = Math.Max(0, Math.Min(_receiverY, _gridSizeY - 1));
-            _receiverZ = Math.Max(0, Math.Min(_receiverZ, _gridSizeZ - 1));
+            _sourceX = Math.Max(2, Math.Min(_sourceX, _gridSizeX - 3));
+            _sourceY = Math.Max(2, Math.Min(_sourceY, _gridSizeY - 3));
+            _sourceZ = Math.Max(2, Math.Min(_sourceZ, _gridSizeZ - 3));
+            _receiverX = Math.Max(2, Math.Min(_receiverX, _gridSizeX - 3));
+            _receiverY = Math.Max(2, Math.Min(_receiverY, _gridSizeY - 3));
+            _receiverZ = Math.Max(2, Math.Min(_receiverZ, _gridSizeZ - 3));
 
-            var extent = new LongIndex3D(_gridSizeX, _gridSizeY, _gridSizeZ);
+            // Create source and receiver positions as arrays
+            int[] sourcePos = { _sourceX, _sourceY, _sourceZ };
+            int[] receiverPos = { _receiverX, _receiverY, _receiverZ };
 
-            // Allocate mutable 3D buffers
-            var currentBuffer = _accelerator.Allocate3DDenseXY<float>(extent);
-            var prevBuffer = _accelerator.Allocate3DDenseXY<float>(extent);
-            var nextBuffer = _accelerator.Allocate3DDenseXY<float>(extent);
+            // Create multiple sources along a plane perpendicular to the test direction
+            // This is key to simulate waves propagating across the entire sample surface
+            List<int[]> sourcePlane = GenerateSourcePlane(TestDirection, _gridSizeX, _gridSizeY, _gridSizeZ);
+            Logger.Log($"[AcousticVelocitySimulation] Created {sourcePlane.Count} source points on plane perpendicular to {TestDirection}");
 
-            try
+            // Create flattened source plane array for GPU
+            int[] flattenedSourcePlane = new int[sourcePlane.Count * 3];
+            for (int i = 0; i < sourcePlane.Count; i++)
             {
-                // Allocate velocity buffer and upload model
-                using (var velocityBuffer = _accelerator.Allocate3DDenseXY<float>(extent))
+                flattenedSourcePlane[i * 3] = sourcePlane[i][0];
+                flattenedSourcePlane[i * 3 + 1] = sourcePlane[i][1];
+                flattenedSourcePlane[i * 3 + 2] = sourcePlane[i][2];
+            }
+
+            // Allocate device buffers with fixed roles - using index tracking approach for rotation
+            var extent = new LongIndex3D(_gridSizeX, _gridSizeY, _gridSizeZ);
+            using (var buffer0 = _accelerator.Allocate3DDenseXY<float>(extent))
+            using (var buffer1 = _accelerator.Allocate3DDenseXY<float>(extent))
+            using (var buffer2 = _accelerator.Allocate3DDenseXY<float>(extent))
+            using (var velocityBuffer = _accelerator.Allocate3DDenseXY<float>(extent))
+            using (var sourcePlaneBuffer = _accelerator.Allocate1D<int>(flattenedSourcePlane.Length))
+            using (var waveletBuffer = _accelerator.Allocate1D<float>(sourceWavelet.Length))
+            using (var receiverBuffer = _accelerator.Allocate1D<float>(TimeSteps))
+            {
+                // Upload data to GPU
+                velocityBuffer.View.CopyFromCPU(_velocityModel);
+                sourcePlaneBuffer.CopyFromCPU(flattenedSourcePlane);
+                waveletBuffer.CopyFromCPU(sourceWavelet);
+
+                // Zero-initialize field buffers
+                buffer0.View.CopyFromCPU(currentField);
+                buffer1.View.CopyFromCPU(currentField);
+                buffer2.View.CopyFromCPU(currentField);
+
+                // Use indices to track which buffer has which role
+                int currentIdx = 0;
+                int prevIdx = 1;
+                int nextIdx = 2;
+
+                // Load injection kernel for multiple sources
+                var injectPlaneKernel = _accelerator.LoadAutoGroupedStreamKernel<
+                    Index1D,
+                    ArrayView<int>,
+                    ArrayView<float>,
+                    int,
+                    int,
+                    ArrayView3D<float, Stride3D.DenseXY>>(
+                    InjectSourcePlaneKernel);
+
+                // Execute time steps in batches for UI responsiveness
+                int batchSize = Math.Min(20, TimeSteps / 10);
+                for (int batchStart = 0; batchStart < TimeSteps; batchStart += batchSize)
                 {
-                    velocityBuffer.View.CopyFromCPU(_velocityModel);
+                    int currentBatchSize = Math.Min(batchSize, TimeSteps - batchStart);
 
-                    // Initialize host wavefield to zero
-                    for (int x = 0; x < _gridSizeX; x++)
-                        for (int y = 0; y < _gridSizeY; y++)
-                            for (int z = 0; z < _gridSizeZ; z++)
-                                u[x, y, z] = 0.0f;
-
-                    currentBuffer.View.CopyFromCPU(u);
-                    prevBuffer.View.CopyFromCPU(u);
-                    nextBuffer.View.CopyFromCPU(u);
-
-                    // Setup source and receiver position buffers
-                    int[] sourcePos = new int[] { _sourceX, _sourceY, _sourceZ };
-                    int[] receiverPos = new int[] { _receiverX, _receiverY, _receiverZ };
-
-                    using (var sourcePosBuffer = _accelerator.Allocate1D<int>(sourcePos))
-                    using (var receiverPosBuffer = _accelerator.Allocate1D<int>(receiverPos))
-                    using (var waveletBuffer = _accelerator.Allocate1D<float>(sourceWavelet))
-                    using (var receiverBuf = _accelerator.Allocate1D<float>(TimeSteps))
+                    for (int step = 0; step < currentBatchSize; step++)
                     {
-                        sourcePosBuffer.CopyFromCPU(sourcePos);
-                        receiverPosBuffer.CopyFromCPU(receiverPos);
-                        waveletBuffer.CopyFromCPU(sourceWavelet);
+                        int t = batchStart + step;
 
-                        int batchSize = 20;
-                        for (int batchStart = 0; batchStart < TimeSteps; batchStart += batchSize)
+                        if (_cancellationTokenSource.Token.IsCancellationRequested)
+                            throw new OperationCanceledException();
+
+                        // Get the correct buffer views based on current roles
+                        var currentView = currentIdx == 0 ? buffer0.View : (currentIdx == 1 ? buffer1.View : buffer2.View);
+                        var prevView = prevIdx == 0 ? buffer0.View : (prevIdx == 1 ? buffer1.View : buffer2.View);
+                        var nextView = nextIdx == 0 ? buffer0.View : (nextIdx == 1 ? buffer1.View : buffer2.View);
+
+                        // Inject source wavelet from the plane of sources
+                        if (t < waveletLength)
                         {
-                            int currentBatchSize = Math.Min(batchSize, TimeSteps - batchStart);
-
-                            for (int step = 0; step < currentBatchSize; step++)
-                            {
-                                int t = batchStart + step;
-
-                                if (_cancellationTokenSource.Token.IsCancellationRequested)
-                                    throw new OperationCanceledException();
-
-                                // Inject source wavelet
-                                if (t < waveletLength)
-                                {
-                                    var injectKernel = _accelerator.LoadAutoGroupedStreamKernel<
-                                        Index1D,
-                                        ArrayView<int>,
-                                        ArrayView<float>,
-                                        int,
-                                        ArrayView3D<float, Stride3D.DenseXY>>(
-                                        InjectSourceKernel);
-
-                                    injectKernel(1,
-                                        sourcePosBuffer.View,
-                                        waveletBuffer.View,
-                                        t,
-                                        currentBuffer.View);
-                                    _accelerator.Synchronize();
-                                }
-
-                                // 3D propagation using heterogeneous velocity
-                                _wave3DPropagationKernel(
-                                    new Index3D(_gridSizeX, _gridSizeY, _gridSizeZ),
-                                    currentBuffer.View,
-                                    prevBuffer.View,
-                                    nextBuffer.View,
-                                    velocityBuffer.View,
-                                    dt,
-                                    _gridSpacing,
-                                    Attenuation,
-                                    t % waveletLength == 0 ? 1 : 0,
-                                    _isPWave ? 1 : 0);
-                                _accelerator.Synchronize();
-
-                                // Extract receiver data
-                                var extractKernel = _accelerator.LoadAutoGroupedStreamKernel<
-                                    Index1D,
-                                    ArrayView<int>,
-                                    ArrayView3D<float, Stride3D.DenseXY>,
-                                    int,
-                                    ArrayView<float>>(
-                                    ExtractReceiverDataKernel);
-
-                                extractKernel(1,
-                                    receiverPosBuffer.View,
-                                    nextBuffer.View,
-                                    t,
-                                    receiverBuf.View);
-                                _accelerator.Synchronize();
-
-                                // Periodic host copy for visualization
-                                if (t % 10 == 0)
-                                {
-                                    nextBuffer.View.CopyToCPU(u);
-                                    SimulationTimes.Add(t * dt);
-                                    var fieldCopy = new float[_gridSizeX, _gridSizeY, _gridSizeZ];
-                                    Array.Copy(u, fieldCopy, u.Length);
-                                    if (_isPWave) PWaveField = fieldCopy;
-                                    else SWaveField = fieldCopy;
-                                }
-
-                                // Rotate buffers
-                                var tmp = nextBuffer;
-                                nextBuffer = prevBuffer;
-                                prevBuffer = currentBuffer;
-                                currentBuffer = tmp;
-                            }
-
-                            float progress = 100f * (batchStart + currentBatchSize) / TimeSteps;
-                            OnProgressChanged(progress, $"3D wave step {batchStart + currentBatchSize}/{TimeSteps}");
-                            await Task.Delay(1);
+                            injectPlaneKernel(sourcePlane.Count,
+                                sourcePlaneBuffer.View,
+                                waveletBuffer.View,
+                                t,
+                                sourcePlane.Count,
+                                currentView);
+                            _accelerator.Synchronize();
                         }
 
-                        // Retrieve final receiver trace
-                        receiverBuf.CopyToCPU(receiverData);
+                        // Propagate wave using the 3D kernel
+                        _wave3DPropagationKernel(
+                            new Index3D(_gridSizeX, _gridSizeY, _gridSizeZ),
+                            currentView,
+                            prevView,
+                            nextView,
+                            velocityBuffer.View,
+                            dt,
+                            _gridSpacing,
+                            Attenuation * 0.2f, // Reduced attenuation for better propagation
+                            t % waveletLength == 0 ? 1 : 0,
+                            _isPWave ? 1 : 0);
+                        _accelerator.Synchronize();
+
+                        // Extract receiver data
+                        var extractKernel = _accelerator.LoadAutoGroupedStreamKernel<
+                            Index1D,
+                            int, int, int,
+                            ArrayView3D<float, Stride3D.DenseXY>,
+                            int,
+                            ArrayView<float>>(
+                            ExtractReceiverDataKernel);
+
+                        extractKernel(1,
+                            receiverPos[0], receiverPos[1], receiverPos[2],
+                            nextView,
+                            t,
+                            receiverBuffer.View);
+                        _accelerator.Synchronize();
+
+                        // Copy back results for visualization at regular intervals
+                        if (t % 5 == 0)
+                        {
+                            nextView.CopyToCPU(currentField);
+                            SimulationTimes.Add(t * dt);
+
+                            // Store wave field in appropriate history
+                            if (_isPWave)
+                            {
+                                PWaveField = currentField.Clone() as float[,,];
+                                PWaveDisplacementHistory.Add(ExtractDisplacementProfile(currentField, TestDirection));
+                            }
+                            else
+                            {
+                                SWaveField = currentField.Clone() as float[,,];
+                                SWaveDisplacementHistory.Add(ExtractDisplacementProfile(currentField, TestDirection));
+                            }
+
+                            // Generate displacement vectors for visualization
+                            StoreDisplacementVectors(currentField, t * dt);
+                        }
+
+                        // Rotate indices for next iteration
+                        int temp = prevIdx;
+                        prevIdx = currentIdx;
+                        currentIdx = nextIdx;
+                        nextIdx = temp;
                     }
+
+                    // Update progress
+                    float progress = 100f * (batchStart + currentBatchSize) / TimeSteps;
+                    OnProgressChanged(progress, $"3D wave simulation: step {batchStart + currentBatchSize}/{TimeSteps}");
+                    await Task.Delay(1);
                 }
 
-                ReceiverTimeSeries = receiverData;
+                // Retrieve final receiver trace
+                receiverBuffer.CopyToCPU(receiverData);
             }
-            catch (Exception ex)
-            {
-                Logger.Log($"[AcousticVelocitySimulation] 3D wave simulation error: {ex.Message}");
-                throw;
-            }
-            finally
-            {
-                // Ensure disposal of mutable buffers
-                nextBuffer?.Dispose();
-                prevBuffer?.Dispose();
-                currentBuffer?.Dispose();
-            }
+
+            // Store the receiver time series
+            ReceiverTimeSeries = receiverData;
+
+            // Apply direction-specific delay to model anisotropy effects if needed
+            ApplyDirectionalEffects(ReceiverTimeSeries, TestDirection);
         }
 
+        private static void InjectSourcePlaneKernel(
+    Index1D index,
+    ArrayView<int> sourcePlaneFlattened,
+    ArrayView<float> wavelet,
+    int timeStep,
+    int numSources,
+    ArrayView3D<float, Stride3D.DenseXY> field)
+        {
+            int sourceIdx = index.X;
+            if (sourceIdx < numSources && timeStep < wavelet.Length)
+            {
+                // Extract source position from flattened array
+                int x = sourcePlaneFlattened[sourceIdx * 3];
+                int y = sourcePlaneFlattened[sourceIdx * 3 + 1];
+                int z = sourcePlaneFlattened[sourceIdx * 3 + 2];
+
+                // Add wavelet value at this source point
+                // Use reduced amplitude for each point since we have multiple sources
+                float amplitudeFactor = 1.0f / (float)Math.Sqrt(numSources);
+                field[x, y, z] += wavelet[timeStep] * amplitudeFactor;
+            }
+        }
+        private static void ExtractReceiverDataKernel(
+    Index1D index,
+    int rx, int ry, int rz,
+    ArrayView3D<float, Stride3D.DenseXY> field,
+    int timeStep,
+    ArrayView<float> receiverData)
+        {
+            if (index == 0 && timeStep < receiverData.Length)
+            {
+                receiverData[timeStep] = field[rx, ry, rz];
+            }
+        }
+        public List<int[]> GenerateSourcePlane(Vector3 direction, int sizeX, int sizeY, int sizeZ)
+        {
+            List<int[]> sourcePlane = new List<int[]>();
+
+            // Normalize direction
+            Vector3 dir = Vector3.Normalize(direction);
+
+            // Find two perpendicular vectors to create a plane
+            Vector3 perpA, perpB;
+
+            if (Math.Abs(dir.X) > Math.Abs(dir.Y) && Math.Abs(dir.X) > Math.Abs(dir.Z))
+            {
+                // X is primary direction
+                perpA = new Vector3(0, 1, 0);
+                perpB = new Vector3(0, 0, 1);
+            }
+            else if (Math.Abs(dir.Y) > Math.Abs(dir.X) && Math.Abs(dir.Y) > Math.Abs(dir.Z))
+            {
+                // Y is primary direction
+                perpA = new Vector3(1, 0, 0);
+                perpB = new Vector3(0, 0, 1);
+            }
+            else
+            {
+                // Z is primary direction
+                perpA = new Vector3(1, 0, 0);
+                perpB = new Vector3(0, 1, 0);
+            }
+
+            // Create source origin (25% in from the edge along test direction)
+            Vector3 center = new Vector3(sizeX / 2, sizeY / 2, sizeZ / 2);
+            Vector3 sourceOrigin = center - dir * (Math.Min(Math.Min(sizeX, sizeY), sizeZ) / 4);
+
+            // Determine plane dimensions (30% of grid size)
+            int planeSize = Math.Max(2, (int)(Math.Min(Math.Min(sizeX, sizeY), sizeZ) * 0.3f));
+            int halfSize = planeSize / 2;
+
+            // Generate grid of points on the plane
+            int spacing = Math.Max(1, planeSize / 10); // Space out the sources
+            for (int i = -halfSize; i <= halfSize; i += spacing)
+            {
+                for (int j = -halfSize; j <= halfSize; j += spacing)
+                {
+                    // Generate point offset from origin along perpendicular vectors
+                    Vector3 point = sourceOrigin + (perpA * i / planeSize + perpB * j / planeSize) * planeSize;
+
+                    // Convert to grid coordinates and bounds check
+                    int x = (int)Math.Round(point.X);
+                    int y = (int)Math.Round(point.Y);
+                    int z = (int)Math.Round(point.Z);
+
+                    x = Math.Max(2, Math.Min(x, sizeX - 3));
+                    y = Math.Max(2, Math.Min(y, sizeY - 3));
+                    z = Math.Max(2, Math.Min(z, sizeZ - 3));
+
+                    sourcePlane.Add(new int[] { x, y, z });
+                }
+            }
+
+            return sourcePlane;
+        }
+        private float[] ExtractDisplacementProfile(float[,,] field, Vector3 direction)
+        {
+            // Number of points to sample
+            int sampleCount = 200;
+            float[] profile = new float[sampleCount];
+
+            // Calculate step size based on grid dimensions
+            Vector3 normalizedDir = Vector3.Normalize(direction);
+            Vector3 start = new Vector3(_sourceX, _sourceY, _sourceZ);
+            Vector3 end = new Vector3(_receiverX, _receiverY, _receiverZ);
+
+            for (int i = 0; i < sampleCount; i++)
+            {
+                float t = i / (float)(sampleCount - 1);
+
+                // Calculate position along the profile
+                int x = (int)Math.Round(_sourceX + (_receiverX - _sourceX) * t);
+                int y = (int)Math.Round(_sourceY + (_receiverY - _sourceY) * t);
+                int z = (int)Math.Round(_sourceZ + (_receiverZ - _sourceZ) * t);
+
+                // Ensure we're within bounds
+                x = Math.Max(0, Math.Min(x, _gridSizeX - 1));
+                y = Math.Max(0, Math.Min(y, _gridSizeY - 1));
+                z = Math.Max(0, Math.Min(z, _gridSizeZ - 1));
+
+                // Extract value
+                profile[i] = field[x, y, z];
+            }
+
+            return profile;
+        }
+        private void StoreDisplacementVectors(float[,,] field, float time)
+        {
+            // Create vector field for visualization
+            Vector3[] displacementVectors = new Vector3[_gridSizeX * _gridSizeY * _gridSizeZ];
+
+            // Normal direction of propagation
+            Vector3 normalDir = Vector3.Normalize(TestDirection);
+
+            // P-waves oscillate parallel to propagation direction
+            // S-waves oscillate perpendicular to propagation direction
+            Vector3 oscillationDir;
+            if (_isPWave)
+            {
+                oscillationDir = normalDir;
+            }
+            else
+            {
+                // Find perpendicular direction for S-wave
+                if (Math.Abs(normalDir.Y) > 0.1f || Math.Abs(normalDir.Z) > 0.1f)
+                    oscillationDir = Vector3.Normalize(Vector3.Cross(normalDir, new Vector3(1, 0, 0)));
+                else
+                    oscillationDir = Vector3.Normalize(Vector3.Cross(normalDir, new Vector3(0, 1, 0)));
+            }
+
+            // Calculate displacement vectors
+            for (int x = 0; x < _gridSizeX; x++)
+            {
+                for (int y = 0; y < _gridSizeY; y++)
+                {
+                    for (int z = 0; z < _gridSizeZ; z++)
+                    {
+                        int index = (x * _gridSizeY + y) * _gridSizeZ + z;
+                        float value = field[x, y, z];
+
+                        // Scale displacement based on oscillation direction
+                        displacementVectors[index] = oscillationDir * value;
+                    }
+                }
+            }
+
+            // Store the vectors
+            WaveDisplacementVectors.Add(displacementVectors);
+        }
+        private void ApplyDirectionalEffects(float[] timeSeries, Vector3 direction)
+        {
+            // Calculate anisotropy factor based on direction (example: slower in Z direction)
+            float xFactor = Math.Abs(direction.X) * 1.0f;
+            float yFactor = Math.Abs(direction.Y) * 1.0f;
+            float zFactor = Math.Abs(direction.Z) * 1.2f; // Z direction is slower
+
+            // Calculate total directional delay factor
+            float delayFactor = xFactor + yFactor + zFactor;
+
+            // Skip if no significant variation
+            if (Math.Abs(delayFactor - 1.0f) < 0.1f)
+                return;
+
+            // Apply delay by shifting the waveform
+            int shiftSamples = (int)(timeSeries.Length * 0.05f * (delayFactor - 1.0f));
+            if (shiftSamples > 0)
+            {
+                float[] shifted = new float[timeSeries.Length];
+                Array.Copy(timeSeries, 0, shifted, shiftSamples, timeSeries.Length - shiftSamples);
+                Array.Copy(shifted, 0, timeSeries, 0, timeSeries.Length);
+            }
+        }
         /// <summary>
         /// Kernel for injecting source wavelet directly on GPU
         /// </summary>
@@ -2329,9 +2579,9 @@ namespace CTSegmenter
         private static void Wave3DPropagationKernel(
     Index3D index,
     ArrayView3D<float, Stride3D.DenseXY> current,
-    ArrayView3D<float, Stride3D.DenseXY> prev,
+    ArrayView3D<float, Stride3D.DenseXY> previous,
     ArrayView3D<float, Stride3D.DenseXY> next,
-    ArrayView3D<float, Stride3D.DenseXY> velocityModel, // ← new
+    ArrayView3D<float, Stride3D.DenseXY> velocityModel,
     float dt,
     float dx,
     float attenuation,
@@ -2341,43 +2591,46 @@ namespace CTSegmenter
             int x = index.X, y = index.Y, z = index.Z;
             int nx = (int)current.Extent.X, ny = (int)current.Extent.Y, nz = (int)current.Extent.Z;
 
-            // Boundary check
+            // Skip boundaries to prevent instability
             if (x < 2 || x >= nx - 2 || y < 2 || y >= ny - 2 || z < 2 || z >= nz - 2)
             {
                 next[x, y, z] = 0.0f;
                 return;
             }
 
-            // Read local and neighbor values
-            float c0 = current[x, y, z];
-            float cxp = current[x + 1, y, z], cxn = current[x - 1, y, z];
-            float cyp = current[x, y + 1, z], cyn = current[x, y - 1, z];
-            float czp = current[x, y, z + 1], czn = current[x, y, z - 1];
+            // Get local velocity for this cell (heterogeneous model)
+            float velocity = velocityModel[x, y, z];
 
-            // Compute Laplacian (stencil varies by wave type)
-            float lap;
+            // Compute Laplacian with different stencils for P and S waves
+            float laplacian;
+
             if (isPWave == 1)
             {
-                lap = (cxp + cxn + cyp + cyn + czp + czn - 6f * c0) / (dx * dx);
+                // Standard 3D Laplacian for P-waves (longitudinal)
+                laplacian = (current[x + 1, y, z] + current[x - 1, y, z] +
+                             current[x, y + 1, z] + current[x, y - 1, z] +
+                             current[x, y, z + 1] + current[x, y, z - 1] -
+                             6.0f * current[x, y, z]) / (dx * dx);
             }
             else
             {
-                lap = (0.8f * (cxp + cxn + cyp + cyn + czp + czn) - 4.8f * c0) / (dx * dx);
+                // Modified stencil for S-waves (transverse) with improved accuracy
+                laplacian = (0.8f * (current[x + 1, y, z] + current[x - 1, y, z] +
+                                     current[x, y + 1, z] + current[x, y - 1, z] +
+                                     current[x, y, z + 1] + current[x, y, z - 1]) -
+                             4.8f * current[x, y, z]) / (dx * dx);
             }
 
-            // Fetch **local** velocity from the heterogeneous model
-            float localVel = velocityModel[x, y, z];
-            float accel = localVel * localVel * lap;
+            // Apply wave equation: acceleration = velocity² * laplacian
+            float acceleration = velocity * velocity * laplacian;
 
-            // Attenuation term (energy‐dependent)
-            float prevVal = prev[x, y, z];
-            float energyFactor = 1.0f + 0.05f * (c0 * c0);
-            accel -= (attenuation * 0.5f * energyFactor) * (c0 - prevVal) / dt;
+            // Apply frequency-dependent attenuation
+            float attenuationFactor = attenuation * (1.0f + 0.1f * (current[x, y, z] * current[x, y, z]));
+            acceleration -= attenuationFactor * (current[x, y, z] - previous[x, y, z]) / dt;
 
-            // Time‐stepping
-            next[x, y, z] = 2f * c0 - prevVal + dt * dt * accel;
+            // Apply wave equation time integration (central difference)
+            next[x, y, z] = 2.0f * current[x, y, z] - previous[x, y, z] + dt * dt * acceleration;
         }
-
         /// <summary>
         /// Calculate the average velocity along the test direction
         /// </summary>

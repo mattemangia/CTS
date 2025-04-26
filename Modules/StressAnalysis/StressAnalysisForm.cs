@@ -79,6 +79,7 @@ namespace CTSegmenter
         private float _sliceThickness = 0.05f; // Thickness of the slice
         private System.Windows.Forms.Timer _sliceDebounceTimer;
         private float _pendingSlicePosition;
+        public bool Use3DSimulation { get; private set; } = false;
 
         // Properties to expose inhomogeneous density state
         public bool InhomogeneousDensityEnabled => inhomogeneousDensityEnabled;
@@ -809,7 +810,23 @@ namespace CTSegmenter
                     "Inhomogeneous density mode disabled.";
             };
             simOptionsTriple.Items.Add(toggleInhomogeneousBtn);
-
+            var toggle3DSimulationBtn = new KryptonRibbonGroupButton
+            {
+                TextLine1 = "Enable 3D",
+                TextLine2 = "Simulation",
+                Checked = Use3DSimulation,
+                ButtonType = GroupButtonType.Check,
+                ImageSmall = Create3DSimulationIcon(16),
+                ImageLarge = Create3DSimulationIcon(32)
+            };
+            toggle3DSimulationBtn.Click += (s, e) =>
+            {
+                Use3DSimulation = toggle3DSimulationBtn.Checked;
+                statusHeader.Text = Use3DSimulation ?
+                    "3D simulation mode enabled. Full wave physics model will be used." :
+                    "1D simulation mode enabled. Simplified wave propagation model will be used.";
+            };
+            simOptionsTriple.Items.Add(toggle3DSimulationBtn);
             // Mesh Generation buttons
             {
                 var meshTriple = new KryptonRibbonGroupTriple();
@@ -1151,6 +1168,83 @@ namespace CTSegmenter
             // Save the “original” pages for reopen logic
             InitializeTabManagement();
             InitializeSimulationParameters();
+        }
+        private Image Create3DSimulationIcon(int size)
+        {
+            Bitmap bmp = new Bitmap(size, size);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+
+                // Draw a 3D cube for the icon
+                int margin = size / 6;
+
+                // Front face (blue)
+                Point[] frontFace = new Point[] {
+            new Point(margin, margin),
+            new Point(size - margin, margin),
+            new Point(size - margin, size - margin),
+            new Point(margin, size - margin)
+        };
+                using (SolidBrush brushFront = new SolidBrush(Color.FromArgb(150, 100, 150, 255)))
+                {
+                    g.FillPolygon(brushFront, frontFace);
+                }
+
+                // Top face (lighter blue)
+                int offset = size / 4;
+                Point[] topFace = new Point[] {
+            new Point(margin, margin),
+            new Point(size - margin, margin),
+            new Point(size - margin + offset, margin - offset / 2),
+            new Point(margin + offset, margin - offset / 2)
+        };
+                using (SolidBrush brushTop = new SolidBrush(Color.FromArgb(150, 150, 200, 255)))
+                {
+                    g.FillPolygon(brushTop, topFace);
+                }
+
+                // Side face (darker blue)
+                Point[] sideFace = new Point[] {
+            new Point(size - margin, margin),
+            new Point(size - margin + offset, margin - offset / 2),
+            new Point(size - margin + offset, size - margin - offset / 2),
+            new Point(size - margin, size - margin)
+        };
+                using (SolidBrush brushSide = new SolidBrush(Color.FromArgb(150, 50, 100, 200)))
+                {
+                    g.FillPolygon(brushSide, sideFace);
+                }
+
+                // Draw wave propagating in 3D (red oscillating line in a curvature)
+                using (Pen wavePen = new Pen(Color.FromArgb(220, 255, 50, 50), 1.5f))
+                {
+                    int waveCount = 4;
+                    int waveHeight = size / 6;
+
+                    for (int i = 1; i < waveCount; i++)
+                    {
+                        float factor = i / (float)waveCount;
+                        int waveX = margin + (int)((size - 2 * margin) * factor);
+                        int waveZ = (int)(size / 2 + waveHeight * Math.Sin(factor * Math.PI * 2));
+
+                        // Draw a small circle at wave point
+                        int radius = 2;
+                        g.FillEllipse(new SolidBrush(Color.Red),
+                            waveX - radius, waveZ - radius,
+                            radius * 2, radius * 2);
+                    }
+                }
+
+                // Draw "3D" text
+                using (Font font = new Font("Arial", size / 4, FontStyle.Bold))
+                using (SolidBrush textBrush = new SolidBrush(Color.White))
+                {
+                    g.DrawString("3D", font, textBrush,
+                        new RectangleF(size / 2 - size / 8, size / 2 - size / 8, size / 2, size / 2));
+                }
+            }
+            return bmp;
         }
         private Image CreateVaryingDensityIcon(int size)
         {
@@ -3133,7 +3227,7 @@ namespace CTSegmenter
 
             try
             {
-                using (DensitySettingsForm form = new DensitySettingsForm(this, mainForm))
+                using (DensitySettingsForm form = new DensitySettingsForm((IMaterialDensityProvider)this, mainForm))
                 {
                     if (form.ShowDialog() == DialogResult.OK)
                     {
@@ -3863,7 +3957,7 @@ namespace CTSegmenter
                 if (cohesionNumeric != null) simulation.CohesionStrength = (float)cohesionNumeric.Value;
                 if (frictionAngleNumeric != null) simulation.FrictionAngle = (float)frictionAngleNumeric.Value;
                 if (tensileStrengthNumeric != null) simulation.TensileStrength = (float)tensileStrengthNumeric.Value;
-
+                
                 Logger.Log($"[StressAnalysisForm] Strength: C={simulation.CohesionStrength} MPa, ϕ={simulation.FrictionAngle}°, T={simulation.TensileStrength} MPa");
 
                 //--- progress callback ---------------------------------------------
@@ -4491,21 +4585,21 @@ namespace CTSegmenter
 
                 //--- create sim via factory ----------------------------------------
                 AcousticVelocitySimulation simulation =
-                    SimulationFactory.CreateAcousticSimulation(
-                        selectedMaterial,
-                        simulationTriangles,
-                        confiningPressure,
-                        waveType,
-                        timeSteps,
-                        frequency,
-                        amplitude,
-                        energy,
-                        direction,                       // the correct token
-                        UseExtendedSimulationTime,
-                        inhomogeneousDensityEnabled,
-                        densityMap,
-                        triaxialResult,
-                        mainForm);
+            SimulationFactory.CreateAcousticSimulation(
+                selectedMaterial,
+                simulationTriangles,
+                confiningPressure,
+                Use3DSimulation ? "3D-Wave" : waveType, // Pass special type for 3D
+                timeSteps,
+                frequency,
+                amplitude,
+                energy,
+                direction,
+                UseExtendedSimulationTime,
+                inhomogeneousDensityEnabled,
+                densityMap,
+                triaxialResult,
+                mainForm);
 
                 simulation.TimeStepFactor = dtFactor;
                 currentAcousticSim = simulation;

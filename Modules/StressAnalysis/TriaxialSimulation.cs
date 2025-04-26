@@ -23,7 +23,7 @@ namespace CTSegmenter
 
         public bool FractureDetected { get; private set; }
         public float theoreticalBreakingPressure { get; private set; }
-        private Action<Index1D,
+        public Action<Index1D,
        ArrayView<System.Numerics.Vector3>,
        ArrayView<System.Numerics.Vector3>,
        ArrayView<System.Numerics.Vector3>,
@@ -102,19 +102,20 @@ namespace CTSegmenter
         /// <param name="pressureSteps">Number of pressure steps</param>
         /// <param name="direction">Test direction (X, Y, or Z)</param>
         public TriaxialSimulation(
-            Material material,
-            List<Triangle> triangles,
-            float confiningPressure,
-            float minAxialPressure,
-            float maxAxialPressure,
-            int pressureSteps,
-            string direction)
+     Material material,
+     List<Triangle> triangles,
+     float confiningPressure,
+     float minAxialPressure,
+     float maxAxialPressure,
+     int pressureSteps,
+     string direction)
         {
             SimulationId = Guid.NewGuid();
             CreationTime = DateTime.Now;
             Status = SimulationStatus.NotInitialized;
             Progress = 0f;
             FracturePlaneNormals = new Dictionary<Triangle, Vector3>();
+
             // Set simulation parameters
             Material = material;
             _simulationTriangles = new List<Triangle>(triangles);
@@ -128,7 +129,7 @@ namespace CTSegmenter
 
             // Set test direction
             TestDirection = Vector3.Normalize(DirectionParser.Parse(direction));
-            Logger.Log("[TriaxialSimulation] Running on " + TestDirection + " Axis");
+            Logger.Log($"[TriaxialSimulation] Running on {TestDirection} Axis with material density {material.Density:F0} kg/m³");
 
             // Initialize result storage
             SimulationPressures = new List<float>();
@@ -140,10 +141,38 @@ namespace CTSegmenter
             // Initialize ILGPU
             InitializeILGPU();
 
-            // Estimate material properties based on density if not set
+            // Always estimate material properties based on density
             EstimateMaterialProperties();
-        }
 
+            // Calculate and log theoretical breaking pressure
+            float theoreticalBreak = CalculateTheoreticalBreakingPressure();
+            Logger.Log($"[TriaxialSimulation] Theoretical breaking pressure: {theoreticalBreak:F2} MPa");
+        }
+        public void UpdateMaterialDensity(double newDensity)
+        {
+            if (newDensity <= 0)
+            {
+                Logger.Log($"[TriaxialSimulation] Invalid density: {newDensity}. Must be greater than 0.");
+                return;
+            }
+
+            // Update the material density
+            Material.Density = newDensity;
+            Logger.Log($"[TriaxialSimulation] Updated material density to {newDensity:F0} kg/m³");
+
+            // Re-estimate properties based on new density
+            EstimateMaterialProperties();
+
+            // Recalculate theoretical breaking pressure
+            float theoreticalBreak = CalculateTheoreticalBreakingPressure();
+            Logger.Log($"[TriaxialSimulation] Updated theoretical breaking pressure: {theoreticalBreak:F2} MPa");
+
+            // Reset simulation state to require re-initialization
+            if (Status != SimulationStatus.Running)
+            {
+                Status = SimulationStatus.NotInitialized;
+            }
+        }
         /// <summary>
         /// Initialize ILGPU context and accelerator
         /// </summary>
@@ -182,18 +211,18 @@ namespace CTSegmenter
         /// <summary>
         /// Estimate material properties based on density
         /// </summary>
-        private void EstimateMaterialProperties()
+        public void EstimateMaterialProperties()
         {
             if (Material == null || Material.Density <= 0)
             {
                 throw new InvalidOperationException("Material density must be set for the simulation");
             }
 
-            // These are simplified estimations based on rock physics relationships
-            // For real-world applications, these should be measured experimentally
-
             // Density in kg/m³
             float density = (float)Material.Density;
+
+            // Log initial density to verify it's being used
+            Logger.Log($"[TriaxialSimulation] Estimating material properties based on density: {density:F0} kg/m³");
 
             // Estimate material properties based on common rock physics relationships
             if (Material.Name != null)
@@ -202,65 +231,69 @@ namespace CTSegmenter
 
                 if (materialName == "limestone" || materialName == "calcite")
                 {
-                    // Limestone/Calcite typical values
-                    YoungModulus = 50000 + density * 0.01f; // MPa
+                    // Limestone/Calcite typical values - with stronger density scaling
+                    YoungModulus = 40000 + density * 0.02f; // MPa - increased density influence
                     PoissonRatio = 0.25f + (density - 2500) * 0.0001f; // Typically 0.25-0.3
-                    CohesionStrength = 10 + (density - 2500) * 0.01f; // MPa
+                    CohesionStrength = 7 + (density - 2500) * 0.012f; // MPa - increased density influence
                     FrictionAngle = 35 + (density - 2500) * 0.005f; // Degrees
                     TensileStrength = 5 + (density - 2500) * 0.005f; // MPa
                 }
                 else if (materialName == "sandstone" || materialName == "quartz")
                 {
-                    // Sandstone/Quartz typical values
-                    YoungModulus = 20000 + density * 0.01f; // MPa
+                    // Sandstone/Quartz typical values - with stronger density scaling
+                    YoungModulus = 15000 + density * 0.015f; // MPa - increased density influence
                     PoissonRatio = 0.2f + (density - 2000) * 0.0001f; // Typically 0.2-0.25
-                    CohesionStrength = 5 + (density - 2000) * 0.01f; // MPa
+                    CohesionStrength = 3 + (density - 2000) * 0.01f; // MPa
                     FrictionAngle = 30 + (density - 2000) * 0.005f; // Degrees
                     TensileStrength = 2 + (density - 2000) * 0.005f; // MPa
                 }
                 else if (materialName == "granite")
                 {
-                    // Granite typical values
-                    YoungModulus = 60000 + density * 0.01f; // MPa
+                    // Granite typical values - with stronger density scaling
+                    YoungModulus = 50000 + density * 0.02f; // MPa - increased density influence
                     PoissonRatio = 0.25f + (density - 2700) * 0.0001f; // Typically 0.25-0.27
-                    CohesionStrength = 20 + (density - 2700) * 0.01f; // MPa
+                    CohesionStrength = 15 + (density - 2700) * 0.015f; // MPa - increased density influence
                     FrictionAngle = 45 + (density - 2700) * 0.005f; // Degrees
-                    TensileStrength = 10 + (density - 2700) * 0.005f; // MPa
+                    TensileStrength = 8 + (density - 2700) * 0.006f; // MPa
                 }
                 else if (materialName == "shale" || materialName == "clay")
                 {
-                    // Shale/Clay typical values
-                    YoungModulus = 10000 + density * 0.01f; // MPa
+                    // Shale/Clay typical values - with stronger density scaling
+                    YoungModulus = 8000 + density * 0.012f; // MPa - increased density influence
                     PoissonRatio = 0.3f + (density - 2200) * 0.0001f; // Typically 0.3-0.35
-                    CohesionStrength = 2 + (density - 2200) * 0.01f; // MPa
+                    CohesionStrength = (float)(1.5 + (density - 2200) * 0.01f); // MPa
                     FrictionAngle = 20 + (density - 2200) * 0.005f; // Degrees
-                    TensileStrength = 1 + (density - 2200) * 0.005f; // MPa
+                    TensileStrength = (float)(0.8 + (density - 2200) * 0.005f); // MPa
                 }
                 else
                 {
-                    // Generic rock
-                    YoungModulus = 30000 + density * 0.01f; // MPa
+                    // Generic rock - with stronger density scaling
+                    YoungModulus = 25000 + density * 0.015f; // MPa - increased density influence
                     PoissonRatio = 0.25f;
-                    CohesionStrength = 10f; // MPa
-                    FrictionAngle = 30f; // Degrees
-                    TensileStrength = 5f; // MPa
+                    CohesionStrength = 8 + density * 0.003f; // MPa - direct density scaling
+                    FrictionAngle = 30 + density * 0.001f; // Degrees - direct density scaling
+                    TensileStrength = 4 + density * 0.001f; // MPa - direct density scaling
                 }
             }
             else
             {
-                // Generic rock (if material name is null)
-                YoungModulus = 30000 + density * 0.01f; // MPa
+                // Generic rock (if material name is null) - with stronger density scaling
+                YoungModulus = 25000 + density * 0.015f; // MPa - increased density influence
                 PoissonRatio = 0.25f;
-                CohesionStrength = 10f; // MPa
-                FrictionAngle = 30f; // Degrees
-                TensileStrength = 5f; // MPa
+                CohesionStrength = 8 + density * 0.003f; // MPa - direct density scaling
+                FrictionAngle = 30 + density * 0.001f; // Degrees - direct density scaling
+                TensileStrength = 4 + density * 0.001f; // MPa - direct density scaling
             }
 
             // Clamp values to reasonable ranges
             PoissonRatio = ClampValue(PoissonRatio, 0.05f, 0.45f);
             FrictionAngle = ClampValue(FrictionAngle, 10f, 60f); // Degrees
-        }
 
+            // Log the resulting properties to verify density influence
+            Logger.Log($"[TriaxialSimulation] Material properties calculated: " +
+                       $"Cohesion={CohesionStrength:F2} MPa, Friction={FrictionAngle:F1}°, " +
+                       $"E={YoungModulus:F0} MPa, ν={PoissonRatio:F2}");
+        }
         #endregion Constructor and Initialization
 
         #region Utility Methods
@@ -385,6 +418,11 @@ namespace CTSegmenter
                 FracturePlaneNormals.Clear();
                 BreakingPressure = 0;
                 FailureTimeStep = -1;
+                FractureDetected = false;
+
+                // Always recalculate theoretical breaking pressure using current properties
+                theoreticalBreakingPressure = CalculateTheoreticalBreakingPressure();
+                Logger.Log($"[TriaxialSimulation] Initialized with theoretical breaking pressure: {theoreticalBreakingPressure:F2} MPa");
 
                 // Set initial progress
                 Progress = 0;
@@ -1553,7 +1591,40 @@ namespace CTSegmenter
 
             return primaryDisplacement;
         }
-        public float CalculateTheoreticalBreakingPressure()
+        public void TestDensitySensitivity()
+        {
+            // Save original density
+            double originalDensity = Material.Density;
+
+            // Test a range of densities and log the results
+            double[] testDensities = { 1800, 2000, 2200, 2400, 2600, 2800, 3000 };
+
+            Logger.Log("====== DENSITY SENSITIVITY TEST ======");
+            Logger.Log($"Original density: {originalDensity:F0} kg/m³");
+
+            foreach (double testDensity in testDensities)
+            {
+                // Update density
+                Material.Density = testDensity;
+
+                // Re-estimate properties
+                EstimateMaterialProperties();
+
+                // Calculate theoretical breaking pressure
+                float breakPressure = CalculateTheoreticalBreakingPressure();
+
+                Logger.Log($"Density: {testDensity:F0} kg/m³ → Breaking P: {breakPressure:F2} MPa, " +
+                           $"Cohesion: {CohesionStrength:F2} MPa, Friction: {FrictionAngle:F1}°");
+            }
+
+            // Restore original density
+            Material.Density = originalDensity;
+            EstimateMaterialProperties();
+
+            Logger.Log("====== END SENSITIVITY TEST ======");
+            Logger.Log($"Restored original density: {originalDensity:F0} kg/m³");
+        }
+        public virtual float CalculateTheoreticalBreakingPressure()
         {
             // Convert friction angle to radians
             float phiRad = FrictionAngle * (float)Math.PI / 180.0f;
@@ -1564,6 +1635,11 @@ namespace CTSegmenter
             // σ₁ = σ₃ + (2c·cos(ϕ))/(1-sin(ϕ))
             float theoreticalSigma1 = ConfiningPressure +
                 (2.0f * CohesionStrength * cosPhi) / (1.0f - sinPhi);
+
+            // Log with density to verify relationship
+            Logger.Log($"[TriaxialSimulation] Theoretical breaking pressure calculation: " +
+                      $"{theoreticalSigma1:F2} MPa (Density: {Material.Density:F0} kg/m³, " +
+                      $"Cohesion: {CohesionStrength:F2} MPa, Friction: {FrictionAngle:F1}°)");
 
             return theoreticalSigma1;
         }
@@ -1593,21 +1669,21 @@ namespace CTSegmenter
         // (This isn't modified as it's primarily used by the child class)
         // Fix the ComputeInhomogeneousStressKernelFixed method to use fewer parameters
         public static void ComputeInhomogeneousStressKernelFixed(
-            Index1D idx,
-            ArrayView<Vector3> v1Arr,
-            ArrayView<Vector3> v2Arr,
-            ArrayView<Vector3> v3Arr,
-            ArrayView<float> stressFactors,
-            float pConf,                  // Confining pressure [MPa]
-            float pAxial,                 // Applied axial pressure [MPa]
-            Vector3 axis,                 // Test axis (unit)
-            float cohesion,               // Cohesion strength [MPa]
-            float frictionAngleRad,       // Friction angle in radians (combined parameter)
-            ArrayView<float> vmArr,       // Von‑Mises σₑ [MPa]
-            ArrayView<float> s1Arr,       // σ₁
-            ArrayView<float> s2Arr,       // σ₂
-            ArrayView<float> s3Arr,       // σ₃
-            ArrayView<int> fracArr)       // 1 = failed, 0 = intact
+    Index1D idx,
+    ArrayView<Vector3> v1Arr,
+    ArrayView<Vector3> v2Arr,
+    ArrayView<Vector3> v3Arr,
+    ArrayView<float> stressFactors, // Density-derived stress factors
+    float pConf,                  // Confining pressure [MPa]
+    float pAxial,                 // Applied axial pressure [MPa]
+    Vector3 axis,                 // Test axis (unit)
+    float cohesion,               // Cohesion strength [MPa]
+    float frictionAngleRad,       // Friction angle in radians
+    ArrayView<float> vmArr,       // Von‑Mises σₑ [MPa]
+    ArrayView<float> s1Arr,       // σ₁
+    ArrayView<float> s2Arr,       // σ₂
+    ArrayView<float> s3Arr,       // σ₃
+    ArrayView<int> fracArr)       // 1 = failed, 0 = intact
         {
             // IMPORTANT: Add bounds check
             if (idx >= v1Arr.Length || idx >= v2Arr.Length || idx >= v3Arr.Length ||
@@ -1618,18 +1694,18 @@ namespace CTSegmenter
                 return;
             }
 
-            // Calculate sin and cos inside the kernel instead of passing both
+            // Calculate sin and cos inside the kernel
             float sinPhi = XMath.Sin(frictionAngleRad);
             float cosPhi = XMath.Cos(frictionAngleRad);
 
-            // Get density stress factor for this triangle
+            // Get density-derived stress factor for this triangle
             float stressFactor = stressFactors[idx];
 
-            // Scale pressures by density factor
+            // Scale pressures and cohesion by density factor
             float scaledPConf = pConf * stressFactor;
             float scaledPAxial = pAxial * stressFactor;
+            float scaledCohesion = cohesion * XMath.Sqrt(stressFactor); // Scale cohesion with square root of density ratio
 
-            // Rest of the kernel implementation remains the same
             Vector3 v1 = v1Arr[idx];
             Vector3 v2 = v2Arr[idx];
             Vector3 v3 = v3Arr[idx];
@@ -1714,8 +1790,8 @@ namespace CTSegmenter
                                    (sigma3 - sigma1) * (sigma3 - sigma1));
             vonMises = XMath.Sqrt(vonMises);
 
-            // Mohr-Coulomb failure check
-            float criterion = (2.0f * cohesion * cosPhi + (sigma1 + sigma3) * sinPhi) / (1.0f - sinPhi);
+            // Mohr-Coulomb failure check with density-adjusted cohesion
+            float criterion = (2.0f * scaledCohesion * cosPhi + (sigma1 + sigma3) * sinPhi) / (1.0f - sinPhi);
             int failed = (sigma1 - sigma3 >= criterion) ? 1 : 0;
 
             // Store results
@@ -1725,8 +1801,6 @@ namespace CTSegmenter
             s3Arr[idx] = sigma3;
             fracArr[idx] = failed;
         }
-
-
         // Enhanced ComputeStressKernelFixed method with more accurate physical calculations
         // In the ComputeStressKernelFixed method, replace:
         // float xVar = (centroid.X * 0.2f) % 1.0f;

@@ -72,7 +72,7 @@ namespace CTSegmenter
         {
             _useInhomogeneousDensity = useInhomogeneousDensity;
             _densityMap = densityMap;
-            InitializeILGPU();
+            //InitializeILGPU();
             // Initialize density-dependent collections
             TriangleDensities = new Dictionary<Triangle, float>();
             TriangleStressFactors = new Dictionary<Triangle, float>();
@@ -151,14 +151,19 @@ namespace CTSegmenter
                 return;
             }
 
-            // Track density statistics
+            // Track density statistics in kg/m³
             float minDensity = float.MaxValue;
             float maxDensity = float.MinValue;
             float sumDensity = 0;
             int densityPointCount = 0;
 
-            // Default to material density
+            // Default to material density in kg/m³
             float baseDensity = (float)Material.Density;
+            if (baseDensity <= 0)
+            {
+                Logger.Log("[InhomogeneousTriaxialSimulation] Warning: Material density is zero or negative. Using default 2500 kg/m³");
+                baseDensity = 2500f; // Default for typical rock material (kg/m³)
+            }
 
             // Process each triangle in the mesh with improved density model
             foreach (var triangle in MeshTriangles)
@@ -171,13 +176,24 @@ namespace CTSegmenter
                 );
 
                 // Find the density value from the density map using improved interpolation
-                float density = FindInterpolatedDensity(centroid);
+                float density = FindInterpolatedDensity(centroid, baseDensity);
 
-                // Store the density for this triangle
+                // Apply sanity check to avoid negative or unreasonable density values
+                if (density <= 0)
+                {
+                    Logger.Log($"[InhomogeneousTriaxialSimulation] Warning: Found invalid density {density} kg/m³ at position {centroid}. Using base density.");
+                    density = baseDensity;
+                }
+                else if (density < 100 || density > 10000)
+                {
+                    Logger.Log($"[InhomogeneousTriaxialSimulation] Warning: Density value {density} kg/m³ at position {centroid} is outside reasonable range for rocks (100-10000 kg/m³)");
+                }
+
+                // Store the density for this triangle (kg/m³)
                 TriangleDensities[triangle] = density;
 
-                // Calculate a more sophisticated stress factor based on density variation
-                // This provides more nuanced behavior based on material mechanics theory
+                // IMPORTANT: Calculate stress factor using improved relationship
+                // This is critical for breaking pressure differences
                 float stressFactor = CalculateStressFactor(density, baseDensity);
 
                 // Store the stress factor for this triangle
@@ -195,38 +211,158 @@ namespace CTSegmenter
             MaximumDensity = maxDensity;
             AverageDensity = densityPointCount > 0 ? sumDensity / densityPointCount : baseDensity;
 
-            Logger.Log($"[InhomogeneousTriaxialSimulation] Density statistics: Min={MinimumDensity:F1}, " +
-                      $"Max={MaximumDensity:F1}, Avg={AverageDensity:F1}, Triangles={densityPointCount}");
+            // Log with explicit units
+            Logger.Log($"[InhomogeneousTriaxialSimulation] Density statistics: Min={MinimumDensity:F1} kg/m³, " +
+                      $"Max={MaximumDensity:F1} kg/m³, Avg={AverageDensity:F1} kg/m³, Triangles={densityPointCount}");
+
+            // Also log the stress factor range to help diagnose issues
+            float minStressFactor = float.MaxValue;
+            float maxStressFactor = float.MinValue;
+
+            foreach (var factor in TriangleStressFactors.Values)
+            {
+                minStressFactor = Math.Min(minStressFactor, factor);
+                maxStressFactor = Math.Max(maxStressFactor, factor);
+            }
+
+            Logger.Log($"[InhomogeneousTriaxialSimulation] Stress factor range: {minStressFactor:F3} to {maxStressFactor:F3}");
+
+            if (maxStressFactor - minStressFactor < 0.1f)
+            {
+                Logger.Log("[InhomogeneousTriaxialSimulation] WARNING: Very small stress factor range - density variations may not affect results significantly");
+            }
+        }
+        private float FindInterpolatedDensity(Vector3 position, float defaultDensity)
+        {
+            if (_densityMap == null || _densityMap.Count == 0)
+                return defaultDensity;
+
+            // Check if exact position exists
+            if (_densityMap.TryGetValue(position, out float exactDensity))
+            {
+                // Ensure the density is in kg/m³ 
+                // If the density map values are in another unit, convert them here
+                return EnsureValidDensity(exactDensity, defaultDensity);
+            }
+
+            // Use inverse distance weighted interpolation
+            const float searchRadius = 10.0f; // Larger radius for better interpolation
+            const int maxNeighbors = 5; // Use at most 5 closest points
+
+            List<(Vector3 Pos, float Density, float Distance)> neighbors = new List<(Vector3, float, float)>();
+
+            // Find all points within search radius
+            foreach (var entry in _densityMap)
+            {
+                Vector3 densityPos = entry.Key;
+                float distance = Vector3.Distance(position, densityPos);
+
+                if (distance <= searchRadius)
+                {
+                    // Ensure the density value is valid
+                    float validDensity = EnsureValidDensity(entry.Value, defaultDensity);
+                    neighbors.Add((densityPos, validDensity, distance));
+                }
+            }
+
+            // Sort by distance and keep only the closest maxNeighbors
+            neighbors.Sort((a, b) => a.Distance.CompareTo(b.Distance));
+            if (neighbors.Count > maxNeighbors)
+                neighbors.RemoveRange(maxNeighbors, neighbors.Count - maxNeighbors);
+
+            // If no neighbors found, use base density
+            if (neighbors.Count == 0)
+                return defaultDensity;
+
+            // If only one neighbor, use its value
+            if (neighbors.Count == 1)
+                return neighbors[0].Density;
+
+            // Calculate IDW weights and sum
+            float weightSum = 0;
+            float valueSum = 0;
+
+            foreach (var (_, density, distance) in neighbors)
+            {
+                // Prevent division by zero
+                float effectiveDistance = Math.Max(distance, 0.0001f);
+                float weight = 1.0f / (effectiveDistance * effectiveDistance); // Square inverse distance
+
+                weightSum += weight;
+                valueSum += density * weight;
+            }
+
+            // Prevent division by zero
+            if (weightSum < 0.0001f)
+                return defaultDensity;
+
+            return valueSum / weightSum;
         }
 
+        // Helper method to ensure density values are valid
+        private float EnsureValidDensity(float density, float defaultDensity)
+        {
+            // Check for negative or zero values
+            if (density <= 0)
+                return defaultDensity;
+
+            // Check for extreme values that may indicate wrong units
+            // Typical rock densities range from ~1500 to ~5000 kg/m³
+            if (density < 100)
+            {
+                // If density is too small, might be in g/cm³ instead of kg/m³
+                Logger.Log($"[InhomogeneousTriaxialSimulation] Warning: Found small density value {density}. Converting from g/cm³ to kg/m³");
+                return density * 1000.0f; // Convert g/cm³ to kg/m³
+            }
+            else if (density > 10000)
+            {
+                // If density is too large, might be in a non-standard unit
+                Logger.Log($"[InhomogeneousTriaxialSimulation] Warning: Density value {density} exceeds reasonable range. Capping to 5000 kg/m³");
+                return 5000.0f; // Cap at reasonable maximum
+            }
+
+            return density;
+        }
         /// <summary>
         /// Calculate stress factor from density using improved physical relationship
         /// Higher density regions typically have higher elastic moduli and strength
         /// </summary>
         private float CalculateStressFactor(float density, float baseDensity)
         {
-            // More sophisticated relationship between density and stiffness/strength
-            // Based on research showing non-linear relationships between density and mechanical properties
+            // Ensure both densities are positive to avoid division issues
+            if (density <= 0 || baseDensity <= 0)
+            {
+                Logger.Log($"[InhomogeneousTriaxialSimulation] Warning: Invalid density values in stress factor calculation: {density} / {baseDensity} kg/m³");
+                return 1.0f; // Default to neutral factor
+            }
 
             // If density is very low, provide a floor to prevent numerical issues
             if (density < 0.1f * baseDensity)
+            {
+                Logger.Log($"[InhomogeneousTriaxialSimulation] Warning: Extremely low density {density} kg/m³ compared to base {baseDensity} kg/m³");
                 density = 0.1f * baseDensity;
+            }
 
             float relativeDensity = density / baseDensity;
 
-            // The relationship between density and elastic properties follows a power law
-            // E ∝ ρ^n where n is typically between 1.5 and 3 for geological materials
-            float exponent = 2.0f; // Empirical exponent (cubic relationship for ceramics, ~2 for rocks)
+            // CRUCIAL FIX: The relationship between density and strength should be more pronounced
+            // Increase from 2.0 to 2.5 for more sensitivity
+            float exponent = 2.5f;
 
-            // Calculate stress factor with power law relationship and limits
+            // Calculate stress factor with power law relationship
             float stressFactor = (float)Math.Pow(relativeDensity, exponent - 1.0f);
 
-            // Limit range to prevent extreme values
-            stressFactor = Math.Max(0.1f, Math.Min(stressFactor, 10.0f));
+            // DEBUG: Log some extreme values to verify range
+            if (stressFactor < 0.5f || stressFactor > 2.0f)
+            {
+                Logger.Log($"[InhomogeneousTriaxialSimulation] Stress factor {stressFactor:F3} for relative density {relativeDensity:F3}");
+            }
+
+            // Allow a wider range to see more effect (0.05-15 instead of 0.1-10)
+            stressFactor = Math.Max(0.05f, Math.Min(stressFactor, 15.0f));
 
             return stressFactor;
         }
-
         /// <summary>
         /// Find the interpolated density value from the density map
         /// Uses inverse distance weighting for smoother transitions
@@ -367,7 +503,7 @@ namespace CTSegmenter
             // Calculate theoretical breaking pressure for reference
             float theoreticalBreak = CalculateTheoreticalBreakingPressure();
 
-            // CRITICAL: Ensure we record reasonable strain values
+            // Ensure we record reasonable strain values
             float currentStrain = CalculateStrain(axialPressure);
 
             // If we're adding a new pressure point, also add a strain value
@@ -417,21 +553,48 @@ namespace CTSegmenter
                 using (var bs3 = _accelerator.Allocate1D<float>(n))
                 using (var bf = _accelerator.Allocate1D<int>(n))
                 {
-                    // Call the kernel with the modified signature
-                    _inhomogeneousStressKernel(
-                        n,
-                        b1.View, b2.View, b3.View,
-                        bsf.View,
-                        ConfiningPressure,
-                        axialPressure,
-                        TestDirection,
-                        CohesionStrength,
-                        frictionAngleRad,
-                        bv.View,
-                        bs1.View,
-                        bs2.View,
-                        bs3.View,
-                        bf.View);
+                    // Check if inhomogeneous kernel is available
+                    if (_inhomogeneousStressKernel != null)
+                    {
+                        // Call the inhomogeneous kernel
+                        _inhomogeneousStressKernel(
+                            n,
+                            b1.View, b2.View, b3.View,
+                            bsf.View,
+                            ConfiningPressure,
+                            axialPressure,
+                            TestDirection,
+                            CohesionStrength,
+                            frictionAngleRad,
+                            bv.View,
+                            bs1.View,
+                            bs2.View,
+                            bs3.View,
+                            bf.View);
+
+                        Logger.Log($"[InhomogeneousTriaxialSimulation] Using inhomogeneous kernel at {axialPressure:F2} MPa");
+                    }
+                    else
+                    {
+                        // Log the issue and fall back to base class computation
+                        Logger.Log("[InhomogeneousTriaxialSimulation] WARNING: Inhomogeneous kernel not available, using base computation");
+
+                        // Use the base kernel if inhomogeneous one is not available
+                        base._computeStressKernelSafe(
+                            n,
+                            b1.View, b2.View, b3.View,
+                            ConfiningPressure,
+                            axialPressure,
+                            TestDirection,
+                            CohesionStrength,
+                            (float)Math.Sin(frictionAngleRad),
+                            (float)Math.Cos(frictionAngleRad),
+                            bv.View,
+                            bs1.View,
+                            bs2.View,
+                            bs3.View,
+                            bf.View);
+                    }
 
                     _accelerator.Synchronize();
 
@@ -592,7 +755,7 @@ namespace CTSegmenter
 
                 tri.FractureProbability = fractureProb;
 
-                // CRITICAL: Improve fracture detection - save whether it was already fractured
+                // Save whether it was already fractured
                 bool wasAlreadyFractured = tri.IsFractured;
 
                 // Multiple fracture criteria
@@ -601,12 +764,12 @@ namespace CTSegmenter
                 bool stressBasedFracture = s1[i] > theoreticalBreak * 0.9f; // Stress-based criterion
 
                 // Force fracture when pressure gets close to theoretical breaking pressure
-                bool forcedFracture = axialPressure >= theoreticalBreak * 0.9f && fractureProb > 0.2f;
+                bool forcedFracture = axialPressure >= theoreticalBreak * 0.95f && fractureProb > 0.2f;
 
                 // Combine all criteria
                 tri.IsFractured = fracturePredicted || probabilityBasedFracture || stressBasedFracture || forcedFracture;
 
-                // CRITICAL: Update breaking pressure when first fracture is detected
+                // Update breaking pressure when first fracture is detected
                 if (tri.IsFractured && !wasAlreadyFractured && BreakingPressure <= 0.001f)
                 {
                     BreakingPressure = axialPressure;
@@ -627,17 +790,30 @@ namespace CTSegmenter
             // force at least some triangles to fracture
             if (axialPressure >= theoreticalBreak * 0.95f && fcount == 0)
             {
-                // Find triangles with highest fracture probability
+                // Find triangles with highest fracture probability AND accounting for density
                 var candidates = new List<KeyValuePair<int, float>>();
                 for (int i = 0; i < n; i++)
                 {
-                    candidates.Add(new KeyValuePair<int, float>(i, _simulationTriangles[i].FractureProbability));
+                    // Get the triangle and its density info
+                    var tri = _simulationTriangles[i];
+                    float densityFactor = 1.0f;
+
+                    // Use inverse of density factor - lower density breaks first
+                    if (_useInhomogeneousDensity && TriangleStressFactors.TryGetValue(tri, out float factor))
+                    {
+                        // Invert the factor - weaker areas break first
+                        densityFactor = 1.0f / Math.Max(0.1f, factor);
+                    }
+
+                    // Combine fracture probability with density factor
+                    float combinedProbability = tri.FractureProbability * densityFactor;
+                    candidates.Add(new KeyValuePair<int, float>(i, combinedProbability));
                 }
 
                 // Sort by fracture probability (descending)
                 candidates.Sort((a, b) => b.Value.CompareTo(a.Value));
 
-                // Force fracture in top 5 candidates
+                // Force fracture in top candidates (proportional to density variations)
                 int forcedCount = Math.Min(5, candidates.Count);
                 for (int j = 0; j < forcedCount; j++)
                 {
@@ -646,14 +822,30 @@ namespace CTSegmenter
                     tri.IsFractured = true;
                     _simulationTriangles[idx] = tri;
                     fcount++;
+
+                    // Also store fracture plane normal if needed
+                    if (!FracturePlaneNormals.ContainsKey(tri))
+                    {
+                        // Create realistic fracture plane normal
+                        Vector3 triNormal = Vector3.Normalize(Vector3.Cross(
+                            tri.V2 - tri.V1,
+                            tri.V3 - tri.V1
+                        ));
+
+                        // Add variation based on principal stress directions
+                        Vector3 fracturePlaneNormal = CalculateFracturePlaneNormal(
+                            s1[idx], s3[idx], TestDirection, Vector3.UnitX);
+
+                        FracturePlaneNormals[tri] = fracturePlaneNormal;
+                    }
                 }
 
-                // Set breaking pressure
+                // Set breaking pressure based on actual density-adjusted properties
                 if (BreakingPressure <= 0.001f)
                 {
                     BreakingPressure = axialPressure;
                     anyFractured = true;
-                    Logger.Log($"[InhomogeneousTriaxialSimulation] Forced fracture at theoretical pressure {axialPressure:F2} MPa");
+                    Logger.Log($"[InhomogeneousTriaxialSimulation] Forced fracture at pressure {axialPressure:F2} MPa (theoretical: {theoreticalBreak:F2} MPa)");
                 }
             }
 
@@ -678,8 +870,6 @@ namespace CTSegmenter
 
             return fracturePercentage > fractureThreshold || anyFractured;
         }
-
-
         /// <summary>
         /// Calculate displacement vector for a triangle with density effects
         /// </summary>
@@ -892,7 +1082,7 @@ namespace CTSegmenter
         /// </summary>
         public override void RenderResults(Graphics g, int width, int height, RenderMode renderMode = RenderMode.Stress)
         {
-            DisposeGpu();
+            
             // Call the base rendering method for all modes
             base.RenderResults(g, width, height, renderMode);
 
@@ -928,18 +1118,39 @@ namespace CTSegmenter
         }
         protected float GetInhomogeneousFractureThreshold(float pressure)
         {
-            // Start with pressure-dependent base threshold similar to the homogeneous simulation
             // Base threshold that decreases as pressure increases
-            float baseThreshold = 0.01f * (1.0f - 0.3f * pressure / MaxAxialPressure); // Lower base threshold
+            float baseThreshold = 0.01f * (1.0f - 0.3f * pressure / MaxAxialPressure);
+
+            // If using inhomogeneous density, adjust threshold
+            if (_useInhomogeneousDensity && TriangleStressFactors.Count > 0)
+            {
+                // Calculate average stress factor to adjust threshold
+                float avgStressFactor = 0;
+                int count = 0;
+
+                foreach (var factor in TriangleStressFactors.Values)
+                {
+                    avgStressFactor += factor;
+                    count++;
+                }
+
+                if (count > 0)
+                {
+                    avgStressFactor /= count;
+                    // Adjust threshold based on density variation
+                    // Higher avg density = higher threshold (need more elements to fail)
+                    baseThreshold *= (float)Math.Sqrt(avgStressFactor);
+                }
+            }
 
             // Scale inversely with cohesion strength (weaker materials break more easily)
-            float cohesionScale = 15.0f / Math.Max(1.0f, CohesionStrength); // Increased sensitivity
+            float cohesionScale = 15.0f / Math.Max(1.0f, CohesionStrength);
 
             // Scale inversely with friction angle (lower friction = easier to break)
-            float frictionScale = 35.0f / Math.Max(10.0f, FrictionAngle); // Increased sensitivity
+            float frictionScale = 35.0f / Math.Max(10.0f, FrictionAngle);
 
             // Combine factors (limit to reasonable range)
-            return Math.Min(0.08f, Math.Max(0.003f, baseThreshold * cohesionScale * frictionScale)); // Lower minimum
+            return Math.Min(0.08f, Math.Max(0.003f, baseThreshold * cohesionScale * frictionScale));
         }
         /// <summary>
         /// Render density distribution visualization with improved positioning and range
@@ -1119,6 +1330,81 @@ namespace CTSegmenter
 
             return maxCoord;
         }
+        public void TestDensitySensitivity()
+        {
+            // Save original density
+            double originalDensity = Material.Density;
+
+            // Test a range of densities and log the results
+            double[] testDensities = { 1800, 2000, 2200, 2400, 2600, 2800, 3000 };
+
+            Logger.Log("====== DENSITY SENSITIVITY TEST ======");
+            Logger.Log($"Original density: {originalDensity:F0} kg/m³");
+
+            foreach (double testDensity in testDensities)
+            {
+                // Update density
+                Material.Density = testDensity;
+
+                // Re-estimate properties
+                EstimateMaterialProperties();
+
+                // Calculate theoretical breaking pressure
+                float breakPressure = CalculateTheoreticalBreakingPressure();
+
+                Logger.Log($"Density: {testDensity:F0} kg/m³ → Breaking P: {breakPressure:F2} MPa, " +
+                           $"Cohesion: {CohesionStrength:F2} MPa, Friction: {FrictionAngle:F1}°");
+            }
+
+            // Restore original density
+            Material.Density = originalDensity;
+            EstimateMaterialProperties();
+
+            Logger.Log("====== END SENSITIVITY TEST ======");
+            Logger.Log($"Restored original density: {originalDensity:F0} kg/m³");
+        }
+        public override float CalculateTheoreticalBreakingPressure()
+        {
+            // Get average density-derived cohesion and friction values
+            float avgCohesion = CohesionStrength;
+            float avgFrictionDeg = FrictionAngle;
+
+            // If using inhomogeneous density, adjust based on average density variation
+            if (_useInhomogeneousDensity && TriangleStressFactors.Count > 0)
+            {
+                // Calculate average stress factor to scale cohesion
+                float avgStressFactor = 0;
+                int count = 0;
+
+                foreach (var factor in TriangleStressFactors.Values)
+                {
+                    avgStressFactor += factor;
+                    count++;
+                }
+
+                if (count > 0)
+                {
+                    avgStressFactor /= count;
+                    // Adjust cohesion based on density-derived stress factor
+                    // Cohesion typically scales with square root of density ratio
+                    avgCohesion *= (float)Math.Sqrt(avgStressFactor);
+                }
+            }
+
+            // Convert friction angle to radians
+            float phiRad = avgFrictionDeg * (float)Math.PI / 180.0f;
+            float sinPhi = (float)Math.Sin(phiRad);
+            float cosPhi = (float)Math.Cos(phiRad);
+
+            // Mohr-Coulomb failure criterion with density-adjusted cohesion
+            // σ₁ = σ₃ + (2c·cos(ϕ))/(1-sin(ϕ))
+            float theoreticalSigma1 = ConfiningPressure +
+                (2.0f * avgCohesion * cosPhi) / (1.0f - sinPhi);
+
+            Logger.Log($"[InhomogeneousTriaxialSimulation] Theoretical breaking pressure: {theoreticalSigma1:F2} MPa (adjusted by density)");
+
+            return theoreticalSigma1;
+        }
 
         /// <summary>
         /// Project a 3D vertex to 2D screen coordinates with improved projection
@@ -1210,6 +1496,7 @@ namespace CTSegmenter
         }
         private void DisposeGpu()
         {
+            base.Dispose();
             _accelerator?.Dispose();
             _context?.Dispose();
         }

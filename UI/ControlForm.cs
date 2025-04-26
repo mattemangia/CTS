@@ -1593,8 +1593,37 @@ namespace CTSegmenter
 
             // Add to Simulation menu
             simulationMenu.DropDownItems.Add(poreNetworkMenuItem);
+            AddAcousticSimulationToMenu();
         }
+        private void AddAcousticSimulationToMenu()
+        {
+            // Create Acoustic Simulation menu item
+            ToolStripMenuItem acousticSimulationMenuItem = new ToolStripMenuItem("Acoustic Simulation");
 
+            // Set click event handler
+            acousticSimulationMenuItem.Click += (s, e) =>
+            {
+                try
+                {
+                    // Create and show the acoustic simulation form
+                    AcousticSimulationForm acousticSimulationForm = new AcousticSimulationForm(mainForm);
+                    acousticSimulationForm.Show();
+                    Logger.Log("[ControlForm] Opened Acoustic Simulation form");
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Error opening Acoustic Simulation form: {ex.Message}",
+                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    Logger.Log($"[ControlForm] Error opening Acoustic Simulation form: {ex.Message}");
+                }
+            };
+
+            // Add to Simulation menu
+            if (simulationMenu != null)
+            {
+                simulationMenu.DropDownItems.Add(acousticSimulationMenuItem);
+            }
+        }
         private void AddStressAnalysisToMenu()
         {
             // Create Stress Analysis menu item

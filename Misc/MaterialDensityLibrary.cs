@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 
 public class MaterialDensity
@@ -87,4 +88,94 @@ public static class MaterialDensityLibrary
         public double Density { get; set; }
         public double AvgGrayValue { get; set; }
     }
+    /// <summary>
+    /// Calculate density based on calibration points and grayscale value
+    /// </summary>
+    public static double CalculateDensityFromGrayValue(List<CalibrationPoint> calibrationPoints, double grayValue)
+    {
+        if (calibrationPoints == null || calibrationPoints.Count < 2)
+        {
+            throw new ArgumentException("At least two calibration points are required");
+        }
+
+        // Sort calibration points by gray value
+        calibrationPoints.Sort((a, b) => a.AvgGrayValue.CompareTo(b.AvgGrayValue));
+
+        // Find the two closest points for interpolation
+        int lowerIndex = -1;
+        int upperIndex = -1;
+
+        for (int i = 0; i < calibrationPoints.Count; i++)
+        {
+            if (calibrationPoints[i].AvgGrayValue <= grayValue)
+            {
+                lowerIndex = i;
+            }
+            else
+            {
+                upperIndex = i;
+                break;
+            }
+        }
+
+        // Handle edge cases
+        if (lowerIndex == -1)
+        {
+            // Below the lowest point, use the first point
+            return calibrationPoints[0].Density;
+        }
+        else if (upperIndex == -1)
+        {
+            // Above the highest point, use the last point
+            return calibrationPoints[calibrationPoints.Count - 1].Density;
+        }
+
+        // Interpolate between the two points
+        CalibrationPoint lower = calibrationPoints[lowerIndex];
+        CalibrationPoint upper = calibrationPoints[upperIndex];
+
+        double t = (grayValue - lower.AvgGrayValue) / (upper.AvgGrayValue - lower.AvgGrayValue);
+
+        return lower.Density * (1 - t) + upper.Density * t;
+    }
+
+    /// <summary>
+    /// Performs a linear regression to find the relationship between gray values and density
+    /// </summary>
+    public static (double slope, double intercept) CalculateLinearDensityModel(List<CalibrationPoint> calibrationPoints)
+    {
+        if (calibrationPoints == null || calibrationPoints.Count < 2)
+        {
+            throw new ArgumentException("At least two calibration points are required");
+        }
+
+        int n = calibrationPoints.Count;
+        double sumX = 0;
+        double sumY = 0;
+        double sumXY = 0;
+        double sumX2 = 0;
+
+        // Calculate sums for linear regression
+        foreach (var point in calibrationPoints)
+        {
+            sumX += point.AvgGrayValue;
+            sumY += point.Density;
+            sumXY += point.AvgGrayValue * point.Density;
+            sumX2 += point.AvgGrayValue * point.AvgGrayValue;
+        }
+
+        // Calculate slope (m) and intercept (b) for y = mx + b
+        double denominator = n * sumX2 - sumX * sumX;
+
+        if (denominator == 0)
+        {
+            return (0, sumY / n); // Horizontal line, average density
+        }
+
+        double slope = (n * sumXY - sumX * sumY) / denominator;
+        double intercept = (sumY * sumX2 - sumX * sumXY) / denominator;
+
+        return (slope, intercept);
+    }
+
 }

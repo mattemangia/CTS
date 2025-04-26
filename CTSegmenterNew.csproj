@@ -122,11 +122,13 @@
       <SubType>Component</SubType>
     </Compile>
     <Compile Include="Misc\Triangle.cs" />
-    <Compile Include="Modules\Acoustic Simulation\AcousticSimulationForm.cs">
+    <Compile Include="Modules\Acoustic_Simulation\AcousticSimulationForm.cs">
       <SubType>Form</SubType>
     </Compile>
-    <Compile Include="Modules\Acoustic Simulation\AcousticSimulator.cs" />
-    <Compile Include="Modules\Acoustic Simulation\VolumeRenderer.cs" />
+    <Compile Include="Modules\Acoustic_Simulation\AcousticSimulator.cs" />
+    <Compile Include="Modules\Acoustic_Simulation\AcousticSimulatorGPU.cs" />
+    <Compile Include="Modules\Acoustic_Simulation\AcousticSimulatorGPUWrapper.cs" />
+    <Compile Include="Modules\Acoustic_Simulation\VolumeRenderer.cs" />
     <Compile Include="Modules\ArtificialIntelligence\GroundingDINO\DirectSAM.cs" />
     <Compile Include="Modules\ArtificialIntelligence\GroundingDINO\GroundingDINODetector.cs" />
     <Compile Include="Modules\ArtificialIntelligence\MicroSAM\MicroSAM.cs" />

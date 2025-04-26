@@ -1,5 +1,4 @@
-﻿using CTSegmenter;
-using Krypton.Toolkit;
+﻿using Krypton.Toolkit;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -8,22 +7,34 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using static MaterialDensityLibrary;
+using FontStyle = System.Drawing.FontStyle;
+using MessageBox = System.Windows.Forms.MessageBox;
+using Point = System.Drawing.Point;
+using Size = System.Drawing.Size;
 
 namespace CTSegmenter
 {
     public class AcousticSimulationForm : KryptonForm, IMaterialDensityProvider
     {
+        private bool isInitializing = true;
         private MainForm mainForm;
+        private dynamic simulator;
         private Material selectedMaterial;
         private double baseDensity = 0.0; // in kg/m³
         private bool hasDensityVariation = false;
         private byte selectedMaterialID = 0;
         private bool isSimDragging = false;
-        private Point lastSimMousePosition;
+        private System.Drawing.Point lastSimMousePosition;
         private float simRotationX = 30;
         private float simRotationY = 30;
         private float simZoom = 1.0f;
         private PointF simPan = new PointF(0, 0);
+        private KryptonCheckBox chkAutoElasticProps;
+        private VolumeRenderer simulationRenderer;
+        private KryptonCheckBox chkRunOnGpu;
+        private AcousticSimulator cpuSimulator;
+        private AcousticSimulatorGPUWrapper gpuSimulator;
+        private bool usingGpuSimulator = false;
         // UI Controls
         private TabControl tabControl;
         private TabPage tabVolume;
@@ -64,10 +75,12 @@ namespace CTSegmenter
         private PictureBox pictureBoxSimulation;
         // Dictionary to store material properties
         private Dictionary<string, MaterialProperties> materialLibrary = new Dictionary<string, MaterialProperties>();
-        private AcousticSimulator simulator;
+        
         private bool simulationRunning = false;
         private CancellableProgressForm simulationProgressForm;
         private SimulationResults simulationResults;
+        private KryptonNumericUpDown numYoungsModulus;
+        private KryptonNumericUpDown numPoissonRatio;
 
         // A class to store simulation results
         private class SimulationResults
@@ -89,8 +102,13 @@ namespace CTSegmenter
             public double Frequency { get; set; }
             public int Amplitude { get; set; }
             public int TimeSteps { get; set; }
-        }
 
+          
+            /// <summary>Young’s modulus in MPa</summary>
+            public double YoungsModulus { get; set; }
+            /// <summary>Poisson’s ratio (dimensionless)</summary>
+            public double PoissonRatio { get; set; }
+        }
 
 
         // Volume data
@@ -111,10 +129,10 @@ namespace CTSegmenter
             InitializeComponent();
 
             // Load materials first
-            LoadMaterials();
+            //adMaterials();
 
             // Ensure correct material is selected before initializing
-            EnsureCorrectMaterialSelected();
+            //sureCorrectMaterialSelected();
 
             // Set the initial view parameters
             rotationX = 30;
@@ -123,11 +141,11 @@ namespace CTSegmenter
             pan = new PointF(0, 0);
 
             // Initialize the volume with the selected material
-            InitializeHomogeneousDensityVolume();
+            //itializeHomogeneousDensityVolume();
+
+            // Set initialization flag to false after everything is set up
+            isInitializing = false;
         }
-
-
-
         private void InitializeComponent()
         {
             // Form settings
@@ -434,6 +452,55 @@ namespace CTSegmenter
             numTimeSteps.Maximum = 10000000;
             numTimeSteps.Value = 100;
             controlPanel.Controls.Add(numTimeSteps);
+            currentY += verticalSpacing + 20;
+            chkAutoElasticProps = new KryptonCheckBox
+            {
+                Text = "Auto-calc E & ν from density",
+                Location = new Point(10, currentY)
+            };
+            chkAutoElasticProps.CheckedChanged += (s, e) => {
+                if (chkAutoElasticProps.Checked)
+                    CalculateAutoElasticProperties();
+                else
+                {
+                    var props = materialLibrary[comboMaterialLibrary.SelectedItem.ToString()];
+                    numYoungsModulus.Value = (decimal)props.YoungsModulus;
+                    numPoissonRatio.Value = (decimal)props.PoissonRatio;
+                }
+            };
+            controlPanel.Controls.Add(chkAutoElasticProps);
+            currentY += verticalSpacing+20;
+
+            // Young's Modulus
+            var lblYoung = new KryptonLabel { Text = "Young’s Modulus (MPa):", Location = new Point(10, currentY) };
+            controlPanel.Controls.Add(lblYoung);
+            numYoungsModulus = new KryptonNumericUpDown
+            {
+                Location = new Point(10, currentY + 20),
+                Width = controlWidth - 30,
+                DecimalPlaces = 1,
+                Minimum = 0,
+                Maximum = decimal.MaxValue,
+                Value = 50.0m   // default
+            };
+            controlPanel.Controls.Add(numYoungsModulus);
+            currentY += verticalSpacing + 20;
+
+            // Poisson’s ratio
+            var lblPoisson = new KryptonLabel { Text = "Poisson’s Ratio:", Location = new Point(10, currentY) };
+            controlPanel.Controls.Add(lblPoisson);
+            numPoissonRatio = new KryptonNumericUpDown
+            {
+                Location = new Point(10, currentY + 20),
+                Width = controlWidth - 30,
+                DecimalPlaces = 3,
+                Minimum = 0m,
+                Maximum = 0.5m,
+                Increment = 0.01m,
+                Value = 0.25m   // default
+            };
+            controlPanel.Controls.Add(numPoissonRatio);
+            
 
             currentY += verticalSpacing + 20;
 
@@ -517,7 +584,15 @@ namespace CTSegmenter
             controlPanel.Controls.Add(chkBrittleModel);
 
             currentY += verticalSpacing;
-
+            chkRunOnGpu = new KryptonCheckBox
+            {
+                Text = "Run on GPU",
+                Location = new Point(10, currentY),
+                Width = controlWidth - 20,
+                Checked = false
+            };
+            controlPanel.Controls.Add(chkRunOnGpu);
+            currentY += verticalSpacing;
             // 11. Start Simulation button
             btnStartSimulation = new KryptonButton();
             btnStartSimulation.Text = "Start Simulation";
@@ -635,7 +710,13 @@ namespace CTSegmenter
             {
                 // Load properties for the selected material
                 MaterialProperties props = materialLibrary[selectedMaterial];
-
+                if (chkAutoElasticProps.Checked)
+                    CalculateAutoElasticProperties();
+                else
+                {
+                    numYoungsModulus.Value = (decimal)props.YoungsModulus;
+                    numPoissonRatio.Value = (decimal)props.PoissonRatio;
+                }
                 numConfiningPressure.Value = (decimal)props.ConfiningPressure;
                 numTensileStrength.Value = (decimal)props.TensileStrength;
                 numFailureAngle.Value = (decimal)props.FailureAngle;
@@ -723,15 +804,15 @@ namespace CTSegmenter
         {
             try
             {
-                // Check if simulation is already running
-                if (simulator != null && simulationRunning)
+                // Prevent re-entrancy
+                if ((cpuSimulator != null || gpuSimulator != null) && simulationRunning)
                 {
                     MessageBox.Show("Simulation is already running.", "Simulation in Progress",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
 
-                // Make sure we have valid material and density data
+                // Ensure volume data is ready
                 if (densityVolume == null || mainForm.volumeLabels == null)
                 {
                     MessageBox.Show("Please initialize the volume data first.",
@@ -739,56 +820,134 @@ namespace CTSegmenter
                     return;
                 }
 
-                // Disable the start button and other controls during simulation
+                // Disable UI
                 btnStartSimulation.Enabled = false;
 
-                // Create the progress form but don't show it yet
-                simulationProgressForm = new CancellableProgressForm("Running acoustic simulation...");
+                // If auto-calc is checked, recompute E & ν now
+                if (chkAutoElasticProps.Checked)
+                    CalculateAutoElasticProperties();
 
-                // Get the volume labels array
-                byte[,,] volumeLabelsArray = GetVolumeLabelsArray();
+                // Gather all parameters
+                int width = mainForm.GetWidth();
+                int height = mainForm.GetHeight();
+                int depth = mainForm.GetDepth();
+                float pixelSizeF = (float)mainForm.GetPixelSize();
+                byte[,,] labels = GetVolumeLabelsArray();
+                byte materialID = selectedMaterialID;
+                string axis = comboAxis.SelectedItem.ToString();
+                string waveType = comboWaveType.SelectedItem.ToString();
+                double confiningPressure = (double)numConfiningPressure.Value;
+                double tensileStrength = (double)numTensileStrength.Value;
+                double failureAngle = (double)numFailureAngle.Value;
+                double cohesion = (double)numCohesion.Value;
+                double energy = (double)numEnergy.Value;
+                double frequency = (double)numFrequency.Value;
+                int amplitude = (int)numAmplitude.Value;
+                int timeSteps = (int)numTimeSteps.Value;
+                bool useElastic = chkElasticModel.Checked;
+                bool usePlastic = chkPlasticModel.Checked;
+                bool useBrittle = chkBrittleModel.Checked;
+                double youngsModulus = (double)numYoungsModulus.Value;  // MPa
+                double poissonRatio = (double)numPoissonRatio.Value;   // unitless
+                bool useGPU = chkRunOnGpu.Checked;  // Check if GPU should be used
 
-                // Create the simulator with current parameters
-                simulator = new AcousticSimulator(
-                    mainForm.GetWidth(),
-                    mainForm.GetHeight(),
-                    mainForm.GetDepth(),
-                    (float)mainForm.GetPixelSize(), // Explicit conversion to float
-                    volumeLabelsArray,
+                simulationRenderer = new VolumeRenderer(
                     densityVolume,
-                    selectedMaterialID,
-                    comboAxis.SelectedItem.ToString(),
-                    comboWaveType.SelectedItem.ToString(),
-                    (double)numConfiningPressure.Value,
-                    (double)numTensileStrength.Value,
-                    (double)numFailureAngle.Value,
-                    (double)numCohesion.Value,
-                    (double)numEnergy.Value,
-                    (double)numFrequency.Value,
-                    (int)numAmplitude.Value,
-                    (int)numTimeSteps.Value,
-                    chkElasticModel.Checked,
-                    chkPlasticModel.Checked,
-                    chkBrittleModel.Checked);
+                    width,
+                    height,
+                    depth,
+                    pixelSizeF,
+                    materialID,
+                    useFullVolumeRendering);
 
-                // Hook up event handlers
-                simulator.ProgressUpdated += Simulator_ProgressUpdated;
-                simulator.SimulationCompleted += Simulator_SimulationCompleted;
+                // Prepare progress UI
+                simulationProgressForm = new CancellableProgressForm(
+                    useGPU ? "Running acoustic simulation on GPU..." : "Running acoustic simulation on CPU...");
+                simulationProgressForm.CancelPressed += (s, args) =>
+                {
+                    if (usingGpuSimulator)
+                        gpuSimulator?.CancelSimulation();
+                    else
+                        cpuSimulator?.CancelSimulation();
 
-                // Handle cancellation
-                simulationProgressForm.CancelPressed += (s, args) => {
-                    simulator.CancelSimulation();
                     simulationRunning = false;
+                    simulationProgressForm.Close();
                 };
 
-                // Start the simulation in a separate thread
+                // Clean up any existing simulators
+                cpuSimulator?.Dispose();
+                gpuSimulator?.Dispose();
+                cpuSimulator = null;
+                gpuSimulator = null;
+
+                // Create appropriate simulator based on GPU checkbox
+                if (useGPU)
+                {
+                    try
+                    {
+                        // Create GPU simulator wrapper
+                        gpuSimulator = new AcousticSimulatorGPUWrapper(
+                            width, height, depth, pixelSizeF, labels, densityVolume, materialID,
+                            axis, waveType, confiningPressure, tensileStrength, failureAngle, cohesion,
+                            energy, frequency, amplitude, timeSteps,
+                            useElastic, usePlastic, useBrittle, youngsModulus, poissonRatio);
+
+                        // Wire up events
+                        gpuSimulator.ProgressUpdated += Simulator_ProgressUpdated;
+                        gpuSimulator.SimulationCompleted += Simulator_SimulationCompleted;
+
+                        usingGpuSimulator = true;
+                        simulationProgressForm.UpdateMessage("Initializing GPU simulation...");
+                    }
+                    catch (Exception gpuEx)
+                    {
+                        // If GPU initialization fails, fall back to CPU with a warning
+                        MessageBox.Show($"Failed to initialize GPU simulation: {gpuEx.Message}\nFalling back to CPU simulation.",
+                            "GPU Initialization Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+
+                        useGPU = false;
+                        usingGpuSimulator = false;
+
+                        // Create CPU simulator instead
+                        cpuSimulator = new AcousticSimulator(
+                            width, height, depth, pixelSizeF, labels, densityVolume, materialID,
+                            axis, waveType, confiningPressure, tensileStrength, failureAngle, cohesion,
+                            energy, frequency, amplitude, timeSteps,
+                            useElastic, usePlastic, useBrittle, youngsModulus, poissonRatio);
+
+                        // Wire up events
+                        cpuSimulator.ProgressUpdated += Simulator_ProgressUpdated;
+                        cpuSimulator.SimulationCompleted += Simulator_SimulationCompleted;
+                    }
+                }
+                else
+                {
+                    // Create CPU simulator
+                    cpuSimulator = new AcousticSimulator(
+                        width, height, depth, pixelSizeF, labels, densityVolume, materialID,
+                        axis, waveType, confiningPressure, tensileStrength, failureAngle, cohesion,
+                        energy, frequency, amplitude, timeSteps,
+                        useElastic, usePlastic, useBrittle, youngsModulus, poissonRatio);
+
+                    // Wire up events
+                    cpuSimulator.ProgressUpdated += Simulator_ProgressUpdated;
+                    cpuSimulator.SimulationCompleted += Simulator_SimulationCompleted;
+
+                    usingGpuSimulator = false;
+                }
+
+                // Start the appropriate simulator
                 simulationRunning = true;
-                Task.Run(() => simulator.StartSimulation());
+                Task.Run(() =>
+                {
+                    if (usingGpuSimulator)
+                        gpuSimulator.StartSimulation();
+                    else
+                        cpuSimulator.StartSimulation();
+                });
 
-                // Show the progress form as modal - this will block until the form is closed
+                // Show modal progress dialog
                 simulationProgressForm.ShowDialog();
-
-                // Clean up after dialog closes
                 simulationProgressForm.Dispose();
                 simulationProgressForm = null;
             }
@@ -799,7 +958,6 @@ namespace CTSegmenter
             }
             finally
             {
-                // Re-enable the start button
                 btnStartSimulation.Enabled = true;
             }
         }
@@ -868,7 +1026,7 @@ namespace CTSegmenter
 
         private void DisplaySimulationResults()
         {
-            // Create a nicely formatted results message
+            // Create a formatted results message
             MessageBox.Show(
                 $"Simulation completed!\n\n" +
                 $"P-Wave Velocity: {simulationResults.PWaveVelocity:F1} m/s\n" +
@@ -878,12 +1036,28 @@ namespace CTSegmenter
                 $"S-Wave Travel Time: {simulationResults.SWaveTravelTime} steps",
                 "Simulation Results", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
+        public (double[,,] vx, double[,,] vy, double[,,] vz) GetWaveFieldSnapshot()
+        {
+            if (usingGpuSimulator && gpuSimulator != null)
+                return gpuSimulator.GetWaveFieldSnapshot();
+            else if (cpuSimulator != null)
+                return cpuSimulator.GetWaveFieldSnapshot();
+            else
+                return (new double[0, 0, 0], new double[0, 0, 0], new double[0, 0, 0]);
+        }
         private void DrawWavePropagation(Graphics g, VolumeRenderer renderer)
         {
-            if (simulator == null) return;
+            if (usingGpuSimulator && gpuSimulator == null) return;
+            if (!usingGpuSimulator && cpuSimulator == null) return;
 
             // Get the current state of the wave fields
-            var (pWaveField, sWaveField) = simulator.GetWaveFieldSnapshot();
+            var snapshot = GetWaveFieldSnapshot();
+            var pWaveField = snapshot.vx;
+            var sWaveField = snapshot.vy;
+            
+
+            // Get the current state of the wave fields
+            
 
             // Draw wave fronts as colored points projected onto the 2D view
             using (SolidBrush pWaveBrush = new SolidBrush(Color.FromArgb(128, 255, 100, 100)))  // Red for P waves
@@ -902,8 +1076,8 @@ namespace CTSegmenter
                         for (int x = 0; x < width; x += sampleRate)
                         {
                             // Check if there's significant wave amplitude at this point
-                            float pAmplitude = pWaveField[x, y, z];
-                            float sAmplitude = sWaveField[x, y, z];
+                            float pAmplitude = (float)pWaveField[x, y, z];
+                            float sAmplitude = (float)sWaveField[x, y, z];
 
                             // Draw P Wave (if above threshold)
                             if (pAmplitude > 0.5f)
@@ -976,57 +1150,57 @@ namespace CTSegmenter
                 g.DrawString($"S-Wave Travel Time: {simulationResults.SWaveTravelTime} steps", font, brush, 20, y);
             }
         }
+        private bool simulationRenderedOnce = false;
         private void PictureBoxSimulation_Paint(object sender, PaintEventArgs e)
         {
-            if (volumeRenderer != null)
+            if (isInitializing && e.ClipRectangle.Width > 0 && simulationRenderedOnce)
+                return;
+
+            simulationRenderedOnce = true;
+            // If we've set up a cached renderer for the simulation, reuse it
+            if (simulationRenderer != null)
             {
-                // Create a copy of the volume renderer with simulation-specific transforms
-                var simRenderer = new VolumeRenderer(
-                    densityVolume,
-                    mainForm.GetWidth(),
-                    mainForm.GetHeight(),
-                    mainForm.GetDepth(),
-                    mainForm.GetPixelSize(),
-                    selectedMaterialID,
-                    useFullVolumeRendering);
+                // Apply the current camera transform
+                simulationRenderer.SetTransformation(simRotationX, simRotationY, simZoom, simPan);
 
-                simRenderer.SetTransformation(simRotationX, simRotationY, simZoom, simPan);
+                // Draw the volume (wireframe or full volume per settings)
+                simulationRenderer.Render(
+                    e.Graphics,
+                    pictureBoxSimulation.Width,
+                    pictureBoxSimulation.Height);
 
-                // Render the volume using the renderer
-                simRenderer.Render(e.Graphics, pictureBoxSimulation.Width, pictureBoxSimulation.Height);
+                // Draw the transducers (T & R) in the scene
+                DrawTransducers(e.Graphics, simulationRenderer);
 
-                // Draw transducers
-                DrawTransducers(e.Graphics, simRenderer);
-
-                // Draw wave propagation if simulation is running
+                // If the simulation is running, overlay the propagating waves
                 if (simulator != null && simulationRunning)
                 {
-                    DrawWavePropagation(e.Graphics, simRenderer);
+                    DrawWavePropagation(e.Graphics, simulationRenderer);
                 }
+                // Otherwise if it's completed, show final scalar results
                 else if (simulationResults != null)
                 {
-                    // Draw results if simulation is complete
                     DrawSimulationResults(e.Graphics);
                 }
 
-                // Draw status information
+                // Finally draw the status/info text (axis, material, models, etc.)
                 DrawSimulationInfo(e.Graphics);
             }
             else
             {
-                // Draw default message if no renderer is available
-                using (Font font = new Font("Segoe UI", 12))
+                // If we don't yet have a renderer, prompt the user
+                using (Font font = new Font("Segoe UI", 12, FontStyle.Regular))
                 using (SolidBrush brush = new SolidBrush(Color.White))
                 {
-                    string message = "Volume data not loaded or initialized.";
+                    string message = "Simulation not initialized.";
                     SizeF textSize = e.Graphics.MeasureString(message, font);
-                    e.Graphics.DrawString(message, font, brush,
-                        (pictureBoxSimulation.Width - textSize.Width) / 2,
-                        (pictureBoxSimulation.Height - textSize.Height) / 2);
+                    float x = (pictureBoxSimulation.Width - textSize.Width) / 2f;
+                    float y = (pictureBoxSimulation.Height - textSize.Height) / 2f;
+                    e.Graphics.DrawString(message, font, brush, x, y);
                 }
             }
         }
-        
+
         private void DrawTransducers(Graphics g, VolumeRenderer renderer)
         {
             if (renderer == null) return;
@@ -1268,7 +1442,9 @@ namespace CTSegmenter
                 Energy = 2.0,
                 Frequency = 200.0,
                 Amplitude = 500,
-                TimeSteps = 200
+                TimeSteps = 200,
+                YoungsModulus = 50000.0,
+                PoissonRatio = 0.25
             };
 
             // Sandstone
@@ -1281,7 +1457,9 @@ namespace CTSegmenter
                 Energy = 1.5,
                 Frequency = 180.0,
                 Amplitude = 450,
-                TimeSteps = 180
+                TimeSteps = 180,
+                YoungsModulus = 30000.0,
+                PoissonRatio = 0.20
             };
 
             // Granite
@@ -1294,7 +1472,9 @@ namespace CTSegmenter
                 Energy = 3.0,
                 Frequency = 250.0,
                 Amplitude = 600,
-                TimeSteps = 220
+                TimeSteps = 220,
+                YoungsModulus = 50000.0,
+                PoissonRatio = 0.25
             };
 
             // Marble
@@ -1307,7 +1487,9 @@ namespace CTSegmenter
                 Energy = 2.5,
                 Frequency = 220.0,
                 Amplitude = 550,
-                TimeSteps = 210
+                TimeSteps = 210,
+                YoungsModulus = 50000.0,
+                PoissonRatio = 0.28
             };
 
             // Basalt
@@ -1320,7 +1502,9 @@ namespace CTSegmenter
                 Energy = 3.5,
                 Frequency = 280.0,
                 Amplitude = 650,
-                TimeSteps = 240
+                TimeSteps = 240,
+                YoungsModulus = 100000.0,
+                PoissonRatio = 0.25
             };
 
             // Shale
@@ -1333,7 +1517,9 @@ namespace CTSegmenter
                 Energy = 1.0,
                 Frequency = 150.0,
                 Amplitude = 400,
-                TimeSteps = 160
+                TimeSteps = 160,
+                YoungsModulus = 10000.0,
+                PoissonRatio = 0.30
             };
 
             // Concrete
@@ -1346,7 +1532,9 @@ namespace CTSegmenter
                 Energy = 2.0,
                 Frequency = 200.0,
                 Amplitude = 500,
-                TimeSteps = 200
+                TimeSteps = 200,
+                YoungsModulus = 30000.0,
+                PoissonRatio = 0.20
             };
 
             // Brick
@@ -1359,7 +1547,9 @@ namespace CTSegmenter
                 Energy = 1.5,
                 Frequency = 180.0,
                 Amplitude = 450,
-                TimeSteps = 180
+                TimeSteps = 180,
+                YoungsModulus = 20000.0,
+                PoissonRatio = 0.15
             };
 
             // Glass
@@ -1372,7 +1562,9 @@ namespace CTSegmenter
                 Energy = 1.0,
                 Frequency = 300.0,
                 Amplitude = 300,
-                TimeSteps = 150
+                TimeSteps = 150,
+                YoungsModulus = 70000.0,
+                PoissonRatio = 0.22
             };
 
             // Steel
@@ -1385,7 +1577,9 @@ namespace CTSegmenter
                 Energy = 5.0,
                 Frequency = 400.0,
                 Amplitude = 800,
-                TimeSteps = 300
+                TimeSteps = 300,
+                YoungsModulus = 200000.0,
+                PoissonRatio = 0.30
             };
 
             // Aluminum
@@ -1398,7 +1592,9 @@ namespace CTSegmenter
                 Energy = 4.0,
                 Frequency = 350.0,
                 Amplitude = 700,
-                TimeSteps = 280
+                TimeSteps = 280,
+                YoungsModulus = 70000.0,
+                PoissonRatio = 0.33
             };
 
             // Copper
@@ -1411,7 +1607,9 @@ namespace CTSegmenter
                 Energy = 4.5,
                 Frequency = 380.0,
                 Amplitude = 750,
-                TimeSteps = 290
+                TimeSteps = 290,
+                YoungsModulus = 110000.0,
+                PoissonRatio = 0.34
             };
 
             // Plastic (Generic)
@@ -1424,7 +1622,9 @@ namespace CTSegmenter
                 Energy = 1.0,
                 Frequency = 150.0,
                 Amplitude = 400,
-                TimeSteps = 160
+                TimeSteps = 160,
+                YoungsModulus = 3000.0,
+                PoissonRatio = 0.35
             };
 
             // Wood (Generic)
@@ -1437,7 +1637,53 @@ namespace CTSegmenter
                 Energy = 1.2,
                 Frequency = 120.0,
                 Amplitude = 350,
-                TimeSteps = 140
+                TimeSteps = 140,
+                YoungsModulus = 10000.0,
+                PoissonRatio = 0.30
+            };
+            // Gabbro: E≈80 GPa, ν≈0.26
+            materialLibrary["Gabbro"] = new MaterialProperties
+            {
+                ConfiningPressure = 15.0,
+                TensileStrength = 20.0,
+                FailureAngle = 36.0,
+                Cohesion = 35.0,
+                Energy = 3.0,
+                Frequency = 300.0,
+                Amplitude = 600,
+                TimeSteps = 230,
+                YoungsModulus = 80000.0,
+                PoissonRatio = 0.26
+            };
+
+            // Serpentinite: E≈50 GPa, ν≈0.27
+            materialLibrary["Serpentinite"] = new MaterialProperties
+            {
+                ConfiningPressure = 8.0,
+                TensileStrength = 12.0,
+                FailureAngle = 32.0,
+                Cohesion = 18.0,
+                Energy = 2.5,
+                Frequency = 220.0,
+                Amplitude = 500,
+                TimeSteps = 200,
+                YoungsModulus = 50000.0,
+                PoissonRatio = 0.27
+            };
+
+            // Peridotite: E≈100 GPa, ν≈0.28
+            materialLibrary["Peridotite"] = new MaterialProperties
+            {
+                ConfiningPressure = 20.0,
+                TensileStrength = 25.0,
+                FailureAngle = 40.0,
+                Cohesion = 40.0,
+                Energy = 4.0,
+                Frequency = 350.0,
+                Amplitude = 700,
+                TimeSteps = 240,
+                YoungsModulus = 100000.0,
+                PoissonRatio = 0.28
             };
 
             // Add materials to combobox
@@ -1657,7 +1903,8 @@ namespace CTSegmenter
                 // Log the change
                 Logger.Log($"[AcousticSimulationForm] Selected material changed to {material.Name} with ID {material.ID}");
                 CalculateVolumes();
-                // Re-initialize the volume with the new material
+
+                // Re-initialize the volume with the new material, but only invalidate if not initializing
                 InitializeHomogeneousDensityVolume();
             }
         }
@@ -1738,8 +1985,11 @@ namespace CTSegmenter
                 if (materialID == 0 || selectedMaterial.ID == 0)
                 {
                     Logger.Log("[AcousticSimulationForm] ERROR: Attempted to use Exterior material (ID 0)");
-                    MessageBox.Show("Cannot use the Exterior material for simulations. Please select a valid material.",
-                        "Invalid Material", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    if (!isInitializing) // Only show message box if not initializing
+                    {
+                        MessageBox.Show("Cannot use the Exterior material for simulations. Please select a valid material.",
+                            "Invalid Material", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
                     return;
                 }
 
@@ -1775,22 +2025,22 @@ namespace CTSegmenter
 
                 if (materialVoxelCount == 0)
                 {
-                    MessageBox.Show($"No voxels found for material {selectedMaterial.Name} (ID {materialID}). Please segment this material first.",
-                        "No Material Voxels", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    if (!isInitializing) // Only show message box if not initializing
+                    {
+                        MessageBox.Show($"No voxels found for material {selectedMaterial.Name} (ID {materialID}). Please segment this material first.",
+                            "No Material Voxels", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
                     return;
                 }
 
                 // Initialize volume renderer with homogeneous density AND material ID
                 densityVolume = homogeneousDensityVolume;
 
-                // IMPORTANT: Pass a flag to render the full volume, not just the surface
-                // Since we can't modify the VolumeRenderer class directly, we'll use a workaround
                 // Create a temporary volume where we mark "fake boundaries" throughout the material
                 var renderVolume = PreprocessVolumeForFullRendering(densityVolume, materialID);
 
                 // Initialize with the preprocessed volume
                 volumeRenderer = new VolumeRenderer(densityVolume, width, height, depth, mainForm.GetPixelSize(), materialID, useFullVolumeRendering);
-
 
                 // Set initial zoom to fit the volume in the view
                 CalculateInitialZoomAndPosition();
@@ -1803,11 +2053,20 @@ namespace CTSegmenter
                 CalculateVolumes();
 
                 Logger.Log($"[AcousticSimulationForm] Initialized full volume rendering for {selectedMaterial.Name} with {materialVoxelCount} voxels");
+
+                // Only invalidate the picture box if we're not initializing
+                if (!isInitializing)
+                {
+                    pictureBoxVolume.Invalidate();
+                }
             }
             catch (Exception ex)
             {
                 Logger.Log($"[AcousticSimulationForm] Error initializing homogeneous density: {ex.Message}");
-                MessageBox.Show($"Error initializing volume: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                if (!isInitializing) // Only show message box if not initializing
+                {
+                    MessageBox.Show($"Error initializing volume: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
         }
         private byte[,,] GetVolumeLabelsArray()
@@ -1901,6 +2160,12 @@ namespace CTSegmenter
             {
                 lblDensityInfo.Text = "Current Density: Not set";
             }
+
+            // Only invalidate if not initializing
+            if (!isInitializing)
+            {
+                pictureBoxVolume.Invalidate();
+            }
         }
 
         private void BtnSetDensity_Click(object sender, EventArgs e)
@@ -1928,6 +2193,24 @@ namespace CTSegmenter
                 MessageBox.Show("Please select a material first.", "No Material Selected",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
+        }
+        private void CalculateAutoElasticProperties()
+        {
+            // use your baseDensity in kg/m³
+            double rho = baseDensity;
+            // estimate Vp from density (same law you use in simulator)
+            double rhoGcm3 = rho / 1000.0;
+            double vp_km = 39.128 * Math.Pow(rhoGcm3, 0.37);
+            double vp = vp_km * 1000.0;          // m/s
+            double vs = vp / Math.Sqrt(3.0);    // approximate
+            double G = rho * vs * vs;           // shear modulus (Pa)
+            double K = rho * (vp * vp - (4.0 / 3.0) * vs * vs);  // bulk modulus (Pa)
+            double E = 9.0 * K * G / (3.0 * K + G);        // Young’s modulus (Pa)
+            double nu = (3.0 * K - 2.0 * G) / (2.0 * (3.0 * K + G)); // Poisson’s ratio
+
+            // fill the UI (convert Pa→MPa)
+            numYoungsModulus.Value = (decimal)(E / 1e6);
+            numPoissonRatio.Value = (decimal)nu;
         }
         private void CalculateVolumes()
         {
@@ -2482,9 +2765,15 @@ namespace CTSegmenter
 
             pictureBoxVolume.Invalidate();
         }
-
+        private bool renderedOnce = false;
         private void PictureBoxVolume_Paint(object sender, PaintEventArgs e)
         {
+            // If we're still initializing and this isn't the first render, skip
+            if (isInitializing && e.ClipRectangle.Width > 0 && renderedOnce)
+                return;
+
+            renderedOnce = true;
+
             // If we have a volume renderer, use it to render the volume
             if (volumeRenderer != null)
             {
@@ -2495,7 +2784,7 @@ namespace CTSegmenter
                     ? "Variable Density Visualization"
                     : "Homogeneous Density Visualization";
 
-                using (Font font = new Font("Segoe UI", 10, FontStyle.Bold))
+                using (Font font = new Font("Segoe UI", 10, System.Drawing.FontStyle.Bold))
                 using (SolidBrush brush = new SolidBrush(Color.White))
                 {
                     // Top info
@@ -2537,7 +2826,20 @@ namespace CTSegmenter
                 }
             }
         }
-
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                // Dispose of the simulator if it implements IDisposable
+                if (simulator is IDisposable disposableSimulator)
+                {
+                    disposableSimulator.Dispose();
+                   cpuSimulator?.Dispose();
+                    gpuSimulator?.Dispose();
+                }
+            }
+            base.Dispose(disposing);
+        }
         #endregion
 
         #region Icon Creation Methods

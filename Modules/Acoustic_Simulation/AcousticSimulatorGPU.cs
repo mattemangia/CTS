@@ -1,6 +1,6 @@
 ﻿//  ---------------- AcousticSimulatorGPU.cs  (ILGPU 1.5.2 – C# 7.3)
-//  Versione completa, auto-contenuta, compatibile con il wrapper storico. Tutti i
-//  parametri fisici del Form sono utilizzati; nessun placeholder; firma a 22 args.
+//  Versione completa, auto-contenuta, compatibile con il wrapper originale. Tutti i
+//  parametri fisici del Form sono utilizzati; firma a 22 args.
 //  Include: elasticità, plastico Mohr-Coulomb, fragile a danno progressivo,
 //  sorgente ampiezza/energia/frequenza, criterio auto-stop, API Get/Set/Step.
 
@@ -11,10 +11,15 @@ using System.Threading.Tasks;
 using ILGPU;
 using ILGPU.Runtime;
 using ILGPU.Algorithms;
+using System.Runtime.Remoting.Contexts;
+using Context = ILGPU.Context;
+using ILGPU.Runtime.Cuda;
+using ILGPU.Runtime.OpenCL;
+using ILGPU.Runtime.CPU;
 
 namespace CTSegmenter.Modules.Acoustic_Simulation
 {
-    internal sealed class AcousticSimulatorGPU : IDisposable
+    public sealed class AcousticSimulatorGPU : IDisposable
     {
         #region helper statici
         private const double Courant = 0.4;
@@ -22,7 +27,7 @@ namespace CTSegmenter.Modules.Acoustic_Simulation
         private static int ClampInt(int v, int lo, int hi) => v < lo ? lo : (v > hi ? hi : v);
         private static int Off(int x, int y, int z, int nx, int nxy) => z * nxy + y * nx + x;
         private static T[] CopyHost<T>(MemoryBuffer1D<T, Stride1D.Dense> b) where T : unmanaged
-        { var h = new T[b.Length]; b.View.CopyToCPU(h); return h; }
+        { var h = new T[b.Length]; b.View.CopyToCPU(h); Logger.Log("[AcousticSimulatorGPU] Copied data from GPU to CPU"); return h; }
         #endregion
 
         #region dimensioni
@@ -47,15 +52,17 @@ namespace CTSegmenter.Modules.Acoustic_Simulation
         private readonly MemoryBuffer1D<double, Stride1D.Dense> vxBuf, vyBuf, vzBuf;
         private readonly MemoryBuffer1D<double, Stride1D.Dense> sxxBuf, syyBuf, szzBuf, sxyBuf, sxzBuf, syzBuf;
         private readonly MemoryBuffer1D<double, Stride1D.Dense> dmgBuf;
+        private int expectedTotalSteps;
+        private CancellationTokenSource cts = new CancellationTokenSource();
         #endregion
 
         #region kernel structs
-        private struct P
+        public struct P
         {
             public double lam, mu, tensile, cohesion, sinPhi, cosPhi, confPa;
             public float dt, dx; public int plast, frag;
         }
-        private struct G { public int nx, ny, nz, nxy; }
+        public struct G { public int nx, ny, nz, nxy; }
         private readonly P p; private readonly G g;
         #endregion
 
@@ -111,9 +118,29 @@ namespace CTSegmenter.Modules.Acoustic_Simulation
             double rhoMin = density.Cast<float>().Where(v => v > 0).Min();
             double vpMax = Math.Sqrt((lam0 + 2 * mu0) / rhoMin);
             dt = Math.Min(Courant * dx / vpMax, 1.0 / (20 * freqHz));
+            double dist = Math.Sqrt((tx - rx) * (tx - rx) +
+                             (ty - ry) * (ty - ry) +
+                             (tz - rz) * (tz - rz)) * dx;
+            double rhoAvg = rhoHost.Cast<float>().Average();
+            double vpEst = Math.Sqrt((lam0 + 2 * mu0) / rhoAvg);
+            expectedTotalSteps = (int)Math.Ceiling(dist / (vpEst * dt)) + totalSteps;
+            // 1 . Build the context and make all math intrinsics available
+            ctx = Context.Create(b => b
+                    .Cuda()        // register the CUDA back-end  (if NV driver + hardware present)
+                    .OpenCL()      // register the OpenCL back-end (if any platform present)
+                    .CPU()         // register the portable CPU back-end (always available)
+                    .EnableAlgorithms());
 
-            ctx = Context.CreateDefault();
-            acc = ctx.GetPreferredDevice(false).CreateAccelerator(ctx);
+            Logger.Log("[AcousticSimulatorGPU] Algorithms package enabled (CUDA, OpenCL & CPU registered)");
+
+            // 2 . Pick the best accelerator: CUDA > OpenCL > CPU
+            Device dev =
+                ctx.Devices.FirstOrDefault(d => d.AcceleratorType == AcceleratorType.Cuda) ??
+                ctx.Devices.FirstOrDefault(d => d.AcceleratorType == AcceleratorType.OpenCL) ??
+                ctx.Devices.First(d => d.AcceleratorType == AcceleratorType.CPU);
+
+            acc = dev.CreateAccelerator(ctx);
+            Logger.Log($"[AcousticSimulatorGPU] Using {acc.AcceleratorType} accelerator: {acc.Name}");
             labBuf = acc.Allocate1D<byte>(cells); rhoBuf = acc.Allocate1D<float>(cells);
             vxBuf = acc.Allocate1D<double>(cells); vyBuf = acc.Allocate1D<double>(cells); vzBuf = acc.Allocate1D<double>(cells);
             sxxBuf = acc.Allocate1D<double>(cells); syyBuf = acc.Allocate1D<double>(cells); szzBuf = acc.Allocate1D<double>(cells);
@@ -146,6 +173,7 @@ namespace CTSegmenter.Modules.Acoustic_Simulation
                 ArrayView<byte>, ArrayView<float>, ArrayView<double>, ArrayView<double>, ArrayView<double>,
                 ArrayView<double>, ArrayView<double>, ArrayView<double>, ArrayView<double>, ArrayView<double>, ArrayView<double>,
                 P, G>(VelKernel);
+            Logger.Log("[AcousticSimulatorGPU] Kernels loaded on GPU");
         }
         #endregion
 
@@ -168,6 +196,7 @@ namespace CTSegmenter.Modules.Acoustic_Simulation
             double val = wave.Length > 0 ? wave[0] : ampl * Math.Sqrt(energyJ);
             sxxBuf.View.SubView(idx, 1).MemSet((byte)val); syyBuf.View.SubView(idx, 1).MemSet((byte)val); szzBuf.View.SubView(idx, 1).MemSet((byte)val);
             acc.Synchronize();
+            Logger.Log("[AcousticSimulatorGPU] GPU synchronized");
         }
         #endregion
 
@@ -180,6 +209,7 @@ namespace CTSegmenter.Modules.Acoustic_Simulation
                     for (int x = 0; x < nx; x++)
                         flat[k++] = src[x, y, z];
             dst.View.CopyFromCPU(flat);
+            Logger.Log("[AcousticSimulatorGPU] Data uploaded to GPU");
         }
         #endregion
 
@@ -192,6 +222,7 @@ namespace CTSegmenter.Modules.Acoustic_Simulation
             syyBuf.View.SubView(idx, 1).MemSet((byte)pulse);
             szzBuf.View.SubView(idx, 1).MemSet((byte)pulse);
             acc.Synchronize();
+            Logger.Log("[AcousticSimulatorGPU] GPU synchronized");
         }
         private void OneStep()
         {
@@ -200,35 +231,64 @@ namespace CTSegmenter.Modules.Acoustic_Simulation
             velK(cells, labBuf.View, rhoBuf.View, vxBuf.View, vyBuf.View, vzBuf.View,
                  sxxBuf.View, syyBuf.View, szzBuf.View, sxyBuf.View, sxzBuf.View, syzBuf.View, p, g);
             acc.Synchronize();
+            Logger.Log("[AcousticSimulatorGPU] GPU synchronized");
             step++;
+            int pct = step * 100 / totalSteps;
+            Logger.Log($"[AcousticSimulatorGPU] Step {step} of {totalSteps} ({pct}% completition)");
         }
         public bool Step()
         {
             if (step == 0) Prime();
-            OneStep();
-            if (!rxTouched && CheckReceiver()) { rxTouched = true; touchStep = step; }
-            return step < totalSteps && !(step >= minSteps && step % 10 == 0 && EnergyStop());
+
+            OneStep();                                   // kernels + sync
+
+            if (!rxTouched && CheckReceiver())
+            {
+                rxTouched = true;
+                touchStep = step;
+                Logger.Log($"[AcousticSimulatorGPU] RX touched at step {touchStep}");
+            }
+
+            // stop after prolongation steps have elapsed
+            if (rxTouched && step - touchStep >= totalSteps)
+                return false;
+
+            return true;
         }
         public void Reset()
         {
             vxBuf.MemSetToZero(); vyBuf.MemSetToZero(); vzBuf.MemSetToZero();
             sxxBuf.MemSetToZero(); syyBuf.MemSetToZero(); szzBuf.MemSetToZero();
             sxyBuf.MemSetToZero(); sxzBuf.MemSetToZero(); syzBuf.MemSetToZero(); dmgBuf.MemSetToZero(); acc.Synchronize();
+            Logger.Log("[AcousticSimulatorGPU] GPU synchronized");
             step = 0; rxTouched = false; maxE = 0; ePeaked = false;
         }
         public void StartSimulation()
         {
-            CancellationTokenSource cts = new CancellationTokenSource();
             Task.Run(() =>
             {
                 Prime();
+
                 while (!cts.IsCancellationRequested && Step())
                 {
                     if (step % 10 == 0) Report();
                 }
-                Report(95); Finish();
+
+                if (cts.IsCancellationRequested)
+                {
+                    Logger.Log("[AcousticSimulatorGPU] Simulation cancelled by user");
+                    ProgressUpdated?.Invoke(
+                        this,
+                        new AcousticSimulationProgressEventArgs(
+                            0, step, "Cancelled", null, null));
+                    return;
+                }
+
+                Report(99);
+                Finish();                                // measured arrival
             });
         }
+        public void CancelSimulation() => cts.Cancel();
         #endregion
 
         #region kernel fisica
@@ -355,26 +415,39 @@ namespace CTSegmenter.Modules.Acoustic_Simulation
         }
         private void Report(int force = -1)
         {
-            int pct = force >= 0 ? force : (int)(step * 95.0 / totalSteps);
-            ProgressUpdated?.Invoke(this, new AcousticSimulationProgressEventArgs(pct, step, "Simulating", null, null));
+            int pct = force >= 0 ? force : (int)(step * 100.0 / expectedTotalSteps);
+            if (pct > 99) pct = 99;
+            ProgressUpdated?.Invoke(
+                this,
+                new AcousticSimulationProgressEventArgs(
+                    pct, step, "Simulating", null, null));
         }
         private void Finish()
         {
-            double dist = Math.Sqrt((tx - rx) * (tx - rx) + (ty - ry) * (ty - ry) + (tz - rz) * (tz - rz)) * dx;
-            double rhoAvg = rhoHost.Cast<float>().Average();
-            double vp = Math.Sqrt((lam0 + 2 * mu0) / rhoAvg);
-            double vs = Math.Sqrt(mu0 / rhoAvg);
-            int pTrav = rxTouched ? touchStep : (int)Math.Round(dist / (vp * dt));
-            int sTrav = (int)Math.Round(dist / (vs * dt));
-            SimulationCompleted?.Invoke(this, new AcousticSimulationCompleteEventArgs(vp, vs, vp / vs, pTrav, sTrav, step));
+            double dist = Math.Sqrt((tx - rx) * (tx - rx) +
+                                    (ty - ry) * (ty - ry) +
+                                    (tz - rz) * (tz - rz)) * dx;
+
+            double vp = dist / (touchStep * dt);
+            int pTrav = touchStep;
+
+            double vs = dist / ((step - touchStep) * dt);
+            int sTrav = step - touchStep;
+
+            SimulationCompleted?.Invoke(
+                this,
+                new AcousticSimulationCompleteEventArgs(
+                    vp, vs, vp / vs, pTrav, sTrav, step));
         }
         #endregion
 
+        #region Dispose
         public void Dispose()
         {
             labBuf.Dispose(); rhoBuf.Dispose(); vxBuf.Dispose(); vyBuf.Dispose(); vzBuf.Dispose();
             sxxBuf.Dispose(); syyBuf.Dispose(); szzBuf.Dispose(); sxyBuf.Dispose(); sxzBuf.Dispose(); syzBuf.Dispose(); dmgBuf.Dispose();
             acc.Dispose(); ctx.Dispose();
         }
+        #endregion
     }
 }

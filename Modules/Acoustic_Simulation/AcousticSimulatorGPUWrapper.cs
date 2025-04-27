@@ -34,7 +34,7 @@ namespace CTSegmenter
 
         // GPU core
         private AcousticSimulatorGPU gpu;
-        private CancellationTokenSource cts;
+        
 
         // posizione TX / RX pre-calcolate per comodità del wrapper (usate nel wavelet)
         private readonly int tx, ty, tz, rx, ry, rz;
@@ -94,32 +94,16 @@ namespace CTSegmenter
         }
 
         #region API pubblica coerente con versione CPU
+
         public void StartSimulation()
         {
-            if (cts != null) return;                // già in esecuzione
-            cts = new CancellationTokenSource();
-            Task.Run(() =>
-            {
-                try
-                {
-                    gpu.Reset();
-                    // nota: la GPU inserisce già un impulso sorgente interne (Prime) –
-                    // ma per coerenza con la CPU aggiungiamo anche un’onda Ricker modulata.
-                    ApplySourceWavelet();
-                    while (!cts.IsCancellationRequested && gpu.Step())
-                    {
-                        // progress callback avviene dal GPU stesso ogni 10 step internamente.
-                    }
-                }
-                finally { cts = null; }
-            }, cts.Token);
+            // GPU already runs in its own task – just reset & fire
+            gpu.Reset();
+            ApplySourceWavelet();
+            gpu.StartSimulation();
         }
 
-        public void CancelSimulation()
-        {
-            cts?.Cancel();
-        }
-
+        public void CancelSimulation() => gpu.CancelSimulation();
         public (double[,,] vx, double[,,] vy, double[,,] vz) GetWaveFieldSnapshot()
             => (Rebuild3D(gpu.GetVelocityX()), Rebuild3D(gpu.GetVelocityY()), Rebuild3D(gpu.GetVelocityZ()));
         #endregion
@@ -156,7 +140,7 @@ namespace CTSegmenter
 
         public void Dispose()
         {
-            cts?.Cancel();
+            
             gpu?.Dispose();
         }
     }

@@ -35,6 +35,7 @@ namespace CTSegmenter
         private AcousticSimulator cpuSimulator;
         private AcousticSimulatorGPUWrapper gpuSimulator;
         private bool usingGpuSimulator = false;
+        private AcousticSimulationVisualizer visualizer;
         // UI Controls
         private TabControl tabControl;
         private TabPage tabVolume;
@@ -746,6 +747,7 @@ namespace CTSegmenter
         {
             // Calculate the extent based on the input parameters
             CalculateExtent();
+            
         }
 
         private void CalculateExtent()
@@ -858,7 +860,30 @@ namespace CTSegmenter
                     depth,
                     pixelSizeF,
                     materialID,
-                    useFullVolumeRendering);
+                    false);
+
+                // Calculate TX and RX positions based on the axis
+                int tx, ty, tz, rx, ry, rz;
+                switch (axis.ToUpperInvariant())
+                {
+                    case "X":
+                        tx = 0; ty = height / 2; tz = depth / 2;
+                        rx = width - 1; ry = height / 2; rz = depth / 2;
+                        break;
+                    case "Y":
+                        tx = width / 2; ty = 0; tz = depth / 2;
+                        rx = width / 2; ry = height - 1; rz = depth / 2;
+                        break;
+                    default:
+                        tx = width / 2; ty = height / 2; tz = 0;
+                        rx = width / 2; ry = height / 2; rz = depth - 1;
+                        break;
+                }
+
+                // Create the SimulationVisualizer before starting the simulation
+                visualizer = new AcousticSimulationVisualizer(
+                    width, height, depth, pixelSizeF,
+                    tx, ty, tz, rx, ry, rz);
 
                 // Prepare progress UI
                 simulationProgressForm = new CancellableProgressForm(
@@ -896,6 +921,9 @@ namespace CTSegmenter
                         gpuSimulator.ProgressUpdated += Simulator_ProgressUpdated;
                         gpuSimulator.SimulationCompleted += Simulator_SimulationCompleted;
 
+                        // Connect visualizer to the GPU simulator
+                        visualizer.ConnectToGpuSimulator(gpuSimulator);
+
                         usingGpuSimulator = true;
                         simulationProgressForm.UpdateMessage("Initializing GPU simulation...");
                     }
@@ -918,6 +946,9 @@ namespace CTSegmenter
                         // Wire up events
                         cpuSimulator.ProgressUpdated += Simulator_ProgressUpdated;
                         cpuSimulator.SimulationCompleted += Simulator_SimulationCompleted;
+
+                        // Connect visualizer to the CPU simulator
+                        visualizer.ConnectToCpuSimulator(cpuSimulator);
                     }
                 }
                 else
@@ -933,8 +964,13 @@ namespace CTSegmenter
                     cpuSimulator.ProgressUpdated += Simulator_ProgressUpdated;
                     cpuSimulator.SimulationCompleted += Simulator_SimulationCompleted;
 
+                    // Connect visualizer to the CPU simulator
+                    visualizer.ConnectToCpuSimulator(cpuSimulator);
+
                     usingGpuSimulator = false;
                 }
+
+                simulator = usingGpuSimulator ? (dynamic)gpuSimulator : (dynamic)cpuSimulator;
 
                 // Start the appropriate simulator
                 simulationRunning = true;
@@ -947,7 +983,7 @@ namespace CTSegmenter
                 });
 
                 // Show modal progress dialog
-                simulationProgressForm.ShowDialog();
+                simulationProgressForm.Show();
                 simulationProgressForm.Dispose();
                 simulationProgressForm = null;
             }
@@ -1047,70 +1083,65 @@ namespace CTSegmenter
         }
         private void DrawWavePropagation(Graphics g, VolumeRenderer renderer)
         {
-            if (usingGpuSimulator && gpuSimulator == null) return;
-            if (!usingGpuSimulator && cpuSimulator == null) return;
+            if (!simulationRunning || simulator == null)
+                return;
 
-            // Get the current state of the wave fields
+            // grab the latest wavefields
             var snapshot = GetWaveFieldSnapshot();
             var pWaveField = snapshot.vx;
             var sWaveField = snapshot.vy;
-            
 
-            // Get the current state of the wave fields
-            
+            int width = mainForm.GetWidth();
+            int height = mainForm.GetHeight();
+            int depth = mainForm.GetDepth();
 
-            // Draw wave fronts as colored points projected onto the 2D view
-            using (SolidBrush pWaveBrush = new SolidBrush(Color.FromArgb(128, 255, 100, 100)))  // Red for P waves
-            using (SolidBrush sWaveBrush = new SolidBrush(Color.FromArgb(128, 100, 100, 255)))  // Blue for S waves
+            // reduce point density for performance/clarity
+            int sampleRate = Math.Max(1, Math.Min(Math.Min(width, height), depth) / 50);
+
+            using (var pBrush = new SolidBrush(Color.FromArgb(128, 255, 100, 100)))  // red
+            using (var sBrush = new SolidBrush(Color.FromArgb(128, 100, 100, 255)))  // blue
             {
-                // Sample the volume to avoid drawing too many points
-                int width = mainForm.GetWidth();
-                int height = mainForm.GetHeight();
-                int depth = mainForm.GetDepth();
-                int sampleRate = Math.Max(1, Math.Min(width, Math.Min(height, depth)) / 50);
-
                 for (int z = 0; z < depth; z += sampleRate)
-                {
                     for (int y = 0; y < height; y += sampleRate)
-                    {
                         for (int x = 0; x < width; x += sampleRate)
                         {
-                            // Check if there's significant wave amplitude at this point
-                            float pAmplitude = (float)pWaveField[x, y, z];
-                            float sAmplitude = (float)sWaveField[x, y, z];
+                            // **skip any “empty” voxel** (density == 0)
+                            if (densityVolume[x, y, z] <= 0f)
+                                continue;
 
-                            // Draw P Wave (if above threshold)
-                            if (pAmplitude > 0.5f)
+                            float pAmp = (float)pWaveField[x, y, z];
+                            float sAmp = (float)sWaveField[x, y, z];
+
+                            if (pAmp > 0.5f)
                             {
-                                PointF screenPos = renderer.ProjectToScreen(x, y, z,
-                                    pictureBoxSimulation.Width, pictureBoxSimulation.Height);
+                                // project to screen and draw a red dot
+                                var pt = renderer.ProjectToScreen(
+                                    x, y, z,
+                                    pictureBoxSimulation.Width,
+                                    pictureBoxSimulation.Height);
 
-                                // Scale the size based on amplitude
-                                int size = Math.Min(10, Math.Max(2, (int)(pAmplitude / 10)));
-
-                                // Draw a dot for the P wave
-                                g.FillEllipse(pWaveBrush,
-                                    screenPos.X - size / 2, screenPos.Y - size / 2, size, size);
+                                int size = Math.Min(10, Math.Max(2, (int)(pAmp / 10)));
+                                g.FillEllipse(pBrush,
+                                    pt.X - size / 2, pt.Y - size / 2,
+                                    size, size);
                             }
 
-                            // Draw S Wave (if above threshold)
-                            if (sAmplitude > 0.5f)
+                            if (sAmp > 0.5f)
                             {
-                                PointF screenPos = renderer.ProjectToScreen(x, y, z,
-                                    pictureBoxSimulation.Width, pictureBoxSimulation.Height);
+                                var pt = renderer.ProjectToScreen(
+                                    x, y, z,
+                                    pictureBoxSimulation.Width,
+                                    pictureBoxSimulation.Height);
 
-                                // Scale the size based on amplitude
-                                int size = Math.Min(10, Math.Max(2, (int)(sAmplitude / 10)));
-
-                                // Draw a dot for the S wave
-                                g.FillEllipse(sWaveBrush,
-                                    screenPos.X - size / 2, screenPos.Y - size / 2, size, size);
+                                int size = Math.Min(10, Math.Max(2, (int)(sAmp / 10)));
+                                g.FillEllipse(sBrush,
+                                    pt.X - size / 2, pt.Y - size / 2,
+                                    size, size);
                             }
                         }
-                    }
-                }
             }
         }
+
         private void DrawSimulationResults(Graphics g)
         {
             // Draw the simulation results at the bottom of the screen
@@ -1153,53 +1184,63 @@ namespace CTSegmenter
         private bool simulationRenderedOnce = false;
         private void PictureBoxSimulation_Paint(object sender, PaintEventArgs e)
         {
-            if (isInitializing && e.ClipRectangle.Width > 0 && simulationRenderedOnce)
+            // Skip any first, phantom paint while initializing
+            if (isInitializing && simulationRenderedOnce)
                 return;
-
             simulationRenderedOnce = true;
-            // If we've set up a cached renderer for the simulation, reuse it
+
+            // Clear the background
+            e.Graphics.Clear(Color.FromArgb(20, 20, 20));
+
             if (simulationRenderer != null)
             {
-                // Apply the current camera transform
+                // Sync the camera transform every frame
                 simulationRenderer.SetTransformation(simRotationX, simRotationY, simZoom, simPan);
 
-                // Draw the volume (wireframe or full volume per settings)
-                simulationRenderer.Render(
-                    e.Graphics,
-                    pictureBoxSimulation.Width,
-                    pictureBoxSimulation.Height);
-
-                // Draw the transducers (T & R) in the scene
-                DrawTransducers(e.Graphics, simulationRenderer);
-
-                // If the simulation is running, overlay the propagating waves
-                if (simulator != null && simulationRunning)
+                if (simulationRunning && simulator != null)
                 {
+                    // Simulation is running → draw JUST the waves
                     DrawWavePropagation(e.Graphics, simulationRenderer);
                 }
-                // Otherwise if it's completed, show final scalar results
-                else if (simulationResults != null)
+                else
                 {
-                    DrawSimulationResults(e.Graphics);
+                    // Not running → draw the static, density-colored mesh
+                    simulationRenderer.Render(
+                        e.Graphics,
+                        pictureBoxSimulation.Width,
+                        pictureBoxSimulation.Height
+                    );
+
+                    // If we have final results, overlay them
+                    if (simulationResults != null)
+                    {
+                        DrawSimulationResults(e.Graphics);
+                    }
                 }
 
-                // Finally draw the status/info text (axis, material, models, etc.)
+                // Always draw the transducers + info on top
+                DrawTransducers(e.Graphics, simulationRenderer);
                 DrawSimulationInfo(e.Graphics);
             }
             else
             {
-                // If we don't yet have a renderer, prompt the user
+                // Fallback: should never happen now
                 using (Font font = new Font("Segoe UI", 12, FontStyle.Regular))
                 using (SolidBrush brush = new SolidBrush(Color.White))
                 {
-                    string message = "Simulation not initialized.";
-                    SizeF textSize = e.Graphics.MeasureString(message, font);
-                    float x = (pictureBoxSimulation.Width - textSize.Width) / 2f;
-                    float y = (pictureBoxSimulation.Height - textSize.Height) / 2f;
-                    e.Graphics.DrawString(message, font, brush, x, y);
+                    string msg = "Simulation not initialized.";
+                    SizeF sz = e.Graphics.MeasureString(msg, font);
+                    e.Graphics.DrawString(
+                        msg,
+                        font,
+                        brush,
+                        (pictureBoxSimulation.Width - sz.Width) / 2f,
+                        (pictureBoxSimulation.Height - sz.Height) / 2f
+                    );
                 }
             }
         }
+
 
         private void DrawTransducers(Graphics g, VolumeRenderer renderer)
         {
@@ -1978,34 +2019,18 @@ namespace CTSegmenter
                 int height = mainForm.GetHeight();
                 int depth = mainForm.GetDepth();
 
-                // Use the explicitly stored material ID
+                // Ensure we’re not on the “Exterior” material
                 byte materialID = selectedMaterialID;
-
-                // Double-check we're not using the Exterior material
                 if (materialID == 0 || selectedMaterial.ID == 0)
-                {
-                    Logger.Log("[AcousticSimulationForm] ERROR: Attempted to use Exterior material (ID 0)");
-                    if (!isInitializing) // Only show message box if not initializing
-                    {
-                        MessageBox.Show("Cannot use the Exterior material for simulations. Please select a valid material.",
-                            "Invalid Material", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    }
                     return;
-                }
 
-                Logger.Log($"[AcousticSimulationForm] Initializing density volume for material ID {materialID} ({selectedMaterial.Name})");
-
-                // Create density volume with homogeneous density
+                // Build a homogeneous density volume
                 float[,,] homogeneousDensityVolume = new float[width, height, depth];
-
-                // Count material voxels and create a dense interior representation
                 int materialVoxelCount = 0;
 
-                // Set the same density for ALL voxels of the selected material
                 Parallel.For(0, depth, z =>
                 {
                     for (int y = 0; y < height; y++)
-                    {
                         for (int x = 0; x < width; x++)
                         {
                             if (mainForm.volumeLabels[x, y, z] == materialID)
@@ -2015,60 +2040,54 @@ namespace CTSegmenter
                             }
                             else
                             {
-                                homogeneousDensityVolume[x, y, z] = 0;
+                                homogeneousDensityVolume[x, y, z] = 0f;
                             }
                         }
-                    }
                 });
 
-                Logger.Log($"[AcousticSimulationForm] Found {materialVoxelCount} voxels for material ID {materialID}");
-
-                if (materialVoxelCount == 0)
-                {
-                    if (!isInitializing) // Only show message box if not initializing
-                    {
-                        MessageBox.Show($"No voxels found for material {selectedMaterial.Name} (ID {materialID}). Please segment this material first.",
-                            "No Material Voxels", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    }
-                    return;
-                }
-
-                // Initialize volume renderer with homogeneous density AND material ID
+                // Store for later rendering
                 densityVolume = homogeneousDensityVolume;
 
-                // Create a temporary volume where we mark "fake boundaries" throughout the material
-                var renderVolume = PreprocessVolumeForFullRendering(densityVolume, materialID);
-
-                // Initialize with the preprocessed volume
-                volumeRenderer = new VolumeRenderer(densityVolume, width, height, depth, mainForm.GetPixelSize(), materialID, useFullVolumeRendering);
-
-                // Set initial zoom to fit the volume in the view
+                // Primary volumeRenderer (used on the Volume tab)
+                volumeRenderer = new VolumeRenderer(
+                    densityVolume,
+                    width, height, depth,
+                    mainForm.GetPixelSize(),
+                    materialID,
+                    useFullVolumeRendering
+                );
                 CalculateInitialZoomAndPosition();
                 volumeRenderer.SetTransformation(rotationX, rotationY, zoom, pan);
 
-                // Mark that we're using homogeneous density
-                hasDensityVariation = false;
+                // **Seed the simulationRenderer** (ready for the Simulation tab)
+                simulationRenderer = new VolumeRenderer(
+                    densityVolume,
+                    width, height, depth,
+                    mainForm.GetPixelSize(),
+                    materialID,
+                    useFullVolumeRendering
+                );
+                simulationRenderer.SetTransformation(simRotationX, simRotationY, simZoom, simPan);
 
-                // Calculate volumes
+                hasDensityVariation = false;
                 CalculateVolumes();
 
-                Logger.Log($"[AcousticSimulationForm] Initialized full volume rendering for {selectedMaterial.Name} with {materialVoxelCount} voxels");
-
-                // Only invalidate the picture box if we're not initializing
                 if (!isInitializing)
-                {
                     pictureBoxVolume.Invalidate();
-                }
             }
             catch (Exception ex)
             {
                 Logger.Log($"[AcousticSimulationForm] Error initializing homogeneous density: {ex.Message}");
-                if (!isInitializing) // Only show message box if not initializing
+                if (!isInitializing)
                 {
-                    MessageBox.Show($"Error initializing volume: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show($"Error initializing volume: {ex.Message}",
+                                    "Error",
+                                    MessageBoxButtons.OK,
+                                    MessageBoxIcon.Error);
                 }
             }
         }
+
         private byte[,,] GetVolumeLabelsArray()
         {
             int width = mainForm.GetWidth();
@@ -2536,7 +2555,6 @@ namespace CTSegmenter
                 progressForm.CancelPressed += (s, args) => cts.Cancel();
             }
         }
-
         private void CalculateDensityVariation(CancellableProgressForm progressForm, CancellationToken ct)
         {
             int width = mainForm.GetWidth();
@@ -2544,7 +2562,7 @@ namespace CTSegmenter
             int depth = mainForm.GetDepth();
             byte materialID = selectedMaterial.ID;
 
-            // Initialize density volume if not already created
+            // Ensure our densityVolume array matches the current volume size
             if (densityVolume == null ||
                 densityVolume.GetLength(0) != width ||
                 densityVolume.GetLength(1) != height ||
@@ -2553,73 +2571,55 @@ namespace CTSegmenter
                 densityVolume = new float[width, height, depth];
             }
 
-            // Calculate min and max grayscale values for the material
+            // 1) First pass: find min/max grayscale and average
             byte minGray = byte.MaxValue;
             byte maxGray = byte.MinValue;
             long totalGray = 0;
             int voxelCount = 0;
 
-            // First pass: find the grayscale range and calculate average
             for (int z = 0; z < depth; z++)
             {
                 if (ct.IsCancellationRequested) return;
-
-                // Update progress (0-30%)
-                int progress = (int)(30.0 * z / depth);
-                progressForm.UpdateProgress(progress);
+                progressForm.UpdateProgress((int)(30.0 * z / depth));  // 0–30%
 
                 for (int y = 0; y < height; y++)
                 {
                     for (int x = 0; x < width; x++)
                     {
-                        // Check if this voxel belongs to our material
                         if (mainForm.volumeLabels[x, y, z] == materialID)
                         {
-                            byte grayValue = mainForm.volumeData[x, y, z];
-
-                            // Update min/max
-                            if (grayValue < minGray) minGray = grayValue;
-                            if (grayValue > maxGray) maxGray = grayValue;
-
-                            // Accumulate for average
-                            totalGray += grayValue;
+                            byte g = mainForm.volumeData[x, y, z];
+                            if (g < minGray) minGray = g;
+                            if (g > maxGray) maxGray = g;
+                            totalGray += g;
                             voxelCount++;
                         }
                     }
                 }
             }
 
-            // Check if material exists in the volume
             if (voxelCount == 0)
-            {
                 throw new InvalidOperationException($"Material '{selectedMaterial.Name}' not found in the volume.");
-            }
 
-            // Calculate average grayscale value
             double avgGray = (double)totalGray / voxelCount;
-
-            // Calculate grayscale range (avoid division by zero)
             int grayRange = maxGray - minGray;
             if (grayRange == 0) grayRange = 1;
 
-            // Determine density range as a proportion of the base density
-            // For example, allow variation of ±20% from base density
-            double densityVariationPercent = 0.2; // 20%
-            double minDensity = baseDensity * (1 - densityVariationPercent);
-            double maxDensity = baseDensity * (1 + densityVariationPercent);
+            // 2) Determine density mapping: ±20% about baseDensity
+            double variation = 0.2;  // 20%
+            double minDensity = baseDensity * (1 - variation);
+            double maxDensity = baseDensity * (1 + variation);
             double densityRange = maxDensity - minDensity;
 
-            // Update message with density range info
-            progressForm.UpdateMessage($"Applying density variation ({minDensity:F1} - {maxDensity:F1} kg/m³)...");
+            progressForm.UpdateMessage(
+                $"Applying density variation [{minDensity:F1} – {maxDensity:F1} kg/m³]..."
+            );
 
-            // Second pass: calculate and assign density based on grayscale value
+            // 3) Second pass: fill densityVolume
             for (int z = 0; z < depth; z++)
             {
                 if (ct.IsCancellationRequested) return;
-
-                // Update progress (30-100%)
-                int progress = 30 + (int)(70.0 * z / depth);
-                progressForm.UpdateProgress(progress);
+                progressForm.UpdateProgress(30 + (int)(70.0 * z / depth));  // 30–100%
 
                 Parallel.For(0, height, y =>
                 {
@@ -2627,50 +2627,51 @@ namespace CTSegmenter
 
                     for (int x = 0; x < width; x++)
                     {
-                        // Initialize all voxels to 0
-                        densityVolume[x, y, z] = 0;
-
-                        // Check if this voxel belongs to our material
+                        densityVolume[x, y, z] = 0f;
                         if (mainForm.volumeLabels[x, y, z] == materialID)
                         {
-                            byte grayValue = mainForm.volumeData[x, y, z];
-
-                            // Normalize grayscale value to [0, 1]
-                            double normalizedGray = (double)(grayValue - minGray) / grayRange;
-
-                            // Calculate density based on normalized grayscale
-                            // Linear mapping: lower gray value = lower density, higher gray value = higher density
-                            double density = minDensity + (normalizedGray * densityRange);
-
-                            // Store in density volume
-                            densityVolume[x, y, z] = (float)density;
+                            byte g = mainForm.volumeData[x, y, z];
+                            double norm = (g - minGray) / (double)grayRange;
+                            double d = minDensity + norm * densityRange;
+                            densityVolume[x, y, z] = (float)d;
                         }
                     }
                 });
             }
-            // Initialize volume renderer
+
+            // 4) Rebuild both renderers on the UI thread
             BeginInvoke(new Action(() =>
             {
-                volumeRenderer = new VolumeRenderer(densityVolume,
-                                                   mainForm.GetWidth(),
-                                                   mainForm.GetHeight(),
-                                                   mainForm.GetDepth(),
-                                                   mainForm.GetPixelSize(),
-                                                   selectedMaterialID,
-                                                   useFullVolumeRendering);
-
+                // Volume tab renderer
+                volumeRenderer = new VolumeRenderer(
+                    densityVolume,
+                    width, height, depth,
+                    mainForm.GetPixelSize(),
+                    materialID,
+                    useFullVolumeRendering
+                );
                 volumeRenderer.SetTransformation(rotationX, rotationY, zoom, pan);
 
-                // Mark that we have density variation
+                // Simulation tab renderer
+                simulationRenderer = new VolumeRenderer(
+                    densityVolume,
+                    width, height, depth,
+                    mainForm.GetPixelSize(),
+                    materialID,
+                    useFullVolumeRendering
+                );
+                simulationRenderer.SetTransformation(simRotationX, simRotationY, simZoom, simPan);
+
                 hasDensityVariation = true;
 
-                // Update visualization
+                // Refresh both views
                 pictureBoxVolume.Invalidate();
+                pictureBoxSimulation.Invalidate();
 
-                Logger.Log("[AcousticSimulationForm] Applied variable density to visualization");
+                Logger.Log("[AcousticSimulationForm] Applied variable density to both renderers");
             }));
 
-            // Ensure we don't have disconnected regions
+            // 5) (Optional) ensure connectivity afterward
             if (!ct.IsCancellationRequested)
             {
                 progressForm.UpdateMessage("Ensuring connectivity...");
@@ -2837,6 +2838,7 @@ namespace CTSegmenter
                    cpuSimulator?.Dispose();
                     gpuSimulator?.Dispose();
                 }
+                visualizer?.Dispose();
             }
             base.Dispose(disposing);
         }

@@ -18,7 +18,8 @@ namespace CTSegmenter
         private readonly byte[,,] volumeLabels;
         private readonly float[,,] densityVolume;
         private readonly byte selectedMaterialID;
-
+        // progress ----------------------------------------------------
+        private int expectedTotalSteps;
         private readonly double confiningPressureMPa;
         private readonly double tensileStrengthMPa;
         private readonly double failureAngleDeg;
@@ -128,24 +129,55 @@ namespace CTSegmenter
         #region core loop ---------------------------------------------------------------
         private void Run(CancellationToken token)
         {
-            ComputeStableTimeStep();
+            ComputeStableTimeStep();                 // sets dt
             ClearFields();
 
-            stepCount = 0; receiverTouched = false; touchStep = 0; maxReceiverEnergy = 0; energyPeaked = false;
+            // ----- progress -----------------------------------------------------------
+            double dist = Math.Sqrt((tx - rx) * (tx - rx) +
+                                         (ty - ry) * (ty - ry) +
+                                         (tz - rz) * (tz - rz)) * pixelSize;
+            double rhoAvg = densityVolume.Cast<float>().Average();
+            double vpEst = Math.Sqrt((lambda0 + 2 * mu0) / rhoAvg);
+            expectedTotalSteps = (int)Math.Ceiling(dist / (vpEst * dt)) + totalTimeSteps;
+            // --------------------------------------------------------------------------
 
-            while (!token.IsCancellationRequested && stepCount < totalTimeSteps)
+            stepCount = 0;
+            receiverTouched = false;
+            touchStep = -1;                   // not reached yet
+            int prolongSteps = totalTimeSteps;       // GUI “Time steps” = extra steps
+
+            while (!token.IsCancellationRequested)
             {
                 UpdateStress();
                 UpdateVelocity();
                 stepCount++;
 
-                if (!receiverTouched && CheckReceiverTouch()) { receiverTouched = true; touchStep = stepCount; }
-                if (stepCount >= minRequiredSteps && stepCount % checkInterval == 0 && CheckEnergyStopping()) break;
-                if (stepCount % 10 == 0) ReportProgress();
+                if (!receiverTouched && CheckReceiverTouch())
+                {
+                    receiverTouched = true;
+                    touchStep = stepCount;
+                    Logger.Log($"[AcousticSimulator] RX touched at step {touchStep}");
+                }
+
+                if (receiverTouched && stepCount - touchStep >= prolongSteps)
+                    break;                           // natural stop
+
+                if (stepCount % 10 == 0)
+                    ReportProgress();
+            }
+
+            if (token.IsCancellationRequested)       // user abort
+            {
+                Logger.Log("[AcousticSimulator] Simulation cancelled by user");
+                ProgressUpdated?.Invoke(
+                    this,
+                    new AcousticSimulationProgressEventArgs(
+                        0, stepCount, "Cancelled", null, null));
+                return;
             }
 
             ReportProgress("Finalising", 99);
-            FinaliseAndRaiseEvent();
+            FinaliseAndRaiseEvent();                 // will use measured arrival
         }
         #endregion
 
@@ -340,8 +372,13 @@ namespace CTSegmenter
         #region progress & completion ---------------------------------------------------
         private void ReportProgress(string text = "Simulating", int? force = null)
         {
-            int percent = force ?? (int)(stepCount * 95.0 / totalTimeSteps);
-            ProgressUpdated?.Invoke(this, new AcousticSimulationProgressEventArgs(percent, stepCount, text, ConvertToFloat(vx), ConvertToFloat(vy)));
+            int percent = force ?? (int)(stepCount * 100.0 / expectedTotalSteps);
+            if (percent > 99) percent = 99;                // keep 100 % for Finish()
+            ProgressUpdated?.Invoke(
+                this,
+                new AcousticSimulationProgressEventArgs(
+                    percent, stepCount, text, null, null));
+            Logger.Log("[AcousticSimulator] CPU Simulation Progress: " + percent + " Step: " + stepCount + "/" + expectedTotalSteps);
         }
 
         private static float[,,] ConvertToFloat(double[,,] src)
@@ -356,16 +393,20 @@ namespace CTSegmenter
 
         private void FinaliseAndRaiseEvent()
         {
-            double dist = Math.Sqrt((tx - rx) * (tx - rx) + (ty - ry) * (ty - ry) + (tz - rz) * (tz - rz)) * pixelSize;
-            double Davg = useBrittleModel ? damage.Cast<double>().Average() : 0.0;
-            double lambdaEff = (1 - Davg) * lambda0;
-            double muEff = (1 - Davg) * mu0;
-            double rhoAvg = densityVolume.Cast<float>().Average();
-            double vS = Math.Sqrt(muEff / rhoAvg);
-            double vP = Math.Sqrt((lambdaEff + 2 * muEff) / rhoAvg);
-            int pSteps = receiverTouched ? touchStep : (int)Math.Round(dist / (vP * dt));
-            int sSteps = (int)Math.Round(dist / (vS * dt));
-            SimulationCompleted?.Invoke(this, new AcousticSimulationCompleteEventArgs(vP, vS, vP / vS, pSteps, sSteps, stepCount));
+            double dist = Math.Sqrt((tx - rx) * (tx - rx) +
+                                    (ty - ry) * (ty - ry) +
+                                    (tz - rz) * (tz - rz)) * pixelSize;
+
+            double vp = dist / (touchStep * dt);              // measured
+            int pSteps = touchStep;
+
+            double vs = dist / ((stepCount - touchStep) * dt);
+            int sSteps = stepCount - touchStep;
+
+            SimulationCompleted?.Invoke(
+                this,
+                new AcousticSimulationCompleteEventArgs(
+                    vp, vs, vp / vs, pSteps, sSteps, stepCount));
         }
         #endregion
 

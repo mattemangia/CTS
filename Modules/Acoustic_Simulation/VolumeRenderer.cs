@@ -532,11 +532,7 @@ namespace CTSegmenter
                     float cosX = (float)Math.Cos(angleX);
                     float sinX = (float)Math.Sin(angleX);
 
-                    // Increased scale factor for better initial view
-                    float projectionScale = zoom * 2.5f;
-
-                    // Optimized projection formula to make objects larger initially
-                    float zDivisor = 0.03f;
+                    float focalLength = viewDistance;
 
                     // Draw the edges in sorted order (back to front)
                     // For performance, only draw a subset of edges when zoomed out
@@ -583,13 +579,10 @@ namespace CTSegmenter
                         float z2 = viewDistance + v2zr;
 
                         if (z1 <= 0 || z2 <= 0) continue; // Behind the camera
-
-                        // Improved projection formula to make objects larger initially
-                        float p1x = v1xr * projectionScale / (z1 * zDivisor);
-                        float p1y = v1yr * projectionScale / (z1 * zDivisor);
-
-                        float p2x = v2xr * projectionScale / (z2 * zDivisor);
-                        float p2y = v2yr * projectionScale / (z2 * zDivisor);
+                        float p1x = v1xr * focalLength * zoom / z1;
+                        float p1y = v1yr * focalLength * zoom / z1;
+                        float p2x = v2xr * focalLength * zoom / z2;
+                        float p2y = v2yr * focalLength * zoom / z2;
 
                         // Map to screen coordinates with panning
                         int x1 = (int)(centerX + p1x + pan.X);
@@ -634,8 +627,8 @@ namespace CTSegmenter
                             if (z <= 0) continue; // Behind the camera
 
                             // Projection with better scaling
-                            float px = vxr * projectionScale / (z * zDivisor);
-                            float py = vyr * projectionScale / (z * zDivisor);
+                            float px = vxr * viewDistance * zoom / z;
+                            float py = vyr * viewDistance * zoom / z;
 
                             // Map to screen coordinates with panning
                             int x = (int)(centerX + px + pan.X);

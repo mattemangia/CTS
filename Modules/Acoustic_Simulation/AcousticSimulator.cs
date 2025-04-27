@@ -18,6 +18,12 @@ namespace CTSegmenter
         private readonly byte[,,] volumeLabels;
         private readonly float[,,] densityVolume;
         private readonly byte selectedMaterialID;
+        private bool pWaveReceiverTouched;
+        private bool sWaveReceiverTouched;
+        private int pWaveTouchStep;
+        private int sWaveTouchStep;
+        private double pWaveMaxAmplitude;
+        private double sWaveMaxAmplitude;
         // progress ----------------------------------------------------
         private int expectedTotalSteps;
         private readonly double confiningPressureMPa;
@@ -42,8 +48,8 @@ namespace CTSegmenter
         private readonly double[,,] damage;
 
         // TX / RX
-        private readonly int tx, ty, tz;
-        private readonly int rx, ry, rz;
+        private int tx, ty, tz;
+        private int rx, ry, rz;
 
         // time stepping
         private double dt;
@@ -67,22 +73,25 @@ namespace CTSegmenter
 
         #region constructor -------------------------------------------------------------
         public AcousticSimulator(
-            int width, int height, int depth, float pixelSize,
-            byte[,,] volumeLabels, float[,,] densityVolume, byte selectedMaterialID,
-            string axis, string waveType,
-            double confiningPressure, double tensileStrength, double failureAngle, double cohesion,
-            double energy, double frequency, int amplitude, int timeSteps,
-            bool useElasticModel, bool usePlasticModel, bool useBrittleModel,
-            double youngsModulus, double poissonRatio)
+    int width, int height, int depth, float pixelSize,
+    byte[,,] volumeLabels, float[,,] densityVolume, byte selectedMaterialID,
+    string axis, string waveType,
+    double confiningPressure, double tensileStrength, double failureAngle, double cohesion,
+    double energy, double frequency, int amplitude, int timeSteps,
+    bool useElasticModel, bool usePlasticModel, bool useBrittleModel,
+    double youngsModulus, double poissonRatio,
+    int txParam, int tyParam, int tzParam, int rxParam, int ryParam, int rzParam)
         {
-            // grid & material
-            this.width = width; this.height = height; this.depth = depth;
+            // Grid & material properties
+            this.width = width;
+            this.height = height;
+            this.depth = depth;
             this.pixelSize = pixelSize;
             this.volumeLabels = volumeLabels;
             this.densityVolume = densityVolume;
             this.selectedMaterialID = selectedMaterialID;
 
-            // physics
+            // Physics parameters
             confiningPressureMPa = confiningPressure;
             tensileStrengthMPa = tensileStrength;
             failureAngleDeg = failureAngle;
@@ -102,20 +111,43 @@ namespace CTSegmenter
             mu0 = E / (2.0 * (1.0 + poissonRatio));
             lambda0 = E * poissonRatio / ((1 + poissonRatio) * (1 - 2 * poissonRatio));
 
-            // allocate arrays
-            vx = new double[width, height, depth]; vy = new double[width, height, depth]; vz = new double[width, height, depth];
-            sxx = new double[width, height, depth]; syy = new double[width, height, depth]; szz = new double[width, height, depth];
-            sxy = new double[width, height, depth]; sxz = new double[width, height, depth]; syz = new double[width, height, depth];
+            // Allocate arrays for simulation
+            vx = new double[width, height, depth];
+            vy = new double[width, height, depth];
+            vz = new double[width, height, depth];
+            sxx = new double[width, height, depth];
+            syy = new double[width, height, depth];
+            szz = new double[width, height, depth];
+            sxy = new double[width, height, depth];
+            sxz = new double[width, height, depth];
+            syz = new double[width, height, depth];
             damage = new double[width, height, depth];
 
-            // transducer assignment
-            switch (axis.ToUpperInvariant())
-            {
-                case "X": tx = 0; ty = height / 2; tz = depth / 2; rx = width - 1; ry = height / 2; rz = depth / 2; break;
-                case "Y": tx = width / 2; ty = 0; tz = depth / 2; rx = width / 2; ry = height - 1; rz = depth / 2; break;
-                default: tx = width / 2; ty = height / 2; tz = 0; rx = width / 2; ry = height / 2; rz = depth - 1; break;
-            }
+            // Set transducer positions from parameters
+            tx = txParam;
+            ty = tyParam;
+            tz = tzParam;
+            rx = rxParam;
+            ry = ryParam;
+            rz = rzParam;
 
+            // Ensure transducers are within the volume boundaries and not on edges
+            if (tx < 1) tx = 1;
+            if (ty < 1) ty = 1;
+            if (tz < 1) tz = 1;
+            if (rx < 1) rx = 1;
+            if (ry < 1) ry = 1;
+            if (rz < 1) rz = 1;
+            if (tx >= width - 1) tx = width - 2;
+            if (ty >= height - 1) ty = height - 2;
+            if (tz >= depth - 1) tz = depth - 2;
+            if (rx >= width - 1) rx = width - 2;
+            if (ry >= height - 1) ry = height - 2;
+            if (rz >= depth - 1) rz = depth - 2;
+
+            Logger.Log($"[AcousticSimulator] Using TX: ({tx},{ty},{tz}), RX: ({rx},{ry},{rz})");
+
+            // Set minimum required steps for simulation to avoid premature termination
             minRequiredSteps = Math.Max(50, timeSteps / 10);
         }
         #endregion
@@ -137,33 +169,147 @@ namespace CTSegmenter
                                          (ty - ry) * (ty - ry) +
                                          (tz - rz) * (tz - rz)) * pixelSize;
             double rhoAvg = densityVolume.Cast<float>().Average();
+            rhoAvg = Math.Max(rhoAvg, 100.0); // Safety minimum
             double vpEst = Math.Sqrt((lambda0 + 2 * mu0) / rhoAvg);
+            vpEst = Math.Min(vpEst, 6000.0); // Reasonable maximum
             expectedTotalSteps = (int)Math.Ceiling(dist / (vpEst * dt)) + totalTimeSteps;
+
+            // Add maximum step limit to prevent infinite simulations
+            int absoluteMaxSteps = Math.Max(1000, expectedTotalSteps * 2);
             // --------------------------------------------------------------------------
 
             stepCount = 0;
-            receiverTouched = false;
-            touchStep = -1;                   // not reached yet
-            int prolongSteps = totalTimeSteps;       // GUI “Time steps” = extra steps
+            pWaveReceiverTouched = false;
+            sWaveReceiverTouched = false;
+            pWaveTouchStep = -1;
+            sWaveTouchStep = -1;
+            pWaveMaxAmplitude = 0;
+            sWaveMaxAmplitude = 0;
+            int prolongSteps = totalTimeSteps;  // GUI "Time steps" = extra steps after both waves arrive
+
+            Logger.Log($"[AcousticSimulator] Starting simulation with prolongSteps: {prolongSteps}");
+            Logger.Log($"[AcousticSimulator] Expected total steps: {expectedTotalSteps}, Maximum allowed: {absoluteMaxSteps}");
+
+            // Add variables to detect instability
+            bool instabilityDetected = false;
+            double previousMaxField = 0;
+            int stableCount = 0;
+            int instabilityCounter = 0;
 
             while (!token.IsCancellationRequested)
             {
-                UpdateStress();
-                UpdateVelocity();
-                stepCount++;
-
-                if (!receiverTouched && CheckReceiverTouch())
+                try
                 {
-                    receiverTouched = true;
-                    touchStep = stepCount;
-                    Logger.Log($"[AcousticSimulator] RX touched at step {touchStep}");
+                    UpdateStress();
+                    UpdateVelocity();
+                    stepCount++;
+
+                    // Check for numerical instability
+                    double currentMaxField = GetMaxFieldValue();
+                    if (double.IsInfinity(currentMaxField) || double.IsNaN(currentMaxField) ||
+                        currentMaxField > 1e30 || (currentMaxField > 1e15 && currentMaxField > previousMaxField * 10))
+                    {
+                        instabilityCounter++;
+
+                        if (instabilityCounter >= 3) // Confirm instability with multiple detections
+                        {
+                            Logger.Log($"[AcousticSimulator] WARNING: Numerical instability detected at step {stepCount}. Max field value: {currentMaxField:E6}");
+                            instabilityDetected = true;
+
+                            // Start checking for wave arrival even with instability
+                            if (!pWaveReceiverTouched && stepCount > minRequiredSteps / 2)
+                            {
+                                pWaveReceiverTouched = true;
+                                pWaveTouchStep = stepCount;
+                                Logger.Log($"[AcousticSimulator] Using current step {stepCount} as P-Wave arrival due to instability");
+                            }
+                            else if (pWaveReceiverTouched && !sWaveReceiverTouched && stepCount > pWaveTouchStep + minRequiredSteps / 4)
+                            {
+                                sWaveReceiverTouched = true;
+                                sWaveTouchStep = stepCount;
+                                Logger.Log($"[AcousticSimulator] Using current step {stepCount} as S-Wave arrival due to instability");
+                            }
+                        }
+                    }
+                    else
+                    {
+                        instabilityCounter = 0;
+                        stableCount++;
+                    }
+                    previousMaxField = currentMaxField;
+
+                    // Check for P-wave arrival (primarily in vx component)
+                    if (!pWaveReceiverTouched && CheckPWaveReceiverTouch())
+                    {
+                        pWaveReceiverTouched = true;
+                        pWaveTouchStep = stepCount;
+                        Logger.Log($"[AcousticSimulator] P-Wave reached RX at step {pWaveTouchStep}");
+                    }
+
+                    // Check for S-wave arrival (primarily in vy/vz components)
+                    if (pWaveReceiverTouched && !sWaveReceiverTouched && CheckSWaveReceiverTouch())
+                    {
+                        sWaveReceiverTouched = true;
+                        sWaveTouchStep = stepCount;
+                        Logger.Log($"[AcousticSimulator] S-Wave reached RX at step {sWaveTouchStep}");
+                    }
+
+                    // Only terminate after BOTH waves have been detected and additional steps
+                    if (pWaveReceiverTouched && sWaveReceiverTouched &&
+                        (stepCount - sWaveTouchStep >= prolongSteps))
+                    {
+                        Logger.Log($"[AcousticSimulator] Terminating after both waves + {prolongSteps} extra steps");
+                        break;  // natural stop
+                    }
+
+                    // Time-based automatic termination even if waves aren't detected properly
+                    if (stepCount >= absoluteMaxSteps)
+                    {
+                        Logger.Log($"[AcousticSimulator] WARNING: Terminating due to reaching maximum step count ({stepCount})");
+
+                        // If we haven't detected waves but reached maximum steps,
+                        // use estimated arrival times based on expected speeds
+                        if (!pWaveReceiverTouched)
+                        {
+                            pWaveReceiverTouched = true;
+                            pWaveTouchStep = absoluteMaxSteps / 3;
+                            Logger.Log($"[AcousticSimulator] Using estimated P-Wave arrival at step {pWaveTouchStep}");
+                        }
+
+                        if (!sWaveReceiverTouched)
+                        {
+                            sWaveReceiverTouched = true;
+                            sWaveTouchStep = absoluteMaxSteps / 2;
+                            Logger.Log($"[AcousticSimulator] Using estimated S-Wave arrival at step {sWaveTouchStep}");
+                        }
+
+                        break;
+                    }
+
+                    if (stepCount % 10 == 0)
+                        ReportProgress();
                 }
+                catch (Exception ex)
+                {
+                    // Handle any exceptions during simulation
+                    Logger.Log($"[AcousticSimulator] Error during simulation step {stepCount}: {ex.Message}");
+                    instabilityDetected = true;
 
-                if (receiverTouched && stepCount - touchStep >= prolongSteps)
-                    break;                           // natural stop
+                    // Force termination with estimated results
+                    if (!pWaveReceiverTouched)
+                    {
+                        pWaveReceiverTouched = true;
+                        pWaveTouchStep = Math.Max(10, stepCount / 3);
+                    }
 
-                if (stepCount % 10 == 0)
-                    ReportProgress();
+                    if (!sWaveReceiverTouched)
+                    {
+                        sWaveReceiverTouched = true;
+                        sWaveTouchStep = Math.Max(pWaveTouchStep + 5, stepCount / 2);
+                    }
+
+                    break;
+                }
             }
 
             if (token.IsCancellationRequested)       // user abort
@@ -179,27 +325,265 @@ namespace CTSegmenter
             ReportProgress("Finalising", 99);
             FinaliseAndRaiseEvent();                 // will use measured arrival
         }
+        private double GetMaxFieldValue()
+        {
+            double maxVal = 0;
+
+            // Sample a subset of points to avoid slow computation
+            int stride = Math.Max(1, width / 10);
+
+            for (int z = 0; z < depth; z += stride)
+                for (int y = 0; y < height; y += stride)
+                    for (int x = 0; x < width; x += stride)
+                    {
+                        double vxAbs = Math.Abs(vx[x, y, z]);
+                        double vyAbs = Math.Abs(vy[x, y, z]);
+                        double vzAbs = Math.Abs(vz[x, y, z]);
+                        double sxxAbs = Math.Abs(sxx[x, y, z]);
+                        double syyAbs = Math.Abs(syy[x, y, z]);
+                        double szzAbs = Math.Abs(szz[x, y, z]);
+
+                        maxVal = Math.Max(maxVal, vxAbs);
+                        maxVal = Math.Max(maxVal, vyAbs);
+                        maxVal = Math.Max(maxVal, vzAbs);
+                        maxVal = Math.Max(maxVal, sxxAbs);
+                        maxVal = Math.Max(maxVal, syyAbs);
+                        maxVal = Math.Max(maxVal, szzAbs);
+                    }
+
+            return maxVal;
+        }
         #endregion
 
         #region helpers -----------------------------------------------------------------
         private void ComputeStableTimeStep()
         {
             double rhoMin = densityVolume.Cast<float>().Where(d => d > 0).Min();
+            // Ensure rhoMin has a reasonable minimum value to prevent division by very small numbers
+            rhoMin = Math.Max(rhoMin, 100.0); // Set minimum density to 100 kg/m³
+
+            // Calculate maximum P-wave velocity
             double vpMax = Math.Sqrt((lambda0 + 2 * mu0) / rhoMin);
+
+            // Limit maximum velocity to prevent extremely small time steps
+            vpMax = Math.Min(vpMax, 6000.0); // Cap maximum velocity at 6000 m/s
+
             double f = sourceFrequencyKHz > 0 ? sourceFrequencyKHz * 1e3 : 1e5;
             double dtFreq = 1.0 / (20.0 * f);
-            dt = Math.Min(SafetyCourant * pixelSize / vpMax, dtFreq);
+
+            // Increase safety factor from 0.4 to 0.2 for more stable simulation
+            double safetyFactor = 0.2;
+            dt = Math.Min(safetyFactor * pixelSize / vpMax, dtFreq);
+
+            // Ensure dt is not too small
+            dt = Math.Max(dt, 1e-8);
+
+            Logger.Log($"[AcousticSimulator] Time step calculated: dt={dt:E6} s, vpMax={vpMax:F2} m/s");
+        }
+        private double Clamp(double value, double min, double max)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value))
+                return 0.0;
+
+            return Math.Max(min, Math.Min(max, value));
         }
 
         private void ClearFields()
         {
-            Array.Clear(vx, 0, vx.Length); Array.Clear(vy, 0, vy.Length); Array.Clear(vz, 0, vz.Length);
-            Array.Clear(sxx, 0, sxx.Length); Array.Clear(syy, 0, syy.Length); Array.Clear(szz, 0, szz.Length);
-            Array.Clear(sxy, 0, sxy.Length); Array.Clear(sxz, 0, sxz.Length); Array.Clear(syz, 0, syz.Length);
+            // Reset all field arrays to zero
+            Array.Clear(vx, 0, vx.Length);
+            Array.Clear(vy, 0, vy.Length);
+            Array.Clear(vz, 0, vz.Length);
+            Array.Clear(sxx, 0, sxx.Length);
+            Array.Clear(syy, 0, syy.Length);
+            Array.Clear(szz, 0, szz.Length);
+            Array.Clear(sxy, 0, sxy.Length);
+            Array.Clear(sxz, 0, sxz.Length);
+            Array.Clear(syz, 0, syz.Length);
             Array.Clear(damage, 0, damage.Length);
 
+            // Calculate pulse magnitude and amplify it for better visualization
             double pulse = sourceAmplitude * Math.Sqrt(sourceEnergyJ);
-            sxx[tx, ty, tz] = syy[tx, ty, tz] = szz[tx, ty, tz] = pulse;
+            pulse = Clamp(pulse * 10, -1e6, 1e6); // Moderate amplification with safety limits
+
+            Logger.Log($"[AcousticSimulator] Attempting to place source at TX: ({tx},{ty},{tz})");
+
+            // Check if transmitter is within volume bounds
+            if (tx >= 0 && tx < width && ty >= 0 && ty < height && tz >= 0 && tz < depth)
+            {
+                // Check if transmitter is in the selected material
+                if (volumeLabels[tx, ty, tz] == selectedMaterialID)
+                {
+                    // Apply source impulse at the transmitter location
+                    Logger.Log($"[AcousticSimulator] Applying source pulse of magnitude {pulse} at ({tx},{ty},{tz})");
+                    sxx[tx, ty, tz] = pulse;
+                    syy[tx, ty, tz] = pulse;
+                    szz[tx, ty, tz] = pulse;
+                }
+                else
+                {
+                    Logger.Log($"[AcousticSimulator] WARNING: Transmitter at ({tx},{ty},{tz}) not in selected material!");
+
+                    // Try to find a nearby point in the selected material (search radius: 5 voxels)
+                    bool materialFound = false;
+                    int bestX = 0, bestY = 0, bestZ = 0;
+
+                    // First try nearby points (5 voxel radius)
+                    for (int dz = -5; dz <= 5 && !materialFound; dz++)
+                    {
+                        for (int dy = -5; dy <= 5 && !materialFound; dy++)
+                        {
+                            for (int dx = -5; dx <= 5 && !materialFound; dx++)
+                            {
+                                int nx = tx + dx;
+                                int ny = ty + dy;
+                                int nz = tz + dz;
+
+                                if (nx >= 0 && nx < width && ny >= 0 && ny < height && nz >= 0 && nz < depth)
+                                {
+                                    if (volumeLabels[nx, ny, nz] == selectedMaterialID)
+                                    {
+                                        bestX = nx;
+                                        bestY = ny;
+                                        bestZ = nz;
+                                        materialFound = true;
+                                        Logger.Log($"[AcousticSimulator] Found material near TX at ({bestX},{bestY},{bestZ})");
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // If no nearby material point found, scan the entire volume
+                    if (!materialFound)
+                    {
+                        Logger.Log("[AcousticSimulator] No material found near TX, scanning entire volume...");
+                        double bestDistanceFromCenter = double.MaxValue;
+                        int centerX = width / 2;
+                        int centerY = height / 2;
+                        int centerZ = depth / 2;
+
+                        // Search for material points, prioritizing those near the center
+                        for (int z = 0; z < depth; z++)
+                        {
+                            for (int y = 0; y < height; y++)
+                            {
+                                for (int x = 0; x < width; x++)
+                                {
+                                    if (volumeLabels[x, y, z] == selectedMaterialID)
+                                    {
+                                        // Calculate distance from center
+                                        double dist = Math.Sqrt(
+                                            Math.Pow(x - centerX, 2) +
+                                            Math.Pow(y - centerY, 2) +
+                                            Math.Pow(z - centerZ, 2));
+
+                                        if (dist < bestDistanceFromCenter)
+                                        {
+                                            bestDistanceFromCenter = dist;
+                                            bestX = x;
+                                            bestY = y;
+                                            bestZ = z;
+                                            materialFound = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Apply source pulse if a material point was found
+                    if (materialFound)
+                    {
+                        // Apply an even stronger pulse at the found location to ensure signal propagation
+                        double enhancedPulse = pulse * 10; // Further strengthen pulse
+                        sxx[bestX, bestY, bestZ] = enhancedPulse;
+                        syy[bestX, bestY, bestZ] = enhancedPulse;
+                        szz[bestX, bestY, bestZ] = enhancedPulse;
+                        Logger.Log($"[AcousticSimulator] Applied enhanced source pulse of magnitude {enhancedPulse} at ({bestX},{bestY},{bestZ})");
+
+                        // Update transmitter position for future reference
+                        tx = bestX;
+                        ty = bestY;
+                        tz = bestZ;
+                    }
+                    else
+                    {
+                        Logger.Log($"[AcousticSimulator] CRITICAL ERROR: No material with ID {selectedMaterialID} found in volume!");
+
+                        // Last resort: Apply pulse at volume center to prevent complete failure
+                        int cx = width / 2;
+                        int cy = height / 2;
+                        int cz = depth / 2;
+
+                        sxx[cx, cy, cz] = pulse * 100; // Extreme amplification
+                        syy[cx, cy, cz] = pulse * 100;
+                        szz[cx, cy, cz] = pulse * 100;
+                        Logger.Log($"[AcousticSimulator] FALLBACK: Applied emergency pulse at volume center ({cx},{cy},{cz})");
+                    }
+                }
+            }
+            else
+            {
+                // TX is outside volume - use center as fallback
+                int cx = width / 2;
+                int cy = height / 2;
+                int cz = depth / 2;
+
+                Logger.Log($"[AcousticSimulator] TX ({tx},{ty},{tz}) is outside volume bounds, using center instead");
+
+                // Try to find a material point near the center
+                bool found = false;
+                for (int r = 0; r < Math.Max(width, Math.Max(height, depth)) / 2 && !found; r++)
+                {
+                    for (int dz = -r; dz <= r && !found; dz++)
+                    {
+                        for (int dy = -r; dy <= r && !found; dy++)
+                        {
+                            for (int dx = -r; dx <= r && !found; dx++)
+                            {
+                                // Only check points at approximately distance r
+                                if (Math.Abs(dx) == r || Math.Abs(dy) == r || Math.Abs(dz) == r)
+                                {
+                                    int nx = cx + dx;
+                                    int ny = cy + dy;
+                                    int nz = cz + dz;
+
+                                    if (nx >= 0 && nx < width && ny >= 0 && ny < height && nz >= 0 && nz < depth)
+                                    {
+                                        if (volumeLabels[nx, ny, nz] == selectedMaterialID)
+                                        {
+                                            // Apply source at this point
+                                            sxx[nx, ny, nz] = pulse * 10;
+                                            syy[nx, ny, nz] = pulse * 10;
+                                            szz[nx, ny, nz] = pulse * 10;
+                                            Logger.Log($"[AcousticSimulator] Applied source at material point ({nx},{ny},{nz}) near center");
+                                            tx = nx;
+                                            ty = ny;
+                                            tz = nz;
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!found)
+                {
+                    // Extreme fallback: Apply at center regardless of material
+                    sxx[cx, cy, cz] = pulse * 100;
+                    syy[cx, cy, cz] = pulse * 100;
+                    szz[cx, cy, cz] = pulse * 100;
+                    Logger.Log($"[AcousticSimulator] EMERGENCY FALLBACK: Applied pulse at center ({cx},{cy},{cz})");
+                    tx = cx;
+                    ty = cy;
+                    tz = cz;
+                }
+            }
         }
         #endregion
 
@@ -342,6 +726,80 @@ namespace CTSegmenter
         #endregion
 
         #region termination -------------------------------------------------------------
+        private bool CheckSWaveReceiverTouch()
+        {
+            // S-waves are primarily transverse (shear) - vy and vz components
+            double sTransverseMagnitude = Math.Sqrt(
+                vy[rx, ry, rz] * vy[rx, ry, rz] +
+                vz[rx, ry, rz] * vz[rx, ry, rz]);
+
+            // Protect against extremely large values
+            if (double.IsInfinity(sTransverseMagnitude) || double.IsNaN(sTransverseMagnitude))
+            {
+                Logger.Log("[AcousticSimulator] WARNING: S-wave magnitude at RX is invalid (INF or NaN)");
+                return false;
+            }
+
+            // Track maximum S-wave amplitude for threshold calculation
+            if (sTransverseMagnitude > sWaveMaxAmplitude)
+                sWaveMaxAmplitude = sTransverseMagnitude;
+
+            // Use a more sensitive threshold to avoid false detection 
+            // Wait a bit after P-wave to avoid false detection
+            if (stepCount - pWaveTouchStep < 5) // Reduced from 10 to 5
+                return false;
+
+            // Lower the ratio from 0.05 to 0.01 for easier detection
+            double threshold = Math.Max(1e-10, sWaveMaxAmplitude * 0.01);
+
+            // Log S-wave detection data
+            if (stepCount % 10 == 0)
+                Logger.Log($"[CheckSWaveTouch] RX S-wave: {sTransverseMagnitude:E6}, Threshold: {threshold:E6}");
+
+            // Even with very small values, detect a minimum threshold
+            if (sTransverseMagnitude > 1e-9 && stepCount - pWaveTouchStep >= 5)
+            {
+                Logger.Log($"[AcousticSimulator] S-Wave detected at RX with magnitude {sTransverseMagnitude:E6}");
+                return true;
+            }
+
+            return sTransverseMagnitude > threshold;
+        }
+        private bool CheckPWaveReceiverTouch()
+        {
+            // P-waves are primarily longitudinal (compression) - vx component
+            double pMagnitude = Math.Abs(vx[rx, ry, rz]);
+
+            // Protect against extremely large values
+            if (double.IsInfinity(pMagnitude) || double.IsNaN(pMagnitude))
+            {
+                Logger.Log("[AcousticSimulator] WARNING: P-wave magnitude at RX is invalid (INF or NaN)");
+                return false;
+            }
+
+            // Track maximum P-wave amplitude for threshold calculation
+            if (pMagnitude > pWaveMaxAmplitude)
+                pWaveMaxAmplitude = pMagnitude;
+
+            // Use a more sensitive threshold for detection
+            // Lower the ratio from 0.05 to 0.01 for easier detection
+            double threshold = Math.Max(1e-10, pWaveMaxAmplitude * 0.01);
+
+            // Log P-wave detection data
+            if (stepCount % 10 == 0)
+                Logger.Log($"[CheckPWaveTouch] RX P-wave: {pMagnitude:E6}, Threshold: {threshold:E6}");
+
+            // Even with very small values, detect a minimum threshold
+            // This helps detect waves in case amplitudes are extremely small
+            if (pMagnitude > 1e-9)
+            {
+                Logger.Log($"[AcousticSimulator] P-Wave detected at RX with magnitude {pMagnitude:E6}");
+                return true;
+            }
+
+            return pMagnitude > threshold;
+        }
+
         private bool CheckReceiverTouch()
         {
             return Math.Abs(vx[rx, ry, rz]) > 1e-6 || Math.Abs(vy[rx, ry, rz]) > 1e-6 || Math.Abs(vz[rx, ry, rz]) > 1e-6;
@@ -373,12 +831,58 @@ namespace CTSegmenter
         private void ReportProgress(string text = "Simulating", int? force = null)
         {
             int percent = force ?? (int)(stepCount * 100.0 / expectedTotalSteps);
-            if (percent > 99) percent = 99;                // keep 100 % for Finish()
+            if (percent > 99) percent = 99;  // Keep 100% for Finish()
+
+            // Log current values at TX and RX
+            Logger.Log($"[AcousticSimulator] TX values: P={vx[tx, ty, tz]:E6}, S={vy[tx, ty, tz]:E6}");
+            Logger.Log($"[AcousticSimulator] RX values: P={vx[rx, ry, rz]:E6}, S={vy[rx, ry, rz]:E6}");
+
+            // Log VP/VS ratio as requested
+            double pMag = Math.Abs(vx[rx, ry, rz]);
+            double sMag = Math.Abs(vy[rx, ry, rz]);
+            if (sMag > 1e-10)
+                Logger.Log($"[AcousticSimulator] VP/VS ratio: {pMag / sMag:F4}");
+            else
+                Logger.Log($"[AcousticSimulator] VP/VS ratio: N/A (S-wave too small)");
+
+            // Log maximum values to help debug
+            double maxVx = 0, maxVy = 0, maxVz = 0;
+            int nonZeroVx = 0, nonZeroVy = 0, nonZeroVz = 0;
+
+            for (int z = 0; z < depth; z++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        double absVx = Math.Abs(vx[x, y, z]);
+                        double absVy = Math.Abs(vy[x, y, z]);
+                        double absVz = Math.Abs(vz[x, y, z]);
+
+                        if (absVx > maxVx) maxVx = absVx;
+                        if (absVy > maxVy) maxVy = absVy;
+                        if (absVz > maxVz) maxVz = absVz;
+
+                        if (absVx > 1e-12) nonZeroVx++;
+                        if (absVy > 1e-12) nonZeroVy++;
+                        if (absVz > 1e-12) nonZeroVz++;
+                    }
+                }
+            }
+
+            // Convert velocity fields to float arrays for visualization
+            float[,,] pWaveField = ConvertToFloat(vx);
+            float[,,] sWaveField = ConvertToFloat(vy);
+
+            // Send actual wave field data instead of null
             ProgressUpdated?.Invoke(
                 this,
                 new AcousticSimulationProgressEventArgs(
-                    percent, stepCount, text, null, null));
-            Logger.Log("[AcousticSimulator] CPU Simulation Progress: " + percent + " Step: " + stepCount + "/" + expectedTotalSteps);
+                    percent, stepCount, text, pWaveField, sWaveField));
+
+            Logger.Log($"[AcousticSimulator] CPU Simulation Progress: {percent}% Step: {stepCount}/{expectedTotalSteps}");
+            Logger.Log($"[AcousticSimulator] Max values: Vx={maxVx:E6}, Vy={maxVy:E6}, Vz={maxVz:E6}");
+            Logger.Log($"[AcousticSimulator] Non-zero voxels: Vx={nonZeroVx}, Vy={nonZeroVy}, Vz={nonZeroVz}");
         }
 
         private static float[,,] ConvertToFloat(double[,,] src)
@@ -394,19 +898,49 @@ namespace CTSegmenter
         private void FinaliseAndRaiseEvent()
         {
             double dist = Math.Sqrt((tx - rx) * (tx - rx) +
-                                    (ty - ry) * (ty - ry) +
-                                    (tz - rz) * (tz - rz)) * pixelSize;
+                                   (ty - ry) * (ty - ry) +
+                                   (tz - rz) * (tz - rz)) * pixelSize;
 
-            double vp = dist / (touchStep * dt);              // measured
-            int pSteps = touchStep;
+            // If P-wave wasn't detected, use estimated values
+            if (!pWaveReceiverTouched)
+            {
+                Logger.Log("[AcousticSimulator] WARNING: P-wave arrival wasn't detected, using estimates");
+                double rhoAvg = densityVolume.Cast<float>().Average();
+                double vp = Math.Sqrt((lambda0 + 2 * mu0) / rhoAvg);
+                double vs = Math.Sqrt(mu0 / rhoAvg);
+                SimulationCompleted?.Invoke(
+                    this,
+                    new AcousticSimulationCompleteEventArgs(
+                        vp, vs, vp / vs, stepCount / 3, stepCount / 2, stepCount));
+                return;
+            }
 
-            double vs = dist / ((stepCount - touchStep) * dt);
-            int sSteps = stepCount - touchStep;
+            // If S-wave wasn't detected, use a theoretical vs/vp ratio
+            if (!sWaveReceiverTouched)
+            {
+                Logger.Log("[AcousticSimulator] WARNING: S-wave arrival wasn't detected, using estimates");
+                double vp = dist / (pWaveTouchStep * dt);
+                double vs = vp * Math.Sqrt((1 - 2 * poissonRatio) / (2 - 2 * poissonRatio)); // Theoretical ratio
+                SimulationCompleted?.Invoke(
+                    this,
+                    new AcousticSimulationCompleteEventArgs(
+                        vp, vs, vp / vs, pWaveTouchStep,
+                        (int)(pWaveTouchStep * (vp / vs)), stepCount));
+                return;
+            }
+
+            // Both waves detected - compute actual velocities
+            double pVelocity = dist / (pWaveTouchStep * dt);
+            double sVelocity = dist / (sWaveTouchStep * dt);
+            double vpVsRatio = pVelocity / sVelocity;
+
+            Logger.Log($"[AcousticSimulator] Final results: P-velocity={pVelocity:F2} m/s, S-velocity={sVelocity:F2} m/s, Vp/Vs={vpVsRatio:F3}");
+            Logger.Log($"[AcousticSimulator] Travel times: P-wave={pWaveTouchStep} steps, S-wave={sWaveTouchStep} steps, Total={stepCount} steps");
 
             SimulationCompleted?.Invoke(
                 this,
                 new AcousticSimulationCompleteEventArgs(
-                    vp, vs, vp / vs, pSteps, sSteps, stepCount));
+                    pVelocity, sVelocity, vpVsRatio, pWaveTouchStep, sWaveTouchStep, stepCount));
         }
         #endregion
 

@@ -33,6 +33,7 @@ namespace CTSegmenter
         private bool _simulationCompleted;
         private double _pWaveVelocity;
         private double _sWaveVelocity;
+        private double _vpVsRatio;
         private Color[] _colormap;
 
         // Transmitter and receiver positions
@@ -40,6 +41,7 @@ namespace CTSegmenter
         private readonly int _rx, _ry, _rz;
         private readonly int _width, _height, _depth;
         private readonly float _pixelSize;
+        private readonly float _pixelSizeMm; // For display
 
         // UI components
         private TrackBar _timelineTrackBar;
@@ -65,13 +67,27 @@ namespace CTSegmenter
         // Panel dragging/zooming state
         private bool _isDragging;
         private Point _lastMousePosition;
-        private readonly float[] _zoomFactors = new float[4] { 1.0f, 1.0f, 1.0f, 1.0f };
-        private readonly PointF[] _panOffsets = new PointF[4] { new PointF(0, 0), new PointF(0, 0), new PointF(0, 0), new PointF(0, 0) };
+        private readonly float[] _zoomFactors = new float[6] { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+        private readonly PointF[] _panOffsets = new PointF[6] {
+            new PointF(0, 0), new PointF(0, 0), new PointF(0, 0),
+            new PointF(0, 0), new PointF(0, 0), new PointF(0, 0)
+        };
         private int _selectedPanelIndex = -1;
 
         // Thread-safe bitmap access
-        private Bitmap[] _panelBitmaps = new Bitmap[4];
-        private Bitmap[] _displayBitmaps = new Bitmap[4];
+        private Bitmap[] _panelBitmaps = new Bitmap[6];
+        private Bitmap[] _displayBitmaps = new Bitmap[6];
+
+        // Signal amplification factors - Increased dramatically to address flat time series
+        private const float SIGNAL_AMPLIFICATION = 50000.0f; // Amplification for time series
+        private const float WAVE_VISUALIZATION_AMPLIFICATION = 200.0f; // For 3D visualization
+
+        // Additional simulation data for stats
+        private int _pWaveTravelTime = 0;
+        private int _sWaveTravelTime = 0;
+        private int _totalTimeSteps = 0;
+        private string _simulationStatus = "Initializing";
+        private List<Point3D> _pathPoints;
         #endregion
 
         #region Data Structures
@@ -85,18 +101,29 @@ namespace CTSegmenter
             public float[] SWaveTimeSeries { get; set; }
             public float[,] VelocityTomography { get; set; }
             public float[,] WavefieldCrossSection { get; set; }
+            public float PWaveValue { get; set; }
+            public float SWaveValue { get; set; }
+            
+            public float PWavePathProgress { get; set; } = 0.0f;
+            public float SWavePathProgress { get; set; } = 0.0f;
+            public float[] PWaveSpatialSeries { get; set; }
+            public float[] SWaveSpatialSeries { get; set; }
+
         }
         #endregion
 
         #region Constructor
         public AcousticSimulationVisualizer(int width, int height, int depth, float pixelSize,
-                                   int tx, int ty, int tz, int rx, int ry, int rz)
+                           int tx, int ty, int tz, int rx, int ry, int rz)
         {
             // Store simulation parameters
             _width = width;
             _height = height;
             _depth = depth;
             _pixelSize = pixelSize;
+            _pixelSizeMm = pixelSize * 1000f; // Convert m to mm for display
+
+            // Store transducer positions directly from parameters
             _tx = tx;
             _ty = ty;
             _tz = tz;
@@ -104,20 +131,22 @@ namespace CTSegmenter
             _ry = ry;
             _rz = rz;
 
-            // Set up form properties
+            Logger.Log($"[SimulationVisualizer] TX position: ({_tx}, {_ty}, {_tz})");
+            Logger.Log($"[SimulationVisualizer] RX position: ({_rx}, {_ry}, {_rz})");
+            Logger.Log($"[SimulationVisualizer] Volume dimensions: {_width}x{_height}x{_depth}");
+            Logger.Log($"[SimulationVisualizer] Pixel size: {_pixelSize}m ({_pixelSizeMm}mm)");
+            int numSamples = Math.Max(Math.Max(_width, _height), _depth);
+            _pathPoints = GetPointsAlongPath(_tx, _ty, _tz, _rx, _ry, _rz, numSamples);
+            // Setup form
             this.Text = "Acoustic Simulation Visualizer";
-            this.Size = new Size(1200, 800);
+            this.Size = new Size(1200, 850);
             this.StartPosition = FormStartPosition.CenterScreen;
-            this.BackColor = Color.FromArgb(30, 30, 30);
+            this.BackColor = Color.FromArgb(20, 20, 20);
             this.ForeColor = Color.LightGray;
             this.FormClosing += SimulationVisualizer_FormClosing;
             this.KeyPreview = true;
             this.KeyDown += SimulationVisualizer_KeyDown;
-            for (int i = 0; i < 4; i++)
-            {
-                _zoomFactors[i] = 0.8f;  // Start slightly zoomed out
-            }
-            
+
             // Initialize the color map (jet-like)
             InitializeColormap();
 
@@ -129,11 +158,7 @@ namespace CTSegmenter
 
             // Show the form
             this.Show();
-            this.BeginInvoke((MethodInvoker)delegate
-            {
-                _currentFrameIndex = 0;
-                UpdateVisualization();
-            });
+
             // Start UI update timer
             _uiUpdateTimer.Start();
         }
@@ -148,6 +173,7 @@ namespace CTSegmenter
             // Subscribe to events
             simulator.ProgressUpdated += Simulator_ProgressUpdated;
             simulator.SimulationCompleted += Simulator_SimulationCompleted;
+            Logger.Log("[SimulationVisualizer] Connected to CPU simulator");
         }
 
         /// <summary>
@@ -158,483 +184,212 @@ namespace CTSegmenter
             // Subscribe to events
             simulator.ProgressUpdated += Simulator_ProgressUpdated;
             simulator.SimulationCompleted += Simulator_SimulationCompleted;
+            Logger.Log("[SimulationVisualizer] Connected to GPU simulator");
         }
-
         /// <summary>
-        /// Handles progress events from either simulator type
+        /// Converts a double array to a float array
         /// </summary>
+        private float[,,] ConvertToFloatArray(double[,,] array)
+        {
+            int width = array.GetLength(0);
+            int height = array.GetLength(1);
+            int depth = array.GetLength(2);
+
+            float[,,] result = new float[width, height, depth];
+
+            for (int z = 0; z < depth; z++)
+                for (int y = 0; y < height; y++)
+                    for (int x = 0; x < width; x++)
+                        result[x, y, z] = (float)array[x, y, z];
+
+            return result;
+        }
         private void Simulator_ProgressUpdated(object sender, AcousticSimulationProgressEventArgs e)
         {
-            _currentStep = e.TimeStep;
-
-            // Update every _updateInterval steps
-            if (_currentStep % _updateInterval != 0)
+            // Only update every 10 steps
+            const int UPDATE_INTERVAL = 10;
+            if (e.TimeStep % UPDATE_INTERVAL != 0)
                 return;
 
             try
             {
-                // Get wave field data from the appropriate simulator
-                if (sender is AcousticSimulator cpuSimulator)
+                // 1) grab the raw 3D fields
+                var snapshot = sender is AcousticSimulator cpuSim
+                             ? cpuSim.GetWaveFieldSnapshot()
+                             : ((AcousticSimulatorGPUWrapper)sender).GetWaveFieldSnapshot();
+                double[,,] vx = snapshot.vx;
+                double[,,] vy = snapshot.vy;
+                double[,,] vz = snapshot.vz;
+
+                // 2) sample the receiver time series (P and S)
+                const float TIME_SERIES_GAIN = 50000f;
+                float recvP = (float)(vx[_rx, _ry, _rz] * TIME_SERIES_GAIN);
+                float recvS = (float)(vy[_rx, _ry, _rz] * TIME_SERIES_GAIN);
+
+                // Log TX and RX values as requested
+                Logger.Log($"[SimulationVisualizer] P-wave at TX: {vx[_tx, _ty, _tz]:E6}, RX: {vx[_rx, _ry, _rz]:E6}");
+                Logger.Log($"[SimulationVisualizer] S-wave at TX: {vy[_tx, _ty, _tz]:E6}, RX: {vy[_rx, _ry, _rz]:E6}");
+
+                // 3) compute tomography + cross-section for *every* update
+                var tomo = ComputeVelocityTomography(_tx, _ty, _tz, _rx, _ry, _rz, vx, vy, vz);
+                var xsec = ExtractCrossSection(_tx, _ty, _tz, _rx, _ry, _rz, vx, vy, vz);
+
+                // Log tomography data as requested
+                Logger.Log($"[SimulationVisualizer] Tomography size: {tomo.GetLength(0)}x{tomo.GetLength(1)}");
+
+                // 4) build the new frame
+                var frame = new SimulationFrame
                 {
-                    ProcessCpuData(cpuSimulator, e);
-                }
-                else if (sender is AcousticSimulatorGPU gpuSimulator)
+                    TimeStep = e.TimeStep,
+                    PWaveValue = recvP,
+                    SWaveValue = recvS,
+                    PWavePathProgress = (float)CalculateProgressAlongPath(_tx, _ty, _tz, _rx, _ry, _rz, _rx, _ry, _rz),
+                    SWavePathProgress = (float)CalculateProgressAlongPath(_tx, _ty, _tz, _rx, _ry, _rz, _rx, _ry, _rz),
+                    VelocityTomography = tomo,
+                    WavefieldCrossSection = xsec
+                };
+
+                // 5) append to your _frames list and extend the time-series arrays
+                lock (_dataLock)
                 {
-                    ProcessGpuData(gpuSimulator, e);
+                    int n = _frames.Count;
+                    frame.PWaveTimeSeries = new float[n + 1];
+                    frame.SWaveTimeSeries = new float[n + 1];
+
+                    for (int i = 0; i < n; i++)
+                    {
+                        frame.PWaveTimeSeries[i] = _frames[i].PWaveValue;
+                        frame.SWaveTimeSeries[i] = _frames[i].SWaveValue;
+                    }
+
+                    frame.PWaveTimeSeries[n] = recvP;
+                    frame.SWaveTimeSeries[n] = recvS;
+
+                    // Log waveform values for time series as requested
+                    Logger.Log($"[SimulationVisualizer] Waveform values - P: {recvP:E6}, S: {recvS:E6}");
+
+                    // Calculate and log vp/vs ratio as requested
+                    if (Math.Abs(recvS) > 1e-10)
+                    {
+                        double vpVsRatio = Math.Abs(recvP) / Math.Abs(recvS);
+                        Logger.Log($"[SimulationVisualizer] vp/vs ratio: {vpVsRatio:F3}");
+                    }
+                    else
+                    {
+                        Logger.Log("[SimulationVisualizer] vp/vs ratio: N/A (S-wave too small)");
+                    }
+
+                    _frames.Add(frame);
+                    _currentFrameIndex = n;
+                    _currentStep = e.TimeStep;
+                    _simulationStatus = e.StatusText ?? "Simulating";
                 }
+
+                // 6) invoke the UI redraw on the main thread
+                if (!IsDisposed && IsHandleCreated)
+                    BeginInvoke((Action)UpdateVisualization);
             }
             catch (Exception ex)
             {
-                Logger.Log($"[SimulationVisualizer] Error processing data: {ex.Message}");
+                Logger.Log($"[SimulationVisualizer] ProgressUpdated error: {ex.Message}");
             }
         }
 
         /// <summary>
-        /// Handles simulation completion from either simulator type
+        /// Auto-scaled version of tomography computation
         /// </summary>
-        private void Simulator_SimulationCompleted(object sender, AcousticSimulationCompleteEventArgs e)
-        {
-            _simulationCompleted = true;
-            _pWaveVelocity = e.PWaveVelocity;
-            _sWaveVelocity = e.SWaveVelocity;
-
-            // Update UI on the UI thread
-            this.BeginInvoke((MethodInvoker)delegate
-            {
-                _timelineTrackBar.Maximum = _frames.Count - 1;
-                this.Text = $"Acoustic Simulation Results - P-Wave: {_pWaveVelocity:F2} m/s, S-Wave: {_sWaveVelocity:F2} m/s";
-            });
-        }
-
-        /// <summary>
-        /// Process data from CPU simulator
-        /// </summary>
-        private void ProcessCpuData(AcousticSimulator simulator, AcousticSimulationProgressEventArgs e)
-        {
-            // Get wave field data from CPU simulator
-            var (vx, vy, vz) = simulator.GetWaveFieldSnapshot();
-
-            // Create a new frame
-            var frame = CreateFrameFromCpuData(vx, vy, vz);
-
-            // Add to frames collection thread-safely
-            lock (_dataLock)
-            {
-                _frames.Add(frame);
-                _currentFrameIndex = _frames.Count - 1;
-            }
-
-            // Update UI
-            UpdateVisualization();
-        }
-
-        /// <summary>
-        /// Process data from GPU simulator
-        /// </summary>
-        private void ProcessGpuData(AcousticSimulatorGPU simulator, AcousticSimulationProgressEventArgs e)
-        {
-            // Get wave field data from GPU simulator
-            double[] vx = simulator.GetVelocityX();
-            double[] vy = simulator.GetVelocityY();
-            double[] vz = simulator.GetVelocityZ();
-
-            // Create a new frame
-            var frame = CreateFrameFromGpuData(vx, vy, vz);
-
-            // Add to frames collection thread-safely
-            lock (_dataLock)
-            {
-                _frames.Add(frame);
-                _currentFrameIndex = _frames.Count - 1;
-            }
-
-            // Update UI
-            UpdateVisualization();
-        }
-
-        /// <summary>
-        /// Creates a simulation frame from CPU data (3D arrays)
-        /// </summary>
-        private SimulationFrame CreateFrameFromCpuData(double[,,] vx, double[,,] vy, double[,,] vz)
-        {
-            // Create time series
-            float[] pWaveSeries = ExtractPWaveTimeSeries(_frames.Count, _rx, _ry, _rz, vx);
-            float[] sWaveSeries = ExtractSWaveTimeSeries(_frames.Count, _rx, _ry, _rz, vy, vz);
-
-            // Create tomography data
-            float[,] velocityTomo = ComputeVelocityTomography(_tx, _ty, _tz, _rx, _ry, _rz, vx, vy, vz);
-
-            // Create cross-section
-            float[,] crossSection = ExtractCrossSection(vx, vy, vz);
-
-            return new SimulationFrame
-            {
-                TimeStep = _currentStep,
-                PWaveTimeSeries = pWaveSeries,
-                SWaveTimeSeries = sWaveSeries,
-                VelocityTomography = velocityTomo,
-                WavefieldCrossSection = crossSection
-            };
-        }
-
-        /// <summary>
-        /// Creates a simulation frame from GPU data (flat arrays)
-        /// </summary>
-        private SimulationFrame CreateFrameFromGpuData(double[] vx, double[] vy, double[] vz)
-        {
-            // Create time series from flat arrays
-            float[] pWaveSeries = ExtractPWaveTimeSeriesFlat(_frames.Count, _rx, _ry, _rz, vx, _width, _depth);
-            float[] sWaveSeries = ExtractSWaveTimeSeriesFlat(_frames.Count, _rx, _ry, _rz, vy, vz, _width, _depth);
-
-            // Create tomography data
-            float[,] velocityTomo = ComputeVelocityTomographyFlat(_tx, _ty, _tz, _rx, _ry, _rz, vx, vy, vz, _width, _height, _depth);
-
-            // Create cross-section
-            float[,] crossSection = ExtractCrossSectionFlat(vx, vy, vz, _width, _height, _depth);
-
-            return new SimulationFrame
-            {
-                TimeStep = _currentStep,
-                PWaveTimeSeries = pWaveSeries,
-                SWaveTimeSeries = sWaveSeries,
-                VelocityTomography = velocityTomo,
-                WavefieldCrossSection = crossSection
-            };
-        }
-        #endregion
-
-        #region Data Processing
-        /// <summary>
-        /// Initialize a colormap (jet-like)
-        /// </summary>
-        private void InitializeColormap()
-        {
-            _colormap = new Color[256];
-            for (int i = 0; i < 256; i++)
-            {
-                double value = i / 255.0;
-                int r, g, b;
-
-                if (value < 0.125)
-                {
-                    r = 0;
-                    g = 0;
-                    b = (int)(255 * (value / 0.125));
-                }
-                else if (value < 0.375)
-                {
-                    r = 0;
-                    g = (int)(255 * ((value - 0.125) / 0.25));
-                    b = 255;
-                }
-                else if (value < 0.625)
-                {
-                    r = (int)(255 * ((value - 0.375) / 0.25));
-                    g = 255;
-                    b = (int)(255 * (1.0 - ((value - 0.375) / 0.25)));
-                }
-                else if (value < 0.875)
-                {
-                    r = 255;
-                    g = (int)(255 * (1.0 - ((value - 0.625) / 0.25)));
-                    b = 0;
-                }
-                else
-                {
-                    r = (int)(255 * (1.0 - ((value - 0.875) / 0.125)));
-                    g = 0;
-                    b = 0;
-                }
-
-                _colormap[i] = Color.FromArgb(r, g, b);
-            }
-        }
-
-        /// <summary>
-        /// Extract P-wave time series at receiver
-        /// </summary>
-        private float[] ExtractPWaveTimeSeries(int frameCount, int rx, int ry, int rz, double[,,] vx)
-        {
-            float[] series = new float[frameCount + 1];
-
-            // Add the current value to the time series
-            if (frameCount > 0)
-            {
-                // Copy previous values
-                for (int i = 0; i < frameCount; i++)
-                {
-                    series[i] = i < _frames.Count ? _frames[i].PWaveTimeSeries[i] : 0;
-                }
-            }
-
-            // Get current value and amplify for better visibility
-            double value = vx[rx, ry, rz];
-
-            // Ensure we have a meaningful value to display
-            if (Math.Abs(value) < 1e-10) value = 0;
-
-            // Amplify the signal for better visibility
-            value *= 10.0;  // Adjust amplification factor as needed
-
-            series[frameCount] = (float)value;
-
-            return series;
-        }
-
-        /// <summary>
-        /// Extract S-wave time series at receiver from 3D arrays
-        /// </summary>
-        private float[] ExtractSWaveTimeSeries(int frameCount, int rx, int ry, int rz, double[,,] vy, double[,,] vz)
-        {
-            float[] series = new float[frameCount + 1];
-
-            // Add the current value to the time series
-            if (frameCount > 0)
-            {
-                // Copy previous values
-                for (int i = 0; i < frameCount; i++)
-                {
-                    series[i] = i < _frames.Count ? _frames[i].SWaveTimeSeries[i] : 0;
-                }
-            }
-
-            // Compute magnitude of S-wave (combination of y and z components)
-            double magnitude = Math.Sqrt(vy[rx, ry, rz] * vy[rx, ry, rz] + vz[rx, ry, rz] * vz[rx, ry, rz]);
-
-            // Ensure we have a meaningful value to display
-            if (magnitude < 1e-10) magnitude = 0;
-
-            // Amplify the signal for better visibility
-            magnitude *= 10.0;  // Adjust amplification factor as needed
-
-            series[frameCount] = (float)magnitude;
-
-            return series;
-        }
-
-        /// <summary>
-        /// Extract P-wave time series at receiver from flat arrays
-        /// </summary>
-        private float[] ExtractPWaveTimeSeriesFlat(int frameCount, int rx, int ry, int rz, double[] vx, int width, int depth)
-        {
-            float[] series = new float[frameCount + 1];
-
-            // Add the current value to the time series
-            if (frameCount > 0)
-            {
-                // Copy previous values
-                for (int i = 0; i < frameCount; i++)
-                {
-                    series[i] = _frames[i].PWaveTimeSeries[i];
-                }
-            }
-
-            // Calculate flat index
-            int index = (rz * width * _height) + (ry * width) + rx;
-
-            // Add the current value at the receiver position
-            series[frameCount] = (float)vx[index];
-
-            return series;
-        }
-
-        /// <summary>
-        /// Extract S-wave time series at receiver from flat arrays
-        /// </summary>
-        private float[] ExtractSWaveTimeSeriesFlat(int frameCount, int rx, int ry, int rz, double[] vy, double[] vz, int width, int depth)
-        {
-            float[] series = new float[frameCount + 1];
-
-            // Add the current value to the time series
-            if (frameCount > 0)
-            {
-                // Copy previous values
-                for (int i = 0; i < frameCount; i++)
-                {
-                    series[i] = _frames[i].SWaveTimeSeries[i];
-                }
-            }
-
-            // Calculate flat index
-            int index = (rz * width * _height) + (ry * width) + rx;
-
-            // Compute magnitude of S-wave (combination of y and z components)
-            double magnitude = Math.Sqrt(vy[index] * vy[index] + vz[index] * vz[index]);
-            series[frameCount] = (float)magnitude;
-
-            return series;
-        }
-
-        /// <summary>
-        /// Compute velocity tomography along the path from TX to RX from 3D arrays
-        /// </summary>
-        private float[,] ComputeVelocityTomography(int tx, int ty, int tz, int rx, int ry, int rz,
+        private float[,] ComputeVelocityTomographyAutoScaled(int tx, int ty, int tz, int rx, int ry, int rz,
                                          double[,,] vx, double[,,] vy, double[,,] vz)
         {
-            // Determine the plane to use based on largest dimension of the path
+            // Same method as before, but with adaptive scaling
             int dx = Math.Abs(rx - tx);
             int dy = Math.Abs(ry - ty);
             int dz = Math.Abs(rz - tz);
 
-            int width, height;
             float[,] tomography;
 
-            // Use a scaling factor to ensure transducers are properly spaced
-            float displayScale = 1.0f;
+            // First find the maximum value to determine scaling
+            double maxVal = 0;
+            for (int z = 0; z < _depth; z++)
+                for (int y = 0; y < _height; y++)
+                    for (int x = 0; x < _width; x++)
+                    {
+                        double vMag = Math.Sqrt(vx[x, y, z] * vx[x, y, z] +
+                                              vy[x, y, z] * vy[x, y, z] +
+                                              vz[x, y, z] * vz[x, y, z]);
+                        maxVal = Math.Max(maxVal, vMag);
+                    }
 
+            // Calculate adaptive scaling factor
+            double scaleFactor = (maxVal > 1e-15) ? 1.0 / maxVal : 1000.0;
+
+            // Now create the tomography with appropriate scaling
             if (dx >= dy && dx >= dz)
             {
-                // YZ plane
-                width = _height;
-                height = _depth;
-                tomography = new float[width, height];
-
-                int x = (tx + rx) / 2; // Use middle of path
-
-                for (int y = 0; y < width; y++)
-                {
-                    for (int z = 0; z < height; z++)
-                    {
-                        // Calculate velocity magnitude
-                        double vMag = Math.Sqrt(vx[x, y, z] * vx[x, y, z] +
-                                              vy[x, y, z] * vy[x, y, z] +
-                                              vz[x, y, z] * vz[x, y, z]);
-                        // Apply a threshold for better visualization
-                        if (vMag < 1e-6) vMag = 0;
-                        tomography[y, z] = (float)vMag;
-                    }
-                }
-            }
-            else if (dy >= dx && dy >= dz)
-            {
-                // XZ plane
-                width = _width;
-                height = _depth;
-                tomography = new float[width, height];
-
-                int y = (ty + ry) / 2; // Use middle of path
-
-                for (int x = 0; x < width; x++)
-                {
-                    for (int z = 0; z < height; z++)
-                    {
-                        // Calculate velocity magnitude
-                        double vMag = Math.Sqrt(vx[x, y, z] * vx[x, y, z] +
-                                              vy[x, y, z] * vy[x, y, z] +
-                                              vz[x, y, z] * vz[x, y, z]);
-                        // Apply a threshold for better visualization
-                        if (vMag < 1e-6) vMag = 0;
-                        tomography[x, z] = (float)vMag;
-                    }
-                }
-            }
-            else
-            {
-                // XY plane
-                width = _width;
-                height = _height;
-                tomography = new float[width, height];
-
-                int z = (tz + rz) / 2; // Use middle of path
-
-                for (int x = 0; x < width; x++)
-                {
-                    for (int y = 0; y < height; y++)
-                    {
-                        // Calculate velocity magnitude
-                        double vMag = Math.Sqrt(vx[x, y, z] * vx[x, y, z] +
-                                              vy[x, y, z] * vy[x, y, z] +
-                                              vz[x, y, z] * vz[x, y, z]);
-                        // Apply a threshold for better visualization
-                        if (vMag < 1e-6) vMag = 0;
-                        tomography[x, y] = (float)vMag;
-                    }
-                }
-            }
-
-            return tomography;
-        }
-        /// <summary>
-        /// Compute velocity tomography along the path from TX to RX from flat arrays
-        /// </summary>
-        private float[,] ComputeVelocityTomographyFlat(int tx, int ty, int tz, int rx, int ry, int rz,
-                                                  double[] vx, double[] vy, double[] vz,
-                                                  int width, int height, int depth)
-        {
-            // Determine the plane to use based on largest dimension of the path
-            int dx = Math.Abs(rx - tx);
-            int dy = Math.Abs(ry - ty);
-            int dz = Math.Abs(rz - tz);
-
-            int planeWidth, planeHeight;
-            float[,] tomography;
-
-            if (dx >= dy && dx >= dz)
-            {
-                // YZ plane
-                planeWidth = height;
-                planeHeight = depth;
+                // Wave travels along X axis - show YZ plane
+                int planeWidth = _height;
+                int planeHeight = _depth;
                 tomography = new float[planeWidth, planeHeight];
-
-                int x = (tx + rx) / 2; // Use middle of path
+                int xPos = (tx + rx) / 2;
+                if (xPos < 0 || xPos >= vx.GetLength(0)) xPos = Math.Min(vx.GetLength(0) - 1, Math.Max(0, xPos));
 
                 for (int y = 0; y < planeWidth; y++)
                 {
                     for (int z = 0; z < planeHeight; z++)
                     {
-                        int index = (z * width * height) + (y * width) + x;
-
-                        // Calculate velocity magnitude
-                        double vMag = Math.Sqrt(vx[index] * vx[index] +
-                                              vy[index] * vy[index] +
-                                              vz[index] * vz[index]);
-                        tomography[y, z] = (float)vMag;
+                        if (y < _height && z < _depth && xPos < _width)
+                        {
+                            double vMag = Math.Sqrt(vx[xPos, y, z] * vx[xPos, y, z] +
+                                                  vy[xPos, y, z] * vy[xPos, y, z] +
+                                                  vz[xPos, y, z] * vz[xPos, y, z]);
+                            tomography[y, z] = (float)(vMag * scaleFactor);
+                        }
                     }
                 }
             }
             else if (dy >= dx && dy >= dz)
             {
-                // XZ plane
-                planeWidth = width;
-                planeHeight = depth;
+                // Wave travels along Y axis - show XZ plane
+                int planeWidth = _width;
+                int planeHeight = _depth;
                 tomography = new float[planeWidth, planeHeight];
-
-                int y = (ty + ry) / 2; // Use middle of path
+                int yPos = (ty + ry) / 2;
+                if (yPos < 0 || yPos >= vy.GetLength(1)) yPos = Math.Min(vy.GetLength(1) - 1, Math.Max(0, yPos));
 
                 for (int x = 0; x < planeWidth; x++)
                 {
                     for (int z = 0; z < planeHeight; z++)
                     {
-                        int index = (z * width * height) + (y * width) + x;
-
-                        // Calculate velocity magnitude
-                        double vMag = Math.Sqrt(vx[index] * vx[index] +
-                                              vy[index] * vy[index] +
-                                              vz[index] * vz[index]);
-                        tomography[x, z] = (float)vMag;
+                        if (x < _width && z < _depth && yPos < _height)
+                        {
+                            double vMag = Math.Sqrt(vx[x, yPos, z] * vx[x, yPos, z] +
+                                                  vy[x, yPos, z] * vy[x, yPos, z] +
+                                                  vz[x, yPos, z] * vz[x, yPos, z]);
+                            tomography[x, z] = (float)(vMag * scaleFactor);
+                        }
                     }
                 }
             }
             else
             {
-                // XY plane
-                planeWidth = width;
-                planeHeight = height;
+                // Wave travels along Z axis - show XY plane
+                int planeWidth = _width;
+                int planeHeight = _height;
                 tomography = new float[planeWidth, planeHeight];
-
-                int z = (tz + rz) / 2; // Use middle of path
+                int zPos = (tz + rz) / 2;
+                if (zPos < 0 || zPos >= vz.GetLength(2)) zPos = Math.Min(vz.GetLength(2) - 1, Math.Max(0, zPos));
 
                 for (int x = 0; x < planeWidth; x++)
                 {
                     for (int y = 0; y < planeHeight; y++)
                     {
-                        int index = (z * width * height) + (y * width) + x;
-
-                        // Calculate velocity magnitude
-                        double vMag = Math.Sqrt(vx[index] * vx[index] +
-                                              vy[index] * vy[index] +
-                                              vz[index] * vz[index]);
-                        tomography[x, y] = (float)vMag;
+                        if (x < _width && y < _height && zPos < _depth)
+                        {
+                            double vMag = Math.Sqrt(vx[x, y, zPos] * vx[x, y, zPos] +
+                                                  vy[x, y, zPos] * vy[x, y, zPos] +
+                                                  vz[x, y, zPos] * vz[x, y, zPos]);
+                            tomography[x, y] = (float)(vMag * scaleFactor);
+                        }
                     }
                 }
             }
@@ -643,16 +398,33 @@ namespace CTSegmenter
         }
 
         /// <summary>
-        /// Extract a cross-section of the wave field from 3D arrays
+        /// Auto-scaled version of cross-section extraction
         /// </summary>
-        private float[,] ExtractCrossSection(double[,,] vx, double[,,] vy, double[,,] vz)
+        private float[,] ExtractCrossSectionAutoScaled(double[,,] vx, double[,,] vy, double[,,] vz)
         {
-            // Use the plane that contains both TX and RX
             int dx = Math.Abs(_rx - _tx);
             int dy = Math.Abs(_ry - _ty);
             int dz = Math.Abs(_rz - _tz);
 
             float[,] crossSection;
+
+            // Find max velocity for scaling
+            double maxVelocity = 0;
+            for (int z = 0; z < vx.GetLength(2); z++)
+                for (int y = 0; y < vx.GetLength(1); y++)
+                    for (int x = 0; x < vx.GetLength(0); x++)
+                    {
+                        double mag = Math.Sqrt(
+                            vx[x, y, z] * vx[x, y, z] +
+                            vy[x, y, z] * vy[x, y, z] +
+                            vz[x, y, z] * vz[x, y, z]);
+                        maxVelocity = Math.Max(maxVelocity, mag);
+                    }
+
+            // Calculate adaptive scaling
+            double scaleFactor = (maxVelocity > 1e-15) ? 1.0 / maxVelocity : 1000.0;
+
+            Logger.Log($"[ExtractCrossSection] Max velocity: {maxVelocity:E6}, Scale factor: {scaleFactor:F3}");
 
             if (dz <= dx && dz <= dy)
             {
@@ -664,12 +436,15 @@ namespace CTSegmenter
                 {
                     for (int y = 0; y < _height; y++)
                     {
-                        double magnitude = Math.Sqrt(
-                            vx[x, y, z] * vx[x, y, z] +
-                            vy[x, y, z] * vy[x, y, z] +
-                            vz[x, y, z] * vz[x, y, z]);
+                        if (z >= 0 && z < vx.GetLength(2))
+                        {
+                            double magnitude = Math.Sqrt(
+                                vx[x, y, z] * vx[x, y, z] +
+                                vy[x, y, z] * vy[x, y, z] +
+                                vz[x, y, z] * vz[x, y, z]);
 
-                        crossSection[x, y] = (float)magnitude;
+                            crossSection[x, y] = (float)(magnitude * scaleFactor);
+                        }
                     }
                 }
             }
@@ -683,12 +458,15 @@ namespace CTSegmenter
                 {
                     for (int z = 0; z < _depth; z++)
                     {
-                        double magnitude = Math.Sqrt(
-                            vx[x, y, z] * vx[x, y, z] +
-                            vy[x, y, z] * vy[x, y, z] +
-                            vz[x, y, z] * vz[x, y, z]);
+                        if (y >= 0 && y < vx.GetLength(1))
+                        {
+                            double magnitude = Math.Sqrt(
+                                vx[x, y, z] * vx[x, y, z] +
+                                vy[x, y, z] * vy[x, y, z] +
+                                vz[x, y, z] * vz[x, y, z]);
 
-                        crossSection[x, z] = (float)magnitude;
+                            crossSection[x, z] = (float)(magnitude * scaleFactor);
+                        }
                     }
                 }
             }
@@ -702,6 +480,416 @@ namespace CTSegmenter
                 {
                     for (int z = 0; z < _depth; z++)
                     {
+                        if (x >= 0 && x < vx.GetLength(0))
+                        {
+                            double magnitude = Math.Sqrt(
+                                vx[x, y, z] * vx[x, y, z] +
+                                vy[x, y, z] * vy[x, y, z] +
+                                vz[x, y, z] * vz[x, y, z]);
+
+                            crossSection[y, z] = (float)(magnitude * scaleFactor);
+                        }
+                    }
+                }
+            }
+
+            return crossSection;
+        }
+        /// <summary>
+        /// Calculate the distance from a point to a line defined by two points (TX-RX)
+        /// </summary>
+        private double DistanceToLine(int x1, int y1, int z1, int x2, int y2, int z2, int px, int py, int pz)
+        {
+            // Vector from line point 1 to line point 2
+            double dx = x2 - x1;
+            double dy = y2 - y1;
+            double dz = z2 - z1;
+
+            // Vector from line point 1 to the point
+            double vx = px - x1;
+            double vy = py - y1;
+            double vz = pz - z1;
+
+            // Line length squared
+            double lineLength2 = dx * dx + dy * dy + dz * dz;
+
+            if (lineLength2 < 1e-10) // Very short line, just use point-to-point distance
+                return Math.Sqrt(vx * vx + vy * vy + vz * vz);
+
+            // Calculate projection ratio
+            double t = (vx * dx + vy * dy + vz * dz) / lineLength2;
+
+            // Clamp t to be between 0 and 1 (i.e., point on line segment)
+            t = Math.Max(0, Math.Min(1, t));
+
+            // Closest point on the line
+            double nearestX = x1 + t * dx;
+            double nearestY = y1 + t * dy;
+            double nearestZ = z1 + t * dz;
+
+            // Distance from point to nearest point on line
+            return Math.Sqrt(
+                (px - nearestX) * (px - nearestX) +
+                (py - nearestY) * (py - nearestY) +
+                (pz - nearestZ) * (pz - nearestZ)
+            );
+        }
+        private List<Point3D> GetPointsAlongPath(int x1, int y1, int z1, int x2, int y2, int z2, int numPoints)
+        {
+            List<Point3D> points = new List<Point3D>();
+
+            for (int i = 0; i < numPoints; i++)
+            {
+                float t = i / (float)(numPoints - 1);
+                int x = (int)Math.Round(x1 + (x2 - x1) * t);
+                int y = (int)Math.Round(y1 + (y2 - y1) * t);
+                int z = (int)Math.Round(z1 + (z2 - z1) * t);
+                points.Add(new Point3D(x, y, z));
+            }
+
+            return points;
+        }
+
+        private double CalculateProgressAlongPath(int x1, int y1, int z1, int x2, int y2, int z2, int px, int py, int pz)
+        {
+            // Calculate distances
+            double fullLength = Math.Sqrt(Math.Pow(x2 - x1, 2) + Math.Pow(y2 - y1, 2) + Math.Pow(z2 - z1, 2));
+            if (fullLength < 1e-6) return 0.0; // Avoid division by zero
+
+            // Vector from start to point
+            double dx = px - x1;
+            double dy = py - y1;
+            double dz = pz - z1;
+
+            // Project onto the path vector
+            double pathDx = x2 - x1;
+            double pathDy = y2 - y1;
+            double pathDz = z2 - z1;
+
+            // Dot product divided by path length gives projection distance
+            double dotProduct = dx * pathDx + dy * pathDy + dz * pathDz;
+            double projectionDistance = dotProduct / fullLength;
+
+            // Progress is projection distance divided by full path length
+            double progress = projectionDistance / fullLength;
+
+            // Clamp to 0-1 range
+            return Math.Max(0, Math.Min(1, progress));
+        }
+
+
+        private class Point3D
+        {
+            public int X { get; set; }
+            public int Y { get; set; }
+            public int Z { get; set; }
+
+            public Point3D(int x, int y, int z)
+            {
+                X = x;
+                Y = y;
+                Z = z;
+            }
+        }
+        private double[,,] ConvertToDoubleArray(float[,,] array)
+        {
+            int width = array.GetLength(0);
+            int height = array.GetLength(1);
+            int depth = array.GetLength(2);
+
+            double[,,] result = new double[width, height, depth];
+
+            for (int z = 0; z < depth; z++)
+                for (int y = 0; y < height; y++)
+                    for (int x = 0; x < width; x++)
+                        result[x, y, z] = array[x, y, z];
+
+            return result;
+        }
+
+        /// <summary>
+        /// Handles simulation completion from either simulator type
+        /// </summary>
+        private void Simulator_SimulationCompleted(object sender, AcousticSimulationCompleteEventArgs e)
+        {
+            _simulationCompleted = true;
+            _pWaveVelocity = e.PWaveVelocity;
+            _sWaveVelocity = e.SWaveVelocity;
+            _vpVsRatio = e.VpVsRatio;
+            _pWaveTravelTime = e.PWaveTravelTime;
+            _sWaveTravelTime = e.SWaveTravelTime;
+            _totalTimeSteps = e.TotalTimeSteps;
+            _simulationStatus = "Completed";
+
+            // Update UI on the UI thread
+            this.BeginInvoke((MethodInvoker)delegate
+            {
+                _timelineTrackBar.Maximum = _frames.Count - 1;
+                this.Text = $"Acoustic Simulation Results - P-Wave: {_pWaveVelocity:F2} m/s, S-Wave: {_sWaveVelocity:F2} m/s";
+                UpdateVisualization(); // Refresh to show completion status
+            });
+
+            Logger.Log($"[SimulationVisualizer] Simulation completed: P-Wave={_pWaveVelocity:F2}m/s, S-Wave={_sWaveVelocity:F2}m/s");
+        }
+        #endregion
+
+        #region Data Processing
+        /// <summary>
+        /// Initialize a colormap (jet-like)
+        /// </summary>
+        private void InitializeColormap()
+        {
+            _colormap = new Color[256];
+
+            // Use a true jet colormap (blue→cyan→green→yellow→red)
+            for (int i = 0; i < 256; i++)
+            {
+                double position = i / 255.0;
+
+                // Calculate RGB values based on position in the colormap
+                int r, g, b;
+
+                if (position < 0.125)
+                {
+                    // Dark blue to blue
+                    r = 0;
+                    g = 0;
+                    b = (int)(255 * (0.5 + position / 0.125 * 0.5));
+                }
+                else if (position < 0.375)
+                {
+                    // Blue to cyan
+                    r = 0;
+                    g = (int)(255 * ((position - 0.125) / 0.25));
+                    b = 255;
+                }
+                else if (position < 0.625)
+                {
+                    // Cyan to yellow
+                    r = (int)(255 * ((position - 0.375) / 0.25));
+                    g = 255;
+                    b = (int)(255 * (1.0 - ((position - 0.375) / 0.25)));
+                }
+                else if (position < 0.875)
+                {
+                    // Yellow to red
+                    r = 255;
+                    g = (int)(255 * (1.0 - ((position - 0.625) / 0.25)));
+                    b = 0;
+                }
+                else
+                {
+                    // Red to dark red
+                    r = (int)(255 * (1.0 - 0.5 * ((position - 0.875) / 0.125)));
+                    g = 0;
+                    b = 0;
+                }
+
+                // Ensure RGB values are in valid range
+                r = Math.Max(0, Math.Min(255, r));
+                g = Math.Max(0, Math.Min(255, g));
+                b = Math.Max(0, Math.Min(255, b));
+
+                _colormap[i] = Color.FromArgb(r, g, b);
+            }
+
+            // Verify colormap at key positions
+            Logger.Log($"[ColorMap] First color: R={_colormap[0].R}, G={_colormap[0].G}, B={_colormap[0].B}");
+            Logger.Log($"[ColorMap] Mid color: R={_colormap[128].R}, G={_colormap[128].G}, B={_colormap[128].B}");
+            Logger.Log($"[ColorMap] Last color: R={_colormap[255].R}, G={_colormap[255].G}, B={_colormap[255].B}");
+        }
+
+        /// <summary>
+        /// Compute velocity tomography along the path from TX to RX from 3D arrays
+        /// </summary>
+        private float[,] ComputeVelocityTomography(
+    int tx, int ty, int tz,
+    int rx, int ry, int rz,
+    double[,,] vx, double[,,] vy, double[,,] vz)
+        {
+            // Determine the primary direction of wave propagation
+            int dx = Math.Abs(rx - tx);
+            int dy = Math.Abs(ry - ty);
+            int dz = Math.Abs(rz - tz);
+
+            float[,] tomography;
+
+            // Create a maximum intensity projection along the wave path
+            if (dx >= dy && dx >= dz) // X is primary axis - project to YZ plane
+            {
+                tomography = new float[_height, _depth];
+
+                // Initialize with zeros
+                for (int y = 0; y < _height; y++)
+                    for (int z = 0; z < _depth; z++)
+                        tomography[y, z] = 0f;
+
+                // Take maximum intensity projection along X axis (from TX to RX)
+                int startX = Math.Min(tx, rx);
+                int endX = Math.Max(tx, rx);
+
+                Logger.Log($"[ComputeVelocityTomography] Creating YZ tomography projection from X={startX} to X={endX}");
+
+                for (int x = startX; x <= endX; x++)
+                {
+                    if (x < 0 || x >= _width) continue;
+
+                    for (int y = 0; y < _height; y++)
+                    {
+                        for (int z = 0; z < _depth; z++)
+                        {
+                            // Calculate wave magnitude at this point
+                            double magnitude = Math.Sqrt(
+                                vx[x, y, z] * vx[x, y, z] +
+                                vy[x, y, z] * vy[x, y, z] +
+                                vz[x, y, z] * vz[x, y, z]);
+
+                            // Keep maximum value at each YZ position
+                            tomography[y, z] = Math.Max(tomography[y, z], (float)magnitude);
+                        }
+                    }
+                }
+            }
+            else if (dy >= dx && dy >= dz) // Y is primary axis - project to XZ plane
+            {
+                tomography = new float[_width, _depth];
+
+                // Initialize with zeros
+                for (int x = 0; x < _width; x++)
+                    for (int z = 0; z < _depth; z++)
+                        tomography[x, z] = 0f;
+
+                // Take maximum intensity projection along Y axis (from TX to RY)
+                int startY = Math.Min(ty, ry);
+                int endY = Math.Max(ty, ry);
+
+                Logger.Log($"[ComputeVelocityTomography] Creating XZ tomography projection from Y={startY} to Y={endY}");
+
+                for (int y = startY; y <= endY; y++)
+                {
+                    if (y < 0 || y >= _height) continue;
+
+                    for (int x = 0; x < _width; x++)
+                    {
+                        for (int z = 0; z < _depth; z++)
+                        {
+                            // Calculate wave magnitude at this point
+                            double magnitude = Math.Sqrt(
+                                vx[x, y, z] * vx[x, y, z] +
+                                vy[x, y, z] * vy[x, y, z] +
+                                vz[x, y, z] * vz[x, y, z]);
+
+                            // Keep maximum value at each XZ position
+                            tomography[x, z] = Math.Max(tomography[x, z], (float)magnitude);
+                        }
+                    }
+                }
+            }
+            else // Z is primary axis - project to XY plane
+            {
+                tomography = new float[_width, _height];
+
+                // Initialize with zeros
+                for (int x = 0; x < _width; x++)
+                    for (int y = 0; y < _height; y++)
+                        tomography[x, y] = 0f;
+
+                // Take maximum intensity projection along Z axis (from TX to RZ)
+                int startZ = Math.Min(tz, rz);
+                int endZ = Math.Max(tz, rz);
+
+                Logger.Log($"[ComputeVelocityTomography] Creating XY tomography projection from Z={startZ} to Z={endZ}");
+
+                for (int z = startZ; z <= endZ; z++)
+                {
+                    if (z < 0 || z >= _depth) continue;
+
+                    for (int x = 0; x < _width; x++)
+                    {
+                        for (int y = 0; y < _height; y++)
+                        {
+                            // Calculate wave magnitude at this point
+                            double magnitude = Math.Sqrt(
+                                vx[x, y, z] * vx[x, y, z] +
+                                vy[x, y, z] * vy[x, y, z] +
+                                vz[x, y, z] * vz[x, y, z]);
+
+                            // Keep maximum value at each XY position
+                            tomography[x, y] = Math.Max(tomography[x, y], (float)magnitude);
+                        }
+                    }
+                }
+            }
+
+            // Find min/max values for normalization
+            float minVal = float.MaxValue;
+            float maxVal = float.MinValue;
+
+            int w = tomography.GetLength(0);
+            int h = tomography.GetLength(1);
+
+            for (int j = 0; j < h; j++)
+            {
+                for (int i = 0; i < w; i++)
+                {
+                    if (tomography[i, j] < minVal) minVal = tomography[i, j];
+                    if (tomography[i, j] > maxVal) maxVal = tomography[i, j];
+                }
+            }
+
+            // Guard against tiny range
+            if (Math.Abs(maxVal - minVal) < 1e-6f)
+            {
+                minVal = 0f;
+                maxVal = 1e-6f;
+            }
+
+            // Normalize to 0-1 range
+            float range = maxVal - minVal;
+            for (int j = 0; j < h; j++)
+            {
+                for (int i = 0; i < w; i++)
+                {
+                    tomography[i, j] = (tomography[i, j] - minVal) / range;
+                }
+            }
+
+            Logger.Log($"[ComputeVelocityTomography] Tomography size: {w}x{h}, Min: {minVal:E6}, Max: {maxVal:E6}");
+            return tomography;
+        }
+
+        /// <summary>
+        /// Extract a cross-section of the wave field from 3D arrays with improved amplification
+        /// </summary>
+        private float[,] ExtractCrossSection(
+    int tx, int ty, int tz,
+    int rx, int ry, int rz,
+    double[,,] vx, double[,,] vy, double[,,] vz)
+        {
+            // Determine the primary direction of wave propagation
+            int dx = Math.Abs(rx - tx);
+            int dy = Math.Abs(ry - ty);
+            int dz = Math.Abs(rz - tz);
+
+            float[,] crossSection;
+
+            // Extract cross-section perpendicular to the primary direction
+            if (dx >= dy && dx >= dz) // X is primary axis - extract YZ plane
+            {
+                crossSection = new float[_height, _depth];
+
+                // Use the midpoint between TX and RX for the cross-section
+                int x = (tx + rx) / 2;
+                x = Math.Max(0, Math.Min(x, _width - 1)); // Ensure within bounds
+
+                Logger.Log($"[ExtractCrossSection] Extracting YZ plane at X={x} (perpendicular to wave)");
+
+                // Sample the YZ plane at the specified X
+                for (int y = 0; y < _height; y++)
+                {
+                    for (int z = 0; z < _depth; z++)
+                    {
+                        // Calculate wave magnitude at this point
                         double magnitude = Math.Sqrt(
                             vx[x, y, z] * vx[x, y, z] +
                             vy[x, y, z] * vy[x, y, z] +
@@ -711,85 +899,95 @@ namespace CTSegmenter
                     }
                 }
             }
-
-            return crossSection;
-        }
-
-        /// <summary>
-        /// Extract a cross-section of the wave field from flat arrays
-        /// </summary>
-        private float[,] ExtractCrossSectionFlat(double[] vx, double[] vy, double[] vz, int width, int height, int depth)
-        {
-            // Use the plane that contains both TX and RX
-            int dx = Math.Abs(_rx - _tx);
-            int dy = Math.Abs(_ry - _ty);
-            int dz = Math.Abs(_rz - _tz);
-
-            float[,] crossSection;
-
-            if (dz <= dx && dz <= dy)
+            else if (dy >= dx && dy >= dz) // Y is primary axis - extract XZ plane
             {
-                // Use XY plane at middle Z
-                int z = (_tz + _rz) / 2;
-                crossSection = new float[width, height];
+                crossSection = new float[_width, _depth];
 
-                for (int x = 0; x < width; x++)
+                // Use the midpoint between TY and RY for the cross-section
+                int y = (ty + ry) / 2;
+                y = Math.Max(0, Math.Min(y, _height - 1)); // Ensure within bounds
+
+                Logger.Log($"[ExtractCrossSection] Extracting XZ plane at Y={y} (perpendicular to wave)");
+
+                // Sample the XZ plane at the specified Y
+                for (int x = 0; x < _width; x++)
                 {
-                    for (int y = 0; y < height; y++)
+                    for (int z = 0; z < _depth; z++)
                     {
-                        int index = (z * width * height) + (y * width) + x;
+                        // Calculate wave magnitude at this point
                         double magnitude = Math.Sqrt(
-                            vx[index] * vx[index] +
-                            vy[index] * vy[index] +
-                            vz[index] * vz[index]);
-
-                        crossSection[x, y] = (float)magnitude;
-                    }
-                }
-            }
-            else if (dy <= dx && dy <= dz)
-            {
-                // Use XZ plane at middle Y
-                int y = (_ty + _ry) / 2;
-                crossSection = new float[width, depth];
-
-                for (int x = 0; x < width; x++)
-                {
-                    for (int z = 0; z < depth; z++)
-                    {
-                        int index = (z * width * height) + (y * width) + x;
-                        double magnitude = Math.Sqrt(
-                            vx[index] * vx[index] +
-                            vy[index] * vy[index] +
-                            vz[index] * vz[index]);
+                            vx[x, y, z] * vx[x, y, z] +
+                            vy[x, y, z] * vy[x, y, z] +
+                            vz[x, y, z] * vz[x, y, z]);
 
                         crossSection[x, z] = (float)magnitude;
                     }
                 }
             }
-            else
+            else // Z is primary axis - extract XY plane
             {
-                // Use YZ plane at middle X
-                int x = (_tx + _rx) / 2;
-                crossSection = new float[height, depth];
+                crossSection = new float[_width, _height];
 
-                for (int y = 0; y < height; y++)
+                // Use the midpoint between TZ and RZ for the cross-section
+                int z = (tz + rz) / 2;
+                z = Math.Max(0, Math.Min(z, _depth - 1)); // Ensure within bounds
+
+                Logger.Log($"[ExtractCrossSection] Extracting XY plane at Z={z} (perpendicular to wave)");
+
+                // Sample the XY plane at the specified Z
+                for (int x = 0; x < _width; x++)
                 {
-                    for (int z = 0; z < depth; z++)
+                    for (int y = 0; y < _height; y++)
                     {
-                        int index = (z * width * height) + (y * width) + x;
+                        // Calculate wave magnitude at this point
                         double magnitude = Math.Sqrt(
-                            vx[index] * vx[index] +
-                            vy[index] * vy[index] +
-                            vz[index] * vz[index]);
+                            vx[x, y, z] * vx[x, y, z] +
+                            vy[x, y, z] * vy[x, y, z] +
+                            vz[x, y, z] * vz[x, y, z]);
 
-                        crossSection[y, z] = (float)magnitude;
+                        crossSection[x, y] = (float)magnitude;
                     }
                 }
             }
 
+            // Find min/max values for normalization
+            float minVal = float.MaxValue;
+            float maxVal = float.MinValue;
+
+            int w = crossSection.GetLength(0);
+            int h = crossSection.GetLength(1);
+
+            for (int j = 0; j < h; j++)
+            {
+                for (int i = 0; i < w; i++)
+                {
+                    if (crossSection[i, j] < minVal) minVal = crossSection[i, j];
+                    if (crossSection[i, j] > maxVal) maxVal = crossSection[i, j];
+                }
+            }
+
+            // Guard against tiny range
+            if (Math.Abs(maxVal - minVal) < 1e-6f)
+            {
+                minVal = 0f;
+                maxVal = 1e-6f;
+            }
+
+            // Normalize to 0-1 range
+            float range = maxVal - minVal;
+            for (int j = 0; j < h; j++)
+            {
+                for (int i = 0; i < w; i++)
+                {
+                    crossSection[i, j] = (crossSection[i, j] - minVal) / range;
+                }
+            }
+
+            Logger.Log($"[ExtractCrossSection] Cross-section size: {w}x{h}, Min: {minVal:E6}, Max: {maxVal:E6}");
             return crossSection;
         }
+
+
         #endregion
 
         #region UI Components
@@ -805,19 +1003,23 @@ namespace CTSegmenter
                 BackColor = Color.FromArgb(20, 20, 20)
             };
             this.Controls.Add(_mainPanel);
+            this.TopMost = true;
+            this.BringToFront();
 
-            // Create sub-panels for each visualization
-            _subPanels = new Panel[4];
-            _pictureBoxes = new PictureBox[4];
+            // Create sub-panels for each visualization (now 6 panels)
+            _subPanels = new Panel[6];
+            _pictureBoxes = new PictureBox[6];
 
-            // Panel layout: 2x2 grid
-            int panelWidth = _mainPanel.Width / 2;
-            int panelHeight = _mainPanel.Height / 2;
+            // Panel layout: 2 rows of 3 panels
+            int rowCount = 2;
+            int colCount = 3;
+            int panelWidth = _mainPanel.Width / colCount;
+            int panelHeight = _mainPanel.Height / rowCount;
 
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < 6; i++)
             {
-                int row = i / 2;
-                int col = i % 2;
+                int row = i / colCount;
+                int col = i % colCount;
 
                 _subPanels[i] = new Panel
                 {
@@ -849,8 +1051,14 @@ namespace CTSegmenter
                 _pictureBoxes[i].Image = _displayBitmaps[i];
 
                 // Add labels to each panel
-                string[] titles = { "P-Wave Time Series", "S-Wave Time Series",
-                                   "Velocity Tomography", "Wavefield Cross-Section" };
+                string[] titles = {
+                    "P-Wave Time Series",
+                    "S-Wave Time Series",
+                    "Velocity Tomography",
+                    "Wavefield Cross-Section",
+                    "Combined P/S Wave Visualization",
+                    "Simulation Information"
+                };
 
                 Label titleLabel = new Label
                 {
@@ -1098,6 +1306,18 @@ namespace CTSegmenter
                         DrawHeatmap(g, frame.WavefieldCrossSection, 3);
                     }
 
+                    // Update combined P/S wave visualization panel
+                    using (Graphics g = Graphics.FromImage(_panelBitmaps[4]))
+                    {
+                        DrawCombinedWaveVisualization(g, frame);
+                    }
+
+                    // Update information panel
+                    using (Graphics g = Graphics.FromImage(_panelBitmaps[5]))
+                    {
+                        DrawInformationPanel(g);
+                    }
+
                     // Update the UI on the main thread
                     this.BeginInvoke((MethodInvoker)delegate
                     {
@@ -1117,7 +1337,7 @@ namespace CTSegmenter
                         }
 
                         // Copy bitmaps to display bitmaps and refresh pictureboxes
-                        for (int i = 0; i < 4; i++)
+                        for (int i = 0; i < 6; i++)
                         {
                             if (_displayBitmaps[i] != null && _displayBitmaps[i] != _panelBitmaps[i])
                             {
@@ -1133,12 +1353,12 @@ namespace CTSegmenter
                 catch (Exception ex)
                 {
                     Logger.Log($"[SimulationVisualizer] Error updating visualization: {ex.Message}");
+                    Logger.Log($"[SimulationVisualizer] Stack trace: {ex.StackTrace}");
                 }
             }
         }
-
         /// <summary>
-        /// Draw time series data on the specified graphics context
+        /// Draw time series data on the specified graphics context with robust bounds checking
         /// </summary>
         private void DrawTimeSeries(Graphics g, float[] series, int panelIndex)
         {
@@ -1151,132 +1371,317 @@ namespace CTSegmenter
             // Clear background
             g.Clear(Color.Black);
 
-            // Find min/max values for scaling
+            // Draw white rectangle border
+            using (Pen borderPen = new Pen(Color.White, 1))
+            {
+                g.DrawRectangle(borderPen, 0, 0, width - 1, height - 1);
+            }
+
+            // Find min/max values for scaling with better error handling
             float minVal = float.MaxValue;
             float maxVal = float.MinValue;
             bool hasNonZeroData = false;
 
             foreach (float val in series)
             {
-                if (Math.Abs(val) > 1e-6) hasNonZeroData = true;
-                minVal = Math.Min(minVal, val);
-                maxVal = Math.Max(maxVal, val);
+                if (!float.IsNaN(val) && !float.IsInfinity(val))
+                {
+                    minVal = Math.Min(minVal, val);
+                    maxVal = Math.Max(maxVal, val);
+                    if (Math.Abs(val) > 1e-10) // More sensitive threshold
+                        hasNonZeroData = true;
+                }
             }
 
-            // If we don't have meaningful data yet, use default range
+            // If we don't have meaningful data, use default range
             if (!hasNonZeroData || Math.Abs(maxVal - minVal) < 1e-6)
             {
-                minVal = -1.0f;
-                maxVal = 1.0f;
+                // Use smaller default range to make small signals more visible
+                minVal = -0.1f;
+                maxVal = 0.1f;
+            }
+            else
+            {
+                // Ensure symmetrical range for waveform display
+                float absMax = Math.Max(Math.Abs(minVal), Math.Abs(maxVal));
+                minVal = -absMax;
+                maxVal = absMax;
+
+                // Add 10% padding
+                float padding = (maxVal - minVal) * 0.1f;
+                minVal -= padding;
+                maxVal += padding;
             }
 
-            // Ensure minimum range for visibility
-            float range = maxVal - minVal;
-            if (range < 0.1f)
+            // Calculate scaling factors - prevent division by zero
+            float xScale = (series.Length > 1) ? (float)width / (series.Length - 1) : width;
+            float yScale = (maxVal != minVal) ? height / (maxVal - minVal) : height;
+            float centerY = height / 2;
+
+            // Draw path indicator at the top
+            int pathHeight = 20;
+            Rectangle pathRect = new Rectangle(10, 10, width - 20, pathHeight);
+
+            using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(40, 40, 40)))
             {
-                float mid = (maxVal + minVal) / 2;
-                minVal = mid - 0.05f;
-                maxVal = mid + 0.05f;
+                g.FillRectangle(bgBrush, pathRect);
             }
 
-            // Calculate scaling factors
-            float xScale = (float)width / (series.Length > 1 ? series.Length - 1 : 1);
-            float yScale = height / (maxVal - minVal);
-
-            // Draw zero line
-            if (minVal < 0 && maxVal > 0)
+            using (Pen pathPen = new Pen(Color.Gray, 1))
             {
-                float zeroY = height - (0 - minVal) * yScale;
-                g.DrawLine(new Pen(Color.FromArgb(60, 60, 60), 1), 0, zeroY, width, zeroY);
+                g.DrawRectangle(pathPen, pathRect);
             }
 
-            // Draw grid lines
-            using (Pen gridPen = new Pen(Color.FromArgb(30, 30, 30)))
+            // Draw TX and RX markers
+            using (SolidBrush txBrush = new SolidBrush(Color.Yellow))
+            using (SolidBrush rxBrush = new SolidBrush(Color.Cyan))
             {
-                // Vertical grid lines
-                int numVerticals = 10;
-                for (int i = 1; i < numVerticals; i++)
+                g.FillEllipse(txBrush, pathRect.X - 3, pathRect.Y + pathHeight / 2 - 3, 6, 6);
+                g.FillEllipse(rxBrush, pathRect.Right - 3, pathRect.Y + pathHeight / 2 - 3, 6, 6);
+
+                // Draw TX/RX labels
+                using (Font smallFont = new Font("Arial", 7))
                 {
-                    float x = (float)i * width / numVerticals;
-                    g.DrawLine(gridPen, x, 0, x, height);
-                }
-
-                // Horizontal grid lines
-                int numHorizontals = 8;
-                for (int i = 1; i < numHorizontals; i++)
-                {
-                    float y = (float)i * height / numHorizontals;
-                    g.DrawLine(gridPen, 0, y, width, y);
-                }
-            }
-
-            // Draw the time series
-            Point[] points = new Point[series.Length];
-
-            for (int i = 0; i < series.Length; i++)
-            {
-                float x = i * xScale;
-                float y = height - (series[i] - minVal) * yScale;
-
-                // Clamp y to prevent drawing outside bounds
-                y = Math.Max(0, Math.Min(height, y));
-
-                points[i] = new Point((int)x, (int)y);
-            }
-
-            // Draw filled area below the line with more vibrant colors
-            Point[] areaPoints = new Point[points.Length + 2];
-            Array.Copy(points, 0, areaPoints, 0, points.Length);
-            areaPoints[points.Length] = new Point(points[points.Length - 1].X, height);
-            areaPoints[points.Length + 1] = new Point(points[0].X, height);
-
-            using (Brush areaBrush = panelIndex == 0 ?
-                   new LinearGradientBrush(new Point(0, 0), new Point(0, height),
-                                          Color.FromArgb(120, 0, 180, 255), Color.FromArgb(30, 0, 0, 80)) :
-                   new LinearGradientBrush(new Point(0, 0), new Point(0, height),
-                                          Color.FromArgb(120, 255, 100, 100), Color.FromArgb(30, 80, 0, 0)))
-            {
-                g.FillPolygon(areaBrush, areaPoints);
-            }
-
-            // Draw the line with thicker, more visible pen
-            using (Pen linePen = new Pen(panelIndex == 0 ? Color.DeepSkyBlue : Color.Crimson, 2f))
-            {
-                if (points.Length > 1)
-                {
-                    g.DrawLines(linePen, points);
+                    g.DrawString("TX", smallFont, txBrush, pathRect.X - 4, pathRect.Y + pathHeight + 2);
+                    g.DrawString("RX", smallFont, rxBrush, pathRect.Right - 8, pathRect.Y + pathHeight + 2);
                 }
             }
 
-            // Draw points on the line for better visibility
-            using (Brush pointBrush = new SolidBrush(panelIndex == 0 ? Color.LightCyan : Color.LightPink))
+            // Draw current wave position indicator on path
+            lock (_dataLock)
             {
-                // Only draw points if we have fewer than 100 to avoid cluttering
-                if (points.Length < 100)
+                if (_frames.Count > 0 && _currentFrameIndex >= 0 && _currentFrameIndex < _frames.Count)
                 {
-                    foreach (var point in points)
+                    float progress = panelIndex == 0 ?
+                        _frames[_currentFrameIndex].PWavePathProgress :
+                        _frames[_currentFrameIndex].SWavePathProgress;
+
+                    // Clamp to valid range
+                    progress = Math.Max(0.0f, Math.Min(1.0f, progress));
+
+                    int markerX = pathRect.X + (int)(progress * pathRect.Width);
+
+                    using (SolidBrush waveBrush = new SolidBrush(
+                        panelIndex == 0 ? Color.DeepSkyBlue : Color.Crimson))
                     {
-                        g.FillEllipse(pointBrush, point.X - 2, point.Y - 2, 4, 4);
+                        g.FillRectangle(waveBrush, markerX - 2, pathRect.Y, 4, pathHeight);
+
+                        // Draw wave path
+                        using (Pen wavePen = new Pen(waveBrush.Color, 2) { DashStyle = DashStyle.Dot })
+                        {
+                            g.DrawLine(wavePen,
+                                pathRect.X, pathRect.Y + pathHeight / 2,
+                                markerX, pathRect.Y + pathHeight / 2);
+                        }
+
+                        // Draw path progress percentage
+                        using (Font progressFont = new Font("Arial", 7))
+                        {
+                            string progressText = $"{progress:P0}";
+                            g.DrawString(progressText, progressFont, waveBrush, markerX - 10, pathRect.Bottom + 2);
+                        }
                     }
                 }
             }
 
-            // Draw coordinate values
-            using (Font font = new Font("Arial", 8))
-            using (Brush textBrush = new SolidBrush(Color.LightGray))
-            {
-                // Min/max values
-                g.DrawString($"{minVal:F3}", font, textBrush, 5, height - 15);
-                g.DrawString($"{maxVal:F3}", font, textBrush, 5, 5);
+            // Main time series area
+            int graphTop = pathRect.Bottom + 20;
+            int graphHeight = height - graphTop - 10;
 
-                // Panel title with more visibility
-                string title = panelIndex == 0 ? "P-Wave" : "S-Wave";
-                using (Font titleFont = new Font("Arial", 10, FontStyle.Bold))
-                using (Brush titleBrush = new SolidBrush(panelIndex == 0 ? Color.DeepSkyBlue : Color.Crimson))
+            // Draw zero line
+            g.DrawLine(new Pen(Color.FromArgb(80, 80, 80), 1), 0, graphTop + graphHeight / 2, width, graphTop + graphHeight / 2);
+
+            // Draw grid lines
+            using (Pen gridPen = new Pen(Color.FromArgb(40, 40, 40)))
+            {
+                // Vertical grid lines
+                int verticalCount = Math.Min(series.Length, 20);
+                if (verticalCount < 2) verticalCount = 2;
+
+                float verticalSpacing = width / (float)verticalCount;
+
+                for (int i = 0; i <= verticalCount; i++)
                 {
-                    g.DrawString(title, titleFont, titleBrush, width / 2 - 30, 5);
+                    float x = i * verticalSpacing;
+                    g.DrawLine(gridPen, x, graphTop, x, graphTop + graphHeight);
+                }
+
+                // Horizontal grid lines
+                for (int i = 1; i <= 4; i++)
+                {
+                    float y = graphTop + graphHeight / 2 + i * (graphHeight / 10);
+                    g.DrawLine(gridPen, 0, y, width, y);
+
+                    y = graphTop + graphHeight / 2 - i * (graphHeight / 10);
+                    g.DrawLine(gridPen, 0, y, width, y);
                 }
             }
+
+            // Create points for the line with careful bounds checking
+            if (series.Length > 1)
+            {
+                int numPoints = Math.Min(series.Length, 1000);
+                PointF[] points = new PointF[numPoints];
+
+                for (int i = 0; i < numPoints; i++)
+                {
+                    float x = i * width / (float)(numPoints - 1);
+
+                    // Calculate source index with bounds checking
+                    float sourceIdx = i * (series.Length - 1) / (float)(numPoints - 1);
+                    int idxLow = (int)Math.Floor(sourceIdx);
+                    int idxHigh = (int)Math.Ceiling(sourceIdx);
+
+                    // Ensure indices are within bounds
+                    idxLow = Math.Max(0, Math.Min(idxLow, series.Length - 1));
+                    idxHigh = Math.Max(0, Math.Min(idxHigh, series.Length - 1));
+
+                    // Get interpolation fraction
+                    float fraction = sourceIdx - idxLow;
+
+                    // Interpolate for smoother display
+                    float val;
+                    if (idxLow != idxHigh)
+                        val = series[idxLow] * (1 - fraction) + series[idxHigh] * fraction;
+                    else
+                        val = series[idxLow];
+
+                    // Protect against NaN or infinity
+                    if (float.IsNaN(val) || float.IsInfinity(val))
+                        val = 0;
+
+                    // Map to y coordinate - IMPORTANT: Using center as zero point
+                    float y = graphTop + graphHeight / 2 - (val - ((maxVal + minVal) / 2)) * graphHeight / (maxVal - minVal);
+
+                    // Clamp to visible area
+                    y = Math.Max(graphTop, Math.Min(graphTop + graphHeight, y));
+
+                    points[i] = new PointF(x, y);
+                }
+
+                // Draw filled area
+                using (GraphicsPath path = new GraphicsPath())
+                {
+                    // Create path for filled area
+                    path.AddLine(points[0].X, graphTop + graphHeight / 2, points[0].X, points[0].Y);
+                    for (int i = 1; i < points.Length; i++)
+                        path.AddLine(points[i - 1], points[i]);
+
+                    path.AddLine(points[points.Length - 1].X, points[points.Length - 1].Y,
+                                 points[points.Length - 1].X, graphTop + graphHeight / 2);
+                    path.CloseFigure();
+
+                    // Fill with gradient
+                    using (LinearGradientBrush brush = new LinearGradientBrush(
+                        new Rectangle(0, graphTop, width, graphHeight),
+                        panelIndex == 0 ? Color.FromArgb(100, 0, 150, 255) : Color.FromArgb(100, 255, 50, 50),
+                        Color.FromArgb(10, 0, 0, 0),
+                        LinearGradientMode.Vertical))
+                    {
+                        g.FillPath(brush, path);
+                    }
+                }
+
+                // Draw line with appropriate color
+                using (Pen linePen = new Pen(
+                    panelIndex == 0 ? Color.DeepSkyBlue : Color.Crimson, 2f))
+                {
+                    g.DrawLines(linePen, points);
+                }
+            }
+            else if (series.Length == 1)
+            {
+                // Special case for single-point series
+                float centerX = width / 2;
+                float val = series[0];
+                if (float.IsNaN(val) || float.IsInfinity(val)) val = 0;
+
+                float y = graphTop + graphHeight / 2 - (val - ((maxVal + minVal) / 2)) * graphHeight / (maxVal - minVal);
+
+                // Clamp to visible area
+                y = Math.Max(graphTop, Math.Min(graphTop + graphHeight, y));
+
+                // Draw a single point
+                using (SolidBrush pointBrush = new SolidBrush(
+                    panelIndex == 0 ? Color.DeepSkyBlue : Color.Crimson))
+                {
+                    g.FillEllipse(pointBrush, centerX - 3, y - 3, 6, 6);
+                }
+            }
+
+            // Draw title
+            using (Font titleFont = new Font("Arial", 12, FontStyle.Bold))
+            using (Brush titleBrush = new SolidBrush(
+                panelIndex == 0 ? Color.DeepSkyBlue : Color.Crimson))
+            {
+                string title = panelIndex == 0 ? "P-Wave" : "S-Wave";
+                SizeF titleSize = g.MeasureString(title, titleFont);
+                g.DrawString(title, titleFont, titleBrush,
+                            (width - titleSize.Width) / 2, 50);
+            }
+
+            // Draw amplitude labels
+            using (Font labelFont = new Font("Arial", 8))
+            using (Brush labelBrush = new SolidBrush(Color.LightGray))
+            {
+                g.DrawString(maxVal.ToString("0.000"), labelFont, labelBrush, 5, graphTop + 5);
+                g.DrawString("0.000", labelFont, labelBrush, 5, graphTop + graphHeight / 2 - 15);
+                g.DrawString(minVal.ToString("0.000"), labelFont, labelBrush, 5, graphTop + graphHeight - 20);
+            }
+
+            // Draw arrival marker if simulation is completed
+            if (_simulationCompleted && series.Length > 0)
+            {
+                int arrivalStep = panelIndex == 0 ? _pWaveTravelTime : _sWaveTravelTime;
+
+                if (arrivalStep > 0)
+                {
+                    // Calculate x position safely
+                    float arrivalPos = arrivalStep / (float)Math.Max(1, series.Length) * width;
+                    arrivalPos = Math.Min(arrivalPos, width - 10);
+
+                    using (Pen arrivalPen = new Pen(Color.Yellow, 2))
+                    {
+                        g.DrawLine(arrivalPen, arrivalPos, graphTop, arrivalPos, graphTop + graphHeight);
+
+                        using (Font font = new Font("Arial", 8))
+                        using (SolidBrush brush = new SolidBrush(Color.Yellow))
+                        {
+                            g.DrawString("Arrival", font, brush, arrivalPos - 15, graphTop + 5);
+                        }
+                    }
+                }
+            }
+        }
+        private void DrawColorbar(Graphics g, Rectangle rect)
+        {
+            // Create a bitmap for the colorbar
+            Bitmap colorbar = new Bitmap(rect.Width, rect.Height);
+
+            // Draw the gradient
+            for (int y = 0; y < rect.Height; y++)
+            {
+                // Map y position to colormap index (invert so max is at top)
+                int index = 255 - (int)((float)y / rect.Height * 256);
+
+                // Clamp to valid range
+                index = Math.Max(0, Math.Min(255, index));
+
+                // Draw a horizontal line of this color
+                for (int x = 0; x < rect.Width; x++)
+                {
+                    colorbar.SetPixel(x, y, _colormap[index]);
+                }
+            }
+
+            // Draw the colorbar on the graphics context
+            g.DrawImage(colorbar, rect);
+
+            // Draw a border around the colorbar
+            g.DrawRectangle(Pens.White, rect);
+
+            // Clean up
+            colorbar.Dispose();
         }
 
         /// <summary>
@@ -1284,203 +1689,955 @@ namespace CTSegmenter
         /// </summary>
         private void DrawHeatmap(Graphics g, float[,] data, int panelIndex)
         {
-            if (data == null)
-                return;
+            // Get panel dimensions
+            int panelW = _panelBitmaps[panelIndex].Width;
+            int panelH = _panelBitmaps[panelIndex].Height;
 
-            int width = _panelBitmaps[panelIndex].Width;
-            int height = _panelBitmaps[panelIndex].Height;
-
-            // Clear background
+            // Clear background and draw border
             g.Clear(Color.Black);
+            using (var border = new Pen(Color.White, 1))
+            {
+                g.DrawRectangle(border, 0, 0, panelW - 1, panelH - 1);
+            }
 
-            int dataWidth = data.GetLength(0);
-            int dataHeight = data.GetLength(1);
+            // Handle null data or empty array
+            if (data == null || data.Length == 0)
+            {
+                using (var font = new Font("Arial", 10, FontStyle.Bold))
+                using (var brush = new SolidBrush(Color.White))
+                {
+                    string msg = "No Data";
+                    SizeF sz = g.MeasureString(msg, font);
+                    g.DrawString(msg, font, brush,
+                                 (panelW - sz.Width) / 2,
+                                 (panelH - sz.Height) / 2);
+                }
+                return;
+            }
 
-            // Find min/max values for scaling
+            // Get data dimensions
+            int dataW = data.GetLength(0);
+            int dataH = data.GetLength(1);
+
+            // Compute min and max data values
             float minVal = float.MaxValue;
             float maxVal = float.MinValue;
-
-            for (int y = 0; y < dataHeight; y++)
+            for (int y = 0; y < dataH; y++)
             {
-                for (int x = 0; x < dataWidth; x++)
+                for (int x = 0; x < dataW; x++)
                 {
-                    minVal = Math.Min(minVal, data[x, y]);
-                    maxVal = Math.Max(maxVal, data[x, y]);
+                    float v = data[x, y];
+                    if (float.IsNaN(v) || float.IsInfinity(v)) continue;
+                    if (v < minVal) minVal = v;
+                    if (v > maxVal) maxVal = v;
                 }
             }
 
             // Ensure we have a valid range
-            if (Math.Abs(maxVal - minVal) < 1e-6)
+            if (Math.Abs(maxVal - minVal) < 1e-6f)
             {
-                maxVal = minVal + 1.0f;
+                float avg = (minVal + maxVal) * 0.5f;
+                minVal = avg - 0.01f;
+                maxVal = avg + 0.01f;
+            }
+            float range = maxVal - minVal;
+
+            // Reserve space for colorbar
+            int colorbarWidth = 20;
+            int colorbarMargin = 10;
+            int imageWidth = panelW - colorbarWidth - colorbarMargin * 2;
+
+            // Draw the heatmap
+            for (int py = 0; py < panelH; py++)
+            {
+                int dataY = (int)(py * (float)dataH / panelH);
+                if (dataY >= dataH) dataY = dataH - 1;
+
+                for (int px = 0; px < imageWidth; px++)
+                {
+                    int dataX = (int)(px * (float)dataW / imageWidth);
+                    if (dataX >= dataW) dataX = dataW - 1;
+
+                    float v = data[dataX, dataY];
+                    if (float.IsNaN(v) || float.IsInfinity(v)) v = minVal;
+
+                    float norm = (v - minVal) / range;
+                    int cIdx = (int)(norm * 255);
+                    cIdx = Math.Max(0, Math.Min(255, cIdx));
+
+                    using (var b = new SolidBrush(_colormap[cIdx]))
+                    {
+                        g.FillRectangle(b, px, py, 1, 1);
+                    }
+                }
             }
 
-            // Create a direct bitmap for faster pixel manipulation
-            Bitmap heatmap = new Bitmap(width, height);
+            // Draw colorbar
+            Rectangle colorbarRect = new Rectangle(panelW - colorbarWidth - colorbarMargin,
+                                                  colorbarMargin,
+                                                  colorbarWidth,
+                                                  panelH - colorbarMargin * 2);
+            DrawColorbar(g, colorbarRect);
 
-            // Calculate pixel size
-            float cellWidth = (float)width / dataWidth;
-            float cellHeight = (float)height / dataHeight;
-
-            // Draw each pixel
-            BitmapData bmpData = heatmap.LockBits(new Rectangle(0, 0, width, height),
-                                                ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
-
-            try
+            // Add min/max value labels to colorbar
+            using (var font = new Font("Arial", 8))
+            using (var brush = new SolidBrush(Color.White))
             {
-                unsafe
+                // Min value at bottom
+                string minText = FormatHeatmapValue(minVal);
+                g.DrawString(minText, font, brush,
+                            colorbarRect.Right + 2,
+                            colorbarRect.Bottom - 15);
+
+                // Max value at top
+                string maxText = FormatHeatmapValue(maxVal);
+                g.DrawString(maxText, font, brush,
+                            colorbarRect.Right + 2,
+                            colorbarRect.Top);
+
+                // Add title based on panel type
+                string title = "";
+                if (panelIndex == 2) title = "Velocity Tomography";
+                else if (panelIndex == 3) title = "Wavefield Cross-Section";
+
+                if (!string.IsNullOrEmpty(title))
                 {
-                    byte* ptr = (byte*)bmpData.Scan0;
+                    g.DrawString(title, new Font("Arial", 9, FontStyle.Bold), brush,
+                                10, 10);
+                }
+            }
+        }
 
-                    for (int y = 0; y < height; y++)
+        private string FormatHeatmapValue(float value)
+        {
+            // Format based on magnitude
+            if (Math.Abs(value) < 0.0001f)
+                return value.ToString("0.00E+0");
+            else if (Math.Abs(value) < 1)
+                return value.ToString("0.000");
+            else if (Math.Abs(value) < 1000)
+                return value.ToString("0.0");
+            else
+                return value.ToString("0.00E+0");
+        }
+
+        /// <summary>
+        /// Draw the combined time series with parallel P and S waves next to a transmitter drawing
+        /// </summary>
+        private void DrawCombinedWaveVisualization(Graphics g, SimulationFrame frame)
+        {
+            if (_pathPoints == null || _pathPoints.Count == 0 || frame == null)
+            {
+                // Clear background and show waiting message
+                g.Clear(Color.Black);
+                using (var font = new Font("Arial", 12, FontStyle.Italic))
+                using (var brush = new SolidBrush(Color.White))
+                {
+                    g.DrawString("Waiting for data...", font, brush, 10, 10);
+                }
+                return;
+            }
+
+            // Clear background and draw border
+            g.Clear(Color.Black);
+            g.DrawRectangle(Pens.White, 0, 0, _panelBitmaps[4].Width - 1, _panelBitmaps[4].Height - 1);
+
+            // Draw TX/RX illustration in the top half
+            int halfHeight = _panelBitmaps[4].Height / 2;
+            DrawTxRxIllustration(g, 10, 10, _panelBitmaps[4].Width - 20, halfHeight - 20);
+
+            // Draw P/S time series in the bottom half
+            if (frame.PWaveTimeSeries != null && frame.SWaveTimeSeries != null)
+            {
+                DrawParallelWaves(g, 10, halfHeight,
+                                 _panelBitmaps[4].Width - 20, halfHeight - 10,
+                                 frame.PWaveTimeSeries, frame.SWaveTimeSeries);
+            }
+        }
+
+        /// <summary>
+        /// Draw TX-RX illustration showing wave propagation
+        /// </summary>
+        private void DrawTxRxIllustration(Graphics g, int x, int y, int width, int height)
+        {
+            // Drawing area
+            int margin = 20;
+            int drawWidth = width - 2 * margin;
+            int drawHeight = height - 2 * margin;
+
+            // Calculate TX and RX positions
+            int txX = x + margin + drawWidth / 5;
+            int rxX = x + margin + drawWidth * 4 / 5;
+            int centerY = y + height / 2;
+
+            // Draw TX icon (circle)
+            using (SolidBrush txBrush = new SolidBrush(Color.Yellow))
+            using (Pen txPen = new Pen(Color.White, 2))
+            {
+                g.FillEllipse(txBrush, txX - 10, centerY - 10, 20, 20);
+                g.DrawEllipse(txPen, txX - 10, centerY - 10, 20, 20);
+
+                // TX label
+                using (Font font = new Font("Arial", 9, FontStyle.Bold))
+                using (SolidBrush textBrush = new SolidBrush(Color.White))
+                {
+                    g.DrawString("TX", font, textBrush, txX - 8, centerY - 6);
+                }
+            }
+
+            // Draw RX icon (square)
+            using (SolidBrush rxBrush = new SolidBrush(Color.LightGreen))
+            using (Pen rxPen = new Pen(Color.White, 2))
+            {
+                g.FillRectangle(rxBrush, rxX - 10, centerY - 10, 20, 20);
+                g.DrawRectangle(rxPen, rxX - 10, centerY - 10, 20, 20);
+
+                // RX label
+                using (Font font = new Font("Arial", 9, FontStyle.Bold))
+                using (SolidBrush textBrush = new SolidBrush(Color.White))
+                {
+                    g.DrawString("RX", font, textBrush, rxX - 8, centerY - 6);
+                }
+            }
+
+            // Draw line connecting TX and RX
+            using (Pen linePen = new Pen(Color.Gray, 1))
+            {
+                linePen.DashStyle = DashStyle.Dot;
+                g.DrawLine(linePen, txX, centerY, rxX, centerY);
+            }
+
+            // Calculate wave progress based on current frame
+            float pWaveProgress = 0;
+            float sWaveProgress = 0;
+            lock (_dataLock)
+            {
+                if (_frames.Count > 0 && _currentFrameIndex < _frames.Count)
+                {
+                    // Calculate progress based on frame index and total frames
+                    if (_simulationCompleted && _pWaveTravelTime > 0)
                     {
-                        int dataY = (int)(y / cellHeight);
-                        if (dataY >= dataHeight) dataY = dataHeight - 1;
+                        // After completion, use real travel times for accurate visualization
+                        int step = _frames[_currentFrameIndex].TimeStep;
+                        pWaveProgress = Math.Min(1.0f, (float)step / _pWaveTravelTime);
+                        sWaveProgress = Math.Min(1.0f, (float)step / _sWaveTravelTime);
+                    }
+                    else
+                    {
+                        // During simulation, estimate based on frame index
+                        pWaveProgress = Math.Min(1.0f, (float)(_currentFrameIndex + 1) / _frames.Count * 2.5f);
+                        sWaveProgress = Math.Min(1.0f, (float)(_currentFrameIndex + 1) / _frames.Count * 1.5f);
+                    }
+                }
+            }
 
-                        for (int x = 0; x < width; x++)
+            // Draw P-wave propagation
+            if (pWaveProgress > 0)
+            {
+                int waveDistance = rxX - txX;
+                int pWaveX = txX + (int)(waveDistance * pWaveProgress);
+
+                // P wave front
+                using (Pen wavePen = new Pen(Color.DeepSkyBlue, 3))
+                {
+                    wavePen.DashStyle = DashStyle.Dash;
+                    g.DrawLine(wavePen, pWaveX, centerY - 30, pWaveX, centerY + 30);
+                }
+
+                // P wave label
+                using (Font font = new Font("Arial", 8, FontStyle.Bold))
+                using (SolidBrush textBrush = new SolidBrush(Color.DeepSkyBlue))
+                {
+                    g.DrawString("P", font, textBrush, pWaveX - 4, centerY - 40);
+                }
+            }
+
+            // Draw S-wave propagation
+            if (sWaveProgress > 0)
+            {
+                int waveDistance = rxX - txX;
+                int sWaveX = txX + (int)(waveDistance * sWaveProgress);
+
+                // S wave front
+                using (Pen wavePen = new Pen(Color.Crimson, 3))
+                {
+                    wavePen.DashStyle = DashStyle.Dash;
+                    g.DrawLine(wavePen, sWaveX, centerY - 20, sWaveX, centerY + 20);
+                }
+
+                // S wave label
+                using (Font font = new Font("Arial", 8, FontStyle.Bold))
+                using (SolidBrush textBrush = new SolidBrush(Color.Crimson))
+                {
+                    g.DrawString("S", font, textBrush, sWaveX - 4, centerY + 25);
+                }
+            }
+
+            // Draw distance information
+            float distanceM = CalculateDistance(_tx, _ty, _tz, _rx, _ry, _rz) * _pixelSize;
+            string distanceString = $"Distance: {distanceM:F3} m";
+
+            using (Font font = new Font("Arial", 8))
+            using (SolidBrush textBrush = new SolidBrush(Color.White))
+            {
+                g.DrawString(distanceString, font, textBrush, x + margin, y + height - margin - 15);
+            }
+        }
+
+
+        /// <summary>
+        /// Draw parallel P and S waves with safer bounds checking
+        /// </summary>
+        private void DrawParallelWaves(Graphics g, int x, int y, int width, int height, float[] pSeries, float[] sSeries)
+        {
+            // Check if we have valid data
+            if (pSeries == null || sSeries == null || pSeries.Length == 0 || sSeries.Length == 0)
+            {
+                using (Font font = new Font("Arial", 10))
+                using (SolidBrush brush = new SolidBrush(Color.White))
+                {
+                    g.DrawString("Waiting for data...", font, brush, x + 10, y + height / 2);
+                }
+                return;
+            }
+
+            // Find min/max values for both series with safer bounds checking
+            float minP = float.MaxValue, maxP = float.MinValue;
+            float minS = float.MaxValue, maxS = float.MinValue;
+
+            foreach (float val in pSeries)
+            {
+                if (!float.IsNaN(val) && !float.IsInfinity(val))
+                {
+                    minP = Math.Min(minP, val);
+                    maxP = Math.Max(maxP, val);
+                }
+            }
+
+            foreach (float val in sSeries)
+            {
+                if (!float.IsNaN(val) && !float.IsInfinity(val))
+                {
+                    minS = Math.Min(minS, val);
+                    maxS = Math.Max(maxS, val);
+                }
+            }
+
+            // If we don't have meaningful data, use default range
+            if (Math.Abs(maxP - minP) < 1e-6)
+            {
+                minP = -0.1f;
+                maxP = 0.1f;
+            }
+            else
+            {
+                // Ensure symmetrical range for P waveform display
+                float absMaxP = Math.Max(Math.Abs(minP), Math.Abs(maxP));
+                minP = -absMaxP;
+                maxP = absMaxP;
+            }
+
+            if (Math.Abs(maxS - minS) < 1e-6)
+            {
+                minS = -0.1f;
+                maxS = 0.1f;
+            }
+            else
+            {
+                // Ensure symmetrical range for S waveform display
+                float absMaxS = Math.Max(Math.Abs(minS), Math.Abs(maxS));
+                minS = -absMaxS;
+                maxS = absMaxS;
+            }
+
+            // Add padding
+            float paddingP = (maxP - minP) * 0.1f;
+            minP -= paddingP;
+            maxP += paddingP;
+
+            float paddingS = (maxS - minS) * 0.1f;
+            minS -= paddingS;
+            maxS += paddingS;
+
+            // Split the display area for P and S waves
+            int pAreaHeight = height / 2 - 5;
+            int sAreaHeight = height / 2 - 5;
+            int pAreaY = y + 5;
+            int sAreaY = y + height / 2 + 5;
+
+            // Define drawing areas with white borders
+            Rectangle pArea = new Rectangle(x + 5, pAreaY, width - 10, pAreaHeight - 10);
+            Rectangle sArea = new Rectangle(x + 5, sAreaY, width - 10, sAreaHeight - 10);
+
+            // Draw white rectangles to delimit graph areas
+            using (Pen borderPen = new Pen(Color.White, 1))
+            {
+                g.DrawRectangle(borderPen, pArea);
+                g.DrawRectangle(borderPen, sArea);
+            }
+
+            // Draw path visualization above each graph area
+            int pathHeight = 15;
+            Rectangle pPathRect = new Rectangle(pArea.X, pAreaY - pathHeight - 5, pArea.Width, pathHeight);
+            Rectangle sPathRect = new Rectangle(sArea.X, sAreaY - pathHeight - 5, sArea.Width, pathHeight);
+
+            // Draw path backgrounds
+            using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(40, 40, 40)))
+            {
+                g.FillRectangle(bgBrush, pPathRect);
+                g.FillRectangle(bgBrush, sPathRect);
+            }
+
+            // Draw path borders
+            using (Pen pathPen = new Pen(Color.Gray, 1))
+            {
+                g.DrawRectangle(pathPen, pPathRect);
+                g.DrawRectangle(pathPen, sPathRect);
+            }
+
+            // Draw TX and RX markers on both paths
+            using (SolidBrush txBrush = new SolidBrush(Color.Yellow))
+            using (SolidBrush rxBrush = new SolidBrush(Color.Cyan))
+            {
+                // P-wave path
+                g.FillEllipse(txBrush, pPathRect.X - 3, pPathRect.Y + pathHeight / 2 - 3, 6, 6);
+                g.FillEllipse(rxBrush, pPathRect.Right - 3, pPathRect.Y + pathHeight / 2 - 3, 6, 6);
+
+                // S-wave path
+                g.FillEllipse(txBrush, sPathRect.X - 3, sPathRect.Y + pathHeight / 2 - 3, 6, 6);
+                g.FillEllipse(rxBrush, sPathRect.Right - 3, sPathRect.Y + pathHeight / 2 - 3, 6, 6);
+            }
+
+            // Draw current wave position markers on paths - check if frame properties exist
+            lock (_dataLock)
+            {
+                if (_frames.Count > 0 && _currentFrameIndex >= 0 && _currentFrameIndex < _frames.Count)
+                {
+                    // Check if progress properties exist on the frame object (backward compatibility)
+                    float pProgress = 0.0f;
+                    float sProgress = 0.0f;
+
+                    // We need to check if these properties exist before using them
+                    // as they might be missing if code changes weren't fully applied
+                    try
+                    {
+                        // Try to get progress from frame or use simple estimate
+                        pProgress = _frames[_currentFrameIndex].PWavePathProgress;
+                        sProgress = _frames[_currentFrameIndex].SWavePathProgress;
+                    }
+                    catch
+                    {
+                        // Fallback to a simple estimate based on frame index
+                        float simpleProgress = Math.Min(1.0f, (float)(_currentFrameIndex + 1) / _frames.Count);
+                        pProgress = simpleProgress * 1.5f; // P-waves travel faster
+                        if (pProgress > 1.0f) pProgress = 1.0f;
+
+                        sProgress = simpleProgress * 0.8f; // S-waves travel slower
+                        if (sProgress > 1.0f) sProgress = 1.0f;
+                    }
+
+                    int pMarkerX = pPathRect.X + (int)(pProgress * pPathRect.Width);
+                    int sMarkerX = sPathRect.X + (int)(sProgress * sPathRect.Width);
+
+                    using (SolidBrush pWaveBrush = new SolidBrush(Color.DeepSkyBlue))
+                    using (SolidBrush sWaveBrush = new SolidBrush(Color.Crimson))
+                    {
+                        // Draw wave front markers
+                        g.FillRectangle(pWaveBrush, pMarkerX - 2, pPathRect.Y, 4, pathHeight);
+                        g.FillRectangle(sWaveBrush, sMarkerX - 2, sPathRect.Y, 4, pathHeight);
+
+                        // Draw wave paths
+                        using (Pen pPathPen = new Pen(Color.DeepSkyBlue, 2) { DashStyle = DashStyle.Dot })
+                        using (Pen sPathPen = new Pen(Color.Crimson, 2) { DashStyle = DashStyle.Dot })
                         {
-                            int dataX = (int)(x / cellWidth);
-                            if (dataX >= dataWidth) dataX = dataWidth - 1;
+                            // Draw from TX to current position
+                            g.DrawLine(pPathPen,
+                                pPathRect.X, pPathRect.Y + pathHeight / 2,
+                                pMarkerX, pPathRect.Y + pathHeight / 2);
 
-                            float value = data[dataX, dataY];
-                            float normalized = (value - minVal) / (maxVal - minVal);
-                            int colorIndex = (int)(normalized * 255);
-                            if (colorIndex < 0) colorIndex = 0;
-                            if (colorIndex > 255) colorIndex = 255;
+                            g.DrawLine(sPathPen,
+                                sPathRect.X, sPathRect.Y + pathHeight / 2,
+                                sMarkerX, sPathRect.Y + pathHeight / 2);
+                        }
 
-                            Color color = _colormap[colorIndex];
+                        // Draw progress percentages
+                        using (Font progressFont = new Font("Arial", 7))
+                        {
+                            string pProgressText = $"{pProgress:P0}";
+                            string sProgressText = $"{sProgress:P0}";
 
-                            int index = y * bmpData.Stride + x * 4;
-                            ptr[index] = color.B;
-                            ptr[index + 1] = color.G;
-                            ptr[index + 2] = color.R;
-                            ptr[index + 3] = 255; // Alpha
+                            g.DrawString(pProgressText, progressFont, pWaveBrush,
+                                pMarkerX - 10, pPathRect.Y);
+
+                            g.DrawString(sProgressText, progressFont, sWaveBrush,
+                                sMarkerX - 10, sPathRect.Y);
                         }
                     }
                 }
             }
-            finally
+
+            // P-wave area title
+            using (Font titleFont = new Font("Arial", 9, FontStyle.Bold))
+            using (SolidBrush pBrush = new SolidBrush(Color.DeepSkyBlue))
             {
-                heatmap.UnlockBits(bmpData);
+                g.DrawString("P-Wave", titleFont, pBrush, pArea.X + 5, pAreaY - 15);
             }
 
-            // Draw the heatmap
-            g.DrawImage(heatmap, 0, 0, width, height);
-            heatmap.Dispose();
-
-            // Draw TX and RX points
-            if (panelIndex == 2) // Velocity tomography
+            // S-wave area title
+            using (Font titleFont = new Font("Arial", 9, FontStyle.Bold))
+            using (SolidBrush sBrush = new SolidBrush(Color.Crimson))
             {
-                // Draw source and receiver positions if they're in this plane
-                float txX = 0, txY = 0, rxX = 0, rxY = 0;
-                bool showTx = false, showRx = false;
+                g.DrawString("S-Wave", titleFont, sBrush, sArea.X + 5, sAreaY - 15);
+            }
 
-                // Determine which plane we're showing and map TX/RX positions
-                // This depends on how we constructed the tomography
-                int dx = Math.Abs(_rx - _tx);
-                int dy = Math.Abs(_ry - _ty);
-                int dz = Math.Abs(_rz - _tz);
+            // Draw center lines
+            using (Pen centerLinePen = new Pen(Color.Gray, 1))
+            {
+                centerLinePen.DashStyle = DashStyle.Dot;
+                int pCenterY = pArea.Y + pArea.Height / 2;
+                int sCenterY = sArea.Y + sArea.Height / 2;
 
-                if (dx >= dy && dx >= dz)
+                g.DrawLine(centerLinePen, pArea.X, pCenterY, pArea.X + pArea.Width, pCenterY);
+                g.DrawLine(centerLinePen, sArea.X, sCenterY, sArea.X + sArea.Width, sCenterY);
+            }
+
+            // Draw P-wave time series with careful bounds checking
+            if (pSeries.Length > 1)
+            {
+                int pLength = Math.Min(pSeries.Length, 1000); // Limit to prevent excessive points
+                PointF[] pPoints = new PointF[pLength];
+
+                for (int i = 0; i < pLength; i++)
                 {
-                    // YZ plane - check if TX/RX are near this plane
-                    showTx = true;
-                    showRx = true;
-                    txX = _ty * cellWidth;
-                    txY = _tz * cellHeight;
-                    rxX = _ry * cellWidth;
-                    rxY = _rz * cellHeight;
+                    float t = i * pArea.Width / (float)(pLength - 1);
+
+                    // Calculate source index more safely
+                    float sourceIdx = i * (pSeries.Length - 1) / (float)(pLength - 1);
+                    int idxLow = (int)Math.Floor(sourceIdx);
+                    int idxHigh = (int)Math.Ceiling(sourceIdx);
+
+                    // Ensure we're within array bounds
+                    idxLow = Math.Max(0, Math.Min(idxLow, pSeries.Length - 1));
+                    idxHigh = Math.Max(0, Math.Min(idxHigh, pSeries.Length - 1));
+
+                    // Get interpolation fraction
+                    float fraction = sourceIdx - idxLow;
+
+                    // Interpolate for smoother display (with bounds checking)
+                    float value;
+                    if (idxLow != idxHigh)
+                        value = pSeries[idxLow] * (1 - fraction) + pSeries[idxHigh] * fraction;
+                    else
+                        value = pSeries[idxLow];
+
+                    // Normalize to fit in graph area
+                    float normalizedVal = (value - minP) / (maxP - minP);
+                    // Clamp to prevent drawing outside the area
+                    normalizedVal = Math.Max(0, Math.Min(1, normalizedVal));
+
+                    float yPos = pArea.Y + pArea.Height - normalizedVal * pArea.Height;
+
+                    pPoints[i] = new PointF(pArea.X + t, yPos);
                 }
-                else if (dy >= dx && dy >= dz)
+
+                using (Pen pWavePen = new Pen(Color.DeepSkyBlue, 1.5f))
                 {
-                    // XZ plane - check if TX/RX are near this plane
-                    showTx = true;
-                    showRx = true;
-                    txX = _tx * cellWidth;
-                    txY = _tz * cellHeight;
-                    rxX = _rx * cellWidth;
-                    rxY = _rz * cellHeight;
+                    g.DrawLines(pWavePen, pPoints);
+                }
+            }
+
+            // Draw S-wave time series with careful bounds checking
+            if (sSeries.Length > 1)
+            {
+                int sLength = Math.Min(sSeries.Length, 1000); // Limit to prevent excessive points
+                PointF[] sPoints = new PointF[sLength];
+
+                for (int i = 0; i < sLength; i++)
+                {
+                    float t = i * sArea.Width / (float)(sLength - 1);
+
+                    // Calculate source index more safely
+                    float sourceIdx = i * (sSeries.Length - 1) / (float)(sLength - 1);
+                    int idxLow = (int)Math.Floor(sourceIdx);
+                    int idxHigh = (int)Math.Ceiling(sourceIdx);
+
+                    // Ensure we're within array bounds
+                    idxLow = Math.Max(0, Math.Min(idxLow, sSeries.Length - 1));
+                    idxHigh = Math.Max(0, Math.Min(idxHigh, sSeries.Length - 1));
+
+                    // Get interpolation fraction
+                    float fraction = sourceIdx - idxLow;
+
+                    // Interpolate for smoother display (with bounds checking)
+                    float value;
+                    if (idxLow != idxHigh)
+                        value = sSeries[idxLow] * (1 - fraction) + sSeries[idxHigh] * fraction;
+                    else
+                        value = sSeries[idxLow];
+
+                    // Normalize to fit in graph area
+                    float normalizedVal = (value - minS) / (maxS - minS);
+                    // Clamp to prevent drawing outside the area
+                    normalizedVal = Math.Max(0, Math.Min(1, normalizedVal));
+
+                    float yPos = sArea.Y + sArea.Height - normalizedVal * sArea.Height;
+
+                    sPoints[i] = new PointF(sArea.X + t, yPos);
+                }
+
+                using (Pen sWavePen = new Pen(Color.Crimson, 1.5f))
+                {
+                    g.DrawLines(sWavePen, sPoints);
+                }
+            }
+
+            // Draw Time and markers if we have travel times
+            if (_simulationCompleted && _pWaveTravelTime > 0 && _sWaveTravelTime > 0)
+            {
+                // P-wave arrival marker - with bounds checking
+                if (pSeries.Length > 0) // Avoid division by zero
+                {
+                    float pArrivalX = pArea.X + (float)Math.Min(_pWaveTravelTime, pSeries.Length) / pSeries.Length * pArea.Width;
+                    using (Pen arrivalPen = new Pen(Color.Yellow, 2))
+                    {
+                        g.DrawLine(arrivalPen, pArrivalX, pArea.Y, pArrivalX, pArea.Y + pArea.Height);
+
+                        using (Font font = new Font("Arial", 8))
+                        using (SolidBrush brush = new SolidBrush(Color.Yellow))
+                        {
+                            g.DrawString("Arrival", font, brush, pArrivalX - 15, pArea.Y + 2);
+                        }
+                    }
+                }
+
+                // S-wave arrival marker - with bounds checking
+                if (sSeries.Length > 0) // Avoid division by zero
+                {
+                    float sArrivalX = sArea.X + (float)Math.Min(_sWaveTravelTime, sSeries.Length) / sSeries.Length * sArea.Width;
+                    using (Pen arrivalPen = new Pen(Color.Yellow, 2))
+                    {
+                        g.DrawLine(arrivalPen, sArrivalX, sArea.Y, sArrivalX, sArea.Y + sArea.Height);
+
+                        using (Font font = new Font("Arial", 8))
+                        using (SolidBrush brush = new SolidBrush(Color.Yellow))
+                        {
+                            g.DrawString("Arrival", font, brush, sArrivalX - 15, sArea.Y + 2);
+                        }
+                    }
+                }
+            }
+
+            // Draw amplitude scales
+            using (Font labelFont = new Font("Arial", 7))
+            using (SolidBrush labelBrush = new SolidBrush(Color.LightGray))
+            {
+                // P-wave scales
+                g.DrawString(maxP.ToString("0.000"), labelFont, labelBrush, pArea.X + 2, pArea.Y + 2);
+                g.DrawString("0", labelFont, labelBrush, pArea.X + 2, pArea.Y + pArea.Height / 2);
+                g.DrawString(minP.ToString("0.000"), labelFont, labelBrush, pArea.X + 2, pArea.Y + pArea.Height - 10);
+
+                // S-wave scales
+                g.DrawString(maxS.ToString("0.000"), labelFont, labelBrush, sArea.X + 2, sArea.Y + 2);
+                g.DrawString("0", labelFont, labelBrush, sArea.X + 2, sArea.Y + sArea.Height / 2);
+                g.DrawString(minS.ToString("0.000"), labelFont, labelBrush, sArea.X + 2, sArea.Y + sArea.Height - 10);
+            }
+        }
+
+        /// <summary>
+        /// Draw the information panel with simulation details
+        /// </summary>
+        private void DrawInformationPanel(Graphics g)
+        {
+            int width = _panelBitmaps[5].Width;
+            int height = _panelBitmaps[5].Height;
+
+            // Clear background
+            g.Clear(Color.Black);
+
+            // Draw white rectangle border
+            using (Pen borderPen = new Pen(Color.White, 1))
+            {
+                g.DrawRectangle(borderPen, 0, 0, width - 1, height - 1);
+            }
+
+            // Set up fonts
+            Font titleFont = new Font("Arial", 12, FontStyle.Bold);
+            Font subtitleFont = new Font("Arial", 10, FontStyle.Bold);
+            Font regularFont = new Font("Arial", 9);
+
+            // Set up brushes
+            SolidBrush whiteBrush = new SolidBrush(Color.White);
+            SolidBrush lightBlueBrush = new SolidBrush(Color.LightBlue);
+            SolidBrush lightGreenBrush = new SolidBrush(Color.LightGreen);
+            SolidBrush orangeBrush = new SolidBrush(Color.Orange);
+
+            try
+            {
+                // Draw title
+                g.DrawString("Simulation Information", titleFont, lightBlueBrush, 10, 10);
+
+                // Draw status
+                string statusText = $"Status: {_simulationStatus}";
+                g.DrawString(statusText, subtitleFont, (_simulationCompleted ? lightGreenBrush : orangeBrush), 10, 35);
+
+                // Current step info
+                string stepInfo = $"Current Step: {_currentStep}";
+                g.DrawString(stepInfo, regularFont, whiteBrush, 10, 60);
+
+                // Distance information
+                float distanceM = CalculateDistance(_tx, _ty, _tz, _rx, _ry, _rz) * _pixelSize;
+                string distanceString = $"Distance: {distanceM:F3} m ({distanceM * 1000:F1} mm)";
+                g.DrawString(distanceString, regularFont, whiteBrush, 10, 80);
+
+                // Grid information
+                string gridString = $"Grid Size: {_width}×{_height}×{_depth} pixels";
+                string pixelSizeString = $"Pixel Size: {_pixelSize:E3} m ({_pixelSizeMm:F3} mm)";
+                g.DrawString(gridString, regularFont, whiteBrush, 10, 100);
+                g.DrawString(pixelSizeString, regularFont, whiteBrush, 10, 120);
+
+                // Transducer positions
+                string txString = $"Transmitter: ({_tx}, {_ty}, {_tz})";
+                string rxString = $"Receiver: ({_rx}, {_ry}, {_rz})";
+                g.DrawString(txString, regularFont, whiteBrush, 10, 140);
+                g.DrawString(rxString, regularFont, whiteBrush, 10, 160);
+
+                if (_simulationCompleted)
+                {
+                    // Draw wave velocity results
+                    g.DrawString("Results:", subtitleFont, lightGreenBrush, 10, 190);
+
+                    g.DrawString($"P-Wave Velocity: {_pWaveVelocity:F2} m/s", regularFont, whiteBrush, 20, 210);
+                    g.DrawString($"S-Wave Velocity: {_sWaveVelocity:F2} m/s", regularFont, whiteBrush, 20, 230);
+                    g.DrawString($"Vp/Vs Ratio: {_vpVsRatio:F3}", regularFont, whiteBrush, 20, 250);
+
+                    g.DrawString($"P-Wave Travel Time: {_pWaveTravelTime} steps", regularFont, whiteBrush, 20, 270);
+                    g.DrawString($"S-Wave Travel Time: {_sWaveTravelTime} steps", regularFont, whiteBrush, 20, 290);
+                    g.DrawString($"Total Time Steps: {_totalTimeSteps}", regularFont, whiteBrush, 20, 310);
                 }
                 else
                 {
-                    // XY plane - check if TX/RX are near this plane
-                    showTx = true;
-                    showRx = true;
-                    txX = _tx * cellWidth;
-                    txY = _ty * cellHeight;
-                    rxX = _rx * cellWidth;
-                    rxY = _ry * cellHeight;
+                    // Drawing instructions
+                    g.DrawString("Visualization Controls:", subtitleFont, lightBlueBrush, 10, 190);
+                    g.DrawString("• Drag to pan any panel", regularFont, whiteBrush, 20, 210);
+                    g.DrawString("• Mouse wheel to zoom in/out", regularFont, whiteBrush, 20, 230);
+                    g.DrawString("• Press ESC to reset view", regularFont, whiteBrush, 20, 250);
+                    g.DrawString("• Press left/right arrow to step through frames", regularFont, whiteBrush, 20, 270);
+                    g.DrawString("• Press space to play/pause animation", regularFont, whiteBrush, 20, 290);
                 }
 
-                // Draw lines from TX to RX
-                if (showTx && showRx)
+                // Signal quality indicator
+                float signalQuality = CalculateSignalQuality();
+                string signalQualityText = $"Signal Quality: {GetSignalQualityDescription(signalQuality)}";
+                Color qualityColor = GetSignalQualityColor(signalQuality);
+
+                using (SolidBrush qualityBrush = new SolidBrush(qualityColor))
                 {
-                    using (Pen pen = new Pen(Color.White, 1))
+                    g.DrawString(signalQualityText, regularFont, qualityBrush, 10, height - 40);
+
+                    // Draw a quality bar
+                    int barWidth = width - 40;
+                    int barHeight = 15;
+                    Rectangle barRect = new Rectangle(20, height - 25, barWidth, barHeight);
+
+                    using (LinearGradientBrush gradientBrush = new LinearGradientBrush(
+                        barRect, Color.Red, Color.Green, LinearGradientMode.Horizontal))
                     {
-                        pen.DashStyle = DashStyle.Dash;
-                        g.DrawLine(pen, txX, txY, rxX, rxY);
+                        g.FillRectangle(gradientBrush, barRect);
                     }
-                }
 
-                // Draw TX marker (source)
-                if (showTx)
-                {
-                    const int markerSize = 6;
-                    g.FillEllipse(Brushes.Yellow, txX - markerSize / 2, txY - markerSize / 2, markerSize, markerSize);
-                    g.DrawEllipse(Pens.White, txX - markerSize / 2, txY - markerSize / 2, markerSize, markerSize);
+                    // Draw a marker at the current quality level
+                    int markerX = 20 + (int)(signalQuality * barWidth);
+                    Point[] markerPoints = {
+                        new Point(markerX, height - 25 - 5),
+                        new Point(markerX - 5, height - 25),
+                        new Point(markerX + 5, height - 25)
+                    };
 
-                    using (Font font = new Font("Arial", 8))
-                    using (Brush textBrush = new SolidBrush(Color.Yellow))
-                    {
-                        g.DrawString("TX", font, textBrush, txX + 8, txY - 8);
-                    }
-                }
-
-                // Draw RX marker (receiver)
-                if (showRx)
-                {
-                    const int markerSize = 6;
-                    g.FillEllipse(Brushes.Cyan, rxX - markerSize / 2, rxY - markerSize / 2, markerSize, markerSize);
-                    g.DrawEllipse(Pens.White, rxX - markerSize / 2, rxY - markerSize / 2, markerSize, markerSize);
-
-                    using (Font font = new Font("Arial", 8))
-                    using (Brush textBrush = new SolidBrush(Color.Cyan))
-                    {
-                        g.DrawString("RX", font, textBrush, rxX + 8, rxY - 8);
-                    }
+                    g.FillPolygon(new SolidBrush(Color.White), markerPoints);
                 }
             }
-            else if (panelIndex == 3) // Wavefield cross-section
+            finally
             {
-                // Draw a colorbar to indicate magnitude scale
-                int barWidth = 15;
-                int barHeight = 150;
-                int barX = width - barWidth - 10;
-                int barY = 20;
+                // Clean up resources
+                titleFont.Dispose();
+                subtitleFont.Dispose();
+                regularFont.Dispose();
+                whiteBrush.Dispose();
+                lightBlueBrush.Dispose();
+                lightGreenBrush.Dispose();
+                orangeBrush.Dispose();
+            }
+        }
 
-                // Draw colorbar
-                for (int y = 0; y < barHeight; y++)
+        /// <summary>
+        /// Calculate the 3D distance between TX and RX
+        /// </summary>
+        private float CalculateDistance(int x1, int y1, int z1, int x2, int y2, int z2)
+        {
+            double dx = x2 - x1;
+            double dy = y2 - y1;
+            double dz = z2 - z1;
+            return (float)Math.Sqrt(dx * dx + dy * dy + dz * dz);
+        }
+
+        /// <summary>
+        /// Calculate signal quality from current frames (0.0-1.0)
+        /// </summary>
+        private float CalculateSignalQuality()
+        {
+            if (_frames.Count == 0) return 0.0f;
+
+            // Find maximum signal values in P and S series
+            float maxP = 0f;
+            float maxS = 0f;
+
+            foreach (var frame in _frames)
+            {
+                maxP = Math.Max(maxP, Math.Abs(frame.PWaveValue));
+                maxS = Math.Max(maxS, Math.Abs(frame.SWaveValue));
+            }
+
+            // Normalize to get quality value from 0-1
+            float signalStrength = (maxP + maxS) / 2.0f;
+
+            // Extremely high or low values indicate issues
+            float normalizedQuality;
+            if (signalStrength < 0.1f)
+                normalizedQuality = signalStrength * 10f; // Scale up weak signals
+            else if (signalStrength > 100f)
+                normalizedQuality = 1.0f - (1.0f / signalStrength); // Scale down very strong signals
+            else
+                normalizedQuality = 0.5f + (float)Math.Min(0.5, Math.Log10(signalStrength) / 4.0);
+
+            return Math.Max(0f, Math.Min(1f, normalizedQuality));
+        }
+
+        /// <summary>
+        /// Get a text description of signal quality
+        /// </summary>
+        private string GetSignalQualityDescription(float quality)
+        {
+            if (quality < 0.2f) return "Poor";
+            if (quality < 0.4f) return "Fair";
+            if (quality < 0.6f) return "Good";
+            if (quality < 0.8f) return "Very Good";
+            return "Excellent";
+        }
+
+        /// <summary>
+        /// Get color representing signal quality
+        /// </summary>
+        private Color GetSignalQualityColor(float quality)
+        {
+            if (quality < 0.2f) return Color.Red;
+            if (quality < 0.4f) return Color.Orange;
+            if (quality < 0.6f) return Color.Yellow;
+            if (quality < 0.8f) return Color.GreenYellow;
+            return Color.LimeGreen;
+        }
+
+        private string FormatColorbarValue(float value)
+        {
+            // Handle special cases
+            if (float.IsNaN(value) || float.IsInfinity(value))
+                return "N/A";
+
+            // Check magnitude to determine formatting
+            double absVal = Math.Abs(value);
+
+            if (absVal == 0)
+                return "0.000";
+            else if (absVal < 0.001)
+                return value.ToString("0.000e0");
+            else if (absVal < 1000)
+                return value.ToString("0.000");
+            else if (absVal < 1000000)
+                return (value / 1000).ToString("0.00") + "k";
+            else
+                return (value / 1000000).ToString("0.00") + "M";
+        }
+
+        private void DrawTransducersOnTomography(Graphics g, int width, int height)
+        {
+            // Determine which plane we're showing based on wave direction
+            int dx = Math.Abs(_rx - _tx);
+            int dy = Math.Abs(_ry - _ty);
+            int dz = Math.Abs(_rz - _tz);
+
+            PointF txPoint = new PointF();
+            PointF rxPoint = new PointF();
+            bool validPoints = false;
+
+            if (dx >= dy && dx >= dz)
+            {
+                // YZ plane (X direction)
+                float txScreenY = (float)_ty / _height * height;
+                float txScreenZ = (float)_tz / _depth * height;
+                float rxScreenY = (float)_ry / _height * height;
+                float rxScreenZ = (float)_rz / _depth * height;
+
+                txPoint = new PointF(10, txScreenY); // Place TX at left edge
+                rxPoint = new PointF(width - 10, rxScreenY); // Place RX at right edge
+                validPoints = true;
+            }
+            else if (dy >= dx && dy >= dz)
+            {
+                // XZ plane (Y direction)
+                float txScreenX = (float)_tx / _width * width;
+                float txScreenZ = (float)_tz / _depth * height;
+                float rxScreenX = (float)_rx / _width * width;
+                float rxScreenZ = (float)_rz / _depth * height;
+
+                txPoint = new PointF(txScreenX, 10); // Place TX at top edge
+                rxPoint = new PointF(rxScreenX, height - 10); // Place RX at bottom edge
+                validPoints = true;
+            }
+            else
+            {
+                // XY plane (Z direction)
+                float txScreenX = (float)_tx / _width * width;
+                float txScreenY = (float)_ty / _height * height;
+                float rxScreenX = (float)_rx / _width * width;
+                float rxScreenY = (float)_ry / _height * height;
+
+                txPoint = new PointF(txScreenX, txScreenY);
+                rxPoint = new PointF(rxScreenX, rxScreenY);
+                validPoints = true;
+            }
+
+            if (validPoints)
+            {
+                // Draw line connecting TX and RX
+                using (Pen linePen = new Pen(Color.White, 1.5f))
                 {
-                    float normalized = 1.0f - (float)y / barHeight;
-                    int colorIndex = (int)(normalized * 255);
-                    if (colorIndex < 0) colorIndex = 0;
-                    if (colorIndex > 255) colorIndex = 255;
-
-                    using (Brush brush = new SolidBrush(_colormap[colorIndex]))
-                    {
-                        g.FillRectangle(brush, barX, barY + y, barWidth, 1);
-                    }
+                    linePen.DashStyle = DashStyle.Dash;
+                    g.DrawLine(linePen, txPoint, rxPoint);
                 }
 
-                // Draw colorbar border
-                g.DrawRectangle(Pens.Gray, barX, barY, barWidth, barHeight);
+                // Draw TX marker
+                const int markerSize = 8;
+                g.FillEllipse(Brushes.Yellow,
+                             txPoint.X - markerSize / 2, txPoint.Y - markerSize / 2,
+                             markerSize, markerSize);
+                g.DrawEllipse(Pens.White,
+                             txPoint.X - markerSize / 2, txPoint.Y - markerSize / 2,
+                             markerSize, markerSize);
 
-                // Draw min/max labels
-                using (Font font = new Font("Arial", 8))
-                using (Brush textBrush = new SolidBrush(Color.White))
+                // Draw RX marker
+                g.FillEllipse(Brushes.Cyan,
+                             rxPoint.X - markerSize / 2, rxPoint.Y - markerSize / 2,
+                             markerSize, markerSize);
+                g.DrawEllipse(Pens.White,
+                             rxPoint.X - markerSize / 2, rxPoint.Y - markerSize / 2,
+                             markerSize, markerSize);
+
+                // Draw labels
+                using (Font font = new Font("Arial", 8, FontStyle.Bold))
                 {
-                    g.DrawString($"{maxVal:F3}", font, textBrush, barX - 35, barY - 5);
-                    g.DrawString($"{minVal:F3}", font, textBrush, barX - 35, barY + barHeight + 5);
+                    g.DrawString("TX", font, Brushes.Yellow,
+                                txPoint.X + markerSize / 2 + 2, txPoint.Y - markerSize / 2 - 2);
+                    g.DrawString("RX", font, Brushes.Cyan,
+                                rxPoint.X + markerSize / 2 + 2, rxPoint.Y - markerSize / 2 - 2);
                 }
             }
         }
@@ -1670,13 +2827,15 @@ namespace CTSegmenter
         private void UiUpdateTimer_Tick(object sender, EventArgs e)
         {
             // Update panel layouts in case of resize
-            int panelWidth = _mainPanel.Width / 2;
-            int panelHeight = _mainPanel.Height / 2;
+            int rowCount = 2;
+            int colCount = 3;
+            int panelWidth = _mainPanel.Width / colCount;
+            int panelHeight = _mainPanel.Height / rowCount;
 
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < 6; i++)
             {
-                int row = i / 2;
-                int col = i % 2;
+                int row = i / colCount;
+                int col = i % colCount;
 
                 _subPanels[i].Left = col * panelWidth;
                 _subPanels[i].Top = row * panelHeight;
@@ -1693,13 +2852,15 @@ namespace CTSegmenter
             if (WindowState != FormWindowState.Minimized)
             {
                 // Resize panels
-                int panelWidth = _mainPanel.Width / 2;
-                int panelHeight = _mainPanel.Height / 2;
+                int rowCount = 2;
+                int colCount = 3;
+                int panelWidth = _mainPanel.Width / colCount;
+                int panelHeight = _mainPanel.Height / rowCount;
 
-                for (int i = 0; i < 4; i++)
+                for (int i = 0; i < 6; i++)
                 {
-                    int row = i / 2;
-                    int col = i % 2;
+                    int row = i / colCount;
+                    int col = i % colCount;
 
                     _subPanels[i].Left = col * panelWidth;
                     _subPanels[i].Top = row * panelHeight;
@@ -1740,7 +2901,7 @@ namespace CTSegmenter
             _uiUpdateTimer.Stop();
 
             // Dispose of bitmaps
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < 6; i++)
             {
                 if (_panelBitmaps[i] != null)
                 {
@@ -1794,7 +2955,7 @@ namespace CTSegmenter
             else if (e.KeyCode == Keys.Escape)
             {
                 // Reset zoom and pan for all panels
-                for (int i = 0; i < 4; i++)
+                for (int i = 0; i < 6; i++)
                 {
                     _zoomFactors[i] = 1.0f;
                     _panOffsets[i] = new PointF(0, 0);
@@ -1934,20 +3095,28 @@ namespace CTSegmenter
                 g.Clear(Color.Black);
 
                 // Draw each panel
-                for (int i = 0; i < 4; i++)
-                {
-                    int row = i / 2;
-                    int col = i % 2;
+                int rowCount = 2;
+                int colCount = 3;
+                int panelWidth = width / colCount;
+                int panelHeight = height / rowCount;
 
-                    int x = col * (width / 2);
-                    int y = row * (height / 2);
+                for (int i = 0; i < 6; i++)
+                {
+                    int row = i / colCount;
+                    int col = i % colCount;
+
+                    int x = col * panelWidth;
+                    int y = row * panelHeight;
 
                     // Draw panel content
-                    g.DrawImage(_panelBitmaps[i], x, y, width / 2, height / 2);
+                    g.DrawImage(_panelBitmaps[i], x, y, panelWidth, panelHeight);
 
                     // Draw panel title
-                    string[] titles = { "P-Wave Time Series", "S-Wave Time Series",
-                                      "Velocity Tomography", "Wavefield Cross-Section" };
+                    string[] titles = {
+                        "P-Wave Time Series", "S-Wave Time Series",
+                        "Velocity Tomography", "Wavefield Cross-Section",
+                        "Combined P/S Wave Visualization", "Simulation Information"
+                    };
 
                     using (Font font = new Font("Arial", 10, FontStyle.Bold))
                     using (Brush brush = new SolidBrush(Color.White))
@@ -2016,7 +3185,7 @@ namespace CTSegmenter
                     // Update progress
                     this.BeginInvoke((MethodInvoker)delegate
                     {
-                        progress.UpdateProgress(i + 1);
+                        progress.UpdateProgress((i + 1) * 100 / frameCount);
                     });
                 }
 
@@ -2044,7 +3213,44 @@ namespace CTSegmenter
                 }
             }
         }
+
+        private void LogAmplitudeInformation(double[,,] vx, double[,,] vy, double[,,] vz)
+        {
+            double maxVx = 0, maxVy = 0, maxVz = 0;
+            double sumVx = 0, sumVy = 0, sumVz = 0;
+            int nonZeroVx = 0, nonZeroVy = 0, nonZeroVz = 0;
+            double threshold = 1e-10; // Very small threshold to count non-zero values
+
+            // Sample the arrays to find statistical information
+            int stride = Math.Max(1, Math.Min(Math.Min(vx.GetLength(0), vx.GetLength(1)), vx.GetLength(2)) / 20);
+
+            for (int z = 0; z < vx.GetLength(2); z += stride)
+                for (int y = 0; y < vx.GetLength(1); y += stride)
+                    for (int x = 0; x < vx.GetLength(0); x += stride)
+                    {
+                        double absVx = Math.Abs(vx[x, y, z]);
+                        double absVy = Math.Abs(vy[x, y, z]);
+                        double absVz = Math.Abs(vz[x, y, z]);
+
+                        maxVx = Math.Max(maxVx, absVx);
+                        maxVy = Math.Max(maxVy, absVy);
+                        maxVz = Math.Max(maxVz, absVz);
+
+                        if (absVx > threshold) { sumVx += absVx; nonZeroVx++; }
+                        if (absVy > threshold) { sumVy += absVy; nonZeroVy++; }
+                        if (absVz > threshold) { sumVz += absVz; nonZeroVz++; }
+                    }
+
+            double avgVx = nonZeroVx > 0 ? sumVx / nonZeroVx : 0;
+            double avgVy = nonZeroVy > 0 ? sumVy / nonZeroVy : 0;
+            double avgVz = nonZeroVz > 0 ? sumVz / nonZeroVz : 0;
+
+            Logger.Log($"[Visualizer] Wave field analysis:");
+            Logger.Log($"  Max values: Vx={maxVx:E4}, Vy={maxVy:E4}, Vz={maxVz:E4}");
+            Logger.Log($"  Avg non-zero: Vx={avgVx:E4}, Vy={avgVy:E4}, Vz={avgVz:E4}");
+            Logger.Log($"  Non-zero count: Vx={nonZeroVx}, Vy={nonZeroVy}, Vz={nonZeroVz}");
+            Logger.Log($"  Amplification: {SIGNAL_AMPLIFICATION}");
+        }
         #endregion
     }
-
 }

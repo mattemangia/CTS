@@ -45,7 +45,7 @@ namespace CTSegmenter
         private List<Point3D> vertices;
         private List<(int, int)> edges;
 
-        
+
         // Simple 3D point class
         private class Point3D
         {
@@ -87,8 +87,8 @@ namespace CTSegmenter
             // Generate an optimized wireframe representation of the volume
             GenerateVolumeRepresentation();
 
-            // Set initial transformation
-            SetTransformation(30, 30, 2.0f, new PointF(0, 0));
+            // Set initial transformation - CHANGED: Lowered initial zoom to 1.0f for better initial view
+            SetTransformation(30, 30, 1.0f, new PointF(0, 0));
 
             Logger.Log($"[VolumeRenderer] Initialized with wireframe for material ID {materialID}, rendering mode: {(renderFullVolume ? "Full Volume" : "Boundary Only")}");
         }
@@ -137,7 +137,6 @@ namespace CTSegmenter
             float scale = Math.Max(Math.Max(width, height), depth) * zoom;
 
             // Project to screen space, apply pan, and center
-            // FIXED: Changed translation.X/Y to pan.X/Y
             float screenX = nx1 * scale + pan.X + screenWidth * 0.5f;
             float screenY = ny1 * scale + pan.Y + screenHeight * 0.5f;
 
@@ -520,8 +519,8 @@ namespace CTSegmenter
                     float volumeCenterY = height / 2.0f;
                     float volumeCenterZ = depth / 2.0f;
 
-                    // Reduced view distance to make object appear closer
-                    float viewDistance = Math.Max(Math.Max(width, height), depth) * 0.8f;
+                    // FIXED: Increased view distance to reduce fisheye effect
+                    float viewDistance = Math.Max(Math.Max(width, height), depth) * 1.5f;
 
                     // Pre-calculate rotation matrices for better performance
                     float angleY = rotationY * (float)Math.PI / 180.0f;
@@ -532,6 +531,7 @@ namespace CTSegmenter
                     float cosX = (float)Math.Cos(angleX);
                     float sinX = (float)Math.Sin(angleX);
 
+                    // FIXED: Focal length now independent of zoom to prevent fisheye effect
                     float focalLength = viewDistance;
 
                     // Draw the edges in sorted order (back to front)
@@ -579,10 +579,12 @@ namespace CTSegmenter
                         float z2 = viewDistance + v2zr;
 
                         if (z1 <= 0 || z2 <= 0) continue; // Behind the camera
-                        float p1x = v1xr * focalLength * zoom / z1;
-                        float p1y = v1yr * focalLength * zoom / z1;
-                        float p2x = v2xr * focalLength * zoom / z2;
-                        float p2y = v2yr * focalLength * zoom / z2;
+
+                        // FIXED: Perspective projection with better focal length and zoom application
+                        float p1x = (v1xr * focalLength / z1) * zoom;
+                        float p1y = (v1yr * focalLength / z1) * zoom;
+                        float p2x = (v2xr * focalLength / z2) * zoom;
+                        float p2y = (v2yr * focalLength / z2) * zoom;
 
                         // Map to screen coordinates with panning
                         int x1 = (int)(centerX + p1x + pan.X);
@@ -626,9 +628,9 @@ namespace CTSegmenter
                             float z = viewDistance + vzr;
                             if (z <= 0) continue; // Behind the camera
 
-                            // Projection with better scaling
-                            float px = vxr * viewDistance * zoom / z;
-                            float py = vyr * viewDistance * zoom / z;
+                            // FIXED: Projection with better focal length and zoom application
+                            float px = (vxr * focalLength / z) * zoom;
+                            float py = (vyr * focalLength / z) * zoom;
 
                             // Map to screen coordinates with panning
                             int x = (int)(centerX + px + pan.X);

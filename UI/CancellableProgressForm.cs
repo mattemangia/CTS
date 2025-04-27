@@ -30,7 +30,7 @@ namespace CTSegmenter
         {
             this.Size = new Size(400, 150); // Increased height for cancel button
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
-            this.StartPosition = FormStartPosition.CenterParent;
+            this.StartPosition = FormStartPosition.WindowsDefaultLocation;
             this.ControlBox = false;
             this.Text = "Processing...";
 

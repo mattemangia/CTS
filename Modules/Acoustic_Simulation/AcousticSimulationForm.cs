@@ -760,15 +760,67 @@ namespace CTSegmenter
                 double energy = (double)numEnergy.Value;
                 double frequency = (double)numFrequency.Value;
 
-                // Simple formula for demonstration (replace with actual physics formula)
-                // This is a placeholder and should be replaced with the correct calculation
-                double extentX = Math.Sqrt(energy * 1000 / (confiningPressure + 0.1)) *
-                               (1 + tensileStrength / 10) *
-                               (frequency / 100);
+                // Get actual model dimensions in mm
+                double objectSizeX = 0, objectSizeY = 0, objectSizeZ = 0;
+
+                if (mainForm != null && mainForm.volumeLabels != null)
+                {
+                    int width = mainForm.GetWidth();
+                    int height = mainForm.GetHeight();
+                    int depth = mainForm.GetDepth();
+                    double pixelSizeMM = mainForm.GetPixelSize() * 1000; // Convert from m to mm
+
+                    // Find min/max coordinates of the material
+                    int minX = width, minY = height, minZ = depth;
+                    int maxX = 0, maxY = 0, maxZ = 0;
+
+                    for (int z = 0; z < depth; z++)
+                    {
+                        for (int y = 0; y < height; y++)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                if (mainForm.volumeLabels[x, y, z] == selectedMaterialID)
+                                {
+                                    minX = Math.Min(minX, x);
+                                    minY = Math.Min(minY, y);
+                                    minZ = Math.Min(minZ, z);
+
+                                    maxX = Math.Max(maxX, x);
+                                    maxY = Math.Max(maxY, y);
+                                    maxZ = Math.Max(maxZ, z);
+                                }
+                            }
+                        }
+                    }
+
+                    // Calculate dimensions in mm
+                    objectSizeX = (maxX - minX + 1) * pixelSizeMM;
+                    objectSizeY = (maxY - minY + 1) * pixelSizeMM;
+                    objectSizeZ = (maxZ - minZ + 1) * pixelSizeMM;
+
+                    Logger.Log($"[AcousticSimulationForm] Object dimensions: {objectSizeX:F2} x {objectSizeY:F2} x {objectSizeZ:F2} mm");
+                }
+
+                // If we couldn't determine the object size, use a small default
+                if (objectSizeX <= 0) objectSizeX = 3.0;
+                if (objectSizeY <= 0) objectSizeY = 3.0;
+                if (objectSizeZ <= 0) objectSizeZ = 3.0;
+
+                // Calculate extent for the given material and parameters
+                // Base the calculation on the actual object size rather than arbitrary formulas
+                double baseExtent = Math.Max(1.0, Math.Max(objectSizeX, Math.Max(objectSizeY, objectSizeZ)));
+
+                // Factor in energy, frequency and material properties for a more realistic estimation
+                double energyFactor = Math.Sqrt(energy);
+                double frequencyFactor = Math.Pow(frequency / 100.0, 0.5); // Higher frequency = smaller penetration
+                double materialFactor = Math.Pow(tensileStrength / (confiningPressure + 0.1), 0.3);
+
+                double extentX = baseExtent * energyFactor * materialFactor / frequencyFactor;
 
                 // Vary Y and Z slightly for demonstration
-                double extentY = extentX * 0.9;
-                double extentZ = extentX * 1.1;
+                double extentY = extentX * 0.95;
+                double extentZ = extentX * 0.90;
 
                 // Round to 2 decimal places
                 extentX = Math.Round(extentX, 2);
@@ -789,6 +841,7 @@ namespace CTSegmenter
                     "Calculation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
+
 
         private void ModelCheckBox_CheckedChanged(object sender, EventArgs e)
         {
@@ -853,6 +906,26 @@ namespace CTSegmenter
                 double poissonRatio = (double)numPoissonRatio.Value;   // unitless
                 bool useGPU = chkRunOnGpu.Checked;  // Check if GPU should be used
 
+                // ADDED: Ensure minimum energy and amplitude values
+                if (energy <= 0.001)
+                {
+                    Logger.Log("[AcousticSimulationForm] Warning: Energy is very low, increasing to minimum value");
+                    numEnergy.Value = 1.0m; // Set minimum energy
+                    energy = 1.0;
+                }
+
+                if (amplitude < 100)
+                {
+                    Logger.Log("[AcousticSimulationForm] Warning: Amplitude is low, increasing to 100");
+                    numAmplitude.Value = 100; // Set minimum amplitude
+                    amplitude = 100;
+                }
+
+                // Log key simulation parameters
+                Logger.Log($"[AcousticSimulationForm] Starting simulation with: E={energy}J, A={amplitude}, f={frequency}kHz");
+                Logger.Log($"[AcousticSimulationForm] Material params: E={youngsModulus}MPa, ν={poissonRatio}");
+                Logger.Log($"[AcousticSimulationForm] Material density: {baseDensity} kg/m³");
+
                 simulationRenderer = new VolumeRenderer(
                     densityVolume,
                     width,
@@ -880,14 +953,97 @@ namespace CTSegmenter
                         break;
                 }
 
+                if (rx >= 0 && rx < width && ry >= 0 && ry < height && rz >= 0 && rz < depth)
+                {
+                    if (labels[rx, ry, rz] != materialID)
+                    {
+                        Logger.Log($"[AcousticSimulationForm] Warning: Receiver not in selected material! Adjusting position...");
+
+                        // Find a valid position for the receiver that's also distant from transmitter
+                        bool found = false;
+                        double bestDistance = 0;
+                        int bestX = rx, bestY = ry, bestZ = rz;
+
+                        // Try to find a material point that's far from the transmitter
+                        for (int z = 0; z < depth && !found; z++)
+                        {
+                            for (int y = 0; y < height && !found; y++)
+                            {
+                                for (int x = 0; x < width; x++)
+                                {
+                                    if (labels[x, y, z] == materialID)
+                                    {
+                                        // Calculate distance from transmitter
+                                        double dist = Math.Sqrt(
+                                            Math.Pow(x - tx, 2) +
+                                            Math.Pow(y - ty, 2) +
+                                            Math.Pow(z - tz, 2));
+
+                                        // Keep track of the point farthest from transmitter
+                                        if (dist > bestDistance)
+                                        {
+                                            bestDistance = dist;
+                                            bestX = x;
+                                            bestY = y;
+                                            bestZ = z;
+
+                                            // If we found a point sufficiently far away, use it
+                                            if (dist > Math.Max(width, Math.Max(height, depth)) * 0.5)
+                                            {
+                                                found = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Use the best position found
+                        rx = bestX;
+                        ry = bestY;
+                        rz = bestZ;
+                        Logger.Log($"[AcousticSimulationForm] Adjusted RX position to ({rx},{ry},{rz}) at distance {bestDistance:F1}");
+                    }
+                }
+
+                // Ensure minimum distance between TX and RX
+                double txRxDistance = Math.Sqrt(
+                    Math.Pow(rx - tx, 2) +
+                    Math.Pow(ry - ty, 2) +
+                    Math.Pow(rz - tz, 2));
+
+                Logger.Log($"[AcousticSimulationForm] TX-RX Distance: {txRxDistance:F1} pixels");
+
+                if (txRxDistance < 10) // Minimum distance in pixels
+                {
+                    Logger.Log($"[AcousticSimulationForm] Warning: TX and RX are too close! Simulation may not work properly.");
+                    MessageBox.Show("!!!Position Warning!!! The transmitter and receiver positions are too close to each other. This may cause the simulation to fail. !!!Position Warning!!!");
+                }
+
+                Logger.Log($"[AcousticSimulationForm] TX: ({tx},{ty},{tz}), RX: ({rx},{ry},{rz})");
+                if (energy <= 0.001)
+                {
+                    Logger.Log("[AcousticSimulationForm] Warning: Energy is very low, increasing to minimum value");
+                    numEnergy.Value = 5.0m; // Increased from 1.0 to 5.0
+                    energy = 5.0;
+                }
+
+                if (amplitude < 100)
+                {
+                    Logger.Log("[AcousticSimulationForm] Warning: Amplitude is low, increasing to minimum");
+                    numAmplitude.Value = 500; // Increased from 100 to 500
+                    amplitude = 500;
+                }
                 // Create the SimulationVisualizer before starting the simulation
                 visualizer = new AcousticSimulationVisualizer(
                     width, height, depth, pixelSizeF,
                     tx, ty, tz, rx, ry, rz);
 
-                // Prepare progress UI
+                // Prepare progress UI - CHANGED: Use Owner to set proper ownership
                 simulationProgressForm = new CancellableProgressForm(
                     useGPU ? "Running acoustic simulation on GPU..." : "Running acoustic simulation on CPU...");
+                simulationProgressForm.Owner = this; // Set the owner to establish parent-child relationship
                 simulationProgressForm.CancelPressed += (s, args) =>
                 {
                     if (usingGpuSimulator)
@@ -938,10 +1094,11 @@ namespace CTSegmenter
 
                         // Create CPU simulator instead
                         cpuSimulator = new AcousticSimulator(
-                            width, height, depth, pixelSizeF, labels, densityVolume, materialID,
-                            axis, waveType, confiningPressure, tensileStrength, failureAngle, cohesion,
-                            energy, frequency, amplitude, timeSteps,
-                            useElastic, usePlastic, useBrittle, youngsModulus, poissonRatio);
+                     width, height, depth, pixelSizeF, labels, densityVolume, materialID,
+                     axis, waveType, confiningPressure, tensileStrength, failureAngle, cohesion,
+                     energy, frequency, amplitude, timeSteps,
+                     useElastic, usePlastic, useBrittle, youngsModulus, poissonRatio,
+                     tx, ty, tz, rx, ry, rz);
 
                         // Wire up events
                         cpuSimulator.ProgressUpdated += Simulator_ProgressUpdated;
@@ -955,10 +1112,11 @@ namespace CTSegmenter
                 {
                     // Create CPU simulator
                     cpuSimulator = new AcousticSimulator(
-                        width, height, depth, pixelSizeF, labels, densityVolume, materialID,
-                        axis, waveType, confiningPressure, tensileStrength, failureAngle, cohesion,
-                        energy, frequency, amplitude, timeSteps,
-                        useElastic, usePlastic, useBrittle, youngsModulus, poissonRatio);
+                    width, height, depth, pixelSizeF, labels, densityVolume, materialID,
+                    axis, waveType, confiningPressure, tensileStrength, failureAngle, cohesion,
+                    energy, frequency, amplitude, timeSteps,
+                    useElastic, usePlastic, useBrittle, youngsModulus, poissonRatio,
+                    tx, ty, tz, rx, ry, rz);
 
                     // Wire up events
                     cpuSimulator.ProgressUpdated += Simulator_ProgressUpdated;
@@ -982,10 +1140,9 @@ namespace CTSegmenter
                         cpuSimulator.StartSimulation();
                 });
 
-                // Show modal progress dialog
-                simulationProgressForm.Show();
-                simulationProgressForm.Dispose();
-                simulationProgressForm = null;
+                // CHANGED: Show the form as non-modal instead of modal
+                // This allows interaction with other forms while the simulation is running
+                simulationProgressForm.Show(this); // Pass owner as parameter
             }
             catch (Exception ex)
             {
@@ -1014,8 +1171,102 @@ namespace CTSegmenter
                 simulationProgressForm.UpdateMessage(e.StatusText);
             }
 
+            // Check if we have wave field data directly from the event
+            float[,,] pField = e.PWaveField;
+            float[,,] sField = e.SWaveField;
+
+            // If not provided, get it from the snapshot
+            if (pField == null || sField == null)
+            {
+                var snapshot = GetWaveFieldSnapshot();
+                pField = ConvertToFloatArray(snapshot.vx);
+                sField = ConvertToFloatArray(snapshot.vy);
+            }
+
             // Update the visualization with current wave fields
-            UpdateWaveFieldVisualization(e.PWaveField, e.SWaveField);
+            UpdateWaveFieldVisualization(pField, sField);
+        }
+        private float[,,] ConvertToFloatArray(double[,,] array)
+        {
+            int width = array.GetLength(0);
+            int height = array.GetLength(1);
+            int depth = array.GetLength(2);
+
+            float[,,] result = new float[width, height, depth];
+
+            for (int z = 0; z < depth; z++)
+                for (int y = 0; y < height; y++)
+                    for (int x = 0; x < width; x++)
+                        result[x, y, z] = (float)array[x, y, z];
+
+            return result;
+        }
+        private void InjectTestWave()
+        {
+            // This method injects a test signal to verify visualization works
+            // Only call this if you need to debug the visualization without relying on simulators
+            Logger.Log("[AcousticSimulationForm] Injecting test wave pattern for debugging");
+
+            int width = mainForm.GetWidth();
+            int height = mainForm.GetHeight();
+            int depth = mainForm.GetDepth();
+
+            // Create a simple spherical wave pattern
+            int centerX = width / 2;
+            int centerY = height / 2;
+            int centerZ = depth / 2;
+            double radius = Math.Min(Math.Min(width, height), depth) / 4.0;
+
+            for (int z = 0; z < depth; z++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        if (densityVolume[x, y, z] <= 0f)
+                            continue;
+
+                        // Calculate distance from center
+                        double dx = x - centerX;
+                        double dy = y - centerY;
+                        double dz = z - centerZ;
+                        double dist = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+
+                        // Create a ripple pattern
+                        if (dist <= radius)
+                        {
+                            double value = Math.Sin(dist / radius * Math.PI) * Math.Exp(-dist / radius) * 0.0001;
+
+                            // Call the wave field update methods with test values
+                            if (usingGpuSimulator && gpuSimulator != null)
+                            {
+                                var simSnapshot = gpuSimulator.GetWaveFieldSnapshot();
+                                var vx = simSnapshot.vx;
+                                var vy = simSnapshot.vy;
+                                var vz = simSnapshot.vz;
+
+                                vx[x, y, z] = value;
+                                vy[x, y, z] = value * 0.5; // Different pattern for S-wave
+                                vz[x, y, z] = value * 0.5;
+                            }
+                            else if (cpuSimulator != null)
+                            {
+                                var simSnapshot = cpuSimulator.GetWaveFieldSnapshot();
+                                var vx = simSnapshot.vx;
+                                var vy = simSnapshot.vy;
+                                var vz = simSnapshot.vz;
+
+                                vx[x, y, z] = value;
+                                vy[x, y, z] = value * 0.5; // Different pattern for S-wave
+                                vz[x, y, z] = value * 0.5;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Force redraw
+            pictureBoxSimulation.Invalidate();
         }
         private void Simulator_SimulationCompleted(object sender, AcousticSimulationCompleteEventArgs e)
         {
@@ -1088,57 +1339,126 @@ namespace CTSegmenter
 
             // grab the latest wavefields
             var snapshot = GetWaveFieldSnapshot();
+
+            // Check for invalid snapshot
+            if (snapshot.vx == null || snapshot.vx.GetLength(0) == 0 ||
+                snapshot.vy == null || snapshot.vy.GetLength(0) == 0 ||
+                snapshot.vz == null || snapshot.vz.GetLength(0) == 0)
+            {
+                g.DrawString("No valid wave data", new Font("Arial", 12), Brushes.Red, 10, 10);
+                return;
+            }
+
             var pWaveField = snapshot.vx;
             var sWaveField = snapshot.vy;
+            var zField = snapshot.vz; // Also visualize Z component
 
             int width = mainForm.GetWidth();
             int height = mainForm.GetHeight();
             int depth = mainForm.GetDepth();
 
             // reduce point density for performance/clarity
-            int sampleRate = Math.Max(1, Math.Min(Math.Min(width, height), depth) / 50);
+            int sampleRate = Math.Max(1, Math.Min(Math.Min(width, height), depth) / 40);
 
-            using (var pBrush = new SolidBrush(Color.FromArgb(128, 255, 100, 100)))  // red
-            using (var sBrush = new SolidBrush(Color.FromArgb(128, 100, 100, 255)))  // blue
+            // EXTREME AMPLIFICATION - Dramatically increased
+            const double WAVE_VIS_AMPLIFICATION = 100000000.0;
+
+            // ULTRA-LOW THRESHOLD - catch virtually any signal
+            const double WAVE_VISIBILITY_THRESHOLD = 0.000000001;
+
+            // Find maximum values for adaptive scaling
+            double maxVal = 0.0;
+            Parallel.For(0, depth, z => {
+                for (int y = 0; y < height; y += sampleRate)
+                    for (int x = 0; x < width; x += sampleRate)
+                    {
+                        if (mainForm.volumeLabels[x, y, z] != selectedMaterialID)
+                            continue;
+
+                        double pAmp = Math.Abs(pWaveField[x, y, z]);
+                        double sAmp = Math.Abs(sWaveField[x, y, z]);
+                        double zAmp = Math.Abs(zField[x, y, z]);
+                        double combined = Math.Sqrt(pAmp * pAmp + sAmp * sAmp + zAmp * zAmp);
+
+                        // Thread-safe max update
+                        double current = maxVal;
+                        if (combined > current)
+                            Interlocked.CompareExchange(ref maxVal, combined, current);
+                    }
+            });
+
+            // Apply adaptive scaling if we have non-zero signals
+            double adaptiveAmp = WAVE_VIS_AMPLIFICATION;
+            if (maxVal > 1e-12)
             {
+                adaptiveAmp = Math.Max(WAVE_VIS_AMPLIFICATION, 0.1 / maxVal);
+                Logger.Log($"[DrawWavePropagation] Using adaptive amplification: {adaptiveAmp:E2}");
+            }
+
+            // Use more visible colors with higher opacity
+            using (var pBrush = new SolidBrush(Color.FromArgb(230, 255, 50, 50)))  // bright red
+            using (var sBrush = new SolidBrush(Color.FromArgb(230, 50, 50, 255)))  // bright blue
+            {
+                double maxPAmp = 0.0; // For logging
+                double maxSAmp = 0.0; // For logging
+                double maxZAmp = 0.0; // For logging
+                int pointsDrawn = 0;  // For logging
+
                 for (int z = 0; z < depth; z += sampleRate)
                     for (int y = 0; y < height; y += sampleRate)
                         for (int x = 0; x < width; x += sampleRate)
                         {
-                            // **skip any “empty” voxel** (density == 0)
-                            if (densityVolume[x, y, z] <= 0f)
+                            // Only visualize points in the material
+                            if (mainForm.volumeLabels[x, y, z] != selectedMaterialID)
                                 continue;
 
-                            float pAmp = (float)pWaveField[x, y, z];
-                            float sAmp = (float)sWaveField[x, y, z];
+                            double pAmp = Math.Abs(pWaveField[x, y, z]) * adaptiveAmp;
+                            double sAmp = Math.Abs(sWaveField[x, y, z]) * adaptiveAmp;
+                            double zAmp = Math.Abs(zField[x, y, z]) * adaptiveAmp;
 
-                            if (pAmp > 0.5f)
+                            maxPAmp = Math.Max(maxPAmp, pAmp);
+                            maxSAmp = Math.Max(maxSAmp, sAmp);
+                            maxZAmp = Math.Max(maxZAmp, zAmp);
+
+                            // Use combined amplitude for visualization threshold
+                            double combinedAmp = Math.Sqrt(pAmp * pAmp + sAmp * sAmp + zAmp * zAmp);
+
+                            if (combinedAmp > WAVE_VISIBILITY_THRESHOLD)
                             {
-                                // project to screen and draw a red dot
+                                // project to screen and draw a dot
                                 var pt = renderer.ProjectToScreen(
                                     x, y, z,
                                     pictureBoxSimulation.Width,
                                     pictureBoxSimulation.Height);
 
-                                int size = Math.Min(10, Math.Max(2, (int)(pAmp / 10)));
-                                g.FillEllipse(pBrush,
+                                // Determine color based on dominant component
+                                Brush dotBrush;
+                                if (pAmp > sAmp && pAmp > zAmp)
+                                    dotBrush = pBrush;
+                                else
+                                    dotBrush = sBrush;
+
+                                // Ensure minimum dot size but scale with amplitude
+                                int size = Math.Min(14, Math.Max(5, (int)(combinedAmp * 0.5)));
+                                g.FillEllipse(dotBrush,
                                     pt.X - size / 2, pt.Y - size / 2,
                                     size, size);
-                            }
-
-                            if (sAmp > 0.5f)
-                            {
-                                var pt = renderer.ProjectToScreen(
-                                    x, y, z,
-                                    pictureBoxSimulation.Width,
-                                    pictureBoxSimulation.Height);
-
-                                int size = Math.Min(10, Math.Max(2, (int)(sAmp / 10)));
-                                g.FillEllipse(sBrush,
-                                    pt.X - size / 2, pt.Y - size / 2,
-                                    size, size);
+                                pointsDrawn++;
                             }
                         }
+
+                // Log the maximum amplitudes found to help with debugging
+                Logger.Log($"[DrawWavePropagation] Max amplitudes: P={maxPAmp:E3}, S={maxSAmp:E3}, Z={maxZAmp:E3}, Points drawn: {pointsDrawn}");
+            }
+
+            // Draw informational overlay
+            using (Font font = new Font("Arial", 9))
+            using (SolidBrush brush = new SolidBrush(Color.Yellow))
+            using (SolidBrush shadowBrush = new SolidBrush(Color.FromArgb(100, 0, 0, 0)))
+            {
+                string info = "Wave visualization active...";
+                g.FillRectangle(shadowBrush, 10, 10, 200, 20);
+                g.DrawString(info, font, brush, 15, 12);
             }
         }
 
@@ -1332,7 +1652,7 @@ namespace CTSegmenter
             using (Font font = new Font("Segoe UI", 9))
             using (SolidBrush brush = new SolidBrush(Color.White))
             {
-                int y = 10;
+                int y = 30;
                 int lineHeight = 18;
 
                 // Draw material and axis info
@@ -2491,69 +2811,68 @@ namespace CTSegmenter
                 return;
             }
 
-            // Show progress form with cancellation support
-            using (CancellableProgressForm progressForm = new CancellableProgressForm("Applying density variation..."))
+            // Show progress form with cancellation support - CHANGED: non-modal with proper ownership
+            CancellableProgressForm progressForm = new CancellableProgressForm("Applying density variation...");
+            progressForm.Owner = this; // Set owner to establish parent-child relationship
+            progressForm.Show(this);   // Show as non-modal dialog with owner
+
+            // Create a cancellation token source
+            var cts = new CancellationTokenSource();
+
+            // Start the calculation in a background task
+            Task.Run(() =>
             {
-                progressForm.Show();
-
-                // Create a cancellation token source
-                var cts = new CancellationTokenSource();
-
-                // Start the calculation in a background task
-                Task.Run(() =>
+                try
                 {
-                    try
+                    CalculateDensityVariation(progressForm, cts.Token);
+
+                    // Initialize volume renderer
+                    BeginInvoke(new Action(() =>
                     {
-                        CalculateDensityVariation(progressForm, cts.Token);
+                        volumeRenderer = new VolumeRenderer(densityVolume,
+                                                          mainForm.GetWidth(),
+                                                          mainForm.GetHeight(),
+                                                          mainForm.GetDepth(),
+                                                          mainForm.GetPixelSize());
 
-                        // Initialize volume renderer
-                        BeginInvoke(new Action(() =>
-                        {
-                            volumeRenderer = new VolumeRenderer(densityVolume,
-                                                              mainForm.GetWidth(),
-                                                              mainForm.GetHeight(),
-                                                              mainForm.GetDepth(),
-                                                              mainForm.GetPixelSize());
+                        volumeRenderer.SetTransformation(rotationX, rotationY, zoom, pan);
 
-                            volumeRenderer.SetTransformation(rotationX, rotationY, zoom, pan);
+                        // Mark that we have density variation
+                        hasDensityVariation = true;
 
-                            // Mark that we have density variation
-                            hasDensityVariation = true;
+                        // Update visualization
+                        pictureBoxVolume.Invalidate();
 
-                            // Update visualization
-                            pictureBoxVolume.Invalidate();
-
-                            Logger.Log("[AcousticSimulationForm] Applied variable density to visualization");
-                        }));
-                    }
-                    catch (OperationCanceledException)
+                        Logger.Log("[AcousticSimulationForm] Applied variable density to visualization");
+                    }));
+                }
+                catch (OperationCanceledException)
+                {
+                    // Task was canceled
+                    this.Invoke(new Action(() =>
                     {
-                        // Task was canceled
-                        this.Invoke(new Action(() =>
-                        {
-                            MessageBox.Show("Operation was cancelled.",
-                                "Cancelled", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        }));
-                    }
-                    catch (Exception ex)
+                        MessageBox.Show("Operation was cancelled.",
+                            "Cancelled", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }));
+                }
+                catch (Exception ex)
+                {
+                    // Handle exception
+                    this.Invoke(new Action(() =>
                     {
-                        // Handle exception
-                        this.Invoke(new Action(() =>
-                        {
-                            MessageBox.Show($"Error applying density variation: {ex.Message}",
-                                "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        }));
-                    }
-                    finally
-                    {
-                        // Close progress form
-                        this.Invoke(new Action(() => progressForm.Close()));
-                    }
-                }, cts.Token);
+                        MessageBox.Show($"Error applying density variation: {ex.Message}",
+                            "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }));
+                }
+                finally
+                {
+                    // Close progress form
+                    this.Invoke(new Action(() => progressForm.Close()));
+                }
+            }, cts.Token);
 
-                // Handle cancellation
-                progressForm.CancelPressed += (s, args) => cts.Cancel();
-            }
+            // Handle cancellation
+            progressForm.CancelPressed += (s, args) => cts.Cancel();
         }
         private void CalculateDensityVariation(CancellableProgressForm progressForm, CancellationToken ct)
         {

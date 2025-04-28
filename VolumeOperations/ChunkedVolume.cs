@@ -6,26 +6,50 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace CTSegmenter
 {
+    /// <summary>
+    /// Efficient storage for large 3D grayscale volumes using a chunked approach
+    /// to overcome array limitations with support for 30GB+ datasets
+    /// </summary>
     public class ChunkedVolume : IDisposable, IGrayscaleVolumeData
     {
         #region Fields and Properties
+        // Volume dimensions
         public int Width { get; }
         public int Height { get; }
         public int Depth { get; }
+
+        // Chunking parameters
         private readonly int _chunkDim;
         private readonly int _chunkCountX;
         private readonly int _chunkCountY;
         private readonly int _chunkCountZ;
-        private readonly byte[][] _chunks;
-        private MemoryMappedFile _mmf;
-        private MemoryMappedViewAccessor[] _accessors;
+
+        // Data storage
+        private byte[][] _chunks; // For in-memory mode
+        private long _headerSize;
+        private MemoryMappedFile _mmf; // For memory-mapped mode
+        private MemoryMappedViewAccessor _viewAccessor; // Main view accessor for MM mode
         private readonly bool _useMemoryMapping;
-        public int TotalChunks => _chunks.Length;
+
+        // Metadata
+        private readonly int _bitsPerPixel; // 8 or 16 bit
+        private double _pixelSize; // Size in meters per pixel
+
+        // Interface properties
+        public int ChunkDim => _chunkDim;
+        public int ChunkCountX => _chunkCountX;
+        public int ChunkCountY => _chunkCountY;
+        public int ChunkCountZ => _chunkCountZ;
+        public int TotalChunks => _chunkCountX * _chunkCountY * _chunkCountZ;
         public byte[][] Chunks => _chunks;
+
+        // File header size (for memory-mapped files)
+        private const int HEADER_SIZE = 36; // 8 ints (32 bytes) + 1 double (8 bytes)
 
         // Supported image extensions
         private static readonly string[] SupportedImageExtensions = {
@@ -34,169 +58,373 @@ namespace CTSegmenter
         #endregion
 
         #region Constructors
-        // Constructor for an in-memory volume.
+        /// <summary>
+        /// Creates a new in-memory volume with the specified dimensions
+        /// </summary>
         public ChunkedVolume(int width, int height, int depth, int chunkDim = 256)
         {
             try
             {
                 ValidateDimensions(width, height, depth, chunkDim);
+
                 Width = width;
                 Height = height;
                 Depth = depth;
                 _chunkDim = chunkDim;
+                _bitsPerPixel = 8; // Default to 8-bit
+                _pixelSize = 1e-6; // Default to 1 micron
+
                 _chunkCountX = (width + chunkDim - 1) / chunkDim;
                 _chunkCountY = (height + chunkDim - 1) / chunkDim;
                 _chunkCountZ = (depth + chunkDim - 1) / chunkDim;
+
                 _chunks = new byte[_chunkCountX * _chunkCountY * _chunkCountZ][];
-                Logger.Log($"[Init] In-memory volume: {Width}x{Height}x{Depth}, chunkDim={_chunkDim}");
+                _useMemoryMapping = false;
+
+                Logger.Log($"[ChunkedVolume] Creating in-memory volume: {Width}x{Height}x{Depth}, chunkDim={_chunkDim}");
                 InitializeChunks();
             }
             catch (Exception ex)
             {
-                Logger.Log("[ChunkedVolume] Error in ChunkedVolume constructor (in-memory): " + ex);
+                Logger.Log($"[ChunkedVolume] Construction error: {ex.Message}");
                 throw;
             }
         }
 
-        // Constructor for a memory-mapped volume.
+        /// <summary>
+        /// Creates a volume that uses memory-mapped file storage
+        /// </summary>
         public ChunkedVolume(int width, int height, int depth, int chunkDim,
-                             MemoryMappedFile mmf, MemoryMappedViewAccessor[] accessors)
+                    MemoryMappedFile mmf, MemoryMappedViewAccessor viewAccessor,
+                    long headerSize = 0)
         {
-            Width = width;
-            Height = height;
-            Depth = depth;
-            _chunkDim = chunkDim;
-            _mmf = mmf;
-            _accessors = accessors;
-            _useMemoryMapping = true;
-            _chunkCountX = (Width + _chunkDim - 1) / _chunkDim;
-            _chunkCountY = (Height + _chunkDim - 1) / _chunkDim;
-            _chunkCountZ = (Depth + _chunkDim - 1) / _chunkDim;
+            try
+            {
+                // Make sure dimensions are valid
+                if (width <= 0 || width > 65536 || height <= 0 || height > 65536 ||
+                    depth <= 0 || depth > 65536 || chunkDim <= 0 || chunkDim > 1024)
+                {
+                    throw new ArgumentException($"Invalid dimensions: {width}x{height}x{depth}, chunkDim={chunkDim}");
+                }
+
+                Width = width;
+                Height = height;
+                Depth = depth;
+                _chunkDim = chunkDim;
+                _bitsPerPixel = 8; // Default to 8-bit
+                _pixelSize = 1e-6; // Default to 1 micron
+
+                _chunkCountX = (width + chunkDim - 1) / chunkDim;
+                _chunkCountY = (height + chunkDim - 1) / chunkDim;
+                _chunkCountZ = (depth + chunkDim - 1) / chunkDim;
+
+                _mmf = mmf;
+                _viewAccessor = viewAccessor;
+                _useMemoryMapping = true;
+                _chunks = null; // Not using in-memory chunks
+
+                // Store the header size for offset calculations
+                _headerSize = headerSize;
+
+                Logger.Log($"[ChunkedVolume] Created memory-mapped volume: {Width}x{Height}x{Depth}, " +
+                           $"chunkDim={_chunkDim}, chunks={_chunkCountX}x{_chunkCountY}x{_chunkCountZ}, headerSize={_headerSize}");
+            }
+            catch (Exception ex)
+            {
+                // Clean up resources to avoid leaks
+                if (viewAccessor != null)
+                {
+                    try { viewAccessor.Dispose(); } catch { }
+                }
+
+                if (mmf != null)
+                {
+                    try { mmf.Dispose(); } catch { }
+                }
+
+                Logger.Log($"[ChunkedVolume] Construction error: {ex.Message}");
+                throw;
+            }
         }
         #endregion
 
         #region Public Interface
+        /// <summary>
+        /// Indexer for accessing voxel data
+        /// </summary>
         public byte this[int x, int y, int z]
         {
             get
             {
-                ValidateCoordinates(x, y, z);
-                var (chunkIndex, offset) = CalculateChunkIndexAndOffset(x, y, z);
                 try
                 {
-                    return _useMemoryMapping
-                        ? _accessors[chunkIndex].ReadByte(offset)
-                        : _chunks[chunkIndex][offset];
+                    ValidateCoordinates(x, y, z);
+
+                    var (chunkIndex, offset) = CalculateChunkIndexAndOffset(x, y, z);
+
+                    if (_useMemoryMapping)
+                    {
+                        long globalOffset = CalculateGlobalOffset(chunkIndex, offset);
+                        return _viewAccessor.ReadByte(globalOffset);
+                    }
+                    else
+                    {
+                        return _chunks[chunkIndex][offset];
+                    }
                 }
                 catch (Exception ex)
                 {
-                    Logger.Log($"Error reading voxel ({x},{y},{z}): {ex}");
-                    throw;
+                    Logger.Log($"[ChunkedVolume] Get voxel error at ({x},{y},{z}): {ex.Message}");
+                    return 0; // Return black on error
                 }
             }
+
             set
             {
-                ValidateCoordinates(x, y, z);
-                var (chunkIndex, offset) = CalculateChunkIndexAndOffset(x, y, z);
                 try
                 {
+                    ValidateCoordinates(x, y, z);
+
+                    var (chunkIndex, offset) = CalculateChunkIndexAndOffset(x, y, z);
+
                     if (_useMemoryMapping)
-                        _accessors[chunkIndex].Write(offset, value);
+                    {
+                        long globalOffset = CalculateGlobalOffset(chunkIndex, offset);
+                        _viewAccessor.Write(globalOffset, value);
+                    }
                     else
+                    {
                         _chunks[chunkIndex][offset] = value;
+                    }
                 }
                 catch (Exception ex)
                 {
-                    Logger.Log($"Error writing voxel ({x},{y},{z}): {ex}");
-                    throw;
+                    Logger.Log($"[ChunkedVolume] Set voxel error at ({x},{y},{z}): {ex.Message}");
                 }
             }
         }
-
-        // Modified FromFolder method that accepts a flag for memory mapping.
+        /// <summary>
+        /// Creates a volume from a folder of image slices with optimized performance while preventing scrambling
+        /// </summary>
         public static ChunkedVolume FromFolder(string folder, int chunkDim, ProgressForm progress, bool useMemoryMapping = false)
         {
             try
             {
-                Logger.Log(useMemoryMapping
-                    ? "[FromFolder] Loading volume with memory mapping."
-                    : "[FromFolder] Loading full volume into RAM.");
+                Logger.Log($"[FromFolder] Loading volume from folder: {folder}, useMemoryMapping={useMemoryMapping}");
 
-                // First, get all supported image paths in the folder
+                // Get all supported image files
                 var allImagePaths = GetAllSupportedImagePaths(folder);
                 if (allImagePaths.Count == 0)
                 {
-                    throw new FileNotFoundException("[FromFolder] No supported image files found in the folder.");
+                    throw new FileNotFoundException("No supported image files found in the folder.");
                 }
 
-                // Determine the file type of the first image and filter by that type
+                // Filter by file extension and sort numerically
                 string firstImageExtension = Path.GetExtension(allImagePaths[0]).ToLower();
-                Logger.Log($"[FromFolder] First image has extension: {firstImageExtension}. Using only this format for consistency.");
+                var slicePaths = SortImagePathsNumerically(
+                    allImagePaths.Where(p => Path.GetExtension(p).ToLower() == firstImageExtension).ToList());
 
-                // Filter images to only include the type of the first image found
-                var slicePaths = allImagePaths
-                    .Where(path => Path.GetExtension(path).ToLower() == firstImageExtension)
-                    .OrderBy(path => path)
-                    .ToList();
+                Logger.Log($"[FromFolder] Using {slicePaths.Count} images with extension {firstImageExtension}");
 
-                Logger.Log($"[FromFolder] Found {slicePaths.Count} images of type {firstImageExtension} (from {allImagePaths.Count} total supported images)");
-
+                // Validate the first and last images
                 ValidateImageSet(slicePaths);
-                var dimensions = GetVolumeDimensions(slicePaths);
-                Logger.Log($"[FromFolder] Volume dimensions: {dimensions.Width}x{dimensions.Height}x{dimensions.Depth}");
 
+                // Get dimensions from the first image
+                var dimensions = GetVolumeDimensionsOptimized(slicePaths[0]);
+                int width = dimensions.Width;
+                int height = dimensions.Height;
+                int depth = slicePaths.Count;
+                int bitsPerPixel = dimensions.BitsPerPixel;
+                double pixelSize = 1e-6; // Default to 1 µm
+
+                Logger.Log($"[FromFolder] Volume dimensions: {width}x{height}x{depth}, bitsPerPixel={bitsPerPixel}");
+
+                // For in-memory mode, process directly
                 if (!useMemoryMapping)
                 {
-                    // Load the full volume into RAM
-                    var volume = new ChunkedVolume(dimensions.Width, dimensions.Height, dimensions.Depth, chunkDim);
-                    ProcessSlices(volume, slicePaths, progress);
+                    var volume = new ChunkedVolume(width, height, depth, chunkDim);
+                    volume._pixelSize = pixelSize;
+                    ProcessSlicesParallel(volume, slicePaths, progress);
                     return volume;
                 }
-                else
+
+                // For memory mapping, create the file with embedded header
+                string volumeBinPath = Path.Combine(folder, "volume.bin");
+
+                // Calculate dimensions
+                int cntX = (width + chunkDim - 1) / chunkDim;
+                int cntY = (height + chunkDim - 1) / chunkDim;
+                int cntZ = (depth + chunkDim - 1) / chunkDim;
+                long chunkSize = (long)chunkDim * chunkDim * chunkDim;
+                long totalChunks = cntX * cntY * cntZ;
+                int headerSize = 36; // 9 integers for header (36 bytes)
+                long totalSize = headerSize + totalChunks * chunkSize;
+
+                Logger.Log($"[FromFolder] Creating volume.bin, size: {totalSize:N0} bytes");
+
+                // Delete existing file if needed
+                if (File.Exists(volumeBinPath))
                 {
-                    // Determine the total number of chunks and total size (in bytes)
-                    int chunkCountX = (dimensions.Width + chunkDim - 1) / chunkDim;
-                    int chunkCountY = (dimensions.Height + chunkDim - 1) / chunkDim;
-                    int chunkCountZ = (dimensions.Depth + chunkDim - 1) / chunkDim;
-                    int totalChunks = chunkCountX * chunkCountY * chunkCountZ;
-                    long chunkSize = (long)chunkDim * chunkDim * chunkDim;
-                    long totalSize = chunkSize * totalChunks;
+                    try { File.Delete(volumeBinPath); }
+                    catch (Exception ex) { Logger.Log($"[FromFolder] Warning: Could not delete existing file: {ex.Message}"); }
+                }
 
-                    // Create a bin file named "volume.bin" in the dataset folder and set its size.
-                    string binPath = Path.Combine(folder, "volume.bin");
-                    Logger.Log($"[FromFolder] Creating memory-mapped bin file at {binPath}");
-                    using (var fs = new FileStream(binPath, FileMode.Create, FileAccess.ReadWrite, FileShare.None))
+                // Create the file and write header
+                using (FileStream fs = new FileStream(volumeBinPath, FileMode.Create, FileAccess.ReadWrite, FileShare.None))
+                {
+                    // Write header information
+                    using (BinaryWriter bw = new BinaryWriter(fs, System.Text.Encoding.Default, leaveOpen: true))
                     {
-                        fs.SetLength(totalSize);
+                        bw.Write(width);
+                        bw.Write(height);
+                        bw.Write(depth);
+                        bw.Write(chunkDim);
+                        bw.Write(bitsPerPixel);
+                        bw.Write(pixelSize);
+                        bw.Write(cntX);
+                        bw.Write(cntY);
+                        bw.Write(cntZ);
                     }
 
-                    // Open the bin file as a memory-mapped file.
-                    MemoryMappedFile mmf = MemoryMappedFile.CreateFromFile(binPath, FileMode.Open, null, totalSize, MemoryMappedFileAccess.ReadWrite);
+                    // Pre-allocate space for the entire file
+                    fs.SetLength(totalSize);
+                    fs.Flush(true);
+                }
 
-                    // Create an accessor for each chunk.
-                    MemoryMappedViewAccessor[] accessors = new MemoryMappedViewAccessor[totalChunks];
-                    for (int i = 0; i < totalChunks; i++)
-                    {
-                        long offset = i * chunkSize;
-                        accessors[i] = mmf.CreateViewAccessor(offset, chunkSize, MemoryMappedFileAccess.ReadWrite);
-                    }
+                // Create the memory-mapped file
+                MemoryMappedFile mmf = null;
+                MemoryMappedViewAccessor viewAccessor = null;
 
-                    // Create a volume instance that writes directly into the mmf.
-                    var volume = new ChunkedVolume(dimensions.Width, dimensions.Height, dimensions.Depth, chunkDim, mmf, accessors);
+                try
+                {
+                    // Generate a unique mapping name
+                    string mapName = $"CTSegmenter_Volume_{Guid.NewGuid()}";
 
-                    // Process each slice and write directly into the memory-mapped file via the volume indexer.
-                    ProcessSlices(volume, slicePaths, progress);
-                    Logger.Log("[FromFolder] Memory-mapped volume created and loaded successfully.");
+                    // Create memory mapping
+                    mmf = MemoryMappedFile.CreateFromFile(
+                        volumeBinPath,
+                        FileMode.Open,
+                        mapName,
+                        0,
+                        MemoryMappedFileAccess.ReadWrite);
+
+                    // Create view accessor
+                    viewAccessor = mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.ReadWrite);
+
+                    // Create volume
+                    ChunkedVolume volume = new ChunkedVolume(width, height, depth, chunkDim, mmf, viewAccessor, headerSize);
+                    volume._pixelSize = pixelSize;
+
+                    // Process slices in optimized parallel mode
+                    ProcessSlicesParallelOptimized(volume, slicePaths, progress);
+
+                    // Create volume.chk for backward compatibility
+                    CreateVolumeChk(folder, width, height, depth, chunkDim, pixelSize);
+
                     return volume;
+                }
+                catch (Exception ex)
+                {
+                    // Clean up resources
+                    viewAccessor?.Dispose();
+                    mmf?.Dispose();
+
+                    Logger.Log($"[FromFolder] Error: {ex.Message}");
+                    throw;
                 }
             }
             catch (Exception ex)
             {
-                Logger.Log("[FromFolder] Error: " + ex);
+                Logger.Log($"[FromFolder] Error: {ex.Message}");
                 throw;
             }
         }
 
+        /// <summary>
+        /// Sorts image paths numerically for correct slice order
+        /// </summary>
+        private static List<string> SortImagePathsNumerically(List<string> paths)
+        {
+            // Extract numbers from filenames for proper numeric sorting
+            return paths.OrderBy(path =>
+            {
+                string filename = Path.GetFileNameWithoutExtension(path);
+                // Extract numeric part (handles filenames like "slice_001.bmp")
+                string numericPart = new string(filename.Where(char.IsDigit).ToArray());
+                if (!string.IsNullOrEmpty(numericPart) && int.TryParse(numericPart, out int number))
+                    return number;
+                else
+                    return 0;
+            }).ToList();
+        }
+
+        /// <summary>
+        /// Gets volume dimensions from a single image file (optimized)
+        /// </summary>
+        private static (int Width, int Height, int BitsPerPixel) GetVolumeDimensionsOptimized(string imagePath)
+        {
+            using (var bmp = new Bitmap(imagePath))
+            {
+                int bitsPerPixel = Image.GetPixelFormatSize(bmp.PixelFormat);
+                return (bmp.Width, bmp.Height, bitsPerPixel);
+            }
+        }
+        /// <summary>
+        /// Process slices sequentially to avoid synchronization issues
+        /// </summary>
+        private static void ProcessSlicesSequentially(ChunkedVolume volume, List<string> slicePaths, ProgressForm progress)
+        {
+            int totalSlices = slicePaths.Count;
+            var exceptions = new List<Exception>();
+
+            for (int z = 0; z < totalSlices; z++)
+            {
+                try
+                {
+                    string slicePath = slicePaths[z];
+                    Logger.Log($"[ProcessSlicesSequentially] Processing slice {z + 1}/{totalSlices}: {Path.GetFileName(slicePath)}");
+
+                    using (Bitmap originalBmp = LoadBitmapFromFile(slicePath))
+                    using (Bitmap processBmp = ConvertTo24bpp(originalBmp))
+                    using (FastBitmap fastBmp = new FastBitmap(processBmp))
+                    {
+                        fastBmp.LockBits();
+
+                        // Process the slice one pixel at a time
+                        for (int y = 0; y < volume.Height; y++)
+                        {
+                            for (int x = 0; x < volume.Width; x++)
+                            {
+                                byte grayValue = fastBmp.GetGrayValue(x, y);
+                                volume[x, y, z] = grayValue;
+                            }
+                        }
+                    }
+
+                    // Update progress
+                    progress?.SafeUpdateProgress(z + 1, totalSlices);
+                }
+                catch (Exception ex)
+                {
+                    string errorMsg = $"Error processing slice {z}: {ex.Message}";
+                    Logger.Log($"[ProcessSlicesSequentially] {errorMsg}");
+                    exceptions.Add(new Exception(errorMsg, ex));
+
+                    // Continue processing other slices
+                }
+            }
+
+            // If any errors occurred, throw an aggregate exception
+            if (exceptions.Count > 0)
+            {
+                throw new AggregateException("Errors occurred while processing image slices:", exceptions);
+            }
+        }
+
+
+        /// <summary>
+        /// Saves the volume to a binary file
+        /// </summary>
         public void SaveAsBin(string path)
         {
             try
@@ -211,193 +439,233 @@ namespace CTSegmenter
             }
             catch (Exception ex)
             {
-                Logger.Log("[SaveAsBin] Error: " + ex);
+                Logger.Log($"[SaveAsBin] Error: {ex.Message}");
                 throw;
             }
         }
 
-        public void ReadChunks(BinaryReader br)
+        /// <summary>
+        /// Writes chunks to a binary writer
+        /// </summary>
+        public void WriteChunks(BinaryWriter bw)
         {
-            int totalChunks = !_useMemoryMapping ? _chunks.Length : (_accessors != null ? _accessors.Length : 0);
             int chunkSize = _chunkDim * _chunkDim * _chunkDim;
+
             try
             {
                 if (!_useMemoryMapping)
                 {
-                    for (int i = 0; i < totalChunks; i++)
+                    foreach (var chunk in _chunks)
+                    {
+                        bw.Write(chunk, 0, chunkSize);
+                    }
+                }
+                else
+                {
+                    // For memory-mapped mode, read each chunk and write to output
+                    byte[] buffer = new byte[chunkSize];
+
+                    for (int cz = 0; cz < _chunkCountZ; cz++)
+                    {
+                        for (int cy = 0; cy < _chunkCountY; cy++)
+                        {
+                            for (int cx = 0; cx < _chunkCountX; cx++)
+                            {
+                                int chunkIndex = GetChunkIndex(cx, cy, cz);
+                                long offset = CalculateGlobalOffset(chunkIndex, 0);
+
+                                // Read the chunk into buffer
+                                _viewAccessor.ReadArray(offset, buffer, 0, chunkSize);
+
+                                // Write the buffer to output
+                                bw.Write(buffer, 0, chunkSize);
+                            }
+                        }
+                    }
+                }
+                Logger.Log($"[WriteChunks] {TotalChunks} chunks written");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[WriteChunks] Error: {ex.Message}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Reads chunks from a binary reader
+        /// </summary>
+        public void ReadChunks(BinaryReader br)
+        {
+            int chunkSize = _chunkDim * _chunkDim * _chunkDim;
+
+            try
+            {
+                if (!_useMemoryMapping)
+                {
+                    for (int i = 0; i < _chunks.Length; i++)
                     {
                         _chunks[i] = br.ReadBytes(chunkSize);
                     }
                 }
                 else
                 {
-                    _accessors = new MemoryMappedViewAccessor[totalChunks];
-                    for (int i = 0; i < totalChunks; i++)
+                    // For memory-mapped mode, read from source and write to memory-mapped file
+                    byte[] buffer = new byte[chunkSize];
+
+                    for (int cz = 0; cz < _chunkCountZ; cz++)
                     {
-                        long thisChunkOffset = br.BaseStream.Position;
-                        _accessors[i] = _mmf.CreateViewAccessor(thisChunkOffset, chunkSize, MemoryMappedFileAccess.ReadWrite);
-                        br.BaseStream.Seek(chunkSize, SeekOrigin.Current);
+                        for (int cy = 0; cy < _chunkCountY; cy++)
+                        {
+                            for (int cx = 0; cx < _chunkCountX; cx++)
+                            {
+                                int chunkIndex = GetChunkIndex(cx, cy, cz);
+                                long offset = CalculateGlobalOffset(chunkIndex, 0);
+
+                                // Read chunk from source
+                                br.Read(buffer, 0, chunkSize);
+
+                                // Write to memory-mapped file
+                                _viewAccessor.WriteArray(offset, buffer, 0, chunkSize);
+                            }
+                        }
                     }
                 }
-                Logger.Log("[ReadChunks] Volume chunks read successfully.");
+                Logger.Log($"[ReadChunks] {TotalChunks} chunks read");
             }
             catch (Exception ex)
             {
-                Logger.Log("[ReadChunks] Error: " + ex);
+                Logger.Log($"[ReadChunks] Error: {ex.Message}");
                 throw;
             }
         }
-        #endregion
 
-        #region Core Implementation
-        private void InitializeChunks()
+        /// <summary>
+        /// Gets the bytes for a specific chunk
+        /// </summary>
+        public byte[] GetChunkBytes(int chunkIndex)
         {
             int chunkSize = _chunkDim * _chunkDim * _chunkDim;
-            for (int i = 0; i < _chunks.Length; i++)
+
+            try
             {
-                _chunks[i] = new byte[chunkSize];
+                if (!_useMemoryMapping)
+                {
+                    return _chunks[chunkIndex];
+                }
+                else
+                {
+                    byte[] buffer = new byte[chunkSize];
+                    long offset = CalculateGlobalOffset(chunkIndex, 0);
+                    _viewAccessor.ReadArray(offset, buffer, 0, chunkSize);
+                    return buffer;
+                }
             }
-            Logger.Log($"[InitializeChunks] Initialized {_chunks.Length} chunks of size {chunkSize} bytes each.");
+            catch (Exception ex)
+            {
+                Logger.Log($"[GetChunkBytes] Error for chunk {chunkIndex}: {ex.Message}");
+                return new byte[chunkSize]; // Return empty chunk on error
+            }
         }
 
+        /// <summary>
+        /// Gets the index of a chunk from its coordinates
+        /// </summary>
+        public int GetChunkIndex(int cx, int cy, int cz)
+        {
+            return (cz * _chunkCountY + cy) * _chunkCountX + cx;
+        }
+        #endregion
+
+        #region Private Implementation
+        /// <summary>
+        /// Initialize empty chunks for in-memory mode
+        /// </summary>
+        private void InitializeChunks()
+        {
+            if (!_useMemoryMapping && _chunks != null)
+            {
+                int chunkSize = _chunkDim * _chunkDim * _chunkDim;
+
+                for (int i = 0; i < _chunks.Length; i++)
+                {
+                    _chunks[i] = new byte[chunkSize];
+                }
+
+                Logger.Log($"[InitializeChunks] Initialized {_chunks.Length} chunks, each {chunkSize} bytes");
+            }
+        }
+
+        /// <summary>
+        /// Calculate chunk index and offset for a voxel
+        /// </summary>
         private (int chunkIndex, int offset) CalculateChunkIndexAndOffset(int x, int y, int z)
         {
             int cx = x / _chunkDim;
             int cy = y / _chunkDim;
             int cz = z / _chunkDim;
-            int chunkIndex = (cz * _chunkCountY + cy) * _chunkCountX + cx;
-            int lx = x % _chunkDim, ly = y % _chunkDim, lz = z % _chunkDim;
-            int offset = (lz * _chunkDim + ly) * _chunkDim + lx;
+
+            int chunkIndex = GetChunkIndex(cx, cy, cz);
+
+            int lx = x % _chunkDim;
+            int ly = y % _chunkDim;
+            int lz = z % _chunkDim;
+
+            int offset = (lz * _chunkDim * _chunkDim) + (ly * _chunkDim) + lx;
+
             return (chunkIndex, offset);
         }
-        #endregion
 
-        #region Image Processing
-        private static Bitmap ConvertTo24bpp(Bitmap source)
+        /// <summary>
+        /// Calculate global offset in memory-mapped file
+        /// </summary>
+        private long CalculateGlobalOffset(int chunkIndex, int localOffset)
+        {
+            long chunkSize = (long)_chunkDim * _chunkDim * _chunkDim;
+            return _headerSize + (chunkIndex * chunkSize) + localOffset;
+        }
+
+        /// <summary>
+        /// Write the header to a binary writer
+        /// </summary>
+        private void WriteHeader(BinaryWriter bw)
+        {
+            bw.Write(Width);
+            bw.Write(Height);
+            bw.Write(Depth);
+            bw.Write(_chunkDim);
+            bw.Write(_bitsPerPixel);
+            bw.Write(_pixelSize);
+            bw.Write(_chunkCountX);
+            bw.Write(_chunkCountY);
+            bw.Write(_chunkCountZ);
+        }
+
+        /// <summary>
+        /// Create volume.chk file for backward compatibility
+        /// </summary>
+        private static void CreateVolumeChk(string folder, int width, int height, int depth, int chunkDim, double pixelSize)
         {
             try
             {
-                Logger.Log($"[ConvertTo24bpp] Converting image of size {source.Width}x{source.Height} from {source.PixelFormat}.");
-                Bitmap clone = new Bitmap(source.Width, source.Height, PixelFormat.Format24bppRgb);
-                using (Graphics g = Graphics.FromImage(clone))
+                string chkPath = Path.Combine(folder, "volume.chk");
+
+                using (FileStream fs = new FileStream(chkPath, FileMode.Create))
+                using (BinaryWriter bw = new BinaryWriter(fs))
                 {
-                    g.DrawImage(source, new Rectangle(0, 0, clone.Width, clone.Height));
+                    bw.Write(width);
+                    bw.Write(height);
+                    bw.Write(depth);
+                    bw.Write(chunkDim);
+                    bw.Write(pixelSize);
                 }
-                return clone;
+
+                Logger.Log($"[CreateVolumeChk] Created: {chkPath}");
             }
             catch (Exception ex)
             {
-                Logger.Log("[ConvertTo24bpp] Conversion error: " + ex);
-                throw;
-            }
-        }
-
-        private static Bitmap LoadBitmapFromFile(string filePath)
-        {
-            try
-            {
-                byte[] imageBytes = File.ReadAllBytes(filePath);
-                using (MemoryStream ms = new MemoryStream(imageBytes))
-                {
-                    return new Bitmap(ms);
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Log($"[LoadBitmapFromFile] Error loading {filePath}: {ex}");
-                throw;
-            }
-        }
-
-        private static void ProcessSlices(ChunkedVolume volume, IReadOnlyList<string> slicePaths, ProgressForm progress)
-        {
-            var exceptions = new ConcurrentQueue<Exception>();
-            int maxCores = Math.Max(1, Environment.ProcessorCount / 2);
-            Parallel.For(0, slicePaths.Count, new ParallelOptions { MaxDegreeOfParallelism = maxCores }, z =>
-            {
-                try
-                {
-                    Logger.Log($"[ProcessSlices] Processing slice {z}: {slicePaths[z]}");
-                    using (var orig = LoadBitmapFromFile(slicePaths[z]))
-                    {
-                        using (Bitmap slice = ConvertTo24bpp(orig))
-                        {
-                            using (var fastBmp = new FastBitmap(slice))
-                            {
-                                fastBmp.LockBits();
-                                ProcessSlice(volume, z, fastBmp);
-                            }
-                        }
-                    }
-                    progress?.SafeUpdateProgress(z + 1, slicePaths.Count);
-                }
-                catch (Exception ex)
-                {
-                    Logger.Log($"[ProcessSlices] Exception on slice {z}: {ex}");
-                    exceptions.Enqueue(new Exception($"Slice {z} ({slicePaths[z]}): {ex.Message}"));
-                }
-            });
-            if (!exceptions.IsEmpty)
-            {
-                foreach (var e in exceptions)
-                    Logger.Log("[ProcessSlices] Logged exception: " + e.Message);
-                throw new AggregateException("Volume loading errors:", exceptions);
-            }
-        }
-
-        private static void ProcessSlice(ChunkedVolume volume, int z, FastBitmap fastBmp)
-        {
-            int maxCores = Math.Max(1, Environment.ProcessorCount / 2);
-            int bmpWidth = fastBmp.Width;
-            int bmpHeight = fastBmp.Height;
-            Parallel.For(0, bmpHeight, new ParallelOptions { MaxDegreeOfParallelism = maxCores }, y =>
-            {
-                for (int x = 0; x < bmpWidth; x++)
-                {
-                    try
-                    {
-                        byte gray = fastBmp.GetGrayValue(x, y);
-                        volume[x, y, z] = gray;
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Log($"[ProcessSlice] Error at slice {z}, pixel ({x},{y}): {ex}");
-                        throw;
-                    }
-                }
-            });
-        }
-        #endregion
-
-        #region Validation Methods
-        private static void ValidateDimensions(int width, int height, int depth, int chunkDim)
-        {
-            if (width <= 0 || height <= 0 || depth <= 0 || chunkDim <= 0)
-                throw new ArgumentException("[ValidateDimensions] Invalid volume dimensions or chunk dimension.");
-        }
-
-        private void ValidateCoordinates(int x, int y, int z)
-        {
-            if (x < 0 || x >= Width || y < 0 || y >= Height || z < 0 || z >= Depth)
-                throw new IndexOutOfRangeException("[ValidateCoordinates] Voxel coordinates out of range.");
-        }
-
-        private static void ValidateImageSet(IReadOnlyList<string> paths)
-        {
-            if (paths.Count == 0)
-                throw new FileNotFoundException("[ValidateImageSet] No valid images found.");
-
-            // Check that all images are the same extension
-            string firstExtension = Path.GetExtension(paths[0]).ToLower();
-            bool allSameFormat = paths.All(p => Path.GetExtension(p).ToLower() == firstExtension);
-
-            if (!allSameFormat)
-                throw new InvalidOperationException("[ValidateImageSet] Inconsistent image formats detected.");
-
-            using (var first = new Bitmap(paths[0]))
-            {
-                if (first.Width <= 0 || first.Height <= 0)
-                    throw new InvalidDataException("[ValidateImageSet] Invalid dimensions in the first image.");
+                Logger.Log($"[CreateVolumeChk] Error: {ex.Message}");
+                // Don't throw, just log and continue
             }
         }
 
@@ -411,142 +679,546 @@ namespace CTSegmenter
                 .ToList();
         }
 
-        private static (int Width, int Height, int Depth) GetVolumeDimensions(IReadOnlyList<string> paths)
+        /// <summary>
+        /// Validate dimensions
+        /// </summary>
+        private static void ValidateDimensions(int width, int height, int depth, int chunkDim)
         {
-            using (var bmp = new Bitmap(paths[0]))
+            if (width <= 0 || height <= 0 || depth <= 0 || chunkDim <= 0)
+                throw new ArgumentException("Invalid dimensions or chunk size.");
+        }
+
+        /// <summary>
+        /// Validate coordinates
+        /// </summary>
+        private void ValidateCoordinates(int x, int y, int z)
+        {
+            if (x < 0 || x >= Width || y < 0 || y >= Height || z < 0 || z >= Depth)
+                throw new IndexOutOfRangeException($"Coordinates ({x},{y},{z}) out of range.");
+        }
+
+        /// <summary>
+        /// Validate the image set is consistent
+        /// </summary>
+        private static void ValidateImageSet(IReadOnlyList<string> imagePaths)
+        {
+            if (imagePaths.Count == 0)
+                throw new ArgumentException("No images to process.");
+
+            // Check that all images have the same extension
+            string firstExt = Path.GetExtension(imagePaths[0]).ToLower();
+            if (!imagePaths.All(p => Path.GetExtension(p).ToLower() == firstExt))
+                throw new ArgumentException("Image set contains mixed file formats.");
+
+            // Check first image can be opened
+            using (var img = new Bitmap(imagePaths[0]))
             {
-                Logger.Log($"[GetVolumeDimensions] First image: {bmp.Width}x{bmp.Height}");
-                return (bmp.Width, bmp.Height, paths.Count);
+                if (img.Width <= 0 || img.Height <= 0)
+                    throw new ArgumentException("First image has invalid dimensions.");
             }
         }
-        #endregion
 
-        #region File Operations
-        private void WriteHeader(BinaryWriter bw)
+        /// <summary>
+        /// Get volume dimensions from the image set
+        /// </summary>
+        private static (int Width, int Height, int Depth, int BitsPerPixel) GetVolumeDimensions(IReadOnlyList<string> imagePaths)
         {
-            bw.Write(Width);
-            bw.Write(Height);
-            bw.Write(Depth);
-            bw.Write(_chunkDim);
-            bw.Write(_chunkCountX);
-            bw.Write(_chunkCountY);
-            bw.Write(_chunkCountZ);
+            using (var bmp = new Bitmap(imagePaths[0]))
+            {
+                // Detect bits per pixel
+                int bitsPerPixel = 8;
+                if (bmp.PixelFormat == PixelFormat.Format16bppGrayScale)
+                    bitsPerPixel = 16;
+
+                return (bmp.Width, bmp.Height, imagePaths.Count, bitsPerPixel);
+            }
         }
 
-        public void WriteChunks(BinaryWriter bw)
+        /// <summary>
+        /// Process all slices and load them into the volume
+        /// </summary>
+        
+        private static void ProcessSlices(ChunkedVolume volume, List<string> slicePaths, ProgressForm progress)
         {
-            int chunkSize = _chunkDim * _chunkDim * _chunkDim;
+            var exceptions = new ConcurrentQueue<Exception>();
+            int totalSlices = slicePaths.Count;
+
+            // First, process slices sequentially to ensure correct synchronization
+            for (int z = 0; z < totalSlices; z++)
+            {
+                try
+                {
+                    Logger.Log($"[ProcessSlices] Processing slice {z}/{totalSlices}: {Path.GetFileName(slicePaths[z])}");
+
+                    // Load the bitmap for this slice
+                    using (var bitmap = LoadBitmapFromFile(slicePaths[z]))
+                    {
+                        // Convert to 24bpp if needed
+                        using (var processedBitmap = ConvertTo24bpp(bitmap))
+                        using (var fastBmp = new FastBitmap(processedBitmap))
+                        {
+                            fastBmp.LockBits();
+
+                            // Process each pixel in the slice
+                            for (int y = 0; y < volume.Height; y++)
+                            {
+                                for (int x = 0; x < volume.Width; x++)
+                                {
+                                    byte gray = fastBmp.GetGrayValue(x, y);
+                                    volume[x, y, z] = gray;
+                                }
+                            }
+                        }
+                    }
+
+                    // Update progress
+                    progress?.SafeUpdateProgress(z + 1, totalSlices);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[ProcessSlices] Error processing slice {z}: {ex.Message}");
+                    exceptions.Enqueue(new Exception($"Error on slice {z}: {ex.Message}", ex));
+                }
+            }
+
+            if (!exceptions.IsEmpty)
+            {
+                throw new AggregateException("Errors processing image slices:", exceptions);
+            }
+        }
+        /// <summary>
+        /// Process slices in parallel for in-memory volumes
+        /// </summary>
+        private static void ProcessSlicesParallel(ChunkedVolume volume, List<string> slicePaths, ProgressForm progress)
+        {
+            int totalSlices = slicePaths.Count;
+            var exceptions = new ConcurrentQueue<Exception>();
+            int processedCount = 0;
+            int maxThreads = Math.Max(1, Environment.ProcessorCount - 1);
+
+            // Process in batches of optimal size
+            int batchSize = Math.Min(20, Math.Max(1, totalSlices / maxThreads));
+
+            for (int batchStart = 0; batchStart < totalSlices; batchStart += batchSize)
+            {
+                int currentBatchSize = Math.Min(batchSize, totalSlices - batchStart);
+                int batchEnd = batchStart + currentBatchSize;
+
+                // Process each slice in this batch in parallel
+                Parallel.For(batchStart, batchEnd, new ParallelOptions { MaxDegreeOfParallelism = maxThreads }, z =>
+                {
+                    try
+                    {
+                        using (var bitmap = new Bitmap(slicePaths[z]))
+                        {
+                            // Process each pixel in the slice
+                            for (int y = 0; y < volume.Height; y++)
+                            {
+                                for (int x = 0; x < volume.Width; x++)
+                                {
+                                    Color c = bitmap.GetPixel(x, y);
+                                    byte grayValue = (byte)((c.R + c.G + c.B) / 3);
+                                    volume[x, y, z] = grayValue;
+                                }
+                            }
+                        }
+
+                        // Update progress
+                        int current = Interlocked.Increment(ref processedCount);
+                        progress?.SafeUpdateProgress(current, totalSlices);
+                    }
+                    catch (Exception ex)
+                    {
+                        exceptions.Enqueue(new Exception($"Error on slice {z}: {ex.Message}", ex));
+                    }
+                });
+
+                // Allow cleanup between batches
+                GC.Collect(0);
+            }
+
+            if (!exceptions.IsEmpty)
+            {
+                throw new AggregateException("Errors processing slices:", exceptions);
+            }
+        }
+
+        /// <summary>
+        /// Writes a buffer of pixel data to a slice in the volume
+        /// </summary>
+        private static void WriteBufferToVolume(ChunkedVolume volume, byte[] buffer, int z)
+        {
+            int width = volume.Width;
+            int height = volume.Height;
+
+            // Write pixels to volume slice
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    byte value = buffer[y * width + x];
+                    volume[x, y, z] = value;
+                }
+            }
+        }
+        /// <summary>
+        /// Fast bitmap loading optimized for performance
+        /// </summary>
+        private static Bitmap LoadBitmapOptimized(string filePath)
+        {
+            // Create stream and load bitmap
+            using (FileStream fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                // Load directly from stream for better performance
+                return new Bitmap(fs);
+            }
+        }
+
+        /// <summary>
+        /// Extracts grayscale pixels directly to a buffer without using lock/unlock
+        /// </summary>
+        private static unsafe void ExtractGrayscalePixels(Bitmap bitmap, byte[] buffer)
+        {
+            int width = bitmap.Width;
+            int height = bitmap.Height;
+
+            // Convert to correct format if needed
+            if (bitmap.PixelFormat != PixelFormat.Format24bppRgb &&
+                bitmap.PixelFormat != PixelFormat.Format32bppArgb)
+            {
+                using (Bitmap converted = new Bitmap(width, height, PixelFormat.Format24bppRgb))
+                using (Graphics g = Graphics.FromImage(converted))
+                {
+                    g.DrawImage(bitmap, 0, 0, width, height);
+                    ExtractGrayscalePixels(converted, buffer);
+                    return;
+                }
+            }
+
+            // Lock bits for faster access
+            BitmapData bmpData = bitmap.LockBits(
+                new Rectangle(0, 0, width, height),
+                ImageLockMode.ReadOnly,
+                bitmap.PixelFormat);
+
             try
             {
-                if (!_useMemoryMapping)
+                int bytesPerPixel = Image.GetPixelFormatSize(bitmap.PixelFormat) / 8;
+                int stride = bmpData.Stride;
+
+                // Use unsafe code for maximum speed
+                byte* ptr = (byte*)bmpData.Scan0.ToPointer();
+
+                // Extract pixels
+                fixed (byte* bufPtr = buffer)
                 {
-                    foreach (var chunk in _chunks)
+                    byte* destPtr = bufPtr;
+
+                    for (int y = 0; y < height; y++)
                     {
-                        bw.Write(chunk, 0, chunkSize);
+                        byte* row = ptr + (y * stride);
+
+                        for (int x = 0; x < width; x++)
+                        {
+                            // Get RGB values
+                            byte b = row[x * bytesPerPixel];
+                            byte g = row[x * bytesPerPixel + 1];
+                            byte r = row[x * bytesPerPixel + 2];
+
+                            // Calculate grayscale and store directly in buffer
+                            *destPtr++ = (byte)(0.299 * r + 0.587 * g + 0.114 * b);
+                        }
                     }
                 }
-                else
+            }
+            finally
+            {
+                // Always unlock the bitmap
+                bitmap.UnlockBits(bmpData);
+            }
+        }
+
+        /// <summary>
+        /// Optimized parallel slice processing that maintains correct slice ordering
+        /// </summary>
+        private static void ProcessSlicesParallelOptimized(ChunkedVolume volume, List<string> slicePaths, ProgressForm progress)
+        {
+            int totalSlices = slicePaths.Count;
+            int width = volume.Width;
+            int height = volume.Height;
+
+            // Use a concurrent queue to track errors
+            var exceptions = new ConcurrentQueue<Exception>();
+
+            // Track progress safely across threads
+            int processedCount = 0;
+
+            // Determine optimal batch size based on processor count
+            int processorCount = Environment.ProcessorCount;
+            int optimalBatchSize = Math.Max(1, totalSlices / (processorCount * 2));
+            int batchSize = Math.Min(20, Math.Max(1, optimalBatchSize)); // Between 1 and 20
+
+            // Store loaded slices in thread-local storage to avoid memory issues
+            ThreadLocal<byte[]> bufferCache = new ThreadLocal<byte[]>(() => new byte[width * height]);
+
+            // Process in batches to control memory usage
+            for (int batchStart = 0; batchStart < totalSlices; batchStart += batchSize)
+            {
+                int currentBatchSize = Math.Min(batchSize, totalSlices - batchStart);
+                int batchEnd = batchStart + currentBatchSize;
+
+                // Process this batch in parallel
+                Parallel.For(batchStart, batchEnd, new ParallelOptions { MaxDegreeOfParallelism = processorCount }, z =>
                 {
-                    foreach (var acc in _accessors)
+                    try
                     {
-                        byte[] buffer = new byte[chunkSize];
-                        acc.ReadArray(0, buffer, 0, chunkSize);
-                        bw.Write(buffer, 0, chunkSize);
+                        string slicePath = slicePaths[z];
+                        byte[] buffer = bufferCache.Value; // Get thread-local buffer
+
+                        // Load and process the image
+                        using (var bitmap = LoadBitmapOptimized(slicePath))
+                        {
+                            // Extract pixel data directly to the buffer
+                            ExtractGrayscalePixels(bitmap, buffer);
+
+                            // Write the buffer to the volume slice
+                            WriteBufferToVolume(volume, buffer, z);
+                        }
+
+                        // Update progress atomically
+                        int currentCount = Interlocked.Increment(ref processedCount);
+                        progress?.SafeUpdateProgress(currentCount, totalSlices);
+                    }
+                    catch (Exception ex)
+                    {
+                        exceptions.Enqueue(new Exception($"Error on slice {z}: {ex.Message}", ex));
+                    }
+                });
+
+                // Allow GC to clean up between batches
+                GC.Collect(0);
+            }
+
+            // Check for errors
+            if (!exceptions.IsEmpty)
+            {
+                throw new AggregateException("Errors processing slices:", exceptions);
+            }
+
+            // Clean up
+            bufferCache.Dispose();
+        }
+
+        /// <summary>
+        /// Process a single slice
+        /// </summary>
+        private static void ProcessSlice(ChunkedVolume volume, int z, FastBitmap fastBmp)
+        {
+            int width = fastBmp.Width;
+            int height = fastBmp.Height;
+
+            // Process in parallel for better performance
+            int maxCores = Math.Max(1, Environment.ProcessorCount / 2);
+            Parallel.For(0, height, new ParallelOptions { MaxDegreeOfParallelism = maxCores }, y =>
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    byte gray = fastBmp.GetGrayValue(x, y);
+                    volume[x, y, z] = gray;
+                }
+            });
+        }
+        /// <summary>
+        /// Converts a bitmap to 24bpp format
+        /// </summary>
+        private static Bitmap ConvertTo24bpp(Bitmap source)
+        {
+            if (source.PixelFormat == PixelFormat.Format24bppRgb)
+                return new Bitmap(source); // Return a copy if already 24bpp
+
+            Bitmap result = new Bitmap(source.Width, source.Height, PixelFormat.Format24bppRgb);
+            using (Graphics g = Graphics.FromImage(result))
+            {
+                g.DrawImage(source, 0, 0, source.Width, source.Height);
+            }
+            return result;
+        }
+        /// <summary>
+        /// Loads a bitmap from a file with proper resource handling
+        /// </summary>
+        private static Bitmap LoadBitmapFromFile(string filePath)
+        {
+            try
+            {
+                // Read the entire file into memory to avoid file locking issues
+                byte[] fileBytes = File.ReadAllBytes(filePath);
+                using (var ms = new MemoryStream(fileBytes))
+                {
+                    // Create a copy of the bitmap to avoid GDI+ issues
+                    using (var originalBmp = new Bitmap(ms))
+                    {
+                        // Return a clone to ensure we have a clean copy
+                        return new Bitmap(originalBmp);
                     }
                 }
-                Logger.Log("[WriteChunks] Volume chunks written successfully.");
             }
             catch (Exception ex)
             {
-                Logger.Log("[WriteChunks] Error: " + ex);
+                Logger.Log($"[LoadBitmapFromFile] Error loading {filePath}: {ex.Message}");
                 throw;
             }
         }
         #endregion
 
-        #region Memory Management
-        public void Dispose()
-        {
-            if (_useMemoryMapping && _accessors != null)
-            {
-                foreach (var acc in _accessors)
-                    acc.Dispose();
-                _mmf?.Dispose();
-            }
-        }
-        #endregion
-
-        #region FastBitmap Implementation
+        #region FastBitmap Helper Class
+        /// <summary>
+        /// Helper class for fast bitmap access
+        /// </summary>
         public sealed class FastBitmap : IDisposable
         {
             private readonly Bitmap _bitmap;
             private BitmapData _data;
             private byte[] _bytes;
             private bool _disposed;
-            private int _cachedWidth;
-            private int _cachedHeight;
+            private int _width;
+            private int _height;
+            private int _stride;
+            private PixelFormat _format;
 
-            public int Width => _cachedWidth;
-            public int Height => _cachedHeight;
+            public int Width => _width;
+            public int Height => _height;
 
             public FastBitmap(Bitmap bitmap)
             {
                 _bitmap = bitmap ?? throw new ArgumentNullException(nameof(bitmap));
-                if (_bitmap.PixelFormat != PixelFormat.Format24bppRgb)
-                    throw new NotSupportedException("[FastBitmap] FastBitmap requires a 24bppRgb bitmap.");
+                _width = bitmap.Width;
+                _height = bitmap.Height;
+                _format = bitmap.PixelFormat;
             }
 
             public void LockBits()
             {
-                _data = _bitmap.LockBits(new Rectangle(0, 0, _bitmap.Width, _bitmap.Height),
-                    ImageLockMode.ReadOnly, _bitmap.PixelFormat);
-                _bytes = new byte[_data.Stride * _data.Height];
+                _data = _bitmap.LockBits(
+                    new Rectangle(0, 0, _width, _height),
+                    ImageLockMode.ReadOnly,
+                    _format);
+
+                _stride = _data.Stride;
+
+                // Copy bitmap data to managed array for faster access
+                _bytes = new byte[_stride * _height];
                 System.Runtime.InteropServices.Marshal.Copy(_data.Scan0, _bytes, 0, _bytes.Length);
-                _cachedWidth = _bitmap.Width;
-                _cachedHeight = _bitmap.Height;
             }
 
             public byte GetGrayValue(int x, int y)
             {
-                if (x < 0 || x >= _cachedWidth || y < 0 || y >= _cachedHeight)
+                if (x < 0 || x >= _width || y < 0 || y >= _height)
                     throw new ArgumentOutOfRangeException($"Coordinates ({x},{y}) out of bounds.");
-                int offset = y * _data.Stride + x * 3;
-                int sum = _bytes[offset] + _bytes[offset + 1] + _bytes[offset + 2];
-                return (byte)(sum / 3);
+
+                int bytesPerPixel;
+
+                switch (_format)
+                {
+                    case PixelFormat.Format8bppIndexed:
+                        return _bytes[y * _stride + x];
+
+                    case PixelFormat.Format24bppRgb:
+                        bytesPerPixel = 3;
+                        break;
+
+                    case PixelFormat.Format32bppRgb:
+                    case PixelFormat.Format32bppArgb:
+                    case PixelFormat.Format32bppPArgb:
+                        bytesPerPixel = 4;
+                        break;
+
+                    case PixelFormat.Format16bppGrayScale:
+                        // Handle 16-bit grayscale (convert to 8-bit)
+                        int offset = y * _stride + x * 2;
+                        ushort val = BitConverter.ToUInt16(_bytes, offset);
+                        return (byte)(val >> 8); // Scale down to 8-bit
+
+                    default:
+                        // For other formats, fall back to GetPixel
+                        Color c = _bitmap.GetPixel(x, y);
+                        return (byte)((c.R + c.G + c.B) / 3);
+                }
+
+                // Calculate RGB values
+                int pixelOffset = y * _stride + x * bytesPerPixel;
+                byte b = _bytes[pixelOffset];
+                byte g = _bytes[pixelOffset + 1];
+                byte r = _bytes[pixelOffset + 2];
+
+                // Standard grayscale formula
+                return (byte)(0.299 * r + 0.587 * g + 0.114 * b);
             }
 
             public void Dispose()
             {
-                if (_disposed)
-                    return;
-                _bitmap.UnlockBits(_data);
-                _disposed = true;
+                if (!_disposed)
+                {
+                    _bitmap.UnlockBits(_data);
+                    _disposed = true;
+                }
             }
         }
         #endregion
 
-        #region ChunkIndexing
+        #region IDisposable Implementation
+        private bool _disposed = false;
 
-        public int ChunkDim => _chunkDim;
-        public int ChunkCountX => _chunkCountX;
-        public int ChunkCountY => _chunkCountY;
-        public int ChunkCountZ => _chunkCountZ;
-        public byte[] GetChunkBytes(int chunkIndex)
+        public void Dispose()
         {
-            if (!_useMemoryMapping)
-                return _chunks[chunkIndex];
-            else
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (!_disposed)
             {
-                byte[] data = new byte[_chunkDim * _chunkDim * _chunkDim];
-                _accessors[chunkIndex].ReadArray(0, data, 0, data.Length);
-                return data;
+                if (disposing)
+                {
+                    try
+                    {
+                        // Clean up managed resources
+                        if (_viewAccessor != null)
+                        {
+                            _viewAccessor.Dispose();
+                            _viewAccessor = null;
+                        }
+
+                        if (_mmf != null)
+                        {
+                            _mmf.Dispose();
+                            _mmf = null;
+                        }
+
+                        // Help GC with large arrays
+                        if (_chunks != null)
+                        {
+                            for (int i = 0; i < _chunks.Length; i++)
+                            {
+                                _chunks[i] = null;
+                            }
+                            _chunks = null;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[ChunkedVolume] Error during disposal: {ex.Message}");
+                    }
+                }
+
+                _disposed = true;
             }
         }
-        public int GetChunkIndex(int cx, int cy, int cz)
-        {
-            return (cz * _chunkCountY + cy) * _chunkCountX + cx;
-        }
 
+        ~ChunkedVolume()
+        {
+            Dispose(false);
+        }
         #endregion
     }
 }

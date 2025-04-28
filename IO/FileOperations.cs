@@ -9,20 +9,29 @@ using System.Threading.Tasks;
 
 namespace CTSegmenter
 {
+    /// <summary>
+    /// Provides file operations for CT datasets including loading, saving, and exporting volumes
+    /// </summary>
     public static class FileOperations
     {
         // Constants
         public const int CHUNK_DIM = 256;
 
         #region Volume and Label Loading
-
         /// <summary>
         /// Loads a dataset from a folder or file path
         /// </summary>
         public static async Task<(IGrayscaleVolumeData volumeData, ILabelVolumeData volumeLabels, int width, int height, int depth, double pixelSize)>
             LoadDatasetAsync(string path, bool useMemoryMapping, double pixelSize, int binningFactor, IProgress<int> progress)
         {
+            // Log the input path and convert to absolute path immediately to avoid path resolution issues
             Logger.Log($"[FileOperations] Loading dataset from path: {path}");
+            string absolutePath = Path.GetFullPath(path);
+            Logger.Log($"[FileOperations] Absolute path resolved to: {absolutePath}");
+            Logger.Log($"[FileOperations] Current working directory: {Directory.GetCurrentDirectory()}");
+
+            // Use the absolute path from now on
+            path = absolutePath;
 
             IGrayscaleVolumeData volumeData = null;
             ILabelVolumeData volumeLabels = null;
@@ -39,47 +48,159 @@ namespace CTSegmenter
                 string labelsBinPath = Path.Combine(path, "labels.bin");
                 string volumeChkPath = Path.Combine(path, "volume.chk");
 
-                // Check if binary files need to be generated from folder images
-                if (!File.Exists(volumeBinPath) || !File.Exists(labelsBinPath) || !File.Exists(volumeChkPath))
+                // Log the exact paths for debugging
+                Logger.Log($"[FileOperations] Volume bin path: {volumeBinPath}");
+                Logger.Log($"[FileOperations] Labels bin path: {labelsBinPath}");
+                Logger.Log($"[FileOperations] Volume chk path: {volumeChkPath}");
+
+                bool volumeExists = File.Exists(volumeBinPath);
+                bool labelsExist = File.Exists(labelsBinPath);
+                bool chkExists = File.Exists(volumeChkPath);
+
+                // Track if we need to generate anything
+                bool needToGenerateVolume = !volumeExists || !chkExists;
+                bool needToGenerateLabels = !labelsExist;
+
+                // Load or create volume data
+                if (needToGenerateVolume)
                 {
                     Logger.Log("[FileOperations] Binary files missing. Generating volume.bin from folder images.");
-                    volumeData = ChunkedVolume.FromFolder(path, CHUNK_DIM, (ProgressForm)progress, useMemoryMapping);
-                    width = volumeData.Width;
-                    height = volumeData.Height;
-                    depth = volumeData.Depth;
 
-                    Logger.Log($"[FileOperations] Created original volume: {width}x{height}x{depth}");
-                    CreateVolumeChk(path, width, height, depth, CHUNK_DIM, pixelSize);
+                    // Force garbage collection before opening new files
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
 
-                    if (!File.Exists(labelsBinPath))
+                    try
                     {
-                        CreateBlankLabelsFile(labelsBinPath, width, height, depth, CHUNK_DIM);
-                    }
+                        // Generate the volume directly with memory mapping (if requested)
+                        volumeData = ChunkedVolume.FromFolder(path, CHUNK_DIM, (ProgressForm)progress, useMemoryMapping);
+                        width = volumeData.Width;
+                        height = volumeData.Height;
+                        depth = volumeData.Depth;
 
-                    volumeData.Dispose();
-                    volumeData = null;
+                        Logger.Log($"[FileOperations] Created original volume: {width}x{height}x{depth}");
+
+                        // Create the header file if it doesn't exist
+                        if (!chkExists)
+                        {
+                            CreateVolumeChk(path, width, height, depth, CHUNK_DIM, pixelSize);
+                        }
+
+                        // If we're using memory mapping, we need to close and reopen the file
+                        if (useMemoryMapping)
+                        {
+                            // Dispose the volume to release file handles
+                            volumeData.Dispose();
+                            volumeData = null;
+
+                            // Force garbage collection to release file locks
+                            GC.Collect();
+                            GC.WaitForPendingFinalizers();
+
+                            // Wait a moment to ensure OS file operations complete
+                            await Task.Delay(500);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[FileOperations] Error generating volume: {ex.Message}");
+                        // Clean up resources
+                        if (volumeData != null)
+                        {
+                            volumeData.Dispose();
+                            volumeData = null;
+                        }
+                        throw;
+                    }
+                }
+                else if (chkExists && !volumeExists)
+                {
+                    // We have a header but no volume
+                    Logger.Log("[FileOperations] Found volume.chk but volume.bin is missing. Reading dimensions from header.");
+                    var header = ReadVolumeChk(path);
+                    width = header.volWidth;
+                    height = header.volHeight;
+                    depth = header.volDepth;
+                    pixelSize = header.pixelSize;
+                }
+
+                // Create labels file if needed
+                if (needToGenerateLabels && width > 0 && height > 0 && depth > 0)
+                {
+                    Logger.Log("[FileOperations] Labels file not found. Creating blank labels file.");
+                    CreateBlankLabelsFile(labelsBinPath, width, height, depth, CHUNK_DIM);
                 }
 
                 // --- BINNING Branch ---
                 if (binningFactor > 1)
                 {
+                    // Close any open files before binning
+                    if (volumeData != null)
+                    {
+                        volumeData.Dispose();
+                        volumeData = null;
+                    }
+
+                    if (volumeLabels != null)
+                    {
+                        volumeLabels.Dispose();
+                        volumeLabels = null;
+                    }
+
+                    // Force garbage collection before binning
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+
                     string backupVolPath = Path.Combine(path, "temp_volume.bin");
                     Logger.Log($"[FileOperations] Creating backup copy of volume.bin: {backupVolPath}");
                     File.Copy(volumeBinPath, backupVolPath, true);
 
                     Logger.Log($"[FileOperations] Running binning process with factor {binningFactor}...");
-                    await Binning.ProcessBinningAsync(path, binningFactor, (float)pixelSize, useMemoryMapping);
-                    Logger.Log("[FileOperations] Binning complete. Loading binned volume.");
+                    await ProcessBinningAsync(path, binningFactor, (float)pixelSize, useMemoryMapping);
+                    Logger.Log("[FileOperations] Binning complete.");
+
+                    // Force another GC after binning
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+
+                    // Wait a moment to ensure OS file operations complete
+                    await Task.Delay(500);
                 }
 
-                // Load volume.bin
+                // Now load the volume and labels files
                 if (File.Exists(volumeBinPath))
                 {
-                    volumeData = LoadVolumeBin(volumeBinPath, useMemoryMapping);
-                    width = volumeData.Width;
-                    height = volumeData.Height;
-                    depth = volumeData.Depth;
-                    Logger.Log($"[FileOperations] Loaded volume: {width}x{height}x{depth}");
+                    try
+                    {
+                        Logger.Log("[FileOperations] Loading volume.bin...");
+                        volumeData = LoadVolumeBin(volumeBinPath, useMemoryMapping);
+                        width = volumeData.Width;
+                        height = volumeData.Height;
+                        depth = volumeData.Depth;
+                        Logger.Log($"[FileOperations] Loaded volume: {width}x{height}x{depth}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[FileOperations] Error loading volume.bin: {ex.Message}");
+
+                        // Try waiting and retrying once
+                        await Task.Delay(1000);
+                        Logger.Log("[FileOperations] Retrying after short delay...");
+
+                        try
+                        {
+                            volumeData = LoadVolumeBin(volumeBinPath, useMemoryMapping);
+                            width = volumeData.Width;
+                            height = volumeData.Height;
+                            depth = volumeData.Depth;
+                            Logger.Log($"[FileOperations] Retry succeeded, loaded volume: {width}x{height}x{depth}");
+                        }
+                        catch (Exception retryEx)
+                        {
+                            Logger.Log($"[FileOperations] Retry failed: {retryEx.Message}");
+                            throw;
+                        }
+                    }
                 }
 
                 // Load labels.bin
@@ -89,20 +210,59 @@ namespace CTSegmenter
                     try
                     {
                         volumeLabels = LoadLabelsBin(labelsBinPath, useMemoryMapping);
+                        if (volumeLabels != null)
+                        {
+                            Logger.Log($"[FileOperations] Loaded labels: {volumeLabels.Width}x{volumeLabels.Height}x{volumeLabels.Depth}");
+                        }
                     }
                     catch (Exception ex)
                     {
                         Logger.Log("[FileOperations] Error loading labels.bin: " + ex.Message + ". Recreating blank labels file.");
-                        CreateBlankLabelsFile(labelsBinPath, width, height, depth, CHUNK_DIM);
-                        volumeLabels = LoadLabelsBin(labelsBinPath, useMemoryMapping);
-                        Logger.Log("[FileOperations] Reloaded new labels.bin.");
+
+                        // Close file handles and force GC
+                        if (volumeLabels != null)
+                        {
+                            volumeLabels.Dispose();
+                            volumeLabels = null;
+                        }
+
+                        GC.Collect();
+                        GC.WaitForPendingFinalizers();
+                        await Task.Delay(500);
+
+                        // Try to create a new blank labels file
+                        try
+                        {
+                            File.Delete(labelsBinPath);
+                            CreateBlankLabelsFile(labelsBinPath, width, height, depth, CHUNK_DIM);
+                            volumeLabels = LoadLabelsBin(labelsBinPath, useMemoryMapping);
+                            Logger.Log("[FileOperations] Reloaded new labels.bin.");
+                        }
+                        catch (Exception retryEx)
+                        {
+                            Logger.Log($"[FileOperations] Failed to create new labels file: {retryEx.Message}");
+                            throw;
+                        }
                     }
                 }
-                else
+                else if (width > 0 && height > 0 && depth > 0)
                 {
-                    Logger.Log("[FileOperations] labels.bin not found. Creating blank labels file.");
+                    Logger.Log("[FileOperations] labels.bin not found. Creating and loading blank labels file.");
                     CreateBlankLabelsFile(labelsBinPath, width, height, depth, CHUNK_DIM);
-                    volumeLabels = LoadLabelsBin(labelsBinPath, useMemoryMapping);
+
+                    // Wait a moment for file operations to complete
+                    await Task.Delay(500);
+
+                    try
+                    {
+                        volumeLabels = LoadLabelsBin(labelsBinPath, useMemoryMapping);
+                        Logger.Log("[FileOperations] Successfully loaded new labels file.");
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[FileOperations] Error loading newly created labels file: {ex.Message}");
+                        throw;
+                    }
                 }
             }
             // --- FILE MODE ---
@@ -110,6 +270,8 @@ namespace CTSegmenter
             {
                 string fileName = Path.GetFileName(path).ToLower();
                 string baseFolder = Path.GetDirectoryName(path);
+
+                Logger.Log($"[FileOperations] File mode detected. Loading file: {fileName} from folder: {baseFolder}");
 
                 // Case: Volume file (volume.bin) only
                 if (fileName.Contains("volume") && !fileName.Contains("labels"))
@@ -141,6 +303,8 @@ namespace CTSegmenter
                         else
                         {
                             CreateBlankLabelsFile(labelsPath, width, height, depth, CHUNK_DIM);
+                            // Wait briefly for file operations to complete
+                            await Task.Delay(500);
                             volumeLabels = LoadLabelsBin(labelsPath, useMemoryMapping);
                         }
                     }
@@ -180,70 +344,363 @@ namespace CTSegmenter
         }
 
         /// <summary>
-        /// Loads a volume from a binary file with header
+        /// Loads a volume from a binary file with robust header validation and corruption handling
         /// </summary>
         public static IGrayscaleVolumeData LoadVolumeBin(string path, bool useMM)
         {
-            int volWidth, volHeight, volDepth, chunkDim, cntX, cntY, cntZ;
-            using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-            using (BinaryReader br = new BinaryReader(fs))
+            // Log the absolute path to identify the exact file being loaded
+            string absolutePath = Path.GetFullPath(path);
+            Logger.Log($"[LoadVolumeBin] Loading volume from absolute path: {absolutePath}");
+
+            // First, check if we have a volume.chk file in the same directory
+            string folderPath = Path.GetDirectoryName(absolutePath);
+            string chkPath = Path.Combine(folderPath, "volume.chk");
+
+            int volWidth = 0, volHeight = 0, volDepth = 0, chunkDim = 0;
+            bool useBackupDimensions = false;
+
+            // Try to read dimensions from volume.chk as a backup
+            if (File.Exists(chkPath))
             {
-                volWidth = br.ReadInt32();
-                volHeight = br.ReadInt32();
-                volDepth = br.ReadInt32();
-                chunkDim = br.ReadInt32();
-                cntX = br.ReadInt32();
-                cntY = br.ReadInt32();
-                cntZ = br.ReadInt32();
+                try
+                {
+                    var header = ReadVolumeChk(folderPath);
+                    Logger.Log($"[LoadVolumeBin] Found volume.chk with dimensions: {header.volWidth}x{header.volHeight}x{header.volDepth}, chunkDim={header.chunkDim}");
+
+                    // Store these in case we need to fall back to them
+                    volWidth = header.volWidth;
+                    volHeight = header.volHeight;
+                    volDepth = header.volDepth;
+                    chunkDim = header.chunkDim;
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[LoadVolumeBin] Warning: Could not read volume.chk: {ex.Message}");
+                }
             }
 
-            int headerSize = 7 * sizeof(int);
-            long chunkSize = (long)chunkDim * chunkDim * chunkDim;
+            // Try to read the dimensions from the bin file
+            int binWidth = 0, binHeight = 0, binDepth = 0, binChunkDim = 0;
+            int bitsPerPixel = 8;
+            double pixelSize = 1e-6;
+            int headerSize = 36; // 9 ints (36 bytes)
+
+            try
+            {
+                // Read header with FileShare.ReadWrite to avoid file locking issues
+                using (FileStream fs = new FileStream(absolutePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (BinaryReader br = new BinaryReader(fs))
+                {
+                    // Verify file is at least large enough to contain a header
+                    if (fs.Length < 7 * sizeof(int))
+                    {
+                        Logger.Log("[LoadVolumeBin] File too small for header, using backup dimensions");
+                        useBackupDimensions = true;
+                    }
+                    else
+                    {
+                        // Read header values
+                        binWidth = br.ReadInt32();
+                        binHeight = br.ReadInt32();
+                        binDepth = br.ReadInt32();
+                        binChunkDim = br.ReadInt32();
+
+                        // Try to read bits per pixel and pixel size if available
+                        try
+                        {
+                            bitsPerPixel = br.ReadInt32();
+                            pixelSize = br.ReadDouble();
+                        }
+                        catch
+                        {
+                            // Use defaults if not available
+                            Logger.Log("[LoadVolumeBin] Header doesn't include bitsPerPixel/pixelSize. Using defaults.");
+                        }
+
+                        // Skip over the (potentially corrupt) chunk counts
+                        try { br.ReadInt32(); br.ReadInt32(); br.ReadInt32(); } catch { }
+
+                        // Check if dimensions seem reasonable (between 1 and 10000)
+                        const int MAX_DIM = 10000;
+                        if (binWidth <= 0 || binWidth > MAX_DIM ||
+                            binHeight <= 0 || binHeight > MAX_DIM ||
+                            binDepth <= 0 || binDepth > MAX_DIM ||
+                            binChunkDim <= 0 || binChunkDim > 1024)
+                        {
+                            Logger.Log($"[LoadVolumeBin] Invalid dimensions detected in bin file: {binWidth}x{binHeight}x{binDepth}, chunkDim={binChunkDim}");
+                            useBackupDimensions = true;
+                        }
+                        else
+                        {
+                            // Bin file dimensions look good
+                            Logger.Log($"[LoadVolumeBin] Valid dimensions from bin file: {binWidth}x{binHeight}x{binDepth}, chunkDim={binChunkDim}");
+
+                            // Use the bin file dimensions
+                            volWidth = binWidth;
+                            volHeight = binHeight;
+                            volDepth = binDepth;
+                            chunkDim = binChunkDim;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[LoadVolumeBin] Error reading header from bin file: {ex.Message}");
+                useBackupDimensions = true;
+            }
+
+            // If we couldn't get valid dimensions from the bin file and have no backup, fail
+            if (useBackupDimensions && (volWidth <= 0 || volHeight <= 0 || volDepth <= 0 || chunkDim <= 0))
+            {
+                throw new InvalidDataException("Could not determine volume dimensions from either bin file or chk file");
+            }
+
+            // Calculate chunk counts correctly
+            int cntX = (volWidth + chunkDim - 1) / chunkDim;
+            int cntY = (volHeight + chunkDim - 1) / chunkDim;
+            int cntZ = (volDepth + chunkDim - 1) / chunkDim;
             int totalChunks = cntX * cntY * cntZ;
-            long expectedSize = headerSize + totalChunks * chunkSize;
-            long fileSize = new FileInfo(path).Length;
 
-            if (fileSize < expectedSize)
-                throw new Exception($"volume.bin file is incomplete: expected {expectedSize} bytes but got {fileSize} bytes.");
+            Logger.Log($"[LoadVolumeBin] Using dimensions: {volWidth}x{volHeight}x{volDepth}, chunkDim={chunkDim}, chunks={cntX}x{cntY}x{cntZ}");
 
-            MemoryMappedFile mmf = MemoryMappedFile.CreateFromFile(path, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
-            MemoryMappedViewAccessor[] accessors = new MemoryMappedViewAccessor[totalChunks];
-
-            for (int i = 0; i < totalChunks; i++)
+            // Now that we have valid dimensions, create the appropriate volume
+            if (!useMM)
             {
-                long offset = headerSize + i * chunkSize;
-                accessors[i] = mmf.CreateViewAccessor(offset, chunkSize, MemoryMappedFileAccess.Read);
+                // Create in-memory volume
+                ChunkedVolume volume = new ChunkedVolume(volWidth, volHeight, volDepth, chunkDim);
+
+                // Load data from file into memory chunks
+                try
+                {
+                    using (FileStream fs = new FileStream(absolutePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    {
+                        // Skip header
+                        fs.Seek(headerSize, SeekOrigin.Begin);
+
+                        // Read chunk by chunk
+                        long chunkSize = (long)chunkDim * chunkDim * chunkDim;
+                        byte[] buffer = new byte[chunkSize];
+
+                        for (int i = 0; i < totalChunks; i++)
+                        {
+                            int bytesRead = fs.Read(buffer, 0, (int)chunkSize);
+                            if (bytesRead == chunkSize)
+                            {
+                                volume.Chunks[i] = (byte[])buffer.Clone();
+                            }
+                            else
+                            {
+                                // Handle partial or no read by creating a blank chunk
+                                byte[] chunkData = new byte[chunkSize];
+                                Array.Copy(buffer, chunkData, Math.Max(0, bytesRead));
+                                volume.Chunks[i] = chunkData;
+                                Logger.Log($"[LoadVolumeBin] Warning: Chunk {i} incomplete, read {bytesRead}/{chunkSize} bytes");
+                            }
+                        }
+                    }
+
+                    return volume;
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[LoadVolumeBin] Error loading volume data: {ex.Message}");
+                    throw;
+                }
             }
+            else
+            {
+                // For memory mapping, implement a robust retry mechanism
+                MemoryMappedFile mmf = null;
+                MemoryMappedViewAccessor viewAccessor = null;
 
-            return new ChunkedVolume(volWidth, volHeight, volDepth, chunkDim, mmf, accessors);
+                try
+                {
+                    // Close any existing file handles and force GC
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+
+                    // Generate a unique mapping name
+                    string mapName = $"CTSegmenter_Volume_{Guid.NewGuid()}";
+
+                    // Implement retry logic with exponential backoff
+                    int maxRetries = 5;
+                    for (int retry = 0; retry < maxRetries; retry++)
+                    {
+                        try
+                        {
+                            Logger.Log($"[LoadVolumeBin] Attempt {retry + 1} to create memory-mapped file");
+
+                            // Wait between retries with increasing delay
+                            if (retry > 0)
+                            {
+                                int delay = 200 * (int)Math.Pow(2, retry - 1);
+                                System.Threading.Thread.Sleep(delay);
+
+                                // Force GC again
+                                GC.Collect();
+                                GC.WaitForPendingFinalizers();
+                            }
+
+                            mmf = MemoryMappedFile.CreateFromFile(
+                                absolutePath,
+                                FileMode.Open,
+                                mapName,
+                                0, // Use file size
+                                MemoryMappedFileAccess.ReadWrite);
+
+                            viewAccessor = mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.ReadWrite);
+
+                            Logger.Log("[LoadVolumeBin] Successfully created memory-mapped file");
+                            break;
+                        }
+                        catch (Exception ex)
+                        {
+                            // Clean up resources from failed attempt
+                            viewAccessor?.Dispose();
+                            viewAccessor = null;
+                            mmf?.Dispose();
+                            mmf = null;
+
+                            Logger.Log($"[LoadVolumeBin] Attempt {retry + 1} failed: {ex.Message}");
+
+                            // Throw on last attempt
+                            if (retry == maxRetries - 1)
+                                throw;
+                        }
+                    }
+
+                    // Create the chunked volume
+                    Logger.Log($"[LoadVolumeBin] Creating memory-mapped volume with {totalChunks} chunks");
+                    return new ChunkedVolume(volWidth, volHeight, volDepth, chunkDim, mmf, viewAccessor, headerSize);
+                }
+                catch (Exception ex)
+                {
+                    // Clean up resources
+                    viewAccessor?.Dispose();
+                    mmf?.Dispose();
+
+                    Logger.Log($"[LoadVolumeBin] Memory mapping failed: {ex.Message}");
+                    throw;
+                }
+            }
         }
-
         /// <summary>
         /// Loads a volume from a raw binary file without header
         /// </summary>
         public static IGrayscaleVolumeData LoadVolumeBinRaw(string path, bool useMM, int volWidth, int volHeight, int volDepth, int chunkDim)
         {
-            int cntX = (volWidth + chunkDim - 1) / chunkDim;
-            int cntY = (volHeight + chunkDim - 1) / chunkDim;
-            int cntZ = (volDepth + chunkDim - 1) / chunkDim;
-            int totalChunks = cntX * cntY * cntZ;
-            long chunkSize = (long)chunkDim * chunkDim * chunkDim;
-            long expectedSize = totalChunks * chunkSize;
-            long fileSize = new FileInfo(path).Length;
-
-            if (fileSize != expectedSize)
-                throw new Exception($"Raw volume.bin file size mismatch: expected {expectedSize} bytes but got {fileSize} bytes.");
-
-            MemoryMappedFile mmf = MemoryMappedFile.CreateFromFile(path, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
-            MemoryMappedViewAccessor[] accessors = new MemoryMappedViewAccessor[totalChunks];
-
-            for (int i = 0; i < totalChunks; i++)
+            try
             {
-                long offset = i * chunkSize;
-                accessors[i] = mmf.CreateViewAccessor(offset, chunkSize, MemoryMappedFileAccess.Read);
-            }
+                // Get file size and validate it
+                int cntX = (volWidth + chunkDim - 1) / chunkDim;
+                int cntY = (volHeight + chunkDim - 1) / chunkDim;
+                int cntZ = (volDepth + chunkDim - 1) / chunkDim;
+                int totalChunks = cntX * cntY * cntZ;
+                long chunkSize = (long)chunkDim * chunkDim * chunkDim;
+                long dataSize = totalChunks * chunkSize;
+                int headerSize = 36; // 9 ints (36 bytes)
 
-            return new ChunkedVolume(volWidth, volHeight, volDepth, chunkDim, mmf, accessors);
+                // Get file information
+                FileInfo fileInfo = new FileInfo(path);
+                long fileSize = fileInfo.Length;
+
+                // Determine if file has a header and set the data offset
+                bool hasHeader = false;
+                long dataOffset = 0;
+
+                if (fileSize == dataSize)
+                {
+                    Logger.Log("[LoadVolumeBinRaw] File appears to be raw data with no header");
+                    hasHeader = false;
+                    dataOffset = 0;
+                }
+                else if (fileSize == dataSize + headerSize)
+                {
+                    Logger.Log("[LoadVolumeBinRaw] File appears to include a 36-byte header");
+                    hasHeader = true;
+                    dataOffset = headerSize;
+                }
+                else
+                {
+                    throw new Exception($"Volume file size mismatch: expected {dataSize:N0} or {dataSize + headerSize:N0} bytes but got {fileSize:N0} bytes");
+                }
+
+                // Log what we're doing
+                Logger.Log($"[LoadVolumeBinRaw] Loading volume: {volWidth}x{volHeight}x{volDepth}, chunkDim={chunkDim}");
+                Logger.Log($"[LoadVolumeBinRaw] File: {path}, size: {fileSize:N0} bytes, {(hasHeader ? "with header" : "no header")}");
+
+                // Implement retry mechanism with exponential back-off
+                MemoryMappedFile mmf = null;
+                MemoryMappedViewAccessor viewAccessor = null;
+
+                int maxRetries = 5;
+                for (int retry = 0; retry < maxRetries; retry++)
+                {
+                    try
+                    {
+                        // Generate a unique mapping name to avoid conflicts
+                        string mapName = $"CTSegmenter_RawVolume_{Guid.NewGuid()}";
+
+                        // Force GC to release any lingering handles
+                        if (retry > 0)
+                        {
+                            GC.Collect();
+                            GC.WaitForPendingFinalizers();
+                        }
+
+                        // Try to open the memory-mapped file
+                        mmf = MemoryMappedFile.CreateFromFile(
+                            path,
+                            FileMode.Open,
+                            mapName,
+                            0,  // Use file size
+                            MemoryMappedFileAccess.ReadWrite);
+
+                        // Create a single view accessor for the entire file
+                        viewAccessor = mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.ReadWrite);
+
+                        Logger.Log($"[LoadVolumeBinRaw] Successfully created memory-mapped file on attempt {retry + 1}");
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        // Clean up any partial resources
+                        if (viewAccessor != null)
+                        {
+                            viewAccessor.Dispose();
+                            viewAccessor = null;
+                        }
+
+                        if (mmf != null)
+                        {
+                            mmf.Dispose();
+                            mmf = null;
+                        }
+
+                        // Log the error
+                        Logger.Log($"[LoadVolumeBinRaw] Attempt {retry + 1} failed: {ex.Message}");
+
+                        // On last retry, throw the exception
+                        if (retry == maxRetries - 1)
+                        {
+                            throw new IOException($"Failed to create memory-mapped file after {maxRetries} attempts: {ex.Message}", ex);
+                        }
+
+                        // Wait before retrying with exponential back-off
+                        int delay = (int)Math.Pow(2, retry) * 100;
+                        System.Threading.Thread.Sleep(delay);
+                    }
+                }
+
+                // Create and return the ChunkedVolume with the correct data offset
+                return new ChunkedVolume(volWidth, volHeight, volDepth, chunkDim, mmf, viewAccessor, dataOffset);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[LoadVolumeBinRaw] Error: {ex.Message}");
+                throw;
+            }
         }
 
         /// <summary>
@@ -365,26 +822,178 @@ namespace CTSegmenter
             return (volumeData, volumeLabels, width, height, depth, pixelSize);
         }
 
-        #endregion Volume and Label Loading
+        /// <summary>
+        /// Process binning on a volume to reduce its size
+        /// </summary>
+        public static async Task ProcessBinningAsync(string path, int binFactor, float pixelSize, bool useMemoryMapping)
+        {
+            try
+            {
+                // Load the source volume 
+                string volumeBinPath = Path.Combine(path, "volume.bin");
+                if (!File.Exists(volumeBinPath))
+                    throw new FileNotFoundException("Cannot find volume.bin for binning");
+
+                // Read size info from the header only
+                int sourceWidth, sourceHeight, sourceDepth, chunkDim;
+
+                using (FileStream fs = new FileStream(volumeBinPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                using (BinaryReader br = new BinaryReader(fs))
+                {
+                    sourceWidth = br.ReadInt32();
+                    sourceHeight = br.ReadInt32();
+                    sourceDepth = br.ReadInt32();
+                    chunkDim = br.ReadInt32();
+                }
+
+                // Calculate new dimensions
+                int newWidth = sourceWidth / binFactor;
+                int newHeight = sourceHeight / binFactor;
+                int newDepth = sourceDepth / binFactor;
+
+                Logger.Log($"[ProcessBinningAsync] Binning {sourceWidth}x{sourceHeight}x{sourceDepth} " +
+                          $"to {newWidth}x{newHeight}x{newDepth} with factor {binFactor}");
+
+                // Ensure minimum size
+                if (newWidth <= 0 || newHeight <= 0 || newDepth <= 0)
+                    throw new ArgumentException("Binning factor too large for volume dimensions");
+
+                // Create a new volume for the binned data
+                string binnedPath = Path.Combine(path, "binned_volume.bin");
+
+                // Create the binned volume and save it
+                await Task.Run(() =>
+                {
+                    // Load the source volume (must be in memory for efficient processing)
+                    IGrayscaleVolumeData sourceVolume = LoadVolumeBin(volumeBinPath, false);
+
+                    // Create a new volume for the binned data
+                    ChunkedVolume binnedVolume = new ChunkedVolume(newWidth, newHeight, newDepth, chunkDim);
+
+                    // Process the binning in chunks to avoid excessive memory usage
+                    Parallel.For(0, newDepth, z =>
+                    {
+                        for (int y = 0; y < newHeight; y++)
+                        {
+                            for (int x = 0; x < newWidth; x++)
+                            {
+                                long sum = 0;
+                                int count = 0;
+
+                                // Sum the values in the bin
+                                for (int bz = 0; bz < binFactor; bz++)
+                                {
+                                    int srcZ = z * binFactor + bz;
+                                    if (srcZ >= sourceDepth) continue;
+
+                                    for (int by = 0; by < binFactor; by++)
+                                    {
+                                        int srcY = y * binFactor + by;
+                                        if (srcY >= sourceHeight) continue;
+
+                                        for (int bx = 0; bx < binFactor; bx++)
+                                        {
+                                            int srcX = x * binFactor + bx;
+                                            if (srcX >= sourceWidth) continue;
+
+                                            sum += sourceVolume[srcX, srcY, srcZ];
+                                            count++;
+                                        }
+                                    }
+                                }
+
+                                // Calculate average
+                                byte value = count > 0 ? (byte)(sum / count) : (byte)0;
+                                binnedVolume[x, y, z] = value;
+                            }
+                        }
+                    });
+
+                    // Save the binned volume
+                    binnedVolume.SaveAsBin(binnedPath);
+
+                    // Clean up
+                    sourceVolume.Dispose();
+                    binnedVolume.Dispose();
+                });
+
+                // Replace the original volume with the binned one
+                File.Delete(volumeBinPath);
+                File.Move(binnedPath, volumeBinPath);
+
+                // Update the header file
+                CreateVolumeChk(path, newWidth, newHeight, newDepth, chunkDim, pixelSize * binFactor);
+
+                Logger.Log("[ProcessBinningAsync] Binning completed successfully");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ProcessBinningAsync] Error: {ex.Message}");
+                throw;
+            }
+        }
+        #endregion
 
         #region Header Files Operations
-
         /// <summary>
         /// Creates a volume.chk file containing metadata about the volume
         /// </summary>
         public static void CreateVolumeChk(string folder, int volWidth, int volHeight, int volDepth, int chunkDim, double pixelSize)
         {
+            // Validate input parameters
+            if (string.IsNullOrEmpty(folder))
+                throw new ArgumentException("Folder path cannot be null or empty", nameof(folder));
+
+            if (!Directory.Exists(folder))
+                throw new DirectoryNotFoundException($"Directory not found: {folder}");
+
+            if (volWidth <= 0 || volHeight <= 0 || volDepth <= 0)
+                throw new ArgumentException($"Invalid volume dimensions: {volWidth}x{volHeight}x{volDepth}");
+
+            if (chunkDim <= 0)
+                throw new ArgumentException($"Invalid chunk dimension: {chunkDim}");
+
+            if (pixelSize <= 0)
+                throw new ArgumentException($"Invalid pixel size: {pixelSize}");
+
             string chkPath = Path.Combine(folder, "volume.chk");
-            using (FileStream fs = new FileStream(chkPath, FileMode.Create, FileAccess.Write))
-            using (BinaryWriter bw = new BinaryWriter(fs))
+            string absolutePath = Path.GetFullPath(chkPath);
+
+            Logger.Log($"[CreateVolumeChk] Creating header file at {absolutePath}");
+            Logger.Log($"[CreateVolumeChk] Parameters: {volWidth}x{volHeight}x{volDepth}, chunkDim={chunkDim}, pixelSize={pixelSize}");
+
+            try
             {
-                bw.Write(volWidth);
-                bw.Write(volHeight);
-                bw.Write(volDepth);
-                bw.Write(chunkDim);
-                bw.Write(pixelSize); // Store pixel size
+                // Ensure the directory exists
+                Directory.CreateDirectory(Path.GetDirectoryName(absolutePath));
+
+                using (FileStream fs = new FileStream(absolutePath, FileMode.Create, FileAccess.Write))
+                using (BinaryWriter bw = new BinaryWriter(fs))
+                {
+                    bw.Write(volWidth);
+                    bw.Write(volHeight);
+                    bw.Write(volDepth);
+                    bw.Write(chunkDim);
+                    bw.Write(pixelSize); // Store pixel size
+
+                    // Ensure all data is written to disk
+                    fs.Flush(true);
+                }
+
+                // Verify the file was created successfully
+                FileInfo fileInfo = new FileInfo(absolutePath);
+                if (!fileInfo.Exists || fileInfo.Length < sizeof(int) * 4 + sizeof(double))
+                {
+                    throw new IOException($"Failed to create valid header file: {absolutePath}");
+                }
+
+                Logger.Log($"[CreateVolumeChk] Header file created successfully: {fileInfo.Length} bytes");
             }
-            Logger.Log($"[FileOperations] Created header file at {chkPath} with pixel size {pixelSize}");
+            catch (Exception ex)
+            {
+                Logger.Log($"[CreateVolumeChk] Error creating header file: {ex.Message}");
+                throw new IOException($"Failed to create volume.chk file: {ex.Message}", ex);
+            }
         }
 
         /// <summary>
@@ -393,18 +1002,83 @@ namespace CTSegmenter
         public static (int volWidth, int volHeight, int volDepth, int chunkDim, double pixelSize) ReadVolumeChk(string folder)
         {
             string chkPath = Path.Combine(folder, "volume.chk");
-            if (!File.Exists(chkPath))
-                throw new Exception("Volume header file (volume.chk) not found.");
+            string absolutePath = Path.GetFullPath(chkPath);
 
-            using (FileStream fs = new FileStream(chkPath, FileMode.Open, FileAccess.Read))
-            using (BinaryReader br = new BinaryReader(fs))
+            Logger.Log($"[ReadVolumeChk] Reading volume header from: {absolutePath}");
+
+            if (!File.Exists(absolutePath))
             {
-                int volWidth = br.ReadInt32();
-                int volHeight = br.ReadInt32();
-                int volDepth = br.ReadInt32();
-                int chunkDim = br.ReadInt32();
-                double pixelSize = br.ReadDouble();
-                return (volWidth, volHeight, volDepth, chunkDim, pixelSize);
+                throw new FileNotFoundException($"Volume header file not found: {absolutePath}");
+            }
+
+            FileInfo fileInfo = new FileInfo(absolutePath);
+            Logger.Log($"[ReadVolumeChk] File size: {fileInfo.Length} bytes, Last modified: {fileInfo.LastWriteTime}");
+
+            // Minimum size for a valid header
+            int minHeaderSize = sizeof(int) * 4 + sizeof(double);
+
+            if (fileInfo.Length < minHeaderSize)
+            {
+                throw new InvalidDataException($"Header file too small: {fileInfo.Length} bytes (needs at least {minHeaderSize} bytes)");
+            }
+
+            try
+            {
+                using (FileStream fs = new FileStream(absolutePath, FileMode.Open, FileAccess.Read))
+                using (BinaryReader br = new BinaryReader(fs))
+                {
+                    int volWidth = br.ReadInt32();
+                    int volHeight = br.ReadInt32();
+                    int volDepth = br.ReadInt32();
+                    int chunkDim = br.ReadInt32();
+
+                    // The pixelSize field might be missing in older files, use a default in that case
+                    double pixelSize = 1e-6; // Default to 1 µm
+
+                    if (fs.Position < fs.Length)
+                    {
+                        try
+                        {
+                            pixelSize = br.ReadDouble();
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[ReadVolumeChk] Warning: Could not read pixelSize field, using default: {ex.Message}");
+                        }
+                    }
+                    else
+                    {
+                        Logger.Log("[ReadVolumeChk] Warning: volume.chk file does not contain pixelSize field, using default value");
+                    }
+
+                    // Validate the values are reasonable
+                    const int MAX_DIM = 10000;
+                    const int MIN_CHUNK = 16;
+                    const int MAX_CHUNK = 512;
+
+                    if (volWidth <= 0 || volWidth > MAX_DIM)
+                        throw new InvalidDataException($"Invalid volume width in header: {volWidth}");
+
+                    if (volHeight <= 0 || volHeight > MAX_DIM)
+                        throw new InvalidDataException($"Invalid volume height in header: {volHeight}");
+
+                    if (volDepth <= 0 || volDepth > MAX_DIM)
+                        throw new InvalidDataException($"Invalid volume depth in header: {volDepth}");
+
+                    if (chunkDim < MIN_CHUNK || chunkDim > MAX_CHUNK)
+                        throw new InvalidDataException($"Invalid chunk dimension in header: {chunkDim}");
+
+                    if (pixelSize <= 0 || pixelSize > 1.0) // 1.0 meters would be huge for CT voxels
+                        throw new InvalidDataException($"Invalid pixel size in header: {pixelSize}");
+
+                    Logger.Log($"[ReadVolumeChk] Successfully read header: {volWidth}x{volHeight}x{volDepth}, chunkDim={chunkDim}, pixelSize={pixelSize}");
+                    return (volWidth, volHeight, volDepth, chunkDim, pixelSize);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ReadVolumeChk] Error reading volume.chk: {ex.Message}");
+                throw;
             }
         }
 
@@ -458,11 +1132,9 @@ namespace CTSegmenter
             Logger.Log($"[FileOperations] Loaded {mats.Count} materials from labels.chk");
             return mats;
         }
-
-        #endregion Header Files Operations
+        #endregion
 
         #region File Creation and Export
-
         /// <summary>
         /// Creates a blank labels.bin file with the specified dimensions
         /// </summary>
@@ -473,6 +1145,9 @@ namespace CTSegmenter
             int cntZ = (volDepth + chunkDim - 1) / chunkDim;
             int totalChunks = cntX * cntY * cntZ;
             long chunkSize = (long)chunkDim * chunkDim * chunkDim;
+
+            Logger.Log($"[CreateBlankLabelsFile] Creating file: {path} with dimensions {volWidth}x{volHeight}x{volDepth}");
+
             using (FileStream fs = new FileStream(path, FileMode.Create, FileAccess.Write))
             using (BinaryWriter bw = new BinaryWriter(fs))
             {
@@ -480,13 +1155,14 @@ namespace CTSegmenter
                 bw.Write(cntX);
                 bw.Write(cntY);
                 bw.Write(cntZ);
+
                 byte[] emptyChunk = new byte[chunkSize];
                 for (int i = 0; i < totalChunks; i++)
                 {
                     bw.Write(emptyChunk, 0, emptyChunk.Length);
                 }
             }
-            Logger.Log($"[FileOperations] Created blank labels.bin at {path}");
+            Logger.Log($"[CreateBlankLabelsFile] Created blank labels file: {totalChunks} chunks, {totalChunks * chunkSize:N0} bytes");
         }
 
         /// <summary>
@@ -549,10 +1225,10 @@ namespace CTSegmenter
 
             Parallel.For(0, depth, z =>
             {
-                using (Bitmap bmp = CreateBitmapFromData(z, (ChunkedVolume)volumeData, (ChunkedLabelVolume)volumeLabels, materials, width, height))
+                using (Bitmap bmp = CreateBitmapFromData(z, volumeData, volumeLabels, materials, width, height))
                 {
-                    string filePath = Path.Combine(outputPath, $"{z:00000}.bmp");
-                    bmp.Save(filePath);
+                    string filePath = Path.Combine(outputPath, $"{z:00000}.png");
+                    bmp.Save(filePath, ImageFormat.Png);
                 }
             });
 
@@ -562,37 +1238,68 @@ namespace CTSegmenter
         /// <summary>
         /// Creates a bitmap for a specific slice
         /// </summary>
-        private static Bitmap CreateBitmapFromData(int sliceIndex, ChunkedVolume volumeData, ChunkedLabelVolume volumeLabels,
+        private static Bitmap CreateBitmapFromData(int sliceIndex, IGrayscaleVolumeData volumeData, ILabelVolumeData volumeLabels,
                                                  List<Material> materials, int width, int height)
         {
             Bitmap bmp = new Bitmap(width, height, PixelFormat.Format24bppRgb);
 
-            for (int y = 0; y < height; y++)
-            {
-                for (int x = 0; x < width; x++)
-                {
-                    // Start with the grayscale value
-                    byte gVal = volumeData?[x, y, sliceIndex] ?? 128;
-                    Color finalColor = Color.FromArgb(gVal, gVal, gVal);
+            // Lock bits for faster access
+            BitmapData bmpData = bmp.LockBits(
+                new Rectangle(0, 0, width, height),
+                ImageLockMode.WriteOnly,
+                PixelFormat.Format24bppRgb);
 
-                    // If a segmentation has been applied, use it
-                    byte appliedLabel = volumeLabels?[x, y, sliceIndex] ?? 0;
-                    if (appliedLabel != 0)
+            try
+            {
+                unsafe
+                {
+                    byte* ptr = (byte*)bmpData.Scan0.ToPointer();
+                    int stride = bmpData.Stride;
+
+                    for (int y = 0; y < height; y++)
                     {
-                        Material mat = materials.FirstOrDefault(m => m.ID == appliedLabel);
-                        if (mat != null)
+                        byte* row = ptr + (y * stride);
+                        for (int x = 0; x < width; x++)
                         {
-                            finalColor = mat.Color;
+                            int offset = x * 3;
+
+                            // Get grayscale value
+                            byte gVal = volumeData != null ? volumeData[x, y, sliceIndex] : (byte)128;
+
+                            // Get label value
+                            byte label = volumeLabels[x, y, sliceIndex];
+
+                            // Start with grayscale
+                            byte r = gVal, g = gVal, b = gVal;
+
+                            // Apply label color if present
+                            if (label != 0)
+                            {
+                                Material mat = materials.FirstOrDefault(m => m.ID == label);
+                                if (mat != null)
+                                {
+                                    // Blend with material color
+                                    r = (byte)((r + mat.Color.R) / 2);
+                                    g = (byte)((g + mat.Color.G) / 2);
+                                    b = (byte)((b + mat.Color.B) / 2);
+                                }
+                            }
+
+                            // Write RGB values (BGR order for bitmap)
+                            row[offset] = b;
+                            row[offset + 1] = g;
+                            row[offset + 2] = r;
                         }
                     }
-
-                    bmp.SetPixel(x, y, finalColor);
                 }
+            }
+            finally
+            {
+                bmp.UnlockBits(bmpData);
             }
 
             return bmp;
         }
-
-        #endregion File Creation and Export
+        #endregion
     }
 }

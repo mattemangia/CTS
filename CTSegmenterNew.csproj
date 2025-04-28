@@ -112,11 +112,15 @@
     <Compile Include="MaterialOperations\MaterialOperations.cs" />
     <Compile Include="Misc\Annotations.cs" />
     <Compile Include="Misc\AcousticVolume.cs" />
+    <Compile Include="Misc\FastBitmap.cs" />
     <Compile Include="Misc\MaterialDensityLibrary.cs" />
     <Compile Include="Misc\MeshGenerator.cs" />
     <Compile Include="Misc\MiscUtils.cs" />
     <Compile Include="Misc\OrthogonalViewPanel.cs">
       <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="Misc\ProgressFormWithProgress.cs">
+      <SubType>Form</SubType>
     </Compile>
     <Compile Include="Misc\RangeSlider.cs">
       <SubType>Component</SubType>

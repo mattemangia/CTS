@@ -4,7 +4,7 @@ using System.Windows.Forms;
 
 namespace CTSegmenter
 {
-    public partial class ProgressForm : Form
+    public partial class ProgressForm : Form, IProgress<int>
     {
         private ProgressBar progressBar;
         private Label label;
@@ -43,6 +43,15 @@ namespace CTSegmenter
 
             this.Controls.Add(label);
             this.Controls.Add(progressBar);
+        }
+
+        /// <summary>
+        /// Implementation of IProgress<int> interface
+        /// </summary>
+        /// <param name="value">The progress value to report</param>
+        public void Report(int value)
+        {
+            UpdateProgress(value);
         }
 
         /// <summary>
@@ -110,5 +119,22 @@ namespace CTSegmenter
                 // Ignore if form is closed.
             }
         }
+    }
+    public class ProgressFormAdapter : IProgress<int>
+    {
+        private readonly ProgressForm _progressForm;
+
+        public ProgressFormAdapter(ProgressForm progressForm)
+        {
+            _progressForm = progressForm ?? throw new ArgumentNullException(nameof(progressForm));
+        }
+
+        public void Report(int value)
+        {
+            _progressForm.UpdateProgress(value);
+        }
+
+        // Allow direct access to the wrapped ProgressForm
+        public ProgressForm ProgressForm => _progressForm;
     }
 }

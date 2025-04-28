@@ -854,13 +854,14 @@ namespace CTSegmenter
         public async Task LoadDatasetAsync(string path)
         {
             Logger.Log($"[MainForm] Loading dataset from path: {path}");
-            ProgressForm progressForm = null;
+            ProgressFormWithProgress progressForm = null;
 
             try
             {
                 await this.SafeInvokeAsync(() =>
                 {
-                    progressForm = new ProgressForm("Loading dataset...");
+                    // Use ProgressFormWithProgress instead of ProgressForm
+                    progressForm = new ProgressFormWithProgress("Loading dataset...");
                     progressForm.Show();
                 });
 
@@ -900,12 +901,13 @@ namespace CTSegmenter
                 }
 
                 // Use FileOperations to load the dataset
+                // Pass progressForm directly - it's now both a ProgressForm and an IProgress<int>
                 var result = await FileOperations.LoadDatasetAsync(
                     path,
                     useMemoryMapping,
                     pixelSize,
                     SelectedBinningFactor,
-                    new Progress<int>(p => progressForm?.UpdateProgress(p)));
+                    progressForm);
 
                 // Update MainForm state with the result
                 lock (datasetLock)
@@ -993,7 +995,6 @@ namespace CTSegmenter
                 await this.SafeInvokeAsync(() => progressForm?.Close());
             }
         }
-
         private void ShowError(string title, string message)
         {
             if (!this.IsDisposed && this.IsHandleCreated)

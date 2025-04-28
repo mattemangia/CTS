@@ -222,6 +222,7 @@ namespace CTSegmenter
                     Location = new Point(10, 130),
                     Enabled = false
                 };
+
                 btnExportVarianceData = new Button
                 {
                     Text = "Export Variance Data",
@@ -229,12 +230,15 @@ namespace CTSegmenter
                     Location = new Point(180, 130), // Next to variance composite button
                     Enabled = false // Will be enabled when variance maps are calculated
                 };
+
                 btnExportVarianceData.Click += (s, e) => ExportVarianceData();
 
-                // Event handlers
+                // Event handlers with debouncing
                 chkUseVariance.CheckedChanged += (s, e) =>
                 {
                     useVarianceDetection = chkUseVariance.Checked;
+
+                    // Update UI control states
                     numSlicesToIntegrate.Enabled = useVarianceDetection;
                     lblSlicesToIntegrate.Enabled = useVarianceDetection;
                     numVarianceThreshold.Enabled = useVarianceDetection;
@@ -246,11 +250,222 @@ namespace CTSegmenter
                     btnCalculateVariance.Enabled = useVarianceDetection;
                     btnVarianceComposite.Enabled = useVarianceDetection && xyVarianceImage != null;
                     btnSwitchToNormal.Enabled = useVarianceDetection && xyVarianceImage != null;
+
+                    // If variance is being turned off and we're in variance mode, switch back to normal view
+                    if (!useVarianceDetection && isShowingVarianceMap)
+                    {
+                        try
+                        {
+                            Logger.Log("[BandDetectionForm] Switching to normal mode because 'Use Variance' was unchecked");
+
+                            // Check if normal views exist
+                            if (xyProcessedImage == null || xzProcessedImage == null || yzProcessedImage == null)
+                            {
+                                // If normal views aren't ready, process them first
+                                Task.Run(() => ProcessAllViews());
+                                isShowingVarianceMap = false;
+                                return;
+                            }
+
+                            // Restore normal images
+                            xyPictureBox.Image = xyProcessedImage;
+                            xzPictureBox.Image = xzProcessedImage;
+                            yzPictureBox.Image = yzProcessedImage;
+
+                            // Set flag before invalidating
+                            isShowingVarianceMap = false;
+
+                            // Update UI
+                            xyPictureBox.Invalidate();
+                            xzPictureBox.Invalidate();
+                            yzPictureBox.Invalidate();
+
+                            // Replot standard charts
+                            UpdateXYChart();
+                            UpdateXZChart();
+                            UpdateYZChart();
+
+                            btnSwitchToNormal.Text = "Show Variance Maps";
+
+                            // Update status to confirm the mode change
+                            UpdateStatusMessage("Switched to normal view mode");
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[BandDetectionForm] Error returning to normal mode: {ex.Message}");
+                        }
+                    }
                 };
 
-                numSlicesToIntegrate.ValueChanged += (s, e) => slicesToIntegrate = (int)numSlicesToIntegrate.Value;
-                numVarianceThreshold.ValueChanged += (s, e) => varianceThreshold = (float)numVarianceThreshold.Value;
-                numContrastFactor.ValueChanged += (s, e) => varianceContrastFactor = (float)numContrastFactor.Value;
+                // Debounced numSlicesToIntegrate handler
+                DateTime lastNumericChangeTime = DateTime.Now;
+                bool processingScheduled = false;
+
+                numSlicesToIntegrate.ValueChanged += (s, e) =>
+                {
+                    slicesToIntegrate = (int)numSlicesToIntegrate.Value;
+
+                    // Only schedule processing if enough time has passed since the last change
+                    lastNumericChangeTime = DateTime.Now;
+
+                    if (!processingScheduled)
+                    {
+                        processingScheduled = true;
+
+                        // Schedule processing after a short delay
+                        Task.Run(async () =>
+                        {
+                            try
+                            {
+                                // Wait 500ms to see if more changes are coming
+                                await Task.Delay(500);
+
+                                // Check if there have been no changes in the past 500ms
+                                if ((DateTime.Now - lastNumericChangeTime).TotalMilliseconds >= 400)
+                                {
+                                    // Only prompt user that they might want to recalculate
+                                    if (useVarianceDetection && btnCalculateVariance.Enabled)
+                                    {
+                                        this.Invoke(new Action(() => {
+                                            UpdateStatusMessage("Change detected: Click 'Calculate Variance Maps' to update");
+                                        }));
+                                    }
+
+                                    processingScheduled = false;
+                                }
+                                else
+                                {
+                                    processingScheduled = false;
+                                }
+                            }
+                            catch (ObjectDisposedException)
+                            {
+                                // Form might have been closed, ignore
+                            }
+                            catch (InvalidOperationException)
+                            {
+                                // Form might have been closed, ignore
+                            }
+                        });
+                    }
+                };
+
+                // Debounced numVarianceThreshold handler
+                DateTime lastThresholdChangeTime = DateTime.Now;
+                bool thresholdProcessingScheduled = false;
+
+                numVarianceThreshold.ValueChanged += (s, e) =>
+                {
+                    // Prevent exact zero values - choose a small positive number instead
+                    if (numVarianceThreshold.Value <= 0m)
+                    {
+                        Logger.Log("[BandDetectionForm] Warning: Zero threshold detected, using minimum safe value");
+                        numVarianceThreshold.Value = 0.000001m; // Use 1e-6 as minimum
+                        varianceThreshold = 0.000001f;
+                    }
+                    else
+                    {
+                        varianceThreshold = (float)numVarianceThreshold.Value;
+                    }
+
+                    // Schedule delayed processing
+                    lastThresholdChangeTime = DateTime.Now;
+
+                    if (!thresholdProcessingScheduled)
+                    {
+                        thresholdProcessingScheduled = true;
+
+                        Task.Run(async () =>
+                        {
+                            try
+                            {
+                                // Wait to see if more changes are coming
+                                await Task.Delay(300);
+
+                                // Check if there have been no changes in the past time period
+                                if ((DateTime.Now - lastThresholdChangeTime).TotalMilliseconds >= 250)
+                                {
+                                    // Only regenerate if maps exist and we're showing variance
+                                    if (xyVarianceMap != null && isShowingVarianceMap)
+                                    {
+                                        this.Invoke(new Action(() => {
+                                            UpdateStatusMessage("Applying new threshold...");
+                                            RegenerateVarianceImages();
+                                        }));
+                                    }
+
+                                    thresholdProcessingScheduled = false;
+                                }
+                                else
+                                {
+                                    thresholdProcessingScheduled = false;
+                                }
+                            }
+                            catch (ObjectDisposedException)
+                            {
+                                // Form might have been closed, ignore
+                            }
+                            catch (InvalidOperationException)
+                            {
+                                // Form might have been closed, ignore
+                            }
+                        });
+                    }
+                };
+
+                // Debounced numContrastFactor handler
+                DateTime lastContrastChangeTime = DateTime.Now;
+                bool contrastProcessingScheduled = false;
+
+                numContrastFactor.ValueChanged += (s, e) =>
+                {
+                    varianceContrastFactor = (float)numContrastFactor.Value;
+
+                    // Schedule delayed processing
+                    lastContrastChangeTime = DateTime.Now;
+
+                    if (!contrastProcessingScheduled)
+                    {
+                        contrastProcessingScheduled = true;
+
+                        Task.Run(async () =>
+                        {
+                            try
+                            {
+                                // Wait to see if more changes are coming
+                                await Task.Delay(300);
+
+                                // Check if there have been no changes in the past time period
+                                if ((DateTime.Now - lastContrastChangeTime).TotalMilliseconds >= 250)
+                                {
+                                    // Only regenerate if maps exist and we're showing variance
+                                    if (xyVarianceMap != null && isShowingVarianceMap)
+                                    {
+                                        this.Invoke(new Action(() => {
+                                            UpdateStatusMessage("Applying new contrast...");
+                                            RegenerateVarianceImages();
+                                        }));
+                                    }
+
+                                    contrastProcessingScheduled = false;
+                                }
+                                else
+                                {
+                                    contrastProcessingScheduled = false;
+                                }
+                            }
+                            catch (ObjectDisposedException)
+                            {
+                                // Form might have been closed, ignore
+                            }
+                            catch (InvalidOperationException)
+                            {
+                                // Form might have been closed, ignore
+                            }
+                        });
+                    }
+                };
+
                 chkInvertVariance.CheckedChanged += (s, e) =>
                 {
                     invertVarianceDisplay = chkInvertVariance.Checked;
@@ -270,7 +485,13 @@ namespace CTSegmenter
                 };
 
                 btnCalculateVariance.Click += (s, e) => CalculateVarianceMaps();
-                btnSwitchToNormal.Click += (s, e) => ToggleVarianceView();
+                btnSwitchToNormal.Click += (s, e) =>
+                {
+                    ToggleVarianceView();
+                    // Make sure checkbox state matches the current view mode
+                    if (chkUseVariance != null)
+                        chkUseVariance.Checked = isShowingVarianceMap;
+                };
                 btnVarianceComposite.Click += (s, e) => CreateVarianceComposite();
 
                 // Status label for GPU status
@@ -299,30 +520,6 @@ namespace CTSegmenter
                 variancePanel.Controls.Add(btnVarianceComposite);
                 variancePanel.Controls.Add(btnExportVarianceData);
                 variancePanel.Controls.Add(gpuStatusLabel);
-                numVarianceThreshold.ValueChanged += (s, e) =>
-                {
-                    // Prevent exact zero values - choose a small positive number instead
-                    if (numVarianceThreshold.Value <= 0m)
-                    {
-                        Logger.Log("[BandDetectionForm] Warning: Zero threshold detected, using minimum safe value");
-                        numVarianceThreshold.Value = 0.000001m; // Use 1e-6 as minimum
-                        varianceThreshold = 0.000001f;
-                    }
-                    else
-                    {
-                        varianceThreshold = (float)numVarianceThreshold.Value;
-                    }
-
-                    // Regenerate images when parameters change
-                    RegenerateVarianceImages();
-                };
-
-                numContrastFactor.ValueChanged += (s, e) =>
-                {
-                    varianceContrastFactor = (float)numContrastFactor.Value;
-                    // Regenerate images when parameters change
-                    RegenerateVarianceImages();
-                };
 
                 // Add description label
                 Label descriptionLabel = new Label
@@ -335,15 +532,17 @@ namespace CTSegmenter
                 };
 
                 variancePanel.Controls.Add(descriptionLabel);
+
                 Label lblSliceInfo = new Label
                 {
                     Text = "Note: Variance is calculated across slices centered on the current preview position,\n" +
-           "extending half the integration count in each direction.",
+                          "extending half the integration count in each direction.",
                     AutoSize = true,
                     Location = new Point(10, 230),
                     Font = new Font("Arial", 8, FontStyle.Italic),
                     ForeColor = Color.DarkBlue
                 };
+
                 variancePanel.Controls.Add(lblSliceInfo);
                 varianceTab.Controls.Add(variancePanel);
 
@@ -360,7 +559,10 @@ namespace CTSegmenter
                 // Increase form height
                 this.Height += 100;
 
-                Logger.Log("[BandDetectionForm] Variance detection controls initialized successfully");
+                // Set up debounced event handlers for the main view sliders
+                SetupDebouncedMainViewSliders();
+
+                Logger.Log("[BandDetectionForm] Variance detection controls initialized successfully with debouncing");
             }
             catch (Exception ex)
             {
@@ -369,7 +571,47 @@ namespace CTSegmenter
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
+        private void UpdateStatusMessage(string message)
+        {
+            // Check if the status label exists
+            if (gpuStatusLabel != null)
+            {
+                // Store original text and color
+                string originalText = gpuStatusLabel.Text;
+                Color originalColor = gpuStatusLabel.ForeColor;
 
+                // Update with new message
+                gpuStatusLabel.Text = message;
+                gpuStatusLabel.ForeColor = Color.Blue;
+
+                // Schedule restoring after delay
+                Task.Run(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(3000); // Show message for 3 seconds
+
+                        this.Invoke(new Action(() => {
+                            // Only restore if the label hasn't been changed to something else
+                            if (gpuStatusLabel.Text == message)
+                            {
+                                // Restore original text and color
+                                gpuStatusLabel.Text = originalText;
+                                gpuStatusLabel.ForeColor = originalColor;
+                            }
+                        }));
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // Form might have been closed, ignore
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // Form might have been closed, ignore
+                    }
+                });
+            }
+        }
         // Initialize ILGPU context and accelerator
         private void InitializeGPU()
         {
@@ -469,14 +711,14 @@ namespace CTSegmenter
 
         // ILGPU kernel for calculating variance
         private static void CalculateVarianceKernel(
-            Index1D index,
-            ArrayView<byte> volumeData,
-            ArrayView<float> varianceMap,
-            int width,
-            int height,
-            int depth,
-            int sliceStart,
-            int sliceEnd)
+     Index1D index,
+     ArrayView<byte> volumeData,
+     ArrayView<float> varianceMap,
+     int width,
+     int height,
+     int depth,
+     int sliceStart,
+     int sliceEnd)
         {
             // Calculate x, y coordinates from 1D index
             int x = index % width;
@@ -518,8 +760,13 @@ namespace CTSegmenter
                 float mean = sum / validSlices;
                 float variance = (sumSquared / validSlices) - (mean * mean);
 
-                // Store variance in the output map
-                varianceMap[y * width + x] = variance;
+                // Store variance in the output map - ensure positive value
+                varianceMap[y * width + x] = Math.Max(0.000001f, variance);
+            }
+            else
+            {
+                // Default small value to avoid division by zero later
+                varianceMap[y * width + x] = 0.000001f;
             }
         }
 
@@ -601,48 +848,106 @@ namespace CTSegmenter
             {
                 if (isShowingVarianceMap)
                 {
-                    // Switch back to normal view - with robust checks
-                    bool normalViewsAvailable = xyProcessedImage != null && xzProcessedImage != null && yzProcessedImage != null;
-
-                    if (normalViewsAvailable)
+                    // Back to normal mode
+                    if (xyProcessedImage == null || xzProcessedImage == null || yzProcessedImage == null)
                     {
-                        RestoreNormalViews();
-                        btnSwitchToNormal.Text = "Show Variance Maps";
-                        isShowingVarianceMap = false;
-                    }
-                    else
-                    {
-                        // Normal views not available, need to process them first
+                        // Ensure normal views exist
                         MessageBox.Show("Normal views need to be processed first.",
-                                      "Information", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        isShowingVarianceMap = false;
+                                        "Information", MessageBoxButtons.OK, MessageBoxIcon.Information);
                         Task.Run(() => ProcessAllViews());
+                        isShowingVarianceMap = false;
+                        return;
                     }
+
+                    // Keep checkbox in sync
+                    if (chkUseVariance != null && chkUseVariance.Checked)
+                        chkUseVariance.Checked = false;
+                    else
+                        useVarianceDetection = false; // Ensure flag is updated even if checkbox isn't changed
+
+                    // Restore normal images
+                    xyPictureBox.Image = xyProcessedImage;
+                    xzPictureBox.Image = xzProcessedImage;
+                    yzPictureBox.Image = yzProcessedImage;
+
+                    // Set flag before invalidating
+                    isShowingVarianceMap = false;
+
+                    // Update UI
+                    xyPictureBox.Invalidate();
+                    xzPictureBox.Invalidate();
+                    yzPictureBox.Invalidate();
+
+                    // Replot standard charts
+                    UpdateXYChart();
+                    UpdateXZChart();
+                    UpdateYZChart();
+
+                    // Update button text
+                    btnSwitchToNormal.Text = "Show Variance Maps";
+
+                    // Show confirmation in status area
+                    UpdateStatusMessage("Switched to normal view mode");
+
+                    Logger.Log("[BandDetectionForm] Switched from variance to normal view mode");
                 }
                 else
                 {
-                    // Check if variance maps exist before trying to show them
-                    bool varianceMapsExist = xyVarianceImage != null && xzVarianceImage != null && yzVarianceImage != null;
-
-                    if (varianceMapsExist)
-                    {
-                        // Switch to variance view
-                        ShowVarianceMaps();
-                        btnSwitchToNormal.Text = "Show Normal View";
-                        isShowingVarianceMap = true;
-                    }
-                    else
+                    // Switching to variance mode: ensure maps exist
+                    if (xyVarianceMap == null || xzVarianceMap == null || yzVarianceMap == null)
                     {
                         MessageBox.Show("Please calculate variance maps first.",
-                                      "Information", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                                        "Information", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        return;
                     }
+
+                    // Keep checkbox in sync
+                    if (chkUseVariance != null && !chkUseVariance.Checked)
+                        chkUseVariance.Checked = true;
+                    else
+                        useVarianceDetection = true; // Ensure flag is updated even if checkbox isn't changed
+
+                    // Detect peaks to ensure they exist - use lower prominence for variance data
+                    float adjustedProminence = (float)(peakProminence * 0.1);
+                    DetectBandsInXYVarianceMap(adjustedProminence);
+                    DetectBandsInXZVarianceMap(adjustedProminence);
+                    DetectBandsInYZVarianceMap(adjustedProminence);
+
+                    // Set flag before showing images
+                    isShowingVarianceMap = true;
+
+                    // Show variance images
+                    xyPictureBox.Image = xyVarianceImage;
+                    xzPictureBox.Image = xzVarianceImage;
+                    yzPictureBox.Image = yzVarianceImage;
+
+                    // Update UI
+                    xyPictureBox.Invalidate();
+                    xzPictureBox.Invalidate();
+                    yzPictureBox.Invalidate();
+
+                    // Plot variance charts with peaks
+                    UpdateVarianceXYChart();
+                    UpdateVarianceXZChart();
+                    UpdateVarianceYZChart();
+
+                    // Update button text
+                    btnSwitchToNormal.Text = "Show Normal View";
+
+                    // Show confirmation in status area
+                    UpdateStatusMessage("Switched to variance view mode");
+
+                    Logger.Log("[BandDetectionForm] Switched from normal to variance view mode");
+                    Logger.Log($"[BandDetectionForm] XY: {xyVarianceDarkPeaks?.Length ?? 0} dark peaks, " +
+                              $"XZ: {xzVarianceDarkPeaks?.Length ?? 0} dark peaks, " +
+                              $"YZ: {yzVarianceDarkPeaks?.Length ?? 0} dark peaks");
                 }
             }
             catch (Exception ex)
             {
                 Logger.Log($"[BandDetectionForm] Error toggling variance view: {ex.Message}");
                 MessageBox.Show($"Error switching views: {ex.Message}",
-                              "View Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                                "View Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -674,30 +979,76 @@ namespace CTSegmenter
         }
 
         // Method to show variance maps
+
         private void ShowVarianceMaps()
         {
+            // Make sure we display variance images and not standard processed images
             if (xyVarianceImage != null && xyPictureBox != null)
             {
+                // Set the image first
                 xyPictureBox.Image = xyVarianceImage;
-                xyPictureBox.Invalidate();
+
+                // If peaks aren't yet detected, detect them with a lower prominence for variance data
+                if (xyVarianceDarkPeaks == null || xyVarianceBrightPeaks == null)
+                {
+                    Logger.Log("[BandDetectionForm] Detecting XY bands in ShowVarianceMaps (peaks were null)");
+                    DetectBandsInXYVarianceMap((float)(peakProminence * 0.1));
+                }
+
+                // Update chart first, then invalidate PictureBox to ensure both show peaks
                 UpdateVarianceXYChart();
+                xyPictureBox.Invalidate();
+
+                Logger.Log($"[BandDetectionForm] XY variance display: {xyVarianceDarkPeaks?.Length ?? 0} dark peaks, {xyVarianceBrightPeaks?.Length ?? 0} bright peaks");
             }
 
             if (xzVarianceImage != null && xzPictureBox != null)
             {
+                // Set the image first 
                 xzPictureBox.Image = xzVarianceImage;
-                xzPictureBox.Invalidate();
+
+                // If peaks aren't yet detected, detect them with a lower prominence for variance data
+                if (xzVarianceDarkPeaks == null || xzVarianceBrightPeaks == null)
+                {
+                    Logger.Log("[BandDetectionForm] Detecting XZ bands in ShowVarianceMaps (peaks were null)");
+                    DetectBandsInXZVarianceMap((float)(peakProminence * 0.1));
+                }
+
+                // Update chart first, then invalidate PictureBox to ensure both show peaks
                 UpdateVarianceXZChart();
+                xzPictureBox.Invalidate();
+
+                Logger.Log($"[BandDetectionForm] XZ variance display: {xzVarianceDarkPeaks?.Length ?? 0} dark peaks, {xzVarianceBrightPeaks?.Length ?? 0} bright peaks");
             }
 
             if (yzVarianceImage != null && yzPictureBox != null)
             {
+                // Set the image first
                 yzPictureBox.Image = yzVarianceImage;
-                yzPictureBox.Invalidate();
-                UpdateVarianceYZChart();
-            }
-        }
 
+                // If peaks aren't yet detected, detect them with a lower prominence for variance data
+                if (yzVarianceDarkPeaks == null || yzVarianceBrightPeaks == null)
+                {
+                    Logger.Log("[BandDetectionForm] Detecting YZ bands in ShowVarianceMaps (peaks were null)");
+                    DetectBandsInYZVarianceMap((float)(peakProminence * 0.1));
+                }
+
+                // Update chart first, then invalidate PictureBox to ensure both show peaks
+                UpdateVarianceYZChart();
+                yzPictureBox.Invalidate();
+
+                Logger.Log($"[BandDetectionForm] YZ variance display: {yzVarianceDarkPeaks?.Length ?? 0} dark peaks, {yzVarianceBrightPeaks?.Length ?? 0} bright peaks");
+            }
+
+            // Ensure variance mode flag is set
+            isShowingVarianceMap = true;
+
+            // Update button text
+            if (btnSwitchToNormal != null)
+                btnSwitchToNormal.Text = "Show Normal View";
+
+            Logger.Log("[BandDetectionForm] ShowVarianceMaps completed - variance mode is active");
+        }
         // Method to update XY chart with variance data
         private void UpdateVarianceXYChart()
         {
@@ -706,68 +1057,95 @@ namespace CTSegmenter
 
             try
             {
-                // Make sure chart has correct series
-                if (xyChart.Series.Count == 0 || xyChart.Series["Profile"] == null)
-                    ConfigureChart(xyChart, "XY Variance Profile", "Variance", "Row");
+                // Always re-configure for variance mode
+                ConfigureChart(xyChart, "XY Variance Profile", "Variance", "Row");
 
                 // Clear all points
                 foreach (var series in xyChart.Series)
-                {
                     series.Points.Clear();
-                }
 
-                // Create row profile from variance map
-                double[] rowProfile = new double[xyVarianceMap.GetLength(1)];
-                for (int y = 0; y < xyVarianceMap.GetLength(1); y++)
+                int width = xyVarianceMap.GetLength(0);
+                int height = xyVarianceMap.GetLength(1);
+
+                // Build row-average profile
+                double[] profile = new double[height];
+                for (int y = 0; y < height; y++)
                 {
                     double sum = 0;
-                    for (int x = 0; x < xyVarianceMap.GetLength(0); x++)
-                    {
+                    for (int x = 0; x < width; x++)
                         sum += xyVarianceMap[x, y];
-                    }
-                    rowProfile[y] = sum / xyVarianceMap.GetLength(0);
+                    profile[y] = sum / width;
                 }
 
-                // Apply Gaussian smoothing to the row profile
-                double[] smoothRowProfile = GaussianSmoothArray(rowProfile, (float)gaussianSigma);
+                // Smooth
+                double[] smooth = GaussianSmoothArray(profile, (float)gaussianSigma);
 
-                // Add profile data
-                for (int i = 0; i < smoothRowProfile.Length; i++)
-                {
-                    xyChart.Series["Profile"].Points.AddXY(smoothRowProfile[i], i);
-                }
+                // Axis bounds
+                xyChart.ChartAreas[0].AxisY.Minimum = 0;
+                xyChart.ChartAreas[0].AxisY.Maximum = height;
+                double minVal = smooth.Min();
+                double maxVal = smooth.Max();
+                double pad = (maxVal - minVal) * 0.05;
+                xyChart.ChartAreas[0].AxisX.Minimum = minVal - pad;
+                xyChart.ChartAreas[0].AxisX.Maximum = maxVal + pad;
 
-                // Add dark peaks
+                // Plot profile
+                for (int i = 0; i < smooth.Length; i++)
+                    xyChart.Series["Profile"].Points.AddXY(smooth[i], i);
+
+                // Plot low-variance (dark) peaks
                 if (showPeaks && xyVarianceDarkPeaks != null)
                 {
-                    foreach (int peak in xyVarianceDarkPeaks)
-                    {
-                        if (peak < smoothRowProfile.Length)
-                            xyChart.Series["Dark Peaks"].Points.AddXY(smoothRowProfile[peak], peak);
-                    }
+                    // Enable this series
+                    xyChart.Series["Dark Peaks"].Enabled = true;
+
+                    // Make them larger and more visible
+                    xyChart.Series["Dark Peaks"].MarkerSize = 12;
+                    xyChart.Series["Dark Peaks"].BorderWidth = 2;
+
+                    foreach (int p in xyVarianceDarkPeaks)
+                        if (p < smooth.Length)
+                            xyChart.Series["Dark Peaks"].Points.AddXY(smooth[p], p);
+
+                    Logger.Log($"[BandDetectionForm] Added {xyVarianceDarkPeaks.Length} dark peaks to XY variance chart");
+                }
+                else
+                {
+                    // Disable this series if there are no peaks to show
+                    xyChart.Series["Dark Peaks"].Enabled = false;
                 }
 
-                // Add bright peaks
+                // Plot high-variance (bright) peaks
                 if (showPeaks && xyVarianceBrightPeaks != null)
                 {
-                    foreach (int peak in xyVarianceBrightPeaks)
-                    {
-                        if (peak < smoothRowProfile.Length)
-                            xyChart.Series["Bright Peaks"].Points.AddXY(smoothRowProfile[peak], peak);
-                    }
+                    // Enable this series
+                    xyChart.Series["Bright Peaks"].Enabled = true;
+
+                    // Make them larger and more visible
+                    xyChart.Series["Bright Peaks"].MarkerSize = 12;
+                    xyChart.Series["Bright Peaks"].BorderWidth = 2;
+
+                    foreach (int p in xyVarianceBrightPeaks)
+                        if (p < smooth.Length)
+                            xyChart.Series["Bright Peaks"].Points.AddXY(smooth[p], p);
+
+                    Logger.Log($"[BandDetectionForm] Added {xyVarianceBrightPeaks.Length} bright peaks to XY variance chart");
+                }
+                else
+                {
+                    // Disable this series if there are no peaks to show
+                    xyChart.Series["Bright Peaks"].Enabled = false;
                 }
 
-                // Set visibility based on showPeaks
-                xyChart.Series["Dark Peaks"].Enabled = showPeaks;
-                xyChart.Series["Bright Peaks"].Enabled = showPeaks;
-
-                xyChart.ChartAreas[0].RecalculateAxesScale();
+                // Force legends to be visible
+                xyChart.Legends[0].Enabled = true;
             }
             catch (Exception ex)
             {
                 Logger.Log($"[BandDetectionForm] Error updating XY variance chart: {ex.Message}");
             }
         }
+
 
         // Method to update XZ chart with variance data
         private void UpdateVarianceXZChart()
@@ -777,62 +1155,88 @@ namespace CTSegmenter
 
             try
             {
-                // Make sure chart has correct series
-                if (xzChart.Series.Count == 0 || xzChart.Series["Profile"] == null)
-                    ConfigureChart(xzChart, "XZ Variance Profile", "Variance", "Row");
+                // Always re-configure for variance mode
+                ConfigureChart(xzChart, "XZ Variance Profile", "Variance", "Row");
 
                 // Clear all points
                 foreach (var series in xzChart.Series)
-                {
                     series.Points.Clear();
-                }
 
-                // Create row profile from variance map
-                double[] rowProfile = new double[xzVarianceMap.GetLength(1)];
-                for (int z = 0; z < xzVarianceMap.GetLength(1); z++)
+                int width = xzVarianceMap.GetLength(0);
+                int depth = xzVarianceMap.GetLength(1);
+
+                // Build row-average profile
+                double[] profile = new double[depth];
+                for (int z = 0; z < depth; z++)
                 {
                     double sum = 0;
-                    for (int x = 0; x < xzVarianceMap.GetLength(0); x++)
-                    {
+                    for (int x = 0; x < width; x++)
                         sum += xzVarianceMap[x, z];
-                    }
-                    rowProfile[z] = sum / xzVarianceMap.GetLength(0);
+                    profile[z] = sum / width;
                 }
 
-                // Apply Gaussian smoothing to the row profile
-                double[] smoothRowProfile = GaussianSmoothArray(rowProfile, (float)gaussianSigma);
+                // Smooth
+                double[] smooth = GaussianSmoothArray(profile, (float)gaussianSigma);
 
-                // Add profile data
-                for (int i = 0; i < smoothRowProfile.Length; i++)
-                {
-                    xzChart.Series["Profile"].Points.AddXY(smoothRowProfile[i], i);
-                }
+                // Axis bounds
+                xzChart.ChartAreas[0].AxisY.Minimum = 0;
+                xzChart.ChartAreas[0].AxisY.Maximum = depth;
+                double minVal = smooth.Min();
+                double maxVal = smooth.Max();
+                double pad = (maxVal - minVal) * 0.05;
+                xzChart.ChartAreas[0].AxisX.Minimum = minVal - pad;
+                xzChart.ChartAreas[0].AxisX.Maximum = maxVal + pad;
 
-                // Add dark peaks
+                // Plot profile
+                for (int i = 0; i < smooth.Length; i++)
+                    xzChart.Series["Profile"].Points.AddXY(smooth[i], i);
+
+                // Plot low-variance (dark) peaks
                 if (showPeaks && xzVarianceDarkPeaks != null)
                 {
-                    foreach (int peak in xzVarianceDarkPeaks)
-                    {
-                        if (peak < smoothRowProfile.Length)
-                            xzChart.Series["Dark Peaks"].Points.AddXY(smoothRowProfile[peak], peak);
-                    }
+                    // Enable this series
+                    xzChart.Series["Dark Peaks"].Enabled = true;
+
+                    // Make them larger and more visible
+                    xzChart.Series["Dark Peaks"].MarkerSize = 12;
+                    xzChart.Series["Dark Peaks"].BorderWidth = 2;
+
+                    foreach (int p in xzVarianceDarkPeaks)
+                        if (p < smooth.Length)
+                            xzChart.Series["Dark Peaks"].Points.AddXY(smooth[p], p);
+
+                    Logger.Log($"[BandDetectionForm] Added {xzVarianceDarkPeaks.Length} dark peaks to XZ variance chart");
+                }
+                else
+                {
+                    // Disable this series if there are no peaks to show
+                    xzChart.Series["Dark Peaks"].Enabled = false;
                 }
 
-                // Add bright peaks
+                // Plot high-variance (bright) peaks
                 if (showPeaks && xzVarianceBrightPeaks != null)
                 {
-                    foreach (int peak in xzVarianceBrightPeaks)
-                    {
-                        if (peak < smoothRowProfile.Length)
-                            xzChart.Series["Bright Peaks"].Points.AddXY(smoothRowProfile[peak], peak);
-                    }
+                    // Enable this series
+                    xzChart.Series["Bright Peaks"].Enabled = true;
+
+                    // Make them larger and more visible
+                    xzChart.Series["Bright Peaks"].MarkerSize = 12;
+                    xzChart.Series["Bright Peaks"].BorderWidth = 2;
+
+                    foreach (int p in xzVarianceBrightPeaks)
+                        if (p < smooth.Length)
+                            xzChart.Series["Bright Peaks"].Points.AddXY(smooth[p], p);
+
+                    Logger.Log($"[BandDetectionForm] Added {xzVarianceBrightPeaks.Length} bright peaks to XZ variance chart");
+                }
+                else
+                {
+                    // Disable this series if there are no peaks to show
+                    xzChart.Series["Bright Peaks"].Enabled = false;
                 }
 
-                // Set visibility based on showPeaks
-                xzChart.Series["Dark Peaks"].Enabled = showPeaks;
-                xzChart.Series["Bright Peaks"].Enabled = showPeaks;
-
-                xzChart.ChartAreas[0].RecalculateAxesScale();
+                // Force legends to be visible
+                xzChart.Legends[0].Enabled = true;
             }
             catch (Exception ex)
             {
@@ -848,62 +1252,88 @@ namespace CTSegmenter
 
             try
             {
-                // Make sure chart has correct series
-                if (yzChart.Series.Count == 0 || yzChart.Series["Profile"] == null)
-                    ConfigureChart(yzChart, "YZ Variance Profile", "Variance", "Row");
+                // Always re-configure for variance mode
+                ConfigureChart(yzChart, "YZ Variance Profile", "Variance", "Row");
 
                 // Clear all points
                 foreach (var series in yzChart.Series)
-                {
                     series.Points.Clear();
-                }
 
-                // Create row profile from variance map
-                double[] rowProfile = new double[yzVarianceMap.GetLength(1)];
-                for (int z = 0; z < yzVarianceMap.GetLength(1); z++)
+                int height = yzVarianceMap.GetLength(0);
+                int depth = yzVarianceMap.GetLength(1);
+
+                // Build row-average profile
+                double[] profile = new double[depth];
+                for (int z = 0; z < depth; z++)
                 {
                     double sum = 0;
-                    for (int y = 0; y < yzVarianceMap.GetLength(0); y++)
-                    {
+                    for (int y = 0; y < height; y++)
                         sum += yzVarianceMap[y, z];
-                    }
-                    rowProfile[z] = sum / yzVarianceMap.GetLength(0);
+                    profile[z] = sum / height;
                 }
 
-                // Apply Gaussian smoothing to the row profile
-                double[] smoothRowProfile = GaussianSmoothArray(rowProfile, (float)gaussianSigma);
+                // Smooth
+                double[] smooth = GaussianSmoothArray(profile, (float)gaussianSigma);
 
-                // Add profile data
-                for (int i = 0; i < smoothRowProfile.Length; i++)
-                {
-                    yzChart.Series["Profile"].Points.AddXY(smoothRowProfile[i], i);
-                }
+                // Axis bounds
+                yzChart.ChartAreas[0].AxisY.Minimum = 0;
+                yzChart.ChartAreas[0].AxisY.Maximum = depth;
+                double minVal = smooth.Min();
+                double maxVal = smooth.Max();
+                double pad = (maxVal - minVal) * 0.05;
+                yzChart.ChartAreas[0].AxisX.Minimum = minVal - pad;
+                yzChart.ChartAreas[0].AxisX.Maximum = maxVal + pad;
 
-                // Add dark peaks
+                // Plot profile
+                for (int i = 0; i < smooth.Length; i++)
+                    yzChart.Series["Profile"].Points.AddXY(smooth[i], i);
+
+                // Plot low-variance (dark) peaks
                 if (showPeaks && yzVarianceDarkPeaks != null)
                 {
-                    foreach (int peak in yzVarianceDarkPeaks)
-                    {
-                        if (peak < smoothRowProfile.Length)
-                            yzChart.Series["Dark Peaks"].Points.AddXY(smoothRowProfile[peak], peak);
-                    }
+                    // Enable this series
+                    yzChart.Series["Dark Peaks"].Enabled = true;
+
+                    // Make them larger and more visible
+                    yzChart.Series["Dark Peaks"].MarkerSize = 12;
+                    yzChart.Series["Dark Peaks"].BorderWidth = 2;
+
+                    foreach (int p in yzVarianceDarkPeaks)
+                        if (p < smooth.Length)
+                            yzChart.Series["Dark Peaks"].Points.AddXY(smooth[p], p);
+
+                    Logger.Log($"[BandDetectionForm] Added {yzVarianceDarkPeaks.Length} dark peaks to YZ variance chart");
+                }
+                else
+                {
+                    // Disable this series if there are no peaks to show
+                    yzChart.Series["Dark Peaks"].Enabled = false;
                 }
 
-                // Add bright peaks
+                // Plot high-variance (bright) peaks
                 if (showPeaks && yzVarianceBrightPeaks != null)
                 {
-                    foreach (int peak in yzVarianceBrightPeaks)
-                    {
-                        if (peak < smoothRowProfile.Length)
-                            yzChart.Series["Bright Peaks"].Points.AddXY(smoothRowProfile[peak], peak);
-                    }
+                    // Enable this series
+                    yzChart.Series["Bright Peaks"].Enabled = true;
+
+                    // Make them larger and more visible
+                    yzChart.Series["Bright Peaks"].MarkerSize = 12;
+                    yzChart.Series["Bright Peaks"].BorderWidth = 2;
+
+                    foreach (int p in yzVarianceBrightPeaks)
+                        if (p < smooth.Length)
+                            yzChart.Series["Bright Peaks"].Points.AddXY(smooth[p], p);
+
+                    Logger.Log($"[BandDetectionForm] Added {yzVarianceBrightPeaks.Length} bright peaks to YZ variance chart");
+                }
+                else
+                {
+                    // Disable this series if there are no peaks to show
+                    yzChart.Series["Bright Peaks"].Enabled = false;
                 }
 
-                // Set visibility based on showPeaks
-                yzChart.Series["Dark Peaks"].Enabled = showPeaks;
-                yzChart.Series["Bright Peaks"].Enabled = showPeaks;
-
-                yzChart.ChartAreas[0].RecalculateAxesScale();
+                // Force legends to be visible
+                yzChart.Legends[0].Enabled = true;
             }
             catch (Exception ex)
             {
@@ -976,18 +1406,18 @@ namespace CTSegmenter
                         xzVarianceMap = new float[width, depth];
                         yzVarianceMap = new float[height, depth];
 
-                        // Initialize maps with zeros
+                        // Initialize maps with small positive values to avoid numerical issues
                         for (int y = 0; y < height; y++)
                             for (int x = 0; x < width; x++)
-                                xyVarianceMap[x, y] = 0f;
+                                xyVarianceMap[x, y] = 0.000001f;
 
                         for (int z = 0; z < depth; z++)
                             for (int x = 0; x < width; x++)
-                                xzVarianceMap[x, z] = 0f;
+                                xzVarianceMap[x, z] = 0.000001f;
 
                         for (int z = 0; z < depth; z++)
                             for (int y = 0; y < height; y++)
-                                yzVarianceMap[y, z] = 0f;
+                                yzVarianceMap[y, z] = 0.000001f;
 
                         // Calculate variance maps with error handling
                         bool xySuccess = false, xzSuccess = false, yzSuccess = false;
@@ -1166,7 +1596,6 @@ namespace CTSegmenter
                 btnCalculateVariance.Enabled = true;
             }
         }
-
         // Calculate XY variance map on GPU
         private void CalculateXYVarianceMapGPU(int width, int height, int depth, int sliceCount, Action<int> progressCallback, CancellationToken token)
         {
@@ -1220,7 +1649,9 @@ namespace CTSegmenter
                         {
                             for (int x = 0; x < width; x++)
                             {
-                                xyVarianceMap[x, y] = flatVarianceMap[y * width + x];
+                                // Ensure we don't have zero or negative values that might cause issues later
+                                float variance = flatVarianceMap[y * width + x];
+                                xyVarianceMap[x, y] = Math.Max(0.000001f, variance);
                             }
                         }
                     }
@@ -1271,11 +1702,6 @@ namespace CTSegmenter
 
             try
             {
-                // Process each x-z slice
-                // For XZ view, we need to process differently than XY
-                // We could create a specialized kernel, but for simplicity and code reuse,
-                // we'll do this by transforming to a flat result and then reshaping
-
                 // Upload data to GPU
                 using (var deviceVolumeData = accelerator.Allocate1D<byte>(flatVolumeData))
                 {
@@ -1313,7 +1739,13 @@ namespace CTSegmenter
                         {
                             float mean = sum / validPositions;
                             float variance = (sumSquared / validPositions) - (mean * mean);
-                            flatVarianceMap[z * width + x] = variance;
+                            // Ensure we don't have zero or negative values
+                            flatVarianceMap[z * width + x] = Math.Max(0.000001f, variance);
+                        }
+                        else
+                        {
+                            // Default small value to avoid division by zero later
+                            flatVarianceMap[z * width + x] = 0.000001f;
                         }
 
                         // Report progress periodically
@@ -1377,9 +1809,6 @@ namespace CTSegmenter
 
             try
             {
-                // Process each Y-Z slice
-                // Like with XZ, we'll handle this specially since it's a different projection
-
                 // Upload data to GPU
                 using (var deviceVolumeData = accelerator.Allocate1D<byte>(flatVolumeData))
                 {
@@ -1417,7 +1846,13 @@ namespace CTSegmenter
                         {
                             float mean = sum / validPositions;
                             float variance = (sumSquared / validPositions) - (mean * mean);
-                            flatVarianceMap[z * height + y] = variance;
+                            // Ensure we don't have zero or negative values
+                            flatVarianceMap[z * height + y] = Math.Max(0.000001f, variance);
+                        }
+                        else
+                        {
+                            // Default small value to avoid division by zero later
+                            flatVarianceMap[z * height + y] = 0.000001f;
                         }
 
                         // Report progress periodically
@@ -1496,14 +1931,22 @@ namespace CTSegmenter
                     // Process slices
                     for (int z = startSlice; z <= endSlice; z++)
                     {
-                        // Get voxel value and normalize to 0-1
-                        byte voxelValue = mainForm.volumeData[x, y, z];
-                        float val = voxelValue / 255.0f;
+                        try
+                        {
+                            // Get voxel value and normalize to 0-1
+                            byte voxelValue = mainForm.volumeData[x, y, z];
+                            float val = voxelValue / 255.0f;
 
-                        // Update sums
-                        sum += val;
-                        sumSquared += val * val;
-                        validSlices++;
+                            // Update sums
+                            sum += val;
+                            sumSquared += val * val;
+                            validSlices++;
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[BandDetectionForm] Error accessing voxel at {x},{y},{z}: {ex.Message}");
+                            // Continue processing other voxels
+                        }
                     }
 
                     // Calculate variance only if we have at least 2 slices
@@ -1512,8 +1955,13 @@ namespace CTSegmenter
                         float mean = sum / validSlices;
                         float variance = (sumSquared / validSlices) - (mean * mean);
 
-                        // Store variance
-                        xyVarianceMap[x, y] = variance;
+                        // Store variance - max with a small positive value to avoid numerical issues
+                        xyVarianceMap[x, y] = Math.Max(0.000001f, variance);
+                    }
+                    else
+                    {
+                        // Set to small positive value to avoid numerical issues
+                        xyVarianceMap[x, y] = 0.000001f;
                     }
                 }
 
@@ -1529,6 +1977,7 @@ namespace CTSegmenter
             token.ThrowIfCancellationRequested();
             Logger.Log("[BandDetectionForm] XY variance map calculation complete");
         }
+
 
         // Calculate XZ variance map on CPU (fallback)
         private void CalculateXZVarianceMap(int width, int height, int depth, int sliceCount, Action<int> progressCallback, CancellationToken token)
@@ -1576,14 +2025,22 @@ namespace CTSegmenter
                     // Process Y positions
                     for (int y = startY; y <= endY; y++)
                     {
-                        // Get voxel value and normalize to 0-1
-                        byte voxelValue = mainForm.volumeData[x, y, z];
-                        float val = voxelValue / 255.0f;
+                        try
+                        {
+                            // Get voxel value and normalize to 0-1
+                            byte voxelValue = mainForm.volumeData[x, y, z];
+                            float val = voxelValue / 255.0f;
 
-                        // Update sums
-                        sum += val;
-                        sumSquared += val * val;
-                        validPositions++;
+                            // Update sums
+                            sum += val;
+                            sumSquared += val * val;
+                            validPositions++;
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[BandDetectionForm] Error accessing voxel at {x},{y},{z}: {ex.Message}");
+                            // Continue processing other voxels
+                        }
                     }
 
                     // Calculate variance only if we have at least 2 positions
@@ -1592,8 +2049,13 @@ namespace CTSegmenter
                         float mean = sum / validPositions;
                         float variance = (sumSquared / validPositions) - (mean * mean);
 
-                        // Store variance
-                        xzVarianceMap[x, z] = variance;
+                        // Store variance - max with a small positive value to avoid numerical issues
+                        xzVarianceMap[x, z] = Math.Max(0.000001f, variance);
+                    }
+                    else
+                    {
+                        // Set to small positive value to avoid numerical issues
+                        xzVarianceMap[x, z] = 0.000001f;
                     }
                 }
 
@@ -1656,14 +2118,22 @@ namespace CTSegmenter
                     // Process X positions
                     for (int x = startX; x <= endX; x++)
                     {
-                        // Get voxel value and normalize to 0-1
-                        byte voxelValue = mainForm.volumeData[x, y, z];
-                        float val = voxelValue / 255.0f;
+                        try
+                        {
+                            // Get voxel value and normalize to 0-1
+                            byte voxelValue = mainForm.volumeData[x, y, z];
+                            float val = voxelValue / 255.0f;
 
-                        // Update sums
-                        sum += val;
-                        sumSquared += val * val;
-                        validPositions++;
+                            // Update sums
+                            sum += val;
+                            sumSquared += val * val;
+                            validPositions++;
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[BandDetectionForm] Error accessing voxel at {x},{y},{z}: {ex.Message}");
+                            // Continue processing other voxels
+                        }
                     }
 
                     // Calculate variance only if we have at least 2 positions
@@ -1672,8 +2142,13 @@ namespace CTSegmenter
                         float mean = sum / validPositions;
                         float variance = (sumSquared / validPositions) - (mean * mean);
 
-                        // Store variance
-                        yzVarianceMap[y, z] = variance;
+                        // Store variance - max with a small positive value to avoid numerical issues
+                        yzVarianceMap[y, z] = Math.Max(0.000001f, variance);
+                    }
+                    else
+                    {
+                        // Set to small positive value to avoid numerical issues
+                        yzVarianceMap[y, z] = 0.000001f;
                     }
                 }
 
@@ -1689,7 +2164,448 @@ namespace CTSegmenter
             token.ThrowIfCancellationRequested();
             Logger.Log("[BandDetectionForm] YZ variance map calculation complete");
         }
+        private void ShowStatusMessage(string message)
+        {
+            // Check if the status label exists
+            if (gpuStatusLabel != null)
+            {
+                // Store original text and color
+                string originalText = gpuStatusLabel.Text;
+                Color originalColor = gpuStatusLabel.ForeColor;
 
+                // Update with new message
+                gpuStatusLabel.Text = message;
+                gpuStatusLabel.ForeColor = Color.Blue;
+
+                // Schedule restoring after delay
+                Task.Run(async () =>
+                {
+                    await Task.Delay(3000); // Show message for 3 seconds
+
+                    this.Invoke(new Action(() => {
+                        // Restore original text and color
+                        gpuStatusLabel.Text = originalText;
+                        gpuStatusLabel.ForeColor = originalColor;
+                    }));
+                });
+            }
+        }
+        private void SetupDebouncedMainViewSliders()
+        {
+            // Setup XY View slider
+            if (xySliceTrackBar != null)
+            {
+                // Store current handlers temporarily
+                EventHandler xyNumericHandler = null;
+                if (xySliceNumeric != null)
+                {
+                    // Disconnect the numeric's value changed temporarily to avoid triggering processing
+                    xyNumericHandler = GetEventHandler(xySliceNumeric, "ValueChanged");
+                    if (xyNumericHandler != null)
+                        xySliceNumeric.ValueChanged -= xyNumericHandler;
+                }
+
+                // Remove the trackbar's value changed handler (clearing it)
+                xySliceTrackBar.ValueChanged -= null;
+
+                // Add new debounced handler
+                xySliceTrackBar.ValueChanged += (s, e) =>
+                {
+                    // Only update numeric value without processing
+                    if (xySliceTrackBar.Value >= xySliceNumeric.Minimum &&
+                        xySliceTrackBar.Value <= xySliceNumeric.Maximum)
+                    {
+                        xySliceNumeric.Value = xySliceTrackBar.Value;
+                    }
+                };
+
+                // Add Mouse release handlers - these can be added without removing existing ones
+                // as they specifically handle the MouseUp and CaptureChanged events
+                xySliceTrackBar.MouseUp += OnXYSliderMouseUp;
+                xySliceTrackBar.MouseCaptureChanged += OnXYSliderCaptureChanged;
+
+                // Reconnect numeric handler if we stored one
+                if (xyNumericHandler != null)
+                    xySliceNumeric.ValueChanged += xyNumericHandler;
+            }
+
+            // Setup XZ View slider
+            if (xzSliceTrackBar != null)
+            {
+                // Store current handlers temporarily
+                EventHandler xzNumericHandler = null;
+                if (xzSliceNumeric != null)
+                {
+                    // Disconnect the numeric's value changed temporarily to avoid triggering processing
+                    xzNumericHandler = GetEventHandler(xzSliceNumeric, "ValueChanged");
+                    if (xzNumericHandler != null)
+                        xzSliceNumeric.ValueChanged -= xzNumericHandler;
+                }
+
+                // Remove the trackbar's value changed handler
+                xzSliceTrackBar.ValueChanged -= null;
+
+                // Add new debounced handler
+                xzSliceTrackBar.ValueChanged += (s, e) =>
+                {
+                    // Only update numeric value without processing
+                    if (xzSliceTrackBar.Value >= xzSliceNumeric.Minimum &&
+                        xzSliceTrackBar.Value <= xzSliceNumeric.Maximum)
+                    {
+                        xzSliceNumeric.Value = xzSliceTrackBar.Value;
+                    }
+                };
+
+                // Add Mouse release handlers
+                xzSliceTrackBar.MouseUp += OnXZSliderMouseUp;
+                xzSliceTrackBar.MouseCaptureChanged += OnXZSliderCaptureChanged;
+
+                // Reconnect numeric handler if we stored one
+                if (xzNumericHandler != null)
+                    xzSliceNumeric.ValueChanged += xzNumericHandler;
+            }
+
+            // Setup YZ View slider
+            if (yzSliceTrackBar != null)
+            {
+                // Store current handlers temporarily
+                EventHandler yzNumericHandler = null;
+                if (yzSliceNumeric != null)
+                {
+                    // Disconnect the numeric's value changed temporarily to avoid triggering processing
+                    yzNumericHandler = GetEventHandler(yzSliceNumeric, "ValueChanged");
+                    if (yzNumericHandler != null)
+                        yzSliceNumeric.ValueChanged -= yzNumericHandler;
+                }
+
+                // Remove the trackbar's value changed handler
+                yzSliceTrackBar.ValueChanged -= null;
+
+                // Add new debounced handler
+                yzSliceTrackBar.ValueChanged += (s, e) =>
+                {
+                    // Only update numeric value without processing
+                    if (yzSliceTrackBar.Value >= yzSliceNumeric.Minimum &&
+                        yzSliceTrackBar.Value <= yzSliceNumeric.Maximum)
+                    {
+                        yzSliceNumeric.Value = yzSliceTrackBar.Value;
+                    }
+                };
+
+                // Add Mouse release handlers
+                yzSliceTrackBar.MouseUp += OnYZSliderMouseUp;
+                yzSliceTrackBar.MouseCaptureChanged += OnYZSliderCaptureChanged;
+
+                // Reconnect numeric handler if we stored one
+                if (yzNumericHandler != null)
+                    yzSliceNumeric.ValueChanged += yzNumericHandler;
+            }
+        }
+
+        private EventHandler GetEventHandler(Control control, string eventName)
+        {
+            try
+            {
+                // Get the field info for the event
+                System.Reflection.FieldInfo fi = control.GetType().GetField(eventName,
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.Instance);
+
+                if (fi != null)
+                {
+                    // Get the delegate
+                    object value = fi.GetValue(control);
+                    if (value != null)
+                    {
+                        return (EventHandler)value;
+                    }
+                }
+            }
+            catch
+            {
+                // Ignore errors in getting the handler
+            }
+
+            return null;
+        }
+        private void OnXYSliderMouseUp(object sender, MouseEventArgs e)
+        {
+            if (useVarianceDetection && isShowingVarianceMap)
+            {
+                ShowStatusMessage("Recalculating variance for new slice position...");
+                // Don't call full CalculateVarianceMaps directly, use a lighter recalculation
+                RecalculateCurrentVarianceMap(ViewType.XY);
+            }
+            else
+            {
+                Task.Run(() => ProcessXYView());
+            }
+        }
+
+        private void OnXYSliderCaptureChanged(object sender, EventArgs e)
+        {
+            if (useVarianceDetection && isShowingVarianceMap)
+            {
+                ShowStatusMessage("Recalculating variance for new slice position...");
+                // Don't call full CalculateVarianceMaps directly, use a lighter recalculation
+                RecalculateCurrentVarianceMap(ViewType.XY);
+            }
+            else
+            {
+                Task.Run(() => ProcessXYView());
+            }
+        }
+
+        private void OnXZSliderMouseUp(object sender, MouseEventArgs e)
+        {
+            if (useVarianceDetection && isShowingVarianceMap)
+            {
+                ShowStatusMessage("Recalculating variance for new slice position...");
+                // Don't call full CalculateVarianceMaps directly, use a lighter recalculation
+                RecalculateCurrentVarianceMap(ViewType.XZ);
+            }
+            else
+            {
+                Task.Run(() => ProcessXZView());
+            }
+        }
+
+        private void OnXZSliderCaptureChanged(object sender, EventArgs e)
+        {
+            if (useVarianceDetection && isShowingVarianceMap)
+            {
+                ShowStatusMessage("Recalculating variance for new slice position...");
+                // Don't call full CalculateVarianceMaps directly, use a lighter recalculation
+                RecalculateCurrentVarianceMap(ViewType.XZ);
+            }
+            else
+            {
+                Task.Run(() => ProcessXZView());
+            }
+        }
+
+
+        private void OnYZSliderMouseUp(object sender, MouseEventArgs e)
+        {
+            if (useVarianceDetection && isShowingVarianceMap)
+            {
+                ShowStatusMessage("Recalculating variance for new slice position...");
+                // Don't call full CalculateVarianceMaps directly, use a lighter recalculation
+                RecalculateCurrentVarianceMap(ViewType.YZ);
+            }
+            else
+            {
+                Task.Run(() => ProcessYZView());
+            }
+        }
+        private enum ViewType { XY, XZ, YZ }
+        private void RecalculateCurrentVarianceMap(ViewType viewType)
+        {
+            if (mainForm.volumeData == null)
+                return;
+
+            try
+            {
+                // Cancel any previous operations
+                if (varianceCancellationTokenSource != null)
+                {
+                    varianceCancellationTokenSource.Cancel();
+                    varianceCancellationTokenSource.Dispose();
+                }
+
+                // Create new cancellation token source
+                varianceCancellationTokenSource = new CancellationTokenSource();
+                var token = varianceCancellationTokenSource.Token;
+
+                int width = mainForm.GetWidth();
+                int height = mainForm.GetHeight();
+                int depth = mainForm.GetDepth();
+                int sliceCount = (int)numSlicesToIntegrate.Value;
+
+                if (width <= 0 || height <= 0 || depth <= 0 || sliceCount < 2)
+                    return;
+
+                // Run the calculation in a background task
+                Task.Run(() =>
+                {
+                    try
+                    {
+                        Logger.Log($"[BandDetectionForm] Recalculating {viewType} variance map for slice change");
+
+                        // Only recalculate the specific view that changed
+                        switch (viewType)
+                        {
+                            case ViewType.XY:
+                                // Don't dispose other views' resources
+                                if (xyVarianceImage != null)
+                                {
+                                    xyVarianceImage.Dispose();
+                                    xyVarianceImage = null;
+                                }
+
+                                // Recalculate XY variance map
+                                if (gpuAvailable && accelerator != null && calculateVarianceKernel != null)
+                                {
+                                    CalculateXYVarianceMapGPU(width, height, depth, sliceCount, progress => { }, token);
+                                }
+                                else
+                                {
+                                    CalculateXYVarianceMap(width, height, depth, sliceCount, progress => { }, token);
+                                }
+
+                                // Create image & detect bands
+                                this.Invoke(new Action(() =>
+                                {
+                                    if (!token.IsCancellationRequested)
+                                    {
+                                        try
+                                        {
+                                            xyVarianceImage = CreateVarianceMapImage(xyVarianceMap);
+                                            DetectBandsInXYVarianceMap();
+
+                                            // Update UI with new image and peaks
+                                            if (isShowingVarianceMap)
+                                            {
+                                                xyPictureBox.Image = xyVarianceImage;
+                                                xyPictureBox.Invalidate();
+                                                UpdateVarianceXYChart();
+                                            }
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Logger.Log($"[BandDetectionForm] Error updating XY variance: {ex.Message}");
+                                        }
+                                    }
+                                }));
+                                break;
+
+                            case ViewType.XZ:
+                                // Don't dispose other views' resources
+                                if (xzVarianceImage != null)
+                                {
+                                    xzVarianceImage.Dispose();
+                                    xzVarianceImage = null;
+                                }
+
+                                // Recalculate XZ variance map
+                                if (gpuAvailable && accelerator != null && calculateVarianceKernel != null)
+                                {
+                                    CalculateXZVarianceMapGPU(width, height, depth, sliceCount, progress => { }, token);
+                                }
+                                else
+                                {
+                                    CalculateXZVarianceMap(width, height, depth, sliceCount, progress => { }, token);
+                                }
+
+                                // Create image & detect bands
+                                this.Invoke(new Action(() =>
+                                {
+                                    if (!token.IsCancellationRequested)
+                                    {
+                                        try
+                                        {
+                                            xzVarianceImage = CreateVarianceMapImage(xzVarianceMap);
+                                            DetectBandsInXZVarianceMap();
+
+                                            // Update UI with new image and peaks
+                                            if (isShowingVarianceMap)
+                                            {
+                                                xzPictureBox.Image = xzVarianceImage;
+                                                xzPictureBox.Invalidate();
+                                                UpdateVarianceXZChart();
+                                            }
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Logger.Log($"[BandDetectionForm] Error updating XZ variance: {ex.Message}");
+                                        }
+                                    }
+                                }));
+                                break;
+
+                            case ViewType.YZ:
+                                // Don't dispose other views' resources
+                                if (yzVarianceImage != null)
+                                {
+                                    yzVarianceImage.Dispose();
+                                    yzVarianceImage = null;
+                                }
+
+                                // Recalculate YZ variance map
+                                if (gpuAvailable && accelerator != null && calculateVarianceKernel != null)
+                                {
+                                    CalculateYZVarianceMapGPU(width, height, depth, sliceCount, progress => { }, token);
+                                }
+                                else
+                                {
+                                    CalculateYZVarianceMap(width, height, depth, sliceCount, progress => { }, token);
+                                }
+
+                                // Create image & detect bands
+                                this.Invoke(new Action(() =>
+                                {
+                                    if (!token.IsCancellationRequested)
+                                    {
+                                        try
+                                        {
+                                            yzVarianceImage = CreateVarianceMapImage(yzVarianceMap);
+                                            DetectBandsInYZVarianceMap();
+
+                                            // Update UI with new image and peaks
+                                            if (isShowingVarianceMap)
+                                            {
+                                                yzPictureBox.Image = yzVarianceImage;
+                                                yzPictureBox.Invalidate();
+                                                UpdateVarianceYZChart();
+                                            }
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Logger.Log($"[BandDetectionForm] Error updating YZ variance: {ex.Message}");
+                                        }
+                                    }
+                                }));
+                                break;
+                        }
+
+                        this.Invoke(new Action(() =>
+                        {
+                            ShowStatusMessage("Variance recalculation complete");
+                        }));
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        Logger.Log("[BandDetectionForm] Variance recalculation cancelled");
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[BandDetectionForm] Error in variance recalculation: {ex.Message}");
+                        this.Invoke(new Action(() =>
+                        {
+                            ShowStatusMessage($"Error: {ex.Message}");
+                        }));
+                    }
+                }, token);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[BandDetectionForm] Error setting up variance recalculation: {ex.Message}");
+            }
+        }
+
+        private void OnYZSliderCaptureChanged(object sender, EventArgs e)
+        {
+            if (useVarianceDetection && isShowingVarianceMap)
+            {
+                ShowStatusMessage("Recalculating variance for new slice position...");
+                // Don't call full CalculateVarianceMaps directly, use a lighter recalculation
+                RecalculateCurrentVarianceMap(ViewType.YZ);
+            }
+            else
+            {
+                Task.Run(() => ProcessYZView());
+            }
+        }
         // Create a bitmap from a variance map
         private Bitmap CreateVarianceMapImage(float[,] varianceMap)
         {
@@ -1875,12 +2791,15 @@ namespace CTSegmenter
         }
 
         // Detect bands in the XY variance map
-        private void DetectBandsInXYVarianceMap()
+        private void DetectBandsInXYVarianceMap(float customProminence = 0)
         {
             if (xyVarianceMap == null)
                 return;
 
             Logger.Log("[BandDetectionForm] Detecting bands in XY variance map");
+
+            // Use the provided custom prominence or the default
+            float effectiveProminence = customProminence > 0 ? customProminence : (float)peakProminence;
 
             int width = xyVarianceMap.GetLength(0);
             int height = xyVarianceMap.GetLength(1);
@@ -1903,34 +2822,46 @@ namespace CTSegmenter
             double[] smoothRowProfile = GaussianSmoothArray(rowProfile, (float)gaussianSigma);
 
             // Get min/max values for scaling
-            double minVal = smoothRowProfile.Min();
-            double maxVal = smoothRowProfile.Max();
+            double minVal = double.MaxValue;
+            double maxVal = double.MinValue;
+
+            for (int i = 0; i < smoothRowProfile.Length; i++)
+            {
+                if (smoothRowProfile[i] < minVal) minVal = smoothRowProfile[i];
+                if (smoothRowProfile[i] > maxVal) maxVal = smoothRowProfile[i];
+            }
+
             double range = maxVal - minVal;
+            if (range < 0.0001) range = 0.0001; // Prevent division by zero
 
             // In variance maps, dark peaks (low variance) represent consistent bands across slices
-            // We need to find minima (valleys) in the profile, which can be done by finding maxima in the inverted profile
+            // We need to find minima (valleys) in the profile
+            // Create inverted profile for detecting dark peaks (low variance areas)
             double[] invertedProfileForDarkPeaks = new double[height];
             for (int i = 0; i < height; i++)
             {
-                invertedProfileForDarkPeaks[i] = maxVal - smoothRowProfile[i];
+                invertedProfileForDarkPeaks[i] = maxVal - smoothRowProfile[i] + minVal;
             }
 
             // Find dark peaks (low variance areas = consistent bands) in the inverted profile
-            xyVarianceDarkPeaks = FindPeaks(invertedProfileForDarkPeaks, peakDistance, (float)peakProminence);
+            xyVarianceDarkPeaks = FindPeaks(invertedProfileForDarkPeaks, peakDistance, effectiveProminence);
 
             // Find bright peaks (high variance areas = inconsistent regions) directly in the profile
-            xyVarianceBrightPeaks = FindPeaks(smoothRowProfile, peakDistance, (float)peakProminence);
+            xyVarianceBrightPeaks = FindPeaks(smoothRowProfile, peakDistance, effectiveProminence);
 
             Logger.Log($"[BandDetectionForm] XY: Detected {xyVarianceDarkPeaks.Length} low-variance bands and {xyVarianceBrightPeaks.Length} high-variance regions");
         }
 
         // Detect bands in the XZ variance map
-        private void DetectBandsInXZVarianceMap()
+        private void DetectBandsInXZVarianceMap(float customProminence = 0)
         {
             if (xzVarianceMap == null)
                 return;
 
             Logger.Log("[BandDetectionForm] Detecting bands in XZ variance map");
+
+            // Use the provided custom prominence or the default
+            float effectiveProminence = customProminence > 0 ? customProminence : (float)peakProminence;
 
             int width = xzVarianceMap.GetLength(0);
             int depth = xzVarianceMap.GetLength(1);
@@ -1953,34 +2884,46 @@ namespace CTSegmenter
             double[] smoothRowProfile = GaussianSmoothArray(rowProfile, (float)gaussianSigma);
 
             // Get min/max values for scaling
-            double minVal = smoothRowProfile.Min();
-            double maxVal = smoothRowProfile.Max();
+            double minVal = double.MaxValue;
+            double maxVal = double.MinValue;
+
+            for (int i = 0; i < smoothRowProfile.Length; i++)
+            {
+                if (smoothRowProfile[i] < minVal) minVal = smoothRowProfile[i];
+                if (smoothRowProfile[i] > maxVal) maxVal = smoothRowProfile[i];
+            }
+
             double range = maxVal - minVal;
+            if (range < 0.0001) range = 0.0001; // Prevent division by zero
 
             // In variance maps, dark peaks (low variance) represent consistent bands across slices
-            // We need to find minima (valleys) in the profile, which can be done by finding maxima in the inverted profile
+            // We need to find minima (valleys) in the profile
+            // Create inverted profile for detecting dark peaks (low variance areas)
             double[] invertedProfileForDarkPeaks = new double[depth];
             for (int i = 0; i < depth; i++)
             {
-                invertedProfileForDarkPeaks[i] = maxVal - smoothRowProfile[i];
+                invertedProfileForDarkPeaks[i] = maxVal - smoothRowProfile[i] + minVal;
             }
 
             // Find dark peaks (low variance areas = consistent bands) in the inverted profile
-            xzVarianceDarkPeaks = FindPeaks(invertedProfileForDarkPeaks, peakDistance, (float)peakProminence);
+            xzVarianceDarkPeaks = FindPeaks(invertedProfileForDarkPeaks, peakDistance, effectiveProminence);
 
             // Find bright peaks (high variance areas = inconsistent regions) directly in the profile
-            xzVarianceBrightPeaks = FindPeaks(smoothRowProfile, peakDistance, (float)peakProminence);
+            xzVarianceBrightPeaks = FindPeaks(smoothRowProfile, peakDistance, effectiveProminence);
 
             Logger.Log($"[BandDetectionForm] XZ: Detected {xzVarianceDarkPeaks.Length} low-variance bands and {xzVarianceBrightPeaks.Length} high-variance regions");
         }
 
         // Detect bands in the YZ variance map
-        private void DetectBandsInYZVarianceMap()
+        private void DetectBandsInYZVarianceMap(float customProminence = 0)
         {
             if (yzVarianceMap == null)
                 return;
 
             Logger.Log("[BandDetectionForm] Detecting bands in YZ variance map");
+
+            // Use the provided custom prominence or the default
+            float effectiveProminence = customProminence > 0 ? customProminence : (float)peakProminence;
 
             int height = yzVarianceMap.GetLength(0);
             int depth = yzVarianceMap.GetLength(1);
@@ -2003,23 +2946,32 @@ namespace CTSegmenter
             double[] smoothRowProfile = GaussianSmoothArray(rowProfile, (float)gaussianSigma);
 
             // Get min/max values for scaling
-            double minVal = smoothRowProfile.Min();
-            double maxVal = smoothRowProfile.Max();
+            double minVal = double.MaxValue;
+            double maxVal = double.MinValue;
+
+            for (int i = 0; i < smoothRowProfile.Length; i++)
+            {
+                if (smoothRowProfile[i] < minVal) minVal = smoothRowProfile[i];
+                if (smoothRowProfile[i] > maxVal) maxVal = smoothRowProfile[i];
+            }
+
             double range = maxVal - minVal;
+            if (range < 0.0001) range = 0.0001; // Prevent division by zero
 
             // In variance maps, dark peaks (low variance) represent consistent bands across slices
-            // We need to find minima (valleys) in the profile, which can be done by finding maxima in the inverted profile
+            // We need to find minima (valleys) in the profile
+            // Create inverted profile for detecting dark peaks (low variance areas)
             double[] invertedProfileForDarkPeaks = new double[depth];
             for (int i = 0; i < depth; i++)
             {
-                invertedProfileForDarkPeaks[i] = maxVal - smoothRowProfile[i];
+                invertedProfileForDarkPeaks[i] = maxVal - smoothRowProfile[i] + minVal;
             }
 
             // Find dark peaks (low variance areas = consistent bands) in the inverted profile
-            yzVarianceDarkPeaks = FindPeaks(invertedProfileForDarkPeaks, peakDistance, (float)peakProminence);
+            yzVarianceDarkPeaks = FindPeaks(invertedProfileForDarkPeaks, peakDistance, effectiveProminence);
 
             // Find bright peaks (high variance areas = inconsistent regions) directly in the profile
-            yzVarianceBrightPeaks = FindPeaks(smoothRowProfile, peakDistance, (float)peakProminence);
+            yzVarianceBrightPeaks = FindPeaks(smoothRowProfile, peakDistance, effectiveProminence);
 
             Logger.Log($"[BandDetectionForm] YZ: Detected {yzVarianceDarkPeaks.Length} low-variance bands and {yzVarianceBrightPeaks.Length} high-variance regions");
         }

@@ -21,7 +21,12 @@ namespace CTSegmenter
 
         // UI Components
         private TableLayoutPanel mainLayout;
-
+        private bool xyProcessingInProgress = false;
+        private bool xzProcessingInProgress = false;
+        private bool yzProcessingInProgress = false;
+        private readonly object xyLock = new object();
+        private readonly object xzLock = new object();
+        private readonly object yzLock = new object();
         private Panel xyPanel, xzPanel, yzPanel;
         private PictureBox xyPictureBox, xzPictureBox, yzPictureBox;
         private TrackBar xySliceTrackBar, xzSliceTrackBar, yzSliceTrackBar;
@@ -194,6 +199,7 @@ namespace CTSegmenter
             yzProcessedImage?.Dispose();
         }
 
+        // Modified implementation for the XY View slider initialization
         private void InitializeXYView()
         {
             // Create a single-row layout with the image and chart side by side
@@ -265,14 +271,26 @@ namespace CTSegmenter
                 Location = new Point(150, 5)
             };
 
+            // Modified event handlers to prevent continuous processing while dragging
             xySliceTrackBar.ValueChanged += (s, e) =>
             {
-                // Only update if value is in valid range
+                // Only update numeric value without processing
                 if (xySliceTrackBar.Value >= xySliceNumeric.Minimum &&
                     xySliceTrackBar.Value <= xySliceNumeric.Maximum)
                 {
                     xySliceNumeric.Value = xySliceTrackBar.Value;
                 }
+            };
+
+            // Process the view only when the slider is released
+            xySliceTrackBar.MouseUp += (s, e) =>
+            {
+                Task.Run(() => ProcessXYView());
+            };
+
+            // Backup handler for when slider is released by dragging outside
+            xySliceTrackBar.MouseCaptureChanged += (s, e) =>
+            {
                 Task.Run(() => ProcessXYView());
             };
 
@@ -284,6 +302,9 @@ namespace CTSegmenter
                 {
                     xySliceTrackBar.Value = (int)xySliceNumeric.Value;
                 }
+
+                // Process the view when numeric value is changed directly
+                Task.Run(() => ProcessXYView());
             };
 
             slicePanel.Controls.Add(sliceLabel);
@@ -314,7 +335,6 @@ namespace CTSegmenter
 
             xyPanel.Controls.Add(xyLayout);
         }
-
         private void InitializeXZView()
         {
             // Create a single-row layout with the image and chart side by side
@@ -386,14 +406,26 @@ namespace CTSegmenter
                 Location = new Point(150, 5)
             };
 
+            // Modified event handlers to prevent continuous processing while dragging
             xzSliceTrackBar.ValueChanged += (s, e) =>
             {
-                // Only update if value is in valid range
+                // Only update numeric value without processing
                 if (xzSliceTrackBar.Value >= xzSliceNumeric.Minimum &&
                     xzSliceTrackBar.Value <= xzSliceNumeric.Maximum)
                 {
                     xzSliceNumeric.Value = xzSliceTrackBar.Value;
                 }
+            };
+
+            // Process the view only when the slider is released
+            xzSliceTrackBar.MouseUp += (s, e) =>
+            {
+                Task.Run(() => ProcessXZView());
+            };
+
+            // Backup handler for when slider is released by dragging outside
+            xzSliceTrackBar.MouseCaptureChanged += (s, e) =>
+            {
                 Task.Run(() => ProcessXZView());
             };
 
@@ -405,6 +437,9 @@ namespace CTSegmenter
                 {
                     xzSliceTrackBar.Value = (int)xzSliceNumeric.Value;
                 }
+
+                // Process the view when numeric value is changed directly
+                Task.Run(() => ProcessXZView());
             };
 
             slicePanel.Controls.Add(sliceLabel);
@@ -436,6 +471,9 @@ namespace CTSegmenter
             xzPanel.Controls.Add(xzLayout);
         }
 
+        // Modified implementation for the XZ View slider
+        
+        // Modified implementation for the YZ View slider
         private void InitializeYZView()
         {
             // Create a single-row layout with the image and chart side by side
@@ -506,14 +544,26 @@ namespace CTSegmenter
                 Location = new Point(150, 5)
             };
 
+            // Modified event handlers to prevent continuous processing while dragging
             yzSliceTrackBar.ValueChanged += (s, e) =>
             {
-                // Only update if value is in valid range
+                // Only update numeric value without processing
                 if (yzSliceTrackBar.Value >= yzSliceNumeric.Minimum &&
                     yzSliceTrackBar.Value <= yzSliceNumeric.Maximum)
                 {
                     yzSliceNumeric.Value = yzSliceTrackBar.Value;
                 }
+            };
+
+            // Process the view only when the slider is released
+            yzSliceTrackBar.MouseUp += (s, e) =>
+            {
+                Task.Run(() => ProcessYZView());
+            };
+
+            // Backup handler for when slider is released by dragging outside
+            yzSliceTrackBar.MouseCaptureChanged += (s, e) =>
+            {
                 Task.Run(() => ProcessYZView());
             };
 
@@ -525,6 +575,9 @@ namespace CTSegmenter
                 {
                     yzSliceTrackBar.Value = (int)yzSliceNumeric.Value;
                 }
+
+                // Process the view when numeric value is changed directly
+                Task.Run(() => ProcessYZView());
             };
 
             slicePanel.Controls.Add(sliceLabel);
@@ -555,7 +608,6 @@ namespace CTSegmenter
 
             yzPanel.Controls.Add(yzLayout);
         }
-
         private void InitializeParameters()
         {
             // Parameters panel
@@ -857,7 +909,8 @@ namespace CTSegmenter
 
         private void XYPictureBox_Paint(object sender, PaintEventArgs e)
         {
-            if (xyProcessedImage == null)
+            // Don't try to draw if no image is available
+            if ((xyProcessedImage == null && xyVarianceImage == null) || e.Graphics == null)
                 return;
 
             // The image is automatically drawn by the PictureBox control
@@ -883,32 +936,81 @@ namespace CTSegmenter
                 e.Graphics.DrawString(sliceText, font, brush, pos);
             }
 
-            // Draw peak lines if enabled - HORIZONTAL LINES with scaling
-            if (showPeaks && xyDarkPeaks != null && xyRowProfile != null)
+            // Draw variance mode indicator if applicable
+            if (isShowingVarianceMap)
             {
-                // Calculate scaling factor based on the stretched image height
-                float scaleY = (float)xyPictureBox.ClientSize.Height / xyProcessedImage.Height;
-
-                using (Pen darkPen = new Pen(Color.Red, 1))
+                using (Font font = new Font("Arial", 9, FontStyle.Bold))
+                using (SolidBrush brush = new SolidBrush(Color.LightGreen))
                 {
-                    foreach (int peak in xyDarkPeaks)
+                    e.Graphics.DrawString("VARIANCE MODE", font, brush, new PointF(10, 30));
+                }
+            }
+
+            // Only draw peak lines if they should be shown
+            if (!showPeaks)
+                return;
+
+            // Determine which image and peaks to use based on current mode
+            Bitmap currentImage;
+            int[] darkPeaks;
+            int[] brightPeaks;
+
+            if (isShowingVarianceMap)
+            {
+                // Use variance-based image and peaks
+                currentImage = xyVarianceImage;
+                darkPeaks = xyVarianceDarkPeaks;
+                brightPeaks = xyVarianceBrightPeaks;
+            }
+            else
+            {
+                // Use standard image and peaks
+                currentImage = xyProcessedImage;
+                darkPeaks = xyDarkPeaks;
+                brightPeaks = xyBrightPeaks;
+            }
+
+            // Only proceed if we have an image and at least one set of peaks
+            if (currentImage == null || (darkPeaks == null && brightPeaks == null))
+                return;
+
+            // Calculate correct scaling factor based on how the image is displayed
+            float scaleY = (float)xyPictureBox.ClientSize.Height / currentImage.Height;
+
+            // Draw dark peak lines
+            if (darkPeaks != null)
+            {
+                using (Pen darkPen = new Pen(Color.Red, 2))
+                {
+                    foreach (int peak in darkPeaks)
                     {
-                        int y1 = (int)(peak * scaleY);
-                        e.Graphics.DrawLine(darkPen, 0, y1, xyPictureBox.Width, y1);
+                        // Make sure peak is within image bounds
+                        if (peak >= 0 && peak < currentImage.Height)
+                        {
+                            int y1 = (int)(peak * scaleY);
+                            e.Graphics.DrawLine(darkPen, 0, y1, xyPictureBox.Width, y1);
+                        }
                     }
                 }
+            }
 
-                using (Pen brightPen = new Pen(Color.Green, 1))
+            // Draw bright peak lines
+            if (brightPeaks != null)
+            {
+                using (Pen brightPen = new Pen(Color.Green, 2))
                 {
-                    foreach (int peak in xyBrightPeaks)
+                    foreach (int peak in brightPeaks)
                     {
-                        int y1 = (int)(peak * scaleY);
-                        e.Graphics.DrawLine(brightPen, 0, y1, xyPictureBox.Width, y1);
+                        // Make sure peak is within image bounds
+                        if (peak >= 0 && peak < currentImage.Height)
+                        {
+                            int y1 = (int)(peak * scaleY);
+                            e.Graphics.DrawLine(brightPen, 0, y1, xyPictureBox.Width, y1);
+                        }
                     }
                 }
             }
         }
-
         // XZ PictureBox mouse events
         private void XZPictureBox_MouseDown(object sender, MouseEventArgs e)
         {
@@ -961,7 +1063,8 @@ namespace CTSegmenter
 
         private void XZPictureBox_Paint(object sender, PaintEventArgs e)
         {
-            if (xzProcessedImage == null)
+            // Don't try to draw if no image is available
+            if ((xzProcessedImage == null && xzVarianceImage == null) || e.Graphics == null)
                 return;
 
             // The image is automatically drawn by the PictureBox control
@@ -987,32 +1090,81 @@ namespace CTSegmenter
                 e.Graphics.DrawString(sliceText, font, brush, pos);
             }
 
-            // Draw peak lines if enabled - HORIZONTAL LINES with scaling
-            if (showPeaks && xzDarkPeaks != null && xzRowProfile != null)
+            // Draw variance mode indicator if applicable
+            if (isShowingVarianceMap)
             {
-                // Calculate scaling factor based on the stretched image height
-                float scaleY = (float)xzPictureBox.ClientSize.Height / xzProcessedImage.Height;
-
-                using (Pen darkPen = new Pen(Color.Red, 1))
+                using (Font font = new Font("Arial", 9, FontStyle.Bold))
+                using (SolidBrush brush = new SolidBrush(Color.LightGreen))
                 {
-                    foreach (int peak in xzDarkPeaks)
+                    e.Graphics.DrawString("VARIANCE MODE", font, brush, new PointF(10, 30));
+                }
+            }
+
+            // Only draw peak lines if they should be shown
+            if (!showPeaks)
+                return;
+
+            // Determine which image and peaks to use based on current mode
+            Bitmap currentImage;
+            int[] darkPeaks;
+            int[] brightPeaks;
+
+            if (isShowingVarianceMap)
+            {
+                // Use variance-based image and peaks
+                currentImage = xzVarianceImage;
+                darkPeaks = xzVarianceDarkPeaks;
+                brightPeaks = xzVarianceBrightPeaks;
+            }
+            else
+            {
+                // Use standard image and peaks
+                currentImage = xzProcessedImage;
+                darkPeaks = xzDarkPeaks;
+                brightPeaks = xzBrightPeaks;
+            }
+
+            // Only proceed if we have an image and at least one set of peaks
+            if (currentImage == null || (darkPeaks == null && brightPeaks == null))
+                return;
+
+            // Calculate correct scaling factor based on how the image is displayed
+            float scaleY = (float)xzPictureBox.ClientSize.Height / currentImage.Height;
+
+            // Draw dark peak lines
+            if (darkPeaks != null)
+            {
+                using (Pen darkPen = new Pen(Color.Red, 2))
+                {
+                    foreach (int peak in darkPeaks)
                     {
-                        int y1 = (int)(peak * scaleY);
-                        e.Graphics.DrawLine(darkPen, 0, y1, xzPictureBox.Width, y1);
+                        // Make sure peak is within image bounds
+                        if (peak >= 0 && peak < currentImage.Height)
+                        {
+                            int y1 = (int)(peak * scaleY);
+                            e.Graphics.DrawLine(darkPen, 0, y1, xzPictureBox.Width, y1);
+                        }
                     }
                 }
+            }
 
-                using (Pen brightPen = new Pen(Color.Green, 1))
+            // Draw bright peak lines
+            if (brightPeaks != null)
+            {
+                using (Pen brightPen = new Pen(Color.Green, 2))
                 {
-                    foreach (int peak in xzBrightPeaks)
+                    foreach (int peak in brightPeaks)
                     {
-                        int y1 = (int)(peak * scaleY);
-                        e.Graphics.DrawLine(brightPen, 0, y1, xzPictureBox.Width, y1);
+                        // Make sure peak is within image bounds
+                        if (peak >= 0 && peak < currentImage.Height)
+                        {
+                            int y1 = (int)(peak * scaleY);
+                            e.Graphics.DrawLine(brightPen, 0, y1, xzPictureBox.Width, y1);
+                        }
                     }
                 }
             }
         }
-
         // YZ PictureBox mouse events
         private void YZPictureBox_MouseDown(object sender, MouseEventArgs e)
         {
@@ -1065,7 +1217,8 @@ namespace CTSegmenter
 
         private void YZPictureBox_Paint(object sender, PaintEventArgs e)
         {
-            if (yzProcessedImage == null)
+            // Don't try to draw if no image is available
+            if ((yzProcessedImage == null && yzVarianceImage == null) || e.Graphics == null)
                 return;
 
             // The image is automatically drawn by the PictureBox control
@@ -1091,27 +1244,77 @@ namespace CTSegmenter
                 e.Graphics.DrawString(sliceText, font, brush, pos);
             }
 
-            // Draw peak lines if enabled - HORIZONTAL LINES with scaling
-            if (showPeaks && yzDarkPeaks != null && yzRowProfile != null)
+            // Draw variance mode indicator if applicable
+            if (isShowingVarianceMap)
             {
-                // Calculate scaling factor based on the stretched image height
-                float scaleY = (float)yzPictureBox.ClientSize.Height / yzProcessedImage.Height;
-
-                using (Pen darkPen = new Pen(Color.Red, 1))
+                using (Font font = new Font("Arial", 9, FontStyle.Bold))
+                using (SolidBrush brush = new SolidBrush(Color.LightGreen))
                 {
-                    foreach (int peak in yzDarkPeaks)
+                    e.Graphics.DrawString("VARIANCE MODE", font, brush, new PointF(10, 30));
+                }
+            }
+
+            // Only draw peak lines if they should be shown
+            if (!showPeaks)
+                return;
+
+            // Determine which image and peaks to use based on current mode
+            Bitmap currentImage;
+            int[] darkPeaks;
+            int[] brightPeaks;
+
+            if (isShowingVarianceMap)
+            {
+                // Use variance-based image and peaks
+                currentImage = yzVarianceImage;
+                darkPeaks = yzVarianceDarkPeaks;
+                brightPeaks = yzVarianceBrightPeaks;
+            }
+            else
+            {
+                // Use standard image and peaks
+                currentImage = yzProcessedImage;
+                darkPeaks = yzDarkPeaks;
+                brightPeaks = yzBrightPeaks;
+            }
+
+            // Only proceed if we have an image and at least one set of peaks
+            if (currentImage == null || (darkPeaks == null && brightPeaks == null))
+                return;
+
+            // Calculate correct scaling factor based on how the image is displayed
+            float scaleY = (float)yzPictureBox.ClientSize.Height / currentImage.Height;
+
+            // Draw dark peak lines
+            if (darkPeaks != null)
+            {
+                using (Pen darkPen = new Pen(Color.Red, 2))
+                {
+                    foreach (int peak in darkPeaks)
                     {
-                        int y1 = (int)(peak * scaleY);
-                        e.Graphics.DrawLine(darkPen, 0, y1, yzPictureBox.Width, y1);
+                        // Make sure peak is within image bounds
+                        if (peak >= 0 && peak < currentImage.Height)
+                        {
+                            int y1 = (int)(peak * scaleY);
+                            e.Graphics.DrawLine(darkPen, 0, y1, yzPictureBox.Width, y1);
+                        }
                     }
                 }
+            }
 
-                using (Pen brightPen = new Pen(Color.Green, 1))
+            // Draw bright peak lines
+            if (brightPeaks != null)
+            {
+                using (Pen brightPen = new Pen(Color.Green, 2))
                 {
-                    foreach (int peak in yzBrightPeaks)
+                    foreach (int peak in brightPeaks)
                     {
-                        int y1 = (int)(peak * scaleY);
-                        e.Graphics.DrawLine(brightPen, 0, y1, yzPictureBox.Width, y1);
+                        // Make sure peak is within image bounds
+                        if (peak >= 0 && peak < currentImage.Height)
+                        {
+                            int y1 = (int)(peak * scaleY);
+                            e.Graphics.DrawLine(brightPen, 0, y1, yzPictureBox.Width, y1);
+                        }
                     }
                 }
             }
@@ -1252,6 +1455,16 @@ namespace CTSegmenter
 
         private async Task ProcessXYView(CancellationToken token = default)
         {
+            // Use a lock to prevent concurrent access
+            lock (xyLock)
+            {
+                // If already processing, don't start another task
+                if (xyProcessingInProgress)
+                    return;
+
+                xyProcessingInProgress = true;
+            }
+
             try
             {
                 // Get the current slice
@@ -1261,49 +1474,122 @@ namespace CTSegmenter
                 if (token == default)
                     token = cancellationTokenSource.Token;
 
-                // Dispose old image
-                if (xyProcessedImage != null)
+                // Create a new bitmap before disposing the old one
+                Bitmap rawSlice = null;
+                Bitmap newProcessedImage = null;
+                double[] newRowProfile = null;
+                int[] newDarkPeaks = null;
+                int[] newBrightPeaks = null;
+
+                try
                 {
-                    var oldImage = xyProcessedImage;
-                    xyProcessedImage = null;
-                    oldImage.Dispose();
+                    // Get raw image data from MainForm
+                    rawSlice = mainForm.GetSliceBitmap(sliceZ);
+
+                    // Process the image
+                    var result = await ProcessImage(rawSlice, token);
+                    newProcessedImage = result.Item1;
+                    newRowProfile = result.Item2;
+                    newDarkPeaks = result.Item3;
+                    newBrightPeaks = result.Item4;
+
+                    // Update the UI on the main thread with proper synchronization
+                    await this.SafeInvokeAsync(new Action(() =>
+                    {
+                        try
+                        {
+                            // Temporarily null the PictureBox image before disposal
+                            xyPictureBox.Image = null;
+
+                            // Dispose old image only after assigning null
+                            if (xyProcessedImage != null)
+                            {
+                                var oldImage = xyProcessedImage;
+                                xyProcessedImage = null;
+                                oldImage.Dispose();
+                            }
+
+                            // Update references to new data
+                            xyProcessedImage = newProcessedImage;
+                            xyRowProfile = newRowProfile;
+                            xyDarkPeaks = newDarkPeaks;
+                            xyBrightPeaks = newBrightPeaks;
+
+                            // Now assign the new image to the PictureBox
+                            xyPictureBox.Image = xyProcessedImage;
+                            xyPictureBox.Invalidate();
+                            UpdateXYChart();
+
+                            // Clear temp references so Dispose won't affect them
+                            newProcessedImage = null;
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[BandDetectionForm] Error updating XY UI: {ex.Message}");
+                        }
+                    }));
                 }
-
-                // Get raw image data from MainForm
-                Bitmap rawSlice = mainForm.GetSliceBitmap(sliceZ);
-
-                // Process the image
-                var result = await ProcessImage(rawSlice, token);
-                xyProcessedImage = result.Item1;
-                xyRowProfile = result.Item2;
-                xyDarkPeaks = result.Item3;
-                xyBrightPeaks = result.Item4;
-
-                // Update the UI
-                this.Invoke(new Action(() =>
+                catch (OperationCanceledException)
                 {
-                    xyPictureBox.Image = xyProcessedImage;
-                    xyPictureBox.Invalidate();
-                    UpdateXYChart();
-                }));
+                    // Processing was cancelled
+                    Logger.Log("[BandDetectionForm] XY processing cancelled");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[BandDetectionForm] Error processing XY view: {ex.Message}");
 
-                // Clean up raw slice
-                rawSlice.Dispose();
-            }
-            catch (OperationCanceledException)
-            {
-                // Processing was cancelled
-                Logger.Log("[BandDetectionForm] XY processing cancelled");
+                    // Show error on the main thread
+                    await this.SafeInvokeAsync(new Action(() =>
+                    {
+                        MessageBox.Show($"Error processing XY view: {ex.Message}", "Error",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }));
+                }
+                finally
+                {
+                    // Clean up resources
+                    if (rawSlice != null && rawSlice != xyProcessedImage)
+                    {
+                        rawSlice.Dispose();
+                    }
+
+                    // If processing failed and new image was created but not assigned
+                    if (newProcessedImage != null && newProcessedImage != xyProcessedImage)
+                    {
+                        newProcessedImage.Dispose();
+                    }
+
+                    // Mark processing as complete
+                    lock (xyLock)
+                    {
+                        xyProcessingInProgress = false;
+                    }
+                }
             }
             catch (Exception ex)
             {
-                Logger.Log($"[BandDetectionForm] Error processing XY view: {ex.Message}");
-                MessageBox.Show($"Error processing XY view: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                // Handle any unexpected exceptions
+                Logger.Log($"[BandDetectionForm] Unexpected error in XY processing: {ex.Message}");
+
+                // Mark processing as complete even in case of error
+                lock (xyLock)
+                {
+                    xyProcessingInProgress = false;
+                }
             }
         }
-
         private async Task ProcessXZView(CancellationToken token = default)
         {
+            // Use a lock to prevent concurrent access
+            lock (xzLock)
+            {
+                // If already processing, don't start another task
+                if (xzProcessingInProgress)
+                    return;
+
+                xzProcessingInProgress = true;
+            }
+
             try
             {
                 // Get the current slice
@@ -1313,49 +1599,122 @@ namespace CTSegmenter
                 if (token == default)
                     token = cancellationTokenSource.Token;
 
-                // Dispose old image
-                if (xzProcessedImage != null)
+                // Create a new bitmap before disposing the old one
+                Bitmap rawSlice = null;
+                Bitmap newProcessedImage = null;
+                double[] newRowProfile = null;
+                int[] newDarkPeaks = null;
+                int[] newBrightPeaks = null;
+
+                try
                 {
-                    var oldImage = xzProcessedImage;
-                    xzProcessedImage = null;
-                    oldImage.Dispose();
+                    // Get raw image data from MainForm
+                    rawSlice = mainForm.GetXZSliceBitmap(sliceY);
+
+                    // Process the image
+                    var result = await ProcessImage(rawSlice, token);
+                    newProcessedImage = result.Item1;
+                    newRowProfile = result.Item2;
+                    newDarkPeaks = result.Item3;
+                    newBrightPeaks = result.Item4;
+
+                    // Update the UI on the main thread with proper synchronization
+                    await this.SafeInvokeAsync(new Action(() =>
+                    {
+                        try
+                        {
+                            // Temporarily null the PictureBox image before disposal
+                            xzPictureBox.Image = null;
+
+                            // Dispose old image only after assigning null
+                            if (xzProcessedImage != null)
+                            {
+                                var oldImage = xzProcessedImage;
+                                xzProcessedImage = null;
+                                oldImage.Dispose();
+                            }
+
+                            // Update references to new data
+                            xzProcessedImage = newProcessedImage;
+                            xzRowProfile = newRowProfile;
+                            xzDarkPeaks = newDarkPeaks;
+                            xzBrightPeaks = newBrightPeaks;
+
+                            // Now assign the new image to the PictureBox
+                            xzPictureBox.Image = xzProcessedImage;
+                            xzPictureBox.Invalidate();
+                            UpdateXZChart();
+
+                            // Clear temp references so Dispose won't affect them
+                            newProcessedImage = null;
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[BandDetectionForm] Error updating XZ UI: {ex.Message}");
+                        }
+                    }));
                 }
-
-                // Get raw image data from MainForm
-                Bitmap rawSlice = mainForm.GetXZSliceBitmap(sliceY);
-
-                // Process the image
-                var result = await ProcessImage(rawSlice, token);
-                xzProcessedImage = result.Item1;
-                xzRowProfile = result.Item2;
-                xzDarkPeaks = result.Item3;
-                xzBrightPeaks = result.Item4;
-
-                // Update the UI
-                this.Invoke(new Action(() =>
+                catch (OperationCanceledException)
                 {
-                    xzPictureBox.Image = xzProcessedImage;
-                    xzPictureBox.Invalidate();
-                    UpdateXZChart();
-                }));
+                    // Processing was cancelled
+                    Logger.Log("[BandDetectionForm] XZ processing cancelled");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[BandDetectionForm] Error processing XZ view: {ex.Message}");
 
-                // Clean up raw slice
-                rawSlice.Dispose();
-            }
-            catch (OperationCanceledException)
-            {
-                // Processing was cancelled
-                Logger.Log("[BandDetectionForm] XZ processing cancelled");
+                    // Show error on the main thread
+                    await this.SafeInvokeAsync(new Action(() =>
+                    {
+                        MessageBox.Show($"Error processing XZ view: {ex.Message}", "Error",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }));
+                }
+                finally
+                {
+                    // Clean up resources
+                    if (rawSlice != null && rawSlice != xzProcessedImage)
+                    {
+                        rawSlice.Dispose();
+                    }
+
+                    // If processing failed and new image was created but not assigned
+                    if (newProcessedImage != null && newProcessedImage != xzProcessedImage)
+                    {
+                        newProcessedImage.Dispose();
+                    }
+
+                    // Mark processing as complete
+                    lock (xzLock)
+                    {
+                        xzProcessingInProgress = false;
+                    }
+                }
             }
             catch (Exception ex)
             {
-                Logger.Log($"[BandDetectionForm] Error processing XZ view: {ex.Message}");
-                MessageBox.Show($"Error processing XZ view: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                // Handle any unexpected exceptions
+                Logger.Log($"[BandDetectionForm] Unexpected error in XZ processing: {ex.Message}");
+
+                // Mark processing as complete even in case of error
+                lock (xzLock)
+                {
+                    xzProcessingInProgress = false;
+                }
             }
         }
-
         private async Task ProcessYZView(CancellationToken token = default)
         {
+            // Use a lock to prevent concurrent access
+            lock (yzLock)
+            {
+                // If already processing, don't start another task
+                if (yzProcessingInProgress)
+                    return;
+
+                yzProcessingInProgress = true;
+            }
+
             try
             {
                 // Get the current slice
@@ -1365,47 +1724,110 @@ namespace CTSegmenter
                 if (token == default)
                     token = cancellationTokenSource.Token;
 
-                // Dispose old image
-                if (yzProcessedImage != null)
+                // Create a new bitmap before disposing the old one
+                Bitmap rawSlice = null;
+                Bitmap newProcessedImage = null;
+                double[] newRowProfile = null;
+                int[] newDarkPeaks = null;
+                int[] newBrightPeaks = null;
+
+                try
                 {
-                    var oldImage = yzProcessedImage;
-                    yzProcessedImage = null;
-                    oldImage.Dispose();
+                    // Get raw image data from MainForm
+                    rawSlice = mainForm.GetYZSliceBitmap(sliceX);
+
+                    // Process the image
+                    var result = await ProcessImage(rawSlice, token);
+                    newProcessedImage = result.Item1;
+                    newRowProfile = result.Item2;
+                    newDarkPeaks = result.Item3;
+                    newBrightPeaks = result.Item4;
+
+                    // Update the UI on the main thread with proper synchronization
+                    await this.SafeInvokeAsync(new Action(() =>
+                    {
+                        try
+                        {
+                            // Temporarily null the PictureBox image before disposal
+                            yzPictureBox.Image = null;
+
+                            // Dispose old image only after assigning null
+                            if (yzProcessedImage != null)
+                            {
+                                var oldImage = yzProcessedImage;
+                                yzProcessedImage = null;
+                                oldImage.Dispose();
+                            }
+
+                            // Update references to new data
+                            yzProcessedImage = newProcessedImage;
+                            yzRowProfile = newRowProfile;
+                            yzDarkPeaks = newDarkPeaks;
+                            yzBrightPeaks = newBrightPeaks;
+
+                            // Now assign the new image to the PictureBox
+                            yzPictureBox.Image = yzProcessedImage;
+                            yzPictureBox.Invalidate();
+                            UpdateYZChart();
+
+                            // Clear temp references so Dispose won't affect them
+                            newProcessedImage = null;
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[BandDetectionForm] Error updating YZ UI: {ex.Message}");
+                        }
+                    }));
                 }
-
-                // Get raw image data from MainForm
-                Bitmap rawSlice = mainForm.GetYZSliceBitmap(sliceX);
-
-                // Process the image
-                var result = await ProcessImage(rawSlice, token);
-                yzProcessedImage = result.Item1;
-                yzRowProfile = result.Item2;
-                yzDarkPeaks = result.Item3;
-                yzBrightPeaks = result.Item4;
-
-                // Update the UI
-                this.Invoke(new Action(() =>
+                catch (OperationCanceledException)
                 {
-                    yzPictureBox.Image = yzProcessedImage;
-                    yzPictureBox.Invalidate();
-                    UpdateYZChart();
-                }));
+                    // Processing was cancelled
+                    Logger.Log("[BandDetectionForm] YZ processing cancelled");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[BandDetectionForm] Error processing YZ view: {ex.Message}");
 
-                // Clean up raw slice
-                rawSlice.Dispose();
-            }
-            catch (OperationCanceledException)
-            {
-                // Processing was cancelled
-                Logger.Log("[BandDetectionForm] YZ processing cancelled");
+                    // Show error on the main thread
+                    await this.SafeInvokeAsync(new Action(() =>
+                    {
+                        MessageBox.Show($"Error processing YZ view: {ex.Message}", "Error",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }));
+                }
+                finally
+                {
+                    // Clean up resources
+                    if (rawSlice != null && rawSlice != yzProcessedImage)
+                    {
+                        rawSlice.Dispose();
+                    }
+
+                    // If processing failed and new image was created but not assigned
+                    if (newProcessedImage != null && newProcessedImage != yzProcessedImage)
+                    {
+                        newProcessedImage.Dispose();
+                    }
+
+                    // Mark processing as complete
+                    lock (yzLock)
+                    {
+                        yzProcessingInProgress = false;
+                    }
+                }
             }
             catch (Exception ex)
             {
-                Logger.Log($"[BandDetectionForm] Error processing YZ view: {ex.Message}");
-                MessageBox.Show($"Error processing YZ view: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                // Handle any unexpected exceptions
+                Logger.Log($"[BandDetectionForm] Unexpected error in YZ processing: {ex.Message}");
+
+                // Mark processing as complete even in case of error
+                lock (yzLock)
+                {
+                    yzProcessingInProgress = false;
+                }
             }
         }
-
         private async Task<Tuple<Bitmap, double[], int[], int[]>> ProcessImage(Bitmap sourceImage, CancellationToken token)
         {
             return await Task.Run(() =>
@@ -2004,7 +2426,10 @@ namespace CTSegmenter
             {
                 double peakValue = profile[peak];
 
-                // Find nearest higher peaks on left and right
+                // Find left and right boundaries - points where the function dips below peakValue - prominence
+                double thresholdValue = peakValue - prominence;
+
+                // Find nearest higher peaks or boundaries on left
                 int leftIdx = -1;
                 for (int i = peak - 1; i >= 0; i--)
                 {
@@ -2015,6 +2440,7 @@ namespace CTSegmenter
                     }
                 }
 
+                // Find nearest higher peak or boundary on right
                 int rightIdx = -1;
                 for (int i = peak + 1; i < profile.Length; i++)
                 {
@@ -2049,11 +2475,18 @@ namespace CTSegmenter
                         rightMin = profile[i];
                 }
 
-                // Calculate prominence
+                // Calculate prominence - special handling for variance data which can have small values
                 double peakProminence = peakValue - Math.Max(leftMin, rightMin);
 
-                // Add peak if prominence is high enough
-                if (peakProminence >= prominence)
+                // For very small values (like variance data), also consider relative prominence
+                double relativeProminence = 0;
+                if (peakValue > 0)
+                {
+                    relativeProminence = peakProminence / peakValue;
+                }
+
+                // Add peak if prominence is high enough (absolute or relative)
+                if (peakProminence >= prominence || relativeProminence >= 0.5)
                 {
                     filteredPeaks.Add(peak);
                 }
@@ -2099,6 +2532,9 @@ namespace CTSegmenter
                 // Sort peaks by position
                 distanceFilteredPeaks.Sort();
             }
+
+            // Log the number of peaks found for debugging
+            Logger.Log($"[BandDetectionForm] FindPeaks: Found {distanceFilteredPeaks.Count} peaks (min distance: {minDistance}, prominence: {prominence})");
 
             return distanceFilteredPeaks.ToArray();
         }
@@ -2166,30 +2602,53 @@ namespace CTSegmenter
                 // Add dark peaks
                 if (showPeaks && xyDarkPeaks != null)
                 {
+                    // Enable this series
+                    xyChart.Series["Dark Peaks"].Enabled = true;
+
+                    // Make them larger and more visible
+                    xyChart.Series["Dark Peaks"].MarkerSize = 12;
+                    xyChart.Series["Dark Peaks"].BorderWidth = 2;
+
                     foreach (int peak in xyDarkPeaks)
                     {
                         if (peak < xyRowProfile.Length)
                             xyChart.Series["Dark Peaks"].Points.AddXY(xyRowProfile[peak], peak);
                     }
                 }
+                else
+                {
+                    // Disable this series if there are no peaks to show
+                    xyChart.Series["Dark Peaks"].Enabled = false;
+                }
 
                 // Add bright peaks
                 if (showPeaks && xyBrightPeaks != null)
                 {
+                    // Enable this series
+                    xyChart.Series["Bright Peaks"].Enabled = true;
+
+                    // Make them larger and more visible
+                    xyChart.Series["Bright Peaks"].MarkerSize = 12;
+                    xyChart.Series["Bright Peaks"].BorderWidth = 2;
+
                     foreach (int peak in xyBrightPeaks)
                     {
                         if (peak < xyRowProfile.Length)
                             xyChart.Series["Bright Peaks"].Points.AddXY(xyRowProfile[peak], peak);
                     }
                 }
+                else
+                {
+                    // Disable this series
+                    xyChart.Series["Bright Peaks"].Enabled = false;
+                }
 
-                // Set visibility based on showPeaks
-                xyChart.Series["Dark Peaks"].Enabled = showPeaks;
-                xyChart.Series["Bright Peaks"].Enabled = showPeaks;
+                // Force legends to be visible
+                xyChart.Legends[0].Enabled = true;
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error processing XY chart: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Logger.Log($"[BandDetectionForm] Error updating XY chart: {ex.Message}");
             }
         }
 
@@ -2241,32 +2700,56 @@ namespace CTSegmenter
                 // Add dark peaks - Y values match peak positions in image
                 if (showPeaks && xzDarkPeaks != null)
                 {
+                    // Enable this series
+                    xzChart.Series["Dark Peaks"].Enabled = true;
+
+                    // Make them larger and more visible
+                    xzChart.Series["Dark Peaks"].MarkerSize = 12;
+                    xzChart.Series["Dark Peaks"].BorderWidth = 2;
+
                     foreach (int peak in xzDarkPeaks)
                     {
                         if (peak < xzRowProfile.Length)
                             xzChart.Series["Dark Peaks"].Points.AddXY(xzRowProfile[peak], peak);
                     }
                 }
+                else
+                {
+                    // Disable this series if there are no peaks to show
+                    xzChart.Series["Dark Peaks"].Enabled = false;
+                }
 
                 // Add bright peaks - Y values match peak positions in image
                 if (showPeaks && xzBrightPeaks != null)
                 {
+                    // Enable this series
+                    xzChart.Series["Bright Peaks"].Enabled = true;
+
+                    // Make them larger and more visible
+                    xzChart.Series["Bright Peaks"].MarkerSize = 12;
+                    xzChart.Series["Bright Peaks"].BorderWidth = 2;
+
                     foreach (int peak in xzBrightPeaks)
                     {
                         if (peak < xzRowProfile.Length)
                             xzChart.Series["Bright Peaks"].Points.AddXY(xzRowProfile[peak], peak);
                     }
                 }
+                else
+                {
+                    // Disable this series if there are no peaks to show
+                    xzChart.Series["Bright Peaks"].Enabled = false;
+                }
 
-                // Set visibility based on showPeaks
-                xzChart.Series["Dark Peaks"].Enabled = showPeaks;
-                xzChart.Series["Bright Peaks"].Enabled = showPeaks;
+                // Force legends to be visible
+                xzChart.Legends[0].Enabled = true;
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error processing XZ chart: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Logger.Log($"[BandDetectionForm] Error updating XZ chart: {ex.Message}");
             }
         }
+
 
         private void UpdateYZChart()
         {
@@ -2316,30 +2799,53 @@ namespace CTSegmenter
                 // Add dark peaks - Y values match peak positions in image
                 if (showPeaks && yzDarkPeaks != null)
                 {
+                    // Enable this series
+                    yzChart.Series["Dark Peaks"].Enabled = true;
+
+                    // Make them larger and more visible
+                    yzChart.Series["Dark Peaks"].MarkerSize = 12;
+                    yzChart.Series["Dark Peaks"].BorderWidth = 2;
+
                     foreach (int peak in yzDarkPeaks)
                     {
                         if (peak < yzRowProfile.Length)
                             yzChart.Series["Dark Peaks"].Points.AddXY(yzRowProfile[peak], peak);
                     }
                 }
+                else
+                {
+                    // Disable this series if there are no peaks to show
+                    yzChart.Series["Dark Peaks"].Enabled = false;
+                }
 
                 // Add bright peaks - Y values match peak positions in image
                 if (showPeaks && yzBrightPeaks != null)
                 {
+                    // Enable this series
+                    yzChart.Series["Bright Peaks"].Enabled = true;
+
+                    // Make them larger and more visible
+                    yzChart.Series["Bright Peaks"].MarkerSize = 12;
+                    yzChart.Series["Bright Peaks"].BorderWidth = 2;
+
                     foreach (int peak in yzBrightPeaks)
                     {
                         if (peak < yzRowProfile.Length)
                             yzChart.Series["Bright Peaks"].Points.AddXY(yzRowProfile[peak], peak);
                     }
                 }
+                else
+                {
+                    // Disable this series if there are no peaks to show
+                    yzChart.Series["Bright Peaks"].Enabled = false;
+                }
 
-                // Set visibility based on showPeaks
-                yzChart.Series["Dark Peaks"].Enabled = showPeaks;
-                yzChart.Series["Bright Peaks"].Enabled = showPeaks;
+                // Force legends to be visible
+                yzChart.Legends[0].Enabled = true;
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error processing YZ chart: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Logger.Log($"[BandDetectionForm] Error updating YZ chart: {ex.Message}");
             }
         }
 

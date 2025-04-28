@@ -1,4 +1,5 @@
-﻿using ILGPU;
+﻿using System;
+using ILGPU;
 
 namespace CTSegmenter
 {
@@ -9,49 +10,47 @@ namespace CTSegmenter
         /// Kernel to calculate variance across multiple slices for each pixel
         /// </summary>
         public static void CalculateVarianceKernel(
-            Index2D index,         // 2D processing grid (x, y)
-            ArrayView<byte> voxels, // Input voxels
-            int width,             // Width
-            int height,            // Height
-            int depth,             // Depth
-            int sliceCount,        // Slice count
-            int startSlice,        // Starting slice
-            ArrayView<float> variances) // Output variances
+            Index1D index,
+            ArrayView<byte> volumeData,
+            ArrayView<float> varianceMap,
+            int width,
+            int height,
+            int depth,
+            int sliceStart,
+            int sliceEnd)
         {
-            int x = index.X;
-            int y = index.Y;
+            // Calculate x, y coordinates from 1D index
+            int x = index % width;
+            int y = index / width;
 
-            // If we're out of bounds, return
+            // Skip if out of bounds
             if (x >= width || y >= height)
                 return;
 
-            // Calculate the 1D index for this pixel in the result
-            int resultIdx = y * width + x;
-
-            // Calculate sum and sum of squares for variance
+            // Calculate variance for the current position
             float sum = 0.0f;
             float sumSquared = 0.0f;
             int validSlices = 0;
 
-            // Iterate through the slices to calculate variance
-            for (int z = 0; z < sliceCount; z++)
+            // For each slice in the range
+            for (int z = sliceStart; z <= sliceEnd; z++)
             {
-                int sliceIdx = startSlice + z;
-
                 // Skip if out of bounds
-                if (sliceIdx >= depth)
+                if (z < 0 || z >= depth)
                     continue;
 
-                // Calculate flattened index for this voxel
-                int idx = sliceIdx * width * height + y * width + x;
+                // Get voxel value and normalize to 0-1
+                int offset = z * width * height + y * width + x;
+                if (offset >= 0 && offset < volumeData.Length)
+                {
+                    byte voxelValue = volumeData[offset];
+                    float val = voxelValue / 255.0f;
 
-                // Get the voxel value and normalize to 0-1
-                float val = voxels[idx] / 255.0f;
-
-                // Update sums
-                sum += val;
-                sumSquared += val * val;
-                validSlices++;
+                    // Update sums
+                    sum += val;
+                    sumSquared += val * val;
+                    validSlices++;
+                }
             }
 
             // Calculate variance only if we have at least 2 slices
@@ -60,13 +59,13 @@ namespace CTSegmenter
                 float mean = sum / validSlices;
                 float variance = (sumSquared / validSlices) - (mean * mean);
 
-                // Store the result
-                variances[resultIdx] = variance;
+                // Store variance in the output map - ensure positive value
+                varianceMap[y * width + x] = Math.Max(0.000001f, variance);
             }
             else
             {
-                // Not enough slices for variance
-                variances[resultIdx] = 0.0f;
+                // Default small value to avoid division by zero later
+                varianceMap[y * width + x] = 0.000001f;
             }
         }
     }

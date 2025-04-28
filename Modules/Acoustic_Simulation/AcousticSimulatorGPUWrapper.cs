@@ -40,13 +40,13 @@ namespace CTSegmenter
         private readonly int tx, ty, tz, rx, ry, rz;
 
         public AcousticSimulatorGPUWrapper(
-            int width, int height, int depth, float pixelSize,
-            byte[,,] volumeLabels, float[,,] densityVolume, byte selectedMaterialID,
-            string axis, string waveType,
-            double confiningPressure, double tensileStrength, double failureAngle, double cohesion,
-            double energy, double frequency, int amplitude, int timeSteps,
-            bool useElasticModel, bool usePlasticModel, bool useBrittleModel,
-            double youngsModulus, double poissonRatio)
+    int width, int height, int depth, float pixelSize,
+    byte[,,] volumeLabels, float[,,] densityVolume, byte selectedMaterialID,
+    string axis, string waveType,
+    double confiningPressure, double tensileStrength, double failureAngle, double cohesion,
+    double energy, double frequency, int amplitude, int timeSteps,
+    bool useElasticModel, bool usePlasticModel, bool useBrittleModel,
+    double youngsModulus, double poissonRatio)
         {
             // memorizza per ricostruzioni future / re-start
             this.width = width; this.height = height; this.depth = depth; this.pixelSize = pixelSize;

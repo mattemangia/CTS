@@ -17,6 +17,7 @@ namespace CTSegmenter
     public class AcousticSimulationForm : KryptonForm, IMaterialDensityProvider
     {
         private bool isInitializing = true;
+        private List<Point3D> _pathPoints = null;
         private MainForm mainForm;
         private dynamic simulator;
         private Material selectedMaterial;
@@ -74,6 +75,7 @@ namespace CTSegmenter
         private KryptonCheckBox chkBrittleModel;
         private KryptonButton btnStartSimulation;
         private PictureBox pictureBoxSimulation;
+        private KryptonButton btnCalculatePath;
         // Dictionary to store material properties
         private Dictionary<string, MaterialProperties> materialLibrary = new Dictionary<string, MaterialProperties>();
         
@@ -547,8 +549,15 @@ namespace CTSegmenter
             lblExtentZ.StateCommon.ShortText.Color1 = Color.White;
             controlPanel.Controls.Add(lblExtentZ);
 
-            currentY += verticalSpacing;
-
+            currentY += verticalSpacing+20;
+            btnCalculatePath = new KryptonButton();
+            btnCalculatePath.Text = "Calculate TX-RX Path";
+            btnCalculatePath.Location = new Point(10, currentY);
+            btnCalculatePath.Width = controlWidth - 30;
+            btnCalculatePath.Values.Image = CreatePathIcon();
+            btnCalculatePath.Click += BtnCalculatePath_Click;
+            controlPanel.Controls.Add(btnCalculatePath);
+            currentY += 40;
             // 10. Model checkboxes
             KryptonLabel lblModels = new KryptonLabel();
             lblModels.Text = "Simulation Models:";
@@ -639,6 +648,413 @@ namespace CTSegmenter
             // Initialize material library
             InitializeMaterialLibrary();
         }
+        private void BtnCalculatePath_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                // Ensure volume data is ready
+                if (densityVolume == null || mainForm.volumeLabels == null)
+                {
+                    MessageBox.Show("Please initialize the volume data first.",
+                        "Missing Data", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                btnCalculatePath.Enabled = false;
+
+                // Get parameters
+                int width = mainForm.GetWidth();
+                int height = mainForm.GetHeight();
+                int depth = mainForm.GetDepth();
+                byte materialID = selectedMaterialID;
+                string axis = comboAxis.SelectedItem.ToString();
+
+                // Find material bounds
+                int minX = width, minY = height, minZ = depth;
+                int maxX = 0, maxY = 0, maxZ = 0;
+
+                for (int z = 0; z < depth; z++)
+                {
+                    for (int y = 0; y < height; y++)
+                    {
+                        for (int x = 0; x < width; x++)
+                        {
+                            if (mainForm.volumeLabels[x, y, z] == materialID)
+                            {
+                                minX = Math.Min(minX, x);
+                                minY = Math.Min(minY, y);
+                                minZ = Math.Min(minZ, z);
+
+                                maxX = Math.Max(maxX, x);
+                                maxY = Math.Max(maxY, y);
+                                maxZ = Math.Max(maxZ, z);
+                            }
+                        }
+                    }
+                }
+
+                Logger.Log($"[AcousticSimulationForm] Material bounds: X={minX}-{maxX}, Y={minY}-{maxY}, Z={minZ}-{maxZ}");
+
+                // Calculate TX and RX positions based on material bounds
+                int xPadding = (int)((maxX - minX) * 0.2);
+                int yPadding = (int)((maxY - minY) * 0.2);
+                int zPadding = (int)((maxZ - minZ) * 0.2);
+
+                // Ensure minimum padding
+                xPadding = Math.Max(5, xPadding);
+                yPadding = Math.Max(5, yPadding);
+                zPadding = Math.Max(5, zPadding);
+
+                // Get the midpoints
+                int midY = (minY + maxY) / 2;
+                int midZ = (minZ + maxZ) / 2;
+                int midX = (minX + maxX) / 2;
+
+                // Set TX/RX positions based on selected axis
+                int tx = 0, ty = 0, tz = 0, rx = 0, ry = 0, rz = 0;
+                switch (axis.ToUpperInvariant())
+                {
+                    case "X":
+                        tx = minX + xPadding;
+                        ty = midY;
+                        tz = midZ;
+                        rx = maxX - xPadding;
+                        ry = midY;
+                        rz = midZ;
+                        break;
+
+                    case "Y":
+                        tx = midX;
+                        ty = minY + yPadding;
+                        tz = midZ;
+                        rx = midX;
+                        ry = maxY - yPadding;
+                        rz = midZ;
+                        break;
+
+                    default: // Z
+                        tx = midX;
+                        ty = midY;
+                        tz = minZ + zPadding;
+                        rx = midX;
+                        ry = midY;
+                        rz = maxZ - zPadding;
+                        break;
+                }
+
+                // Verify positions are in material
+                bool txInMaterial = false;
+                bool rxInMaterial = false;
+
+                if (tx >= 0 && tx < width && ty >= 0 && ty < height && tz >= 0 && tz < depth)
+                    txInMaterial = (mainForm.volumeLabels[tx, ty, tz] == materialID);
+
+                if (rx >= 0 && rx < width && ry >= 0 && ry < height && rz >= 0 && rz < depth)
+                    rxInMaterial = (mainForm.volumeLabels[rx, ry, rz] == materialID);
+
+                if (!txInMaterial || !rxInMaterial)
+                {
+                    MessageBox.Show("Initial TX/RX positions not in material. Trying to find valid positions...",
+                        "Position Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+
+                    // Find valid TX position
+                    if (!txInMaterial)
+                    {
+                        for (int z = 0; z < depth; z++)
+                        {
+                            for (int y = 0; y < height; y++)
+                            {
+                                for (int x = 0; x < width; x++)
+                                {
+                                    if (mainForm.volumeLabels[x, y, z] == materialID)
+                                    {
+                                        tx = x;
+                                        ty = y;
+                                        tz = z;
+                                        txInMaterial = true;
+                                        break;
+                                    }
+                                }
+                                if (txInMaterial) break;
+                            }
+                            if (txInMaterial) break;
+                        }
+                    }
+
+                    // Find valid RX position far from TX
+                    if (!rxInMaterial || (tx == rx && ty == ry && tz == rz))
+                    {
+                        double bestDist = 0;
+                        for (int z = 0; z < depth; z++)
+                        {
+                            for (int y = 0; y < height; y++)
+                            {
+                                for (int x = 0; x < width; x++)
+                                {
+                                    if (mainForm.volumeLabels[x, y, z] == materialID)
+                                    {
+                                        double dist = Math.Sqrt(
+                                            Math.Pow(x - tx, 2) +
+                                            Math.Pow(y - ty, 2) +
+                                            Math.Pow(z - tz, 2));
+
+                                        if (dist > bestDist)
+                                        {
+                                            rx = x;
+                                            ry = y;
+                                            rz = z;
+                                            rxInMaterial = true;
+                                            bestDist = dist;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!txInMaterial || !rxInMaterial)
+                {
+                    MessageBox.Show("Failed to find valid TX/RX positions in the material.",
+                        "Position Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    btnCalculatePath.Enabled = true;
+                    return;
+                }
+
+                // Show progress form
+                CancellableProgressForm progressForm = new CancellableProgressForm("Calculating path...");
+                progressForm.Owner = this;
+
+                var cts = new CancellationTokenSource();
+                progressForm.CancelPressed += (s, args) => cts.Cancel();
+
+                // Calculate path in background
+                Task.Run(() =>
+                {
+                    try
+                    {
+                        // If cancelled, check token
+                        if (cts.Token.IsCancellationRequested)
+                            throw new OperationCanceledException();
+
+                        // Get volume labels
+                        byte[,,] labels = GetVolumeLabelsArray();
+
+                        // Create pathfinder using the existing AStar class
+                        AStar pathfinder = new AStar(labels, materialID);
+
+                        // Find the path
+                        Logger.Log($"[AcousticSimulationForm] Finding path from TX({tx},{ty},{tz}) to RX({rx},{ry},{rz})...");
+                        _pathPoints = pathfinder.FindPath(tx, ty, tz, rx, ry, rz);
+
+                        if (_pathPoints != null && _pathPoints.Count > 0)
+                        {
+                            Logger.Log($"[AcousticSimulationForm] Path found with {_pathPoints.Count} points");
+
+                            // Log sample path points
+                            Logger.Log($"[AcousticSimulationForm] Path start: ({_pathPoints[0].X},{_pathPoints[0].Y},{_pathPoints[0].Z})");
+                            if (_pathPoints.Count > 2)
+                                Logger.Log($"[AcousticSimulationForm] Path middle: ({_pathPoints[_pathPoints.Count / 2].X},{_pathPoints[_pathPoints.Count / 2].Y},{_pathPoints[_pathPoints.Count / 2].Z})");
+                            Logger.Log($"[AcousticSimulationForm] Path end: ({_pathPoints[_pathPoints.Count - 1].X},{_pathPoints[_pathPoints.Count - 1].Y},{_pathPoints[_pathPoints.Count - 1].Z})");
+
+                            // Calculate path length
+                            double pathLength = 0;
+                            for (int i = 1; i < _pathPoints.Count; i++)
+                            {
+                                pathLength += Math.Sqrt(
+                                    Math.Pow(_pathPoints[i].X - _pathPoints[i - 1].X, 2) +
+                                    Math.Pow(_pathPoints[i].Y - _pathPoints[i - 1].Y, 2) +
+                                    Math.Pow(_pathPoints[i].Z - _pathPoints[i - 1].Z, 2));
+                            }
+
+                            Logger.Log($"[AcousticSimulationForm] Path length: {pathLength:F1} pixels ({pathLength * mainForm.GetPixelSize() * 1000:F2} mm)");
+                        }
+                        else
+                        {
+                            Logger.Log("[AcousticSimulationForm] No path found between TX and RX!");
+                            // If A* fails, fall back to a straight line path
+                            _pathPoints = CreateStraightLinePath(tx, ty, tz, rx, ry, rz, 100);
+                            Logger.Log("[AcousticSimulationForm] Created straight line path as fallback");
+
+                            BeginInvoke(new Action(() =>
+                            {
+                                MessageBox.Show(
+                                    "Could not find an optimized path through the material.\n" +
+                                    "Created a straight line path instead, but this may not accurately represent wave propagation.",
+                                    "Path Warning",
+                                    MessageBoxButtons.OK,
+                                    MessageBoxIcon.Warning);
+                            }));
+                        }
+
+                        // Update UI on main thread
+                        BeginInvoke(new Action(() =>
+                        {
+                            progressForm.Close();
+                            btnCalculatePath.Enabled = true;
+                            pictureBoxSimulation.Invalidate();
+
+                            // Show icon if path found
+                            if (_pathPoints != null && _pathPoints.Count > 0)
+                            {
+                                btnCalculatePath.Values.Image = CreatePathFoundIcon();
+                            }
+                        }));
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        BeginInvoke(new Action(() =>
+                        {
+                            progressForm.Close();
+                            btnCalculatePath.Enabled = true;
+                            MessageBox.Show("Path calculation was cancelled.",
+                                "Calculation Cancelled", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        }));
+                    }
+                    catch (Exception ex)
+                    {
+                        BeginInvoke(new Action(() =>
+                        {
+                            progressForm.Close();
+                            btnCalculatePath.Enabled = true;
+                            MessageBox.Show($"Error calculating path: {ex.Message}",
+                                "Calculation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }));
+                    }
+                }, cts.Token);
+
+                progressForm.Show(this);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error preparing path calculation: {ex.Message}",
+                    "Preparation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                btnCalculatePath.Enabled = true;
+            }
+        }
+
+        private Bitmap CreatePathIcon()
+        {
+            Bitmap bmp = new Bitmap(16, 16);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.Clear(Color.Transparent);
+
+                // Draw a path line
+                using (Pen pen = new Pen(Color.White, 2))
+                {
+                    pen.DashStyle = DashStyle.Dash;
+                    g.DrawBezier(pen,
+                        2, 8,   // start
+                        5, 2,   // control 1
+                        11, 14, // control 2
+                        14, 8   // end
+                    );
+                }
+
+                // Draw TX/RX points
+                using (SolidBrush txBrush = new SolidBrush(Color.Yellow))
+                using (SolidBrush rxBrush = new SolidBrush(Color.Green))
+                {
+                    g.FillEllipse(txBrush, 1, 7, 4, 4);
+                    g.FillEllipse(rxBrush, 13, 7, 4, 4);
+                }
+            }
+            return bmp;
+        }
+
+        private Bitmap CreatePathFoundIcon()
+        {
+            Bitmap bmp = new Bitmap(16, 16);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.Clear(Color.Transparent);
+
+                // Draw a path line
+                using (Pen pen = new Pen(Color.LightGreen, 2))
+                {
+                    pen.DashStyle = DashStyle.Dash;
+                    g.DrawBezier(pen,
+                        2, 8, 5, 2, 11, 14, 14, 8
+                    );
+                }
+
+                // Draw TX/RX points
+                using (SolidBrush txBrush = new SolidBrush(Color.Yellow))
+                using (SolidBrush rxBrush = new SolidBrush(Color.Green))
+                {
+                    g.FillEllipse(txBrush, 1, 7, 4, 4);
+                    g.FillEllipse(rxBrush, 13, 7, 4, 4);
+                }
+
+                // Draw check mark
+                using (Pen checkPen = new Pen(Color.LightGreen, 2))
+                {
+                    g.DrawLines(checkPen, new Point[] {
+                new Point(3, 10),
+                new Point(6, 14),
+                new Point(13, 3)
+            });
+                }
+            }
+            return bmp;
+        }
+        private void CalculatePathBetweenTxRx(int tx, int ty, int tz, int rx, int ry, int rz, byte materialID)
+        {
+            try
+            {
+                // Get volume labels
+                byte[,,] labels = GetVolumeLabelsArray();
+
+                // Create pathfinder
+                AStar pathfinder = new AStar(labels, materialID);
+
+                // Start calculation
+                Logger.Log($"[AcousticSimulationForm] Finding path from TX({tx},{ty},{tz}) to RX({rx},{ry},{rz})...");
+                _pathPoints = pathfinder.FindPath(tx, ty, tz, rx, ry, rz);
+
+                if (_pathPoints != null && _pathPoints.Count > 0)
+                {
+                    Logger.Log($"[AcousticSimulationForm] Path found with {_pathPoints.Count} points");
+
+                    // Log sample path points
+                    Logger.Log($"[AcousticSimulationForm] Path start: ({_pathPoints[0].X},{_pathPoints[0].Y},{_pathPoints[0].Z})");
+                    if (_pathPoints.Count > 2)
+                        Logger.Log($"[AcousticSimulationForm] Path middle: ({_pathPoints[_pathPoints.Count / 2].X},{_pathPoints[_pathPoints.Count / 2].Y},{_pathPoints[_pathPoints.Count / 2].Z})");
+                    Logger.Log($"[AcousticSimulationForm] Path end: ({_pathPoints[_pathPoints.Count - 1].X},{_pathPoints[_pathPoints.Count - 1].Y},{_pathPoints[_pathPoints.Count - 1].Z})");
+
+                    // Calculate path length
+                    double pathLength = 0;
+                    for (int i = 1; i < _pathPoints.Count; i++)
+                    {
+                        pathLength += Math.Sqrt(
+                            Math.Pow(_pathPoints[i].X - _pathPoints[i - 1].X, 2) +
+                            Math.Pow(_pathPoints[i].Y - _pathPoints[i - 1].Y, 2) +
+                            Math.Pow(_pathPoints[i].Z - _pathPoints[i - 1].Z, 2));
+                    }
+
+                    Logger.Log($"[AcousticSimulationForm] Path length: {pathLength:F1} pixels ({pathLength * mainForm.GetPixelSize() * 1000:F2} mm)");
+                }
+                else
+                {
+                    Logger.Log("[AcousticSimulationForm] No path found between TX and RX!");
+                    MessageBox.Show(
+                        "Could not find a continuous material path between TX and RX.\n" +
+                        "The simulation will not work correctly because the wave cannot propagate.",
+                        "Path Error",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[AcousticSimulationForm] Error calculating path: {ex.Message}");
+                MessageBox.Show($"Error calculating path: {ex.Message}", "Path Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
         private void PictureBoxSimulation_MouseDown(object sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left || e.Button == MouseButtons.Right)
@@ -906,19 +1322,27 @@ namespace CTSegmenter
                 double poissonRatio = (double)numPoissonRatio.Value;   // unitless
                 bool useGPU = chkRunOnGpu.Checked;  // Check if GPU should be used
 
-                // ADDED: Ensure minimum energy and amplitude values
-                if (energy <= 0.001)
+                // ROBUST validation of parameters
+                if (energy <= 0.1)
                 {
-                    Logger.Log("[AcousticSimulationForm] Warning: Energy is very low, increasing to minimum value");
-                    numEnergy.Value = 1.0m; // Set minimum energy
-                    energy = 1.0;
+                    Logger.Log("[AcousticSimulationForm] Energy is very low, increasing to ensure propagation");
+                    numEnergy.Value = 10.0m; // Increased substantially to ensure wave generation
+                    energy = 10.0;
                 }
 
-                if (amplitude < 100)
+                if (amplitude < 500)
                 {
-                    Logger.Log("[AcousticSimulationForm] Warning: Amplitude is low, increasing to 100");
-                    numAmplitude.Value = 100; // Set minimum amplitude
-                    amplitude = 100;
+                    Logger.Log("[AcousticSimulationForm] Amplitude is low, increasing to ensure propagation");
+                    numAmplitude.Value = 2000; // Increased substantially from 500
+                    amplitude = 2000;
+                }
+
+                // Ensure we have enough time steps
+                if (timeSteps < 200)
+                {
+                    Logger.Log("[AcousticSimulationForm] Time steps too low, increasing to ensure wave recording");
+                    numTimeSteps.Value = 200;
+                    timeSteps = 200;
                 }
 
                 // Log key simulation parameters
@@ -926,6 +1350,7 @@ namespace CTSegmenter
                 Logger.Log($"[AcousticSimulationForm] Material params: E={youngsModulus}MPa, ν={poissonRatio}");
                 Logger.Log($"[AcousticSimulationForm] Material density: {baseDensity} kg/m³");
 
+                // Set up the volume renderer for visualization
                 simulationRenderer = new VolumeRenderer(
                     densityVolume,
                     width,
@@ -935,75 +1360,220 @@ namespace CTSegmenter
                     materialID,
                     false);
 
-                // Calculate TX and RX positions based on the axis
+                // --------------------------------
+                // ROBUST TX/RX POSITION CALCULATION
+                // --------------------------------
+
+                // Count material voxels for verification
+                int materialVoxelCount = 0;
+                for (int z = 0; z < depth; z++)
+                    for (int y = 0; y < height; y++)
+                        for (int x = 0; x < width; x++)
+                            if (labels[x, y, z] == materialID)
+                                materialVoxelCount++;
+
+                Logger.Log($"[AcousticSimulationForm] Found {materialVoxelCount} voxels with material ID {materialID}");
+
+                if (materialVoxelCount == 0)
+                {
+                    MessageBox.Show($"No voxels with material ID {materialID} found in the volume. Please select a valid material.",
+                        "Material Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    btnStartSimulation.Enabled = true;
+                    return;
+                }
+
+                // Find material bounds to position TX/RX safely inside material
+                int minX = width, minY = height, minZ = depth;
+                int maxX = 0, maxY = 0, maxZ = 0;
+
+                for (int z = 0; z < depth; z++)
+                {
+                    for (int y = 0; y < height; y++)
+                    {
+                        for (int x = 0; x < width; x++)
+                        {
+                            if (labels[x, y, z] == materialID)
+                            {
+                                minX = Math.Min(minX, x);
+                                minY = Math.Min(minY, y);
+                                minZ = Math.Min(minZ, z);
+
+                                maxX = Math.Max(maxX, x);
+                                maxY = Math.Max(maxY, y);
+                                maxZ = Math.Max(maxZ, z);
+                            }
+                        }
+                    }
+                }
+
+                Logger.Log($"[AcousticSimulationForm] Material bounds: X={minX}-{maxX}, Y={minY}-{maxY}, Z={minZ}-{maxZ}");
+
+                // Calculate TX and RX positions based on axis and material bounds
                 int tx, ty, tz, rx, ry, rz;
+
+                // Calculate positions that are ~20% in from the material bounds
+                int xPadding = (int)((maxX - minX) * 0.2);
+                int yPadding = (int)((maxY - minY) * 0.2);
+                int zPadding = (int)((maxZ - minZ) * 0.2);
+
+                // Ensure minimum padding
+                xPadding = Math.Max(5, xPadding);
+                yPadding = Math.Max(5, yPadding);
+                zPadding = Math.Max(5, zPadding);
+
+                // Get the midpoints of Y and Z dimensions
+                int midY = (minY + maxY) / 2;
+                int midZ = (minZ + maxZ) / 2;
+                int midX = (minX + maxX) / 2;
+
                 switch (axis.ToUpperInvariant())
                 {
                     case "X":
-                        tx = 0; ty = height / 2; tz = depth / 2;
-                        rx = width - 1; ry = height / 2; rz = depth / 2;
+                        // Place TX and RX along X axis, using material bounds
+                        tx = minX + xPadding;
+                        ty = midY;
+                        tz = midZ;
+                        rx = maxX - xPadding;
+                        ry = midY;
+                        rz = midZ;
                         break;
+
                     case "Y":
-                        tx = width / 2; ty = 0; tz = depth / 2;
-                        rx = width / 2; ry = height - 1; rz = depth / 2;
+                        // Place TX and RX along Y axis, using material bounds
+                        tx = midX;
+                        ty = minY + yPadding;
+                        tz = midZ;
+                        rx = midX;
+                        ry = maxY - yPadding;
+                        rz = midZ;
                         break;
-                    default:
-                        tx = width / 2; ty = height / 2; tz = 0;
-                        rx = width / 2; ry = height / 2; rz = depth - 1;
+
+                    default: // Z
+                             // Place TX and RX along Z axis, using material bounds
+                        tx = midX;
+                        ty = midY;
+                        tz = minZ + zPadding;
+                        rx = midX;
+                        ry = midY;
+                        rz = maxZ - zPadding;
                         break;
                 }
 
+                // Now verify if the points are actually in material
+                bool txInMaterial = false;
+                bool rxInMaterial = false;
+
+                if (tx >= 0 && tx < width && ty >= 0 && ty < height && tz >= 0 && tz < depth)
+                    txInMaterial = (labels[tx, ty, tz] == materialID);
+
                 if (rx >= 0 && rx < width && ry >= 0 && ry < height && rz >= 0 && rz < depth)
+                    rxInMaterial = (labels[rx, ry, rz] == materialID);
+
+                Logger.Log($"[AcousticSimulationForm] Initial TX: ({tx},{ty},{tz}) in material: {txInMaterial}");
+                Logger.Log($"[AcousticSimulationForm] Initial RX: ({rx},{ry},{rz}) in material: {rxInMaterial}");
+
+                // Find suitable TX position if not in material
+                if (!txInMaterial)
                 {
-                    if (labels[rx, ry, rz] != materialID)
+                    Logger.Log("[AcousticSimulationForm] TX not in material! Finding suitable position...");
+
+                    // Search outward from initial TX position
+                    bool found = false;
+                    int bestDistance = int.MaxValue;
+                    int bestX = 0, bestY = 0, bestZ = 0;
+
+                    for (int z = 0; z < depth; z++)
                     {
-                        Logger.Log($"[AcousticSimulationForm] Warning: Receiver not in selected material! Adjusting position...");
-
-                        // Find a valid position for the receiver that's also distant from transmitter
-                        bool found = false;
-                        double bestDistance = 0;
-                        int bestX = rx, bestY = ry, bestZ = rz;
-
-                        // Try to find a material point that's far from the transmitter
-                        for (int z = 0; z < depth && !found; z++)
+                        for (int y = 0; y < height; y++)
                         {
-                            for (int y = 0; y < height && !found; y++)
+                            for (int x = 0; x < width; x++)
                             {
-                                for (int x = 0; x < width; x++)
+                                if (labels[x, y, z] == materialID)
                                 {
-                                    if (labels[x, y, z] == materialID)
+                                    // Calculate distance from original TX
+                                    int distance = (x - tx) * (x - tx) + (y - ty) * (y - ty) + (z - tz) * (z - tz);
+
+                                    if (distance < bestDistance)
                                     {
-                                        // Calculate distance from transmitter
-                                        double dist = Math.Sqrt(
-                                            Math.Pow(x - tx, 2) +
-                                            Math.Pow(y - ty, 2) +
-                                            Math.Pow(z - tz, 2));
-
-                                        // Keep track of the point farthest from transmitter
-                                        if (dist > bestDistance)
-                                        {
-                                            bestDistance = dist;
-                                            bestX = x;
-                                            bestY = y;
-                                            bestZ = z;
-
-                                            // If we found a point sufficiently far away, use it
-                                            if (dist > Math.Max(width, Math.Max(height, depth)) * 0.5)
-                                            {
-                                                found = true;
-                                                break;
-                                            }
-                                        }
+                                        bestDistance = distance;
+                                        bestX = x;
+                                        bestY = y;
+                                        bestZ = z;
+                                        found = true;
                                     }
                                 }
                             }
                         }
+                    }
 
-                        // Use the best position found
+                    if (found)
+                    {
+                        tx = bestX;
+                        ty = bestY;
+                        tz = bestZ;
+                        Logger.Log($"[AcousticSimulationForm] Adjusted TX to ({tx},{ty},{tz}) - distance from original: {Math.Sqrt(bestDistance):F1}");
+                    }
+                    else
+                    {
+                        MessageBox.Show("Could not find a valid position for the transmitter in the material.",
+                            "Position Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        btnStartSimulation.Enabled = true;
+                        return;
+                    }
+                }
+
+                // Find suitable RX position if not in material
+                if (!rxInMaterial)
+                {
+                    Logger.Log("[AcousticSimulationForm] RX not in material! Finding suitable position...");
+
+                    // Find a valid position for the receiver that's also distant from transmitter
+                    bool found = false;
+                    double bestDistance = 0;
+                    int bestX = rx, bestY = ry, bestZ = rz;
+
+                    // Try to find a material point that's far from the transmitter
+                    for (int z = 0; z < depth; z++)
+                    {
+                        for (int y = 0; y < height; y++)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                if (labels[x, y, z] == materialID)
+                                {
+                                    // Calculate distance from transmitter
+                                    double dist = Math.Sqrt(
+                                        Math.Pow(x - tx, 2) +
+                                        Math.Pow(y - ty, 2) +
+                                        Math.Pow(z - tz, 2));
+
+                                    // Keep track of the point farthest from transmitter
+                                    if (dist > bestDistance)
+                                    {
+                                        bestDistance = dist;
+                                        bestX = x;
+                                        bestY = y;
+                                        bestZ = z;
+                                        found = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (found)
+                    {
                         rx = bestX;
                         ry = bestY;
                         rz = bestZ;
                         Logger.Log($"[AcousticSimulationForm] Adjusted RX position to ({rx},{ry},{rz}) at distance {bestDistance:F1}");
+                    }
+                    else
+                    {
+                        MessageBox.Show("Could not find a valid position for the receiver in the material.",
+                            "Position Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        btnStartSimulation.Enabled = true;
+                        return;
                     }
                 }
 
@@ -1013,28 +1583,32 @@ namespace CTSegmenter
                     Math.Pow(ry - ty, 2) +
                     Math.Pow(rz - tz, 2));
 
-                Logger.Log($"[AcousticSimulationForm] TX-RX Distance: {txRxDistance:F1} pixels");
+                Logger.Log($"[AcousticSimulationForm] TX-RX Distance: {txRxDistance:F1} pixels ({txRxDistance * pixelSizeF * 1000:F2} mm)");
 
-                if (txRxDistance < 10) // Minimum distance in pixels
+                if (txRxDistance < 20) // Increased minimum distance in pixels
                 {
                     Logger.Log($"[AcousticSimulationForm] Warning: TX and RX are too close! Simulation may not work properly.");
-                    MessageBox.Show("!!!Position Warning!!! The transmitter and receiver positions are too close to each other. This may cause the simulation to fail. !!!Position Warning!!!");
+                    MessageBox.Show("Warning: The transmitter and receiver positions are very close to each other. This may cause the simulation to fail or produce inaccurate results.",
+                        "Position Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
 
-                Logger.Log($"[AcousticSimulationForm] TX: ({tx},{ty},{tz}), RX: ({rx},{ry},{rz})");
-                if (energy <= 0.001)
+                // Final position validation - absolutely ensure TX and RX are in material
+                if (tx < 0 || tx >= width || ty < 0 || ty >= height || tz < 0 || tz >= depth ||
+                    rx < 0 || rx >= width || ry < 0 || ry >= height || rz < 0 || rz >= depth ||
+                    labels[tx, ty, tz] != materialID || labels[rx, ry, rz] != materialID)
                 {
-                    Logger.Log("[AcousticSimulationForm] Warning: Energy is very low, increasing to minimum value");
-                    numEnergy.Value = 5.0m; // Increased from 1.0 to 5.0
-                    energy = 5.0;
+                    MessageBox.Show("Failed to position transducers within material. Please check material segmentation.",
+                        "Position Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    btnStartSimulation.Enabled = true;
+                    return;
                 }
 
-                if (amplitude < 100)
-                {
-                    Logger.Log("[AcousticSimulationForm] Warning: Amplitude is low, increasing to minimum");
-                    numAmplitude.Value = 500; // Increased from 100 to 500
-                    amplitude = 500;
-                }
+                Logger.Log($"[AcousticSimulationForm] Final TX: ({tx},{ty},{tz}), RX: ({rx},{ry},{rz})");
+                Logger.Log($"[AcousticSimulationForm] TX in material: {labels[tx, ty, tz] == materialID}, RX in material: {labels[rx, ry, rz] == materialID}");
+
+                // Create a straight-line path between TX and RX (for visualization)
+                _pathPoints = CreateStraightLinePath(tx, ty, tz, rx, ry, rz, 100);
+
                 // Create the SimulationVisualizer before starting the simulation
                 visualizer = new AcousticSimulationVisualizer(
                     width, height, depth, pixelSizeF,
@@ -1068,10 +1642,13 @@ namespace CTSegmenter
                     {
                         // Create GPU simulator wrapper
                         gpuSimulator = new AcousticSimulatorGPUWrapper(
-                            width, height, depth, pixelSizeF, labels, densityVolume, materialID,
-                            axis, waveType, confiningPressure, tensileStrength, failureAngle, cohesion,
+                            width, height, depth, pixelSizeF,
+                            labels, densityVolume, materialID,
+                            axis, waveType,
+                            confiningPressure, tensileStrength, failureAngle, cohesion,
                             energy, frequency, amplitude, timeSteps,
-                            useElastic, usePlastic, useBrittle, youngsModulus, poissonRatio);
+                            useElastic, usePlastic, useBrittle,
+                            youngsModulus, poissonRatio);
 
                         // Wire up events
                         gpuSimulator.ProgressUpdated += Simulator_ProgressUpdated;
@@ -1094,11 +1671,14 @@ namespace CTSegmenter
 
                         // Create CPU simulator instead
                         cpuSimulator = new AcousticSimulator(
-                     width, height, depth, pixelSizeF, labels, densityVolume, materialID,
-                     axis, waveType, confiningPressure, tensileStrength, failureAngle, cohesion,
-                     energy, frequency, amplitude, timeSteps,
-                     useElastic, usePlastic, useBrittle, youngsModulus, poissonRatio,
-                     tx, ty, tz, rx, ry, rz);
+                            width, height, depth, pixelSizeF,
+                            labels, densityVolume, materialID,
+                            axis, waveType,
+                            confiningPressure, tensileStrength, failureAngle, cohesion,
+                            energy, frequency, amplitude, timeSteps,
+                            useElastic, usePlastic, useBrittle,
+                            youngsModulus, poissonRatio,
+                            tx, ty, tz, rx, ry, rz);
 
                         // Wire up events
                         cpuSimulator.ProgressUpdated += Simulator_ProgressUpdated;
@@ -1112,11 +1692,14 @@ namespace CTSegmenter
                 {
                     // Create CPU simulator
                     cpuSimulator = new AcousticSimulator(
-                    width, height, depth, pixelSizeF, labels, densityVolume, materialID,
-                    axis, waveType, confiningPressure, tensileStrength, failureAngle, cohesion,
-                    energy, frequency, amplitude, timeSteps,
-                    useElastic, usePlastic, useBrittle, youngsModulus, poissonRatio,
-                    tx, ty, tz, rx, ry, rz);
+                        width, height, depth, pixelSizeF,
+                        labels, densityVolume, materialID,
+                        axis, waveType,
+                        confiningPressure, tensileStrength, failureAngle, cohesion,
+                        energy, frequency, amplitude, timeSteps,
+                        useElastic, usePlastic, useBrittle,
+                        youngsModulus, poissonRatio,
+                        tx, ty, tz, rx, ry, rz);
 
                     // Wire up events
                     cpuSimulator.ProgressUpdated += Simulator_ProgressUpdated;
@@ -1140,7 +1723,7 @@ namespace CTSegmenter
                         cpuSimulator.StartSimulation();
                 });
 
-                // CHANGED: Show the form as non-modal instead of modal
+                // Show the form as non-modal instead of modal
                 // This allows interaction with other forms while the simulation is running
                 simulationProgressForm.Show(this); // Pass owner as parameter
             }
@@ -1148,6 +1731,7 @@ namespace CTSegmenter
             {
                 MessageBox.Show($"Error starting simulation: {ex.Message}",
                     "Simulation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Logger.Log($"[AcousticSimulationForm] Simulation error: {ex.Message}\n{ex.StackTrace}");
             }
             finally
             {
@@ -1155,6 +1739,21 @@ namespace CTSegmenter
             }
         }
 
+        private List<Point3D> CreateStraightLinePath(int x1, int y1, int z1, int x2, int y2, int z2, int numPoints)
+        {
+            var points = new List<Point3D>();
+
+            for (int i = 0; i < numPoints; i++)
+            {
+                float t = i / (float)(numPoints - 1);
+                int x = (int)Math.Round(x1 + (x2 - x1) * t);
+                int y = (int)Math.Round(y1 + (y2 - y1) * t);
+                int z = (int)Math.Round(z1 + (z2 - z1) * t);
+                points.Add(new Point3D(x, y, z));
+            }
+
+            return points;
+        }
         private void Simulator_ProgressUpdated(object sender, AcousticSimulationProgressEventArgs e)
         {
             // This might be called from a different thread, so we need to use Invoke
@@ -1361,10 +1960,14 @@ namespace CTSegmenter
             int sampleRate = Math.Max(1, Math.Min(Math.Min(width, height), depth) / 40);
 
             // EXTREME AMPLIFICATION - Dramatically increased
-            const double WAVE_VIS_AMPLIFICATION = 100000000.0;
+            const double WAVE_VIS_AMPLIFICATION = 1e15; // Even more extreme to detect tiny waves
 
             // ULTRA-LOW THRESHOLD - catch virtually any signal
-            const double WAVE_VISIBILITY_THRESHOLD = 0.000000001;
+            const double WAVE_VISIBILITY_THRESHOLD = 1e-20; // Set to an extremely small value
+
+            // Find if any wave exists at all (for debugging)
+            double anyWaveExists = 0.0;
+            int nonZeroVoxels = 0;
 
             // Find maximum values for adaptive scaling
             double maxVal = 0.0;
@@ -1380,6 +1983,12 @@ namespace CTSegmenter
                         double zAmp = Math.Abs(zField[x, y, z]);
                         double combined = Math.Sqrt(pAmp * pAmp + sAmp * sAmp + zAmp * zAmp);
 
+                        if (combined > 0)
+                        {
+                            anyWaveExists = combined;
+                            Interlocked.Increment(ref nonZeroVoxels);
+                        }
+
                         // Thread-safe max update
                         double current = maxVal;
                         if (combined > current)
@@ -1387,23 +1996,28 @@ namespace CTSegmenter
                     }
             });
 
+            // Log if any wave exists for debugging
+            Logger.Log($"[DrawWavePropagation] Any wave exists: {(anyWaveExists > 0 ? "YES" : "NO")} (Max: {anyWaveExists:E20})");
+            Logger.Log($"[DrawWavePropagation] Non-zero voxels: {nonZeroVoxels}");
+
             // Apply adaptive scaling if we have non-zero signals
             double adaptiveAmp = WAVE_VIS_AMPLIFICATION;
-            if (maxVal > 1e-12)
+            if (maxVal > 1e-20) // Extremely small threshold
             {
                 adaptiveAmp = Math.Max(WAVE_VIS_AMPLIFICATION, 0.1 / maxVal);
                 Logger.Log($"[DrawWavePropagation] Using adaptive amplification: {adaptiveAmp:E2}");
             }
 
+            // Initialize variables for collecting stats OUTSIDE the using block
+            double maxPAmp = 0.0; // For logging
+            double maxSAmp = 0.0; // For logging
+            double maxZAmp = 0.0; // For logging
+            int pointsDrawn = 0;  // For logging - moved outside using block
+
             // Use more visible colors with higher opacity
             using (var pBrush = new SolidBrush(Color.FromArgb(230, 255, 50, 50)))  // bright red
             using (var sBrush = new SolidBrush(Color.FromArgb(230, 50, 50, 255)))  // bright blue
             {
-                double maxPAmp = 0.0; // For logging
-                double maxSAmp = 0.0; // For logging
-                double maxZAmp = 0.0; // For logging
-                int pointsDrawn = 0;  // For logging
-
                 for (int z = 0; z < depth; z += sampleRate)
                     for (int y = 0; y < height; y += sampleRate)
                         for (int x = 0; x < width; x += sampleRate)
@@ -1439,26 +2053,42 @@ namespace CTSegmenter
                                     dotBrush = sBrush;
 
                                 // Ensure minimum dot size but scale with amplitude
-                                int size = Math.Min(14, Math.Max(5, (int)(combinedAmp * 0.5)));
+                                int size = Math.Min(14, Math.Max(5, (int)(combinedAmp * 0.5) + 3));
                                 g.FillEllipse(dotBrush,
                                     pt.X - size / 2, pt.Y - size / 2,
                                     size, size);
                                 pointsDrawn++;
                             }
                         }
-
-                // Log the maximum amplitudes found to help with debugging
-                Logger.Log($"[DrawWavePropagation] Max amplitudes: P={maxPAmp:E3}, S={maxSAmp:E3}, Z={maxZAmp:E3}, Points drawn: {pointsDrawn}");
             }
+
+            // Log the maximum amplitudes found to help with debugging
+            Logger.Log($"[DrawWavePropagation] Max amplitudes: P={maxPAmp:E3}, S={maxSAmp:E3}, Z={maxZAmp:E3}, Points drawn: {pointsDrawn}");
 
             // Draw informational overlay
             using (Font font = new Font("Arial", 9))
             using (SolidBrush brush = new SolidBrush(Color.Yellow))
             using (SolidBrush shadowBrush = new SolidBrush(Color.FromArgb(100, 0, 0, 0)))
             {
-                string info = "Wave visualization active...";
-                g.FillRectangle(shadowBrush, 10, 10, 200, 20);
+                string info;
+                if (pointsDrawn > 0)
+                    info = $"Wave visualization active... ({pointsDrawn} points)";
+                else
+                    info = "No waves detected yet. Wait for propagation.";
+
+                g.FillRectangle(shadowBrush, 10, 10, 300, 20);
                 g.DrawString(info, font, brush, 15, 12);
+            }
+
+            // If no points are drawn, suggest placing a test wave for debugging
+            if (pointsDrawn == 0 && simulationRunning)
+            {
+                using (Font font = new Font("Arial", 9, FontStyle.Italic))
+                using (SolidBrush infoText = new SolidBrush(Color.Orange))
+                {
+                    string debugMsg = "Wave generation may need adjustment.";
+                    g.DrawString(debugMsg, font, infoText, pictureBoxSimulation.Width / 2 - 120, pictureBoxSimulation.Height / 2);
+                }
             }
         }
 
@@ -1729,7 +2359,7 @@ namespace CTSegmenter
             }
             return bmp;
         }
-        private class Point3D
+        public class Point3D
         {
             public float X { get; set; }
             public float Y { get; set; }

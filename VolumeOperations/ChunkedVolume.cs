@@ -420,8 +420,6 @@ namespace CTSegmenter
                 throw new AggregateException("Errors occurred while processing image slices:", exceptions);
             }
         }
-
-
         /// <summary>
         /// Saves the volume to a binary file
         /// </summary>

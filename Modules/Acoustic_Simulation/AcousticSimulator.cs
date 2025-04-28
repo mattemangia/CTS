@@ -13,6 +13,7 @@ namespace CTSegmenter
     public class AcousticSimulator : IDisposable
     {
         #region configuration -----------------------------------------------------------
+        private const double WAVE_VISUALIZATION_AMPLIFICATION = 1.0e10;
         private readonly int width, height, depth;
         private readonly float pixelSize;
         private readonly byte[,,] volumeLabels;
@@ -80,7 +81,7 @@ namespace CTSegmenter
     double energy, double frequency, int amplitude, int timeSteps,
     bool useElasticModel, bool usePlasticModel, bool useBrittleModel,
     double youngsModulus, double poissonRatio,
-    int txParam, int tyParam, int tzParam, int rxParam, int ryParam, int rzParam)
+    int tx, int ty, int tz, int rx, int ry, int rz)
         {
             // Grid & material properties
             this.width = width;
@@ -124,28 +125,28 @@ namespace CTSegmenter
             damage = new double[width, height, depth];
 
             // Set transducer positions from parameters
-            tx = txParam;
-            ty = tyParam;
-            tz = tzParam;
-            rx = rxParam;
-            ry = ryParam;
-            rz = rzParam;
+            this.tx = tx;
+            this.ty = ty;
+            this.tz = tz;
+            this.rx = rx;
+            this.ry = ry;
+            this.rz = rz;
 
             // Ensure transducers are within the volume boundaries and not on edges
-            if (tx < 1) tx = 1;
-            if (ty < 1) ty = 1;
-            if (tz < 1) tz = 1;
-            if (rx < 1) rx = 1;
-            if (ry < 1) ry = 1;
-            if (rz < 1) rz = 1;
-            if (tx >= width - 1) tx = width - 2;
-            if (ty >= height - 1) ty = height - 2;
-            if (tz >= depth - 1) tz = depth - 2;
-            if (rx >= width - 1) rx = width - 2;
-            if (ry >= height - 1) ry = height - 2;
-            if (rz >= depth - 1) rz = depth - 2;
+            if (this.tx < 1) this.tx = 1;
+            if (this.ty < 1) this.ty = 1;
+            if (this.tz < 1) this.tz = 1;
+            if (this.rx < 1) this.rx = 1;
+            if (this.ry < 1) this.ry = 1;
+            if (this.rz < 1) this.rz = 1;
+            if (this.tx >= width - 1) this.tx = width - 2;
+            if (this.ty >= height - 1) this.ty = height - 2;
+            if (this.tz >= depth - 1) this.tz = depth - 2;
+            if (this.rx >= width - 1) this.rx = width - 2;
+            if (this.ry >= height - 1) this.ry = height - 2;
+            if (this.rz >= depth - 1) this.rz = depth - 2;
 
-            Logger.Log($"[AcousticSimulator] Using TX: ({tx},{ty},{tz}), RX: ({rx},{ry},{rz})");
+            Logger.Log($"[AcousticSimulator] Using TX: ({this.tx},{this.ty},{this.tz}), RX: ({this.rx},{this.ry},{this.rz})");
 
             // Set minimum required steps for simulation to avoid premature termination
             minRequiredSteps = Math.Max(50, timeSteps / 10);
@@ -402,189 +403,105 @@ namespace CTSegmenter
             Array.Clear(syz, 0, syz.Length);
             Array.Clear(damage, 0, damage.Length);
 
-            // Calculate pulse magnitude and amplify it for better visualization
+            // Calculate pulse magnitude and DRAMATICALLY amplify it
             double pulse = sourceAmplitude * Math.Sqrt(sourceEnergyJ);
-            pulse = Clamp(pulse * 10, -1e6, 1e6); // Moderate amplification with safety limits
+            pulse *= 1e6; // Apply a very large amplification factor to ensure propagation
 
-            Logger.Log($"[AcousticSimulator] Attempting to place source at TX: ({tx},{ty},{tz})");
+            // Log the applied pulse magnitude
+            Logger.Log($"[AcousticSimulator] Applying source pulse with magnitude {pulse:E6}");
 
-            // Check if transmitter is within volume bounds
-            if (tx >= 0 && tx < width && ty >= 0 && ty < height && tz >= 0 && tz < depth)
+            // Instead of a point source, use a small spherical source region to improve propagation
+            int sourceRadius = 2; // Small sphere radius
+
+            // Apply source around TX position to create a stronger, more stable source
+            for (int dz = -sourceRadius; dz <= sourceRadius; dz++)
             {
-                // Check if transmitter is in the selected material
-                if (volumeLabels[tx, ty, tz] == selectedMaterialID)
+                for (int dy = -sourceRadius; dy <= sourceRadius; dy++)
                 {
-                    // Apply source impulse at the transmitter location
-                    Logger.Log($"[AcousticSimulator] Applying source pulse of magnitude {pulse} at ({tx},{ty},{tz})");
-                    sxx[tx, ty, tz] = pulse;
-                    syy[tx, ty, tz] = pulse;
-                    szz[tx, ty, tz] = pulse;
-                }
-                else
-                {
-                    Logger.Log($"[AcousticSimulator] WARNING: Transmitter at ({tx},{ty},{tz}) not in selected material!");
-
-                    // Try to find a nearby point in the selected material (search radius: 5 voxels)
-                    bool materialFound = false;
-                    int bestX = 0, bestY = 0, bestZ = 0;
-
-                    // First try nearby points (5 voxel radius)
-                    for (int dz = -5; dz <= 5 && !materialFound; dz++)
+                    for (int dx = -sourceRadius; dx <= sourceRadius; dx++)
                     {
-                        for (int dy = -5; dy <= 5 && !materialFound; dy++)
+                        // Calculate spherical distance for falloff
+                        double dist = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+                        if (dist > sourceRadius) continue; // Skip if outside sphere
+
+                        // Calculate position
+                        int sx = tx + dx;
+                        int sy = ty + dy;
+                        int sz = tz + dz;
+
+                        // Check bounds
+                        if (sx < 0 || sx >= width || sy < 0 || sy >= height || sz < 0 || sz >= depth)
+                            continue;
+
+                        // Check if voxel is in the material
+                        if (volumeLabels[sx, sy, sz] != selectedMaterialID)
+                            continue;
+
+                        // Apply falloff based on distance from center
+                        double falloff = 1.0 - (dist / sourceRadius);
+
+                        // Apply source with distance falloff
+                        double localPulse = pulse * falloff * falloff;
+
+                        // Apply to stress fields (compressional pulse)
+                        sxx[sx, sy, sz] = localPulse;
+                        syy[sx, sy, sz] = localPulse;
+                        szz[sx, sy, sz] = localPulse;
+
+                        // Also add to velocity field to ensure propagation
+                        double velocityPulse = localPulse / (densityVolume[sx, sy, sz] * 10);
+
+                        // Determine main propagation direction based on axis
+                        int mainAxis = 0; // 0=x, 1=y, 2=z based on RX-TX orientation
+                        if (Math.Abs(rx - tx) >= Math.Abs(ry - ty) && Math.Abs(rx - tx) >= Math.Abs(rz - tz))
+                            mainAxis = 0;
+                        else if (Math.Abs(ry - ty) >= Math.Abs(rx - tx) && Math.Abs(ry - ty) >= Math.Abs(rz - tz))
+                            mainAxis = 1;
+                        else
+                            mainAxis = 2;
+
+                        // Apply initial velocity in the main propagation direction
+                        if (mainAxis == 0)
                         {
-                            for (int dx = -5; dx <= 5 && !materialFound; dx++)
-                            {
-                                int nx = tx + dx;
-                                int ny = ty + dy;
-                                int nz = tz + dz;
-
-                                if (nx >= 0 && nx < width && ny >= 0 && ny < height && nz >= 0 && nz < depth)
-                                {
-                                    if (volumeLabels[nx, ny, nz] == selectedMaterialID)
-                                    {
-                                        bestX = nx;
-                                        bestY = ny;
-                                        bestZ = nz;
-                                        materialFound = true;
-                                        Logger.Log($"[AcousticSimulator] Found material near TX at ({bestX},{bestY},{bestZ})");
-                                        break;
-                                    }
-                                }
-                            }
+                            int direction = Math.Sign(rx - tx);
+                            if (direction == 0) direction = 1;
+                            vx[sx, sy, sz] = velocityPulse * direction;
                         }
-                    }
-
-                    // If no nearby material point found, scan the entire volume
-                    if (!materialFound)
-                    {
-                        Logger.Log("[AcousticSimulator] No material found near TX, scanning entire volume...");
-                        double bestDistanceFromCenter = double.MaxValue;
-                        int centerX = width / 2;
-                        int centerY = height / 2;
-                        int centerZ = depth / 2;
-
-                        // Search for material points, prioritizing those near the center
-                        for (int z = 0; z < depth; z++)
+                        else if (mainAxis == 1)
                         {
-                            for (int y = 0; y < height; y++)
-                            {
-                                for (int x = 0; x < width; x++)
-                                {
-                                    if (volumeLabels[x, y, z] == selectedMaterialID)
-                                    {
-                                        // Calculate distance from center
-                                        double dist = Math.Sqrt(
-                                            Math.Pow(x - centerX, 2) +
-                                            Math.Pow(y - centerY, 2) +
-                                            Math.Pow(z - centerZ, 2));
-
-                                        if (dist < bestDistanceFromCenter)
-                                        {
-                                            bestDistanceFromCenter = dist;
-                                            bestX = x;
-                                            bestY = y;
-                                            bestZ = z;
-                                            materialFound = true;
-                                        }
-                                    }
-                                }
-                            }
+                            int direction = Math.Sign(ry - ty);
+                            if (direction == 0) direction = 1;
+                            vy[sx, sy, sz] = velocityPulse * direction;
                         }
-                    }
-
-                    // Apply source pulse if a material point was found
-                    if (materialFound)
-                    {
-                        // Apply an even stronger pulse at the found location to ensure signal propagation
-                        double enhancedPulse = pulse * 10; // Further strengthen pulse
-                        sxx[bestX, bestY, bestZ] = enhancedPulse;
-                        syy[bestX, bestY, bestZ] = enhancedPulse;
-                        szz[bestX, bestY, bestZ] = enhancedPulse;
-                        Logger.Log($"[AcousticSimulator] Applied enhanced source pulse of magnitude {enhancedPulse} at ({bestX},{bestY},{bestZ})");
-
-                        // Update transmitter position for future reference
-                        tx = bestX;
-                        ty = bestY;
-                        tz = bestZ;
-                    }
-                    else
-                    {
-                        Logger.Log($"[AcousticSimulator] CRITICAL ERROR: No material with ID {selectedMaterialID} found in volume!");
-
-                        // Last resort: Apply pulse at volume center to prevent complete failure
-                        int cx = width / 2;
-                        int cy = height / 2;
-                        int cz = depth / 2;
-
-                        sxx[cx, cy, cz] = pulse * 100; // Extreme amplification
-                        syy[cx, cy, cz] = pulse * 100;
-                        szz[cx, cy, cz] = pulse * 100;
-                        Logger.Log($"[AcousticSimulator] FALLBACK: Applied emergency pulse at volume center ({cx},{cy},{cz})");
+                        else
+                        {
+                            int direction = Math.Sign(rz - tz);
+                            if (direction == 0) direction = 1;
+                            vz[sx, sy, sz] = velocityPulse * direction;
+                        }
                     }
                 }
             }
-            else
+
+            // Log initial field statistics
+            int nonZeroCount = 0;
+            double maxVal = 0;
+
+            for (int z = 0; z < depth; z++)
             {
-                // TX is outside volume - use center as fallback
-                int cx = width / 2;
-                int cy = height / 2;
-                int cz = depth / 2;
-
-                Logger.Log($"[AcousticSimulator] TX ({tx},{ty},{tz}) is outside volume bounds, using center instead");
-
-                // Try to find a material point near the center
-                bool found = false;
-                for (int r = 0; r < Math.Max(width, Math.Max(height, depth)) / 2 && !found; r++)
+                for (int y = 0; y < height; y++)
                 {
-                    for (int dz = -r; dz <= r && !found; dz++)
+                    for (int x = 0; x < width; x++)
                     {
-                        for (int dy = -r; dy <= r && !found; dy++)
-                        {
-                            for (int dx = -r; dx <= r && !found; dx++)
-                            {
-                                // Only check points at approximately distance r
-                                if (Math.Abs(dx) == r || Math.Abs(dy) == r || Math.Abs(dz) == r)
-                                {
-                                    int nx = cx + dx;
-                                    int ny = cy + dy;
-                                    int nz = cz + dz;
-
-                                    if (nx >= 0 && nx < width && ny >= 0 && ny < height && nz >= 0 && nz < depth)
-                                    {
-                                        if (volumeLabels[nx, ny, nz] == selectedMaterialID)
-                                        {
-                                            // Apply source at this point
-                                            sxx[nx, ny, nz] = pulse * 10;
-                                            syy[nx, ny, nz] = pulse * 10;
-                                            szz[nx, ny, nz] = pulse * 10;
-                                            Logger.Log($"[AcousticSimulator] Applied source at material point ({nx},{ny},{nz}) near center");
-                                            tx = nx;
-                                            ty = ny;
-                                            tz = nz;
-                                            found = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        if (Math.Abs(sxx[x, y, z]) > 1e-12) nonZeroCount++;
+                        maxVal = Math.Max(maxVal, Math.Abs(sxx[x, y, z]));
                     }
                 }
-
-                if (!found)
-                {
-                    // Extreme fallback: Apply at center regardless of material
-                    sxx[cx, cy, cz] = pulse * 100;
-                    syy[cx, cy, cz] = pulse * 100;
-                    szz[cx, cy, cz] = pulse * 100;
-                    Logger.Log($"[AcousticSimulator] EMERGENCY FALLBACK: Applied pulse at center ({cx},{cy},{cz})");
-                    tx = cx;
-                    ty = cy;
-                    tz = cz;
-                }
             }
+
+            Logger.Log($"[AcousticSimulator] Source initialization: {nonZeroCount} non-zero voxels, max value: {maxVal:E6}");
         }
+
         #endregion
 
         #region update ------------------------------------------------------------------
@@ -618,6 +535,18 @@ namespace CTSegmenter
                         double dvz_dx = (vz[x + 1, y, z] - vz[x - 1, y, z]) / (2 * pixelSize);
                         double dvz_dy = (vz[x, y + 1, z] - vz[x, y - 1, z]) / (2 * pixelSize);
 
+                        // Add stability check for very large gradients but with much larger limits
+                        const double MAX_GRADIENT = 1.0e12;
+                        dvx_dx = Clamp(dvx_dx, -MAX_GRADIENT, MAX_GRADIENT);
+                        dvy_dy = Clamp(dvy_dy, -MAX_GRADIENT, MAX_GRADIENT);
+                        dvz_dz = Clamp(dvz_dz, -MAX_GRADIENT, MAX_GRADIENT);
+                        dvx_dy = Clamp(dvx_dy, -MAX_GRADIENT, MAX_GRADIENT);
+                        dvx_dz = Clamp(dvx_dz, -MAX_GRADIENT, MAX_GRADIENT);
+                        dvy_dx = Clamp(dvy_dx, -MAX_GRADIENT, MAX_GRADIENT);
+                        dvy_dz = Clamp(dvy_dz, -MAX_GRADIENT, MAX_GRADIENT);
+                        dvz_dx = Clamp(dvz_dx, -MAX_GRADIENT, MAX_GRADIENT);
+                        dvz_dy = Clamp(dvz_dy, -MAX_GRADIENT, MAX_GRADIENT);
+
                         double volumetricStrainRate = dvx_dx + dvy_dy + dvz_dz;
 
                         // elastic predictor
@@ -627,6 +556,15 @@ namespace CTSegmenter
                         double dsxy = dt * (mu * (dvx_dy + dvy_dx));
                         double dsxz = dt * (mu * (dvx_dz + dvz_dx));
                         double dsyz = dt * (mu * (dvy_dz + dvz_dy));
+
+                        // NO DAMPING - we need to ensure propagation
+                        // const double DAMPING = 0.95;
+                        // dsxx *= DAMPING;
+                        // dsyy *= DAMPING;
+                        // dszz *= DAMPING;
+                        // dsxy *= DAMPING;
+                        // dsxz *= DAMPING;
+                        // dsyz *= DAMPING;
 
                         double sxxN = sxx[x, y, z] + dsxx;
                         double syyN = syy[x, y, z] + dsyy;
@@ -697,7 +635,6 @@ namespace CTSegmenter
                     }
             });
         }
-
         private void UpdateVelocity()
         {
             Parallel.For(1, depth - 1, z =>
@@ -706,7 +643,11 @@ namespace CTSegmenter
                     for (int x = 1; x < width - 1; x++)
                     {
                         if (volumeLabels[x, y, z] != selectedMaterialID) continue;
-                        double rho = densityVolume[x, y, z];
+
+                        // Ensure density is reasonable
+                        double rho = Math.Max(100.0, densityVolume[x, y, z]);
+
+                        // Calculate stress gradients
                         double dsxx_dx = (sxx[x, y, z] - sxx[x - 1, y, z]) / pixelSize;
                         double dsxy_dy = (sxy[x, y, z] - sxy[x, y - 1, z]) / pixelSize;
                         double dsxz_dz = (sxz[x, y, z] - sxz[x, y, z - 1]) / pixelSize;
@@ -717,9 +658,33 @@ namespace CTSegmenter
                         double dsxz_dx = (sxz[x + 1, y, z] - sxz[x, y, z]) / pixelSize;
                         double dsyz_dy = (syz[x, y + 1, z] - syz[x, y, z]) / pixelSize;
 
-                        vx[x, y, z] += dt * (dsxx_dx + dsxy_dy + dsxz_dz) / rho;
-                        vy[x, y, z] += dt * (dsxy_dx + dsyy_dy + dsyz_dz) / rho;
-                        vz[x, y, z] += dt * (dsxz_dx + dsyz_dy + dszz_dz) / rho;
+                        // Only use maximum limit for stability, not damping
+                        const double MAX_GRADIENT = 1.0e12;
+                        dsxx_dx = Clamp(dsxx_dx, -MAX_GRADIENT, MAX_GRADIENT);
+                        dsxy_dy = Clamp(dsxy_dy, -MAX_GRADIENT, MAX_GRADIENT);
+                        dsxz_dz = Clamp(dsxz_dz, -MAX_GRADIENT, MAX_GRADIENT);
+                        dsyy_dy = Clamp(dsyy_dy, -MAX_GRADIENT, MAX_GRADIENT);
+                        dsxy_dx = Clamp(dsxy_dx, -MAX_GRADIENT, MAX_GRADIENT);
+                        dsyz_dz = Clamp(dsyz_dz, -MAX_GRADIENT, MAX_GRADIENT);
+                        dszz_dz = Clamp(dszz_dz, -MAX_GRADIENT, MAX_GRADIENT);
+                        dsxz_dx = Clamp(dsxz_dx, -MAX_GRADIENT, MAX_GRADIENT);
+                        dsyz_dy = Clamp(dsyz_dy, -MAX_GRADIENT, MAX_GRADIENT);
+
+                        // Calculate velocity updates
+                        double dvx = dt * (dsxx_dx + dsxy_dy + dsxz_dz) / rho;
+                        double dvy = dt * (dsxy_dx + dsyy_dy + dsyz_dz) / rho;
+                        double dvz = dt * (dsxz_dx + dsyz_dy + dszz_dz) / rho;
+
+                        // Update velocities without damping
+                        vx[x, y, z] += dvx;
+                        vy[x, y, z] += dvy;
+                        vz[x, y, z] += dvz;
+
+                        // Only clamp at extreme values to prevent numerical explosion
+                        const double MAX_VELOCITY = 1.0e10;
+                        vx[x, y, z] = Clamp(vx[x, y, z], -MAX_VELOCITY, MAX_VELOCITY);
+                        vy[x, y, z] = Clamp(vy[x, y, z], -MAX_VELOCITY, MAX_VELOCITY);
+                        vz[x, y, z] = Clamp(vz[x, y, z], -MAX_VELOCITY, MAX_VELOCITY);
                     }
             });
         }
@@ -800,6 +765,7 @@ namespace CTSegmenter
             return pMagnitude > threshold;
         }
 
+
         private bool CheckReceiverTouch()
         {
             return Math.Abs(vx[rx, ry, rz]) > 1e-6 || Math.Abs(vy[rx, ry, rz]) > 1e-6 || Math.Abs(vz[rx, ry, rz]) > 1e-6;
@@ -833,7 +799,19 @@ namespace CTSegmenter
             int percent = force ?? (int)(stepCount * 100.0 / expectedTotalSteps);
             if (percent > 99) percent = 99;  // Keep 100% for Finish()
 
-            // Log current values at TX and RX
+            // Compute midpoint coordinates
+            int midX = (tx + rx) / 2;
+            int midY = (ty + ry) / 2;
+            int midZ = (tz + rz) / 2;
+            midX = Math.Max(0, Math.Min(midX, width - 1));
+            midY = Math.Max(0, Math.Min(midY, height - 1));
+            midZ = Math.Max(0, Math.Min(midZ, depth - 1));
+
+            // Log midpoint measurements
+            Logger.Log($"[MidpointMeasurement] Position: ({midX},{midY},{midZ})");
+            Logger.Log($"[MidpointMeasurement] Values: P={vx[midX, midY, midZ]:E6}, S={vy[midX, midY, midZ]:E6}, Z={vz[midX, midY, midZ]:E6}");
+
+            // Log TX and RX values
             Logger.Log($"[AcousticSimulator] TX values: P={vx[tx, ty, tz]:E6}, S={vy[tx, ty, tz]:E6}");
             Logger.Log($"[AcousticSimulator] RX values: P={vx[rx, ry, rz]:E6}, S={vy[rx, ry, rz]:E6}");
 
@@ -845,15 +823,69 @@ namespace CTSegmenter
             else
                 Logger.Log($"[AcousticSimulator] VP/VS ratio: N/A (S-wave too small)");
 
-            // Log maximum values to help debug
+            // Comprehensive field statistics
             double maxVx = 0, maxVy = 0, maxVz = 0;
             int nonZeroVx = 0, nonZeroVy = 0, nonZeroVz = 0;
 
-            for (int z = 0; z < depth; z++)
+            // Detailed sampling for maximum field values 
+            for (int z = 0; z < depth; z += 2)
             {
-                for (int y = 0; y < height; y++)
+                for (int y = 0; y < height; y += 2)
                 {
-                    for (int x = 0; x < width; x++)
+                    for (int x = 0; x < width; x += 2)
+                    {
+                        // Check if voxel is in material
+                        if (volumeLabels[x, y, z] != selectedMaterialID) continue;
+
+                        double absVx = Math.Abs(vx[x, y, z]);
+                        double absVy = Math.Abs(vy[x, y, z]);
+                        double absVz = Math.Abs(vz[x, y, z]);
+
+                        maxVx = Math.Max(maxVx, absVx);
+                        maxVy = Math.Max(maxVy, absVy);
+                        maxVz = Math.Max(maxVz, absVz);
+
+                        if (absVx > 1e-12) nonZeroVx++;
+                        if (absVy > 1e-12) nonZeroVy++;
+                        if (absVz > 1e-12) nonZeroVz++;
+                    }
+                }
+            }
+
+            // Log statistics
+            Logger.Log($"[AcousticSimulator] Max values: Vx={maxVx:E6}, Vy={maxVy:E6}, Vz={maxVz:E6}");
+            Logger.Log($"[AcousticSimulator] Non-zero voxels: Vx={nonZeroVx}, Vy={nonZeroVy}, Vz={nonZeroVz}");
+
+            // Convert velocity fields to float arrays for visualization (with amplification)
+            float[,,] pWaveField = ConvertToFloat(vx, WAVE_VISUALIZATION_AMPLIFICATION);
+            float[,,] sWaveField = ConvertToFloat(vy, WAVE_VISUALIZATION_AMPLIFICATION);
+
+            // Send actual wave field data instead of null
+            ProgressUpdated?.Invoke(
+                this,
+                new AcousticSimulationProgressEventArgs(
+                    percent, stepCount, text, pWaveField, sWaveField));
+        }
+        private float[,,] ConvertToFloat(double[,,] src, double amplification = 1.0)
+        {
+            int w = src.GetLength(0), h = src.GetLength(1), d = src.GetLength(2);
+            float[,,] dst = new float[w, h, d];
+            for (int z = 0; z < d; z++)
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                        dst[x, y, z] = (float)(src[x, y, z] * amplification);
+            return dst;
+        }
+        private void LogVelocityStatistics()
+        {
+            double maxVx = 0, maxVy = 0, maxVz = 0;
+            int nonZeroVx = 0, nonZeroVy = 0, nonZeroVz = 0;
+
+            for (int z = 0; z < depth; z += 2) // Sample every other point for efficiency
+            {
+                for (int y = 0; y < height; y += 2)
+                {
+                    for (int x = 0; x < width; x += 2)
                     {
                         double absVx = Math.Abs(vx[x, y, z]);
                         double absVy = Math.Abs(vy[x, y, z]);
@@ -870,17 +902,6 @@ namespace CTSegmenter
                 }
             }
 
-            // Convert velocity fields to float arrays for visualization
-            float[,,] pWaveField = ConvertToFloat(vx);
-            float[,,] sWaveField = ConvertToFloat(vy);
-
-            // Send actual wave field data instead of null
-            ProgressUpdated?.Invoke(
-                this,
-                new AcousticSimulationProgressEventArgs(
-                    percent, stepCount, text, pWaveField, sWaveField));
-
-            Logger.Log($"[AcousticSimulator] CPU Simulation Progress: {percent}% Step: {stepCount}/{expectedTotalSteps}");
             Logger.Log($"[AcousticSimulator] Max values: Vx={maxVx:E6}, Vy={maxVy:E6}, Vz={maxVz:E6}");
             Logger.Log($"[AcousticSimulator] Non-zero voxels: Vx={nonZeroVx}, Vy={nonZeroVy}, Vz={nonZeroVz}");
         }

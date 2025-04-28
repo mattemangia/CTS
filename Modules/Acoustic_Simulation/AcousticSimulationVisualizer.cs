@@ -110,11 +110,13 @@ namespace CTSegmenter
             public float[] SWaveSpatialSeries { get; set; }
 
         }
+
         #endregion
 
         #region Constructor
-        public AcousticSimulationVisualizer(int width, int height, int depth, float pixelSize,
-                           int tx, int ty, int tz, int rx, int ry, int rz)
+        public AcousticSimulationVisualizer(
+    int width, int height, int depth, float pixelSize,
+    int tx, int ty, int tz, int rx, int ry, int rz)
         {
             // Store simulation parameters
             _width = width;
@@ -135,8 +137,11 @@ namespace CTSegmenter
             Logger.Log($"[SimulationVisualizer] RX position: ({_rx}, {_ry}, {_rz})");
             Logger.Log($"[SimulationVisualizer] Volume dimensions: {_width}x{_height}x{_depth}");
             Logger.Log($"[SimulationVisualizer] Pixel size: {_pixelSize}m ({_pixelSizeMm}mm)");
+
+            // Setup path points
             int numSamples = Math.Max(Math.Max(_width, _height), _depth);
             _pathPoints = GetPointsAlongPath(_tx, _ty, _tz, _rx, _ry, _rz, numSamples);
+
             // Setup form
             this.Text = "Acoustic Simulation Visualizer";
             this.Size = new Size(1200, 850);
@@ -941,9 +946,9 @@ namespace CTSegmenter
                     {
                         // Calculate wave magnitude at this point
                         double magnitude = Math.Sqrt(
-                            vx[x, y, z] * vx[x, y, z] +
-                            vy[x, y, z] * vy[x, y, z] +
-                            vz[x, y, z] * vz[x, y, z]);
+     vx[x, y, z] * vx[x, y, z] +
+     vy[x, y, z] * vy[x, y, z] +
+     vz[x, y, z] * vz[x, y, z]);
 
                         crossSection[x, y] = (float)magnitude;
                     }
@@ -986,8 +991,6 @@ namespace CTSegmenter
             Logger.Log($"[ExtractCrossSection] Cross-section size: {w}x{h}, Min: {minVal:E6}, Max: {maxVal:E6}");
             return crossSection;
         }
-
-
         #endregion
 
         #region UI Components
@@ -1360,6 +1363,9 @@ namespace CTSegmenter
         /// <summary>
         /// Draw time series data on the specified graphics context with robust bounds checking
         /// </summary>
+        /// <summary>
+        /// Draw time series data on the specified graphics context with robust bounds checking
+        /// </summary>
         private void DrawTimeSeries(Graphics g, float[] series, int panelIndex)
         {
             if (series == null || series.Length == 0)
@@ -1444,6 +1450,19 @@ namespace CTSegmenter
                 {
                     g.DrawString("TX", smallFont, txBrush, pathRect.X - 4, pathRect.Y + pathHeight + 2);
                     g.DrawString("RX", smallFont, rxBrush, pathRect.Right - 8, pathRect.Y + pathHeight + 2);
+                }
+            }
+
+            // Draw midpoint marker
+            using (SolidBrush midBrush = new SolidBrush(Color.Lime))
+            {
+                int midX = pathRect.X + pathRect.Width / 2;
+                g.FillEllipse(midBrush, midX - 3, pathRect.Y + pathHeight / 2 - 3, 6, 6);
+
+                // Draw midpoint label
+                using (Font smallFont = new Font("Arial", 7))
+                {
+                    g.DrawString("MID", smallFont, midBrush, midX - 8, pathRect.Y + pathHeight + 2);
                 }
             }
 
@@ -1652,7 +1671,37 @@ namespace CTSegmenter
                     }
                 }
             }
+
+            // Draw midpoint measurement indicator
+            if (_pathPoints != null && _pathPoints.Count > 0 && _pathPoints.Count / 2 < series.Length)
+            {
+                // Get the index for the midpoint
+                int midpointIndex = Math.Min(series.Length - 1, _pathPoints.Count / 2);
+
+                // Calculate x position
+                float midpointX = midpointIndex / (float)Math.Max(1, series.Length) * width;
+
+                using (Pen midpointPen = new Pen(Color.Lime, 2))
+                {
+                    g.DrawLine(midpointPen, midpointX, graphTop, midpointX, graphTop + graphHeight);
+
+                    using (Font font = new Font("Arial", 8))
+                    using (SolidBrush brush = new SolidBrush(Color.Lime))
+                    {
+                        g.DrawString("Mid", font, brush, midpointX - 10, graphTop + 20);
+                    }
+                }
+            }
+
+            // Label to indicate amplification is applied
+            using (Font smallFont = new Font("Arial", 7, FontStyle.Italic))
+            using (SolidBrush brushInfo = new SolidBrush(Color.Silver))
+            {
+                g.DrawString($"Amplification: {SIGNAL_AMPLIFICATION}x", smallFont, brushInfo,
+                            width - 130, height - 20);
+            }
         }
+
         private void DrawColorbar(Graphics g, Rectangle rect)
         {
             // Create a bitmap for the colorbar
@@ -1844,14 +1893,635 @@ namespace CTSegmenter
 
             // Draw TX/RX illustration in the top half
             int halfHeight = _panelBitmaps[4].Height / 2;
-            DrawTxRxIllustration(g, 10, 10, _panelBitmaps[4].Width - 20, halfHeight - 20);
+            DrawTxRxIllustrationWithMidpoint(g, 10, 10, _panelBitmaps[4].Width - 20, halfHeight - 20);
 
             // Draw P/S time series in the bottom half
             if (frame.PWaveTimeSeries != null && frame.SWaveTimeSeries != null)
             {
-                DrawParallelWaves(g, 10, halfHeight,
-                                 _panelBitmaps[4].Width - 20, halfHeight - 10,
-                                 frame.PWaveTimeSeries, frame.SWaveTimeSeries);
+                DrawParallelWavesWithMidpoint(g, 10, halfHeight,
+                                   _panelBitmaps[4].Width - 20, halfHeight - 10,
+                                   frame.PWaveTimeSeries, frame.SWaveTimeSeries);
+            }
+        }
+        /// <summary>
+        /// Draw TX-RX illustration showing wave propagation with midpoint highlighted
+        /// </summary>
+        private void DrawTxRxIllustrationWithMidpoint(Graphics g, int x, int y, int width, int height)
+        {
+            // Drawing area
+            int margin = 20;
+            int drawWidth = width - 2 * margin;
+            int drawHeight = height - 2 * margin;
+
+            // Calculate TX, RX, and midpoint positions
+            int txX = x + margin + drawWidth / 5;
+            int rxX = x + margin + drawWidth * 4 / 5;
+            int midX = (txX + rxX) / 2;
+            int centerY = y + height / 2;
+
+            // Draw TX icon (circle)
+            using (SolidBrush txBrush = new SolidBrush(Color.Yellow))
+            using (Pen txPen = new Pen(Color.White, 2))
+            {
+                g.FillEllipse(txBrush, txX - 10, centerY - 10, 20, 20);
+                g.DrawEllipse(txPen, txX - 10, centerY - 10, 20, 20);
+
+                // TX label
+                using (Font font = new Font("Arial", 9, FontStyle.Bold))
+                using (SolidBrush textBrush = new SolidBrush(Color.White))
+                {
+                    g.DrawString("TX", font, textBrush, txX - 8, centerY - 6);
+                }
+            }
+
+            // Draw RX icon (square)
+            using (SolidBrush rxBrush = new SolidBrush(Color.LightGreen))
+            using (Pen rxPen = new Pen(Color.White, 2))
+            {
+                g.FillRectangle(rxBrush, rxX - 10, centerY - 10, 20, 20);
+                g.DrawRectangle(rxPen, rxX - 10, centerY - 10, 20, 20);
+
+                // RX label
+                using (Font font = new Font("Arial", 9, FontStyle.Bold))
+                using (SolidBrush textBrush = new SolidBrush(Color.White))
+                {
+                    g.DrawString("RX", font, textBrush, rxX - 8, centerY - 6);
+                }
+            }
+
+            // Draw MIDPOINT icon (diamond)
+            using (SolidBrush midBrush = new SolidBrush(Color.Cyan))
+            {
+                // Create diamond shape
+                Point[] diamondPoints = {
+            new Point(midX, centerY - 10),
+            new Point(midX + 10, centerY),
+            new Point(midX, centerY + 10),
+            new Point(midX - 10, centerY)
+        };
+                g.FillPolygon(midBrush, diamondPoints);
+                g.DrawPolygon(Pens.White, diamondPoints);
+
+                // MID label
+                using (Font font = new Font("Arial", 9, FontStyle.Bold))
+                using (SolidBrush textBrush = new SolidBrush(Color.White))
+                {
+                    g.DrawString("MID", font, textBrush, midX - 12, centerY - 22);
+                }
+            }
+
+            // Draw line connecting TX and RX
+            using (Pen linePen = new Pen(Color.Gray, 1))
+            {
+                linePen.DashStyle = DashStyle.Dot;
+                g.DrawLine(linePen, txX, centerY, rxX, centerY);
+            }
+
+            // Calculate wave progress based on current frame
+            float pWaveProgress = 0;
+            float sWaveProgress = 0;
+            lock (_dataLock)
+            {
+                if (_frames.Count > 0 && _currentFrameIndex < _frames.Count)
+                {
+                    // Calculate progress based on frame index and total frames
+                    if (_simulationCompleted && _pWaveTravelTime > 0)
+                    {
+                        // After completion, use real travel times for accurate visualization
+                        int step = _frames[_currentFrameIndex].TimeStep;
+                        pWaveProgress = Math.Min(1.0f, (float)step / _pWaveTravelTime);
+                        sWaveProgress = Math.Min(1.0f, (float)step / _sWaveTravelTime);
+                    }
+                    else
+                    {
+                        // During simulation, estimate based on frame index
+                        pWaveProgress = Math.Min(1.0f, (float)(_currentFrameIndex + 1) / _frames.Count * 2.5f);
+                        sWaveProgress = Math.Min(1.0f, (float)(_currentFrameIndex + 1) / _frames.Count * 1.5f);
+                    }
+                }
+            }
+
+            // Draw P-wave propagation
+            if (pWaveProgress > 0)
+            {
+                int waveDistance = rxX - txX;
+                int pWaveX = txX + (int)(waveDistance * pWaveProgress);
+
+                // P wave front
+                using (Pen wavePen = new Pen(Color.DeepSkyBlue, 3))
+                {
+                    wavePen.DashStyle = DashStyle.Dash;
+                    g.DrawLine(wavePen, pWaveX, centerY - 30, pWaveX, centerY + 30);
+                }
+
+                // P wave label
+                using (Font font = new Font("Arial", 8, FontStyle.Bold))
+                using (SolidBrush textBrush = new SolidBrush(Color.DeepSkyBlue))
+                {
+                    g.DrawString("P", font, textBrush, pWaveX - 4, centerY - 40);
+                }
+
+                // Highlight midpoint when P-wave passes it
+                if (pWaveProgress >= 0.5)
+                {
+                    using (Pen highlightPen = new Pen(Color.DeepSkyBlue, 2))
+                    {
+                        g.DrawEllipse(highlightPen, midX - 15, centerY - 15, 30, 30);
+                    }
+                }
+            }
+
+            // Draw S-wave propagation
+            if (sWaveProgress > 0)
+            {
+                int waveDistance = rxX - txX;
+                int sWaveX = txX + (int)(waveDistance * sWaveProgress);
+
+                // S wave front
+                using (Pen wavePen = new Pen(Color.Crimson, 3))
+                {
+                    wavePen.DashStyle = DashStyle.Dash;
+                    g.DrawLine(wavePen, sWaveX, centerY - 20, sWaveX, centerY + 20);
+                }
+
+                // S wave label
+                using (Font font = new Font("Arial", 8, FontStyle.Bold))
+                using (SolidBrush textBrush = new SolidBrush(Color.Crimson))
+                {
+                    g.DrawString("S", font, textBrush, sWaveX - 4, centerY + 25);
+                }
+
+                // Highlight midpoint when S-wave passes it
+                if (sWaveProgress >= 0.5)
+                {
+                    using (Pen highlightPen = new Pen(Color.Crimson, 2))
+                    {
+                        // Draw slightly smaller than P-wave highlight to show both
+                        g.DrawEllipse(highlightPen, midX - 12, centerY - 12, 24, 24);
+                    }
+                }
+            }
+
+            // Draw distance information
+            float distanceM = CalculateDistance(_tx, _ty, _tz, _rx, _ry, _rz) * _pixelSize;
+            string distanceString = $"Distance: {distanceM:F3} m";
+
+            using (Font font = new Font("Arial", 8))
+            using (SolidBrush textBrush = new SolidBrush(Color.White))
+            {
+                g.DrawString(distanceString, font, textBrush, x + margin, y + height - margin - 15);
+                g.DrawString($"Midpoint at: {distanceM / 2:F3} m", font, textBrush, x + margin, y + height - margin + 2);
+            }
+        }
+        /// <summary>
+        /// Draw parallel P and S waves with additional midpoint data
+        /// </summary>
+        private void DrawParallelWavesWithMidpoint(Graphics g, int x, int y, int width, int height,
+                                                  float[] pSeries, float[] sSeries)
+        {
+            // Check if we have valid data
+            if (pSeries == null || sSeries == null || pSeries.Length == 0 || sSeries.Length == 0)
+            {
+                using (Font font = new Font("Arial", 10))
+                using (SolidBrush brush = new SolidBrush(Color.White))
+                {
+                    g.DrawString("Waiting for data...", font, brush, x + 10, y + height / 2);
+                }
+                return;
+            }
+
+            // Find min/max values for both series with safe error handling
+            float minP = float.MaxValue, maxP = float.MinValue;
+            float minS = float.MaxValue, maxS = float.MinValue;
+
+            foreach (float val in pSeries)
+            {
+                if (!float.IsNaN(val) && !float.IsInfinity(val))
+                {
+                    minP = Math.Min(minP, val);
+                    maxP = Math.Max(maxP, val);
+                }
+            }
+
+            foreach (float val in sSeries)
+            {
+                if (!float.IsNaN(val) && !float.IsInfinity(val))
+                {
+                    minS = Math.Min(minS, val);
+                    maxS = Math.Max(maxS, val);
+                }
+            }
+
+            // Set reasonable defaults if no significant data
+            if (Math.Abs(maxP - minP) < 1e-6)
+            {
+                minP = -0.1f;
+                maxP = 0.1f;
+            }
+            else
+            {
+                // Ensure symmetrical range for P waveform display
+                float absMaxP = Math.Max(Math.Abs(minP), Math.Abs(maxP));
+                minP = -absMaxP;
+                maxP = absMaxP;
+            }
+
+            if (Math.Abs(maxS - minS) < 1e-6)
+            {
+                minS = -0.1f;
+                maxS = 0.1f;
+            }
+            else
+            {
+                // Ensure symmetrical range for S waveform display
+                float absMaxS = Math.Max(Math.Abs(minS), Math.Abs(maxS));
+                minS = -absMaxS;
+                maxS = absMaxS;
+            }
+
+            // Add padding
+            float paddingP = (maxP - minP) * 0.1f;
+            minP -= paddingP;
+            maxP += paddingP;
+
+            float paddingS = (maxS - minS) * 0.1f;
+            minS -= paddingS;
+            maxS += paddingS;
+
+            // Split the display area for P and S waves
+            int pAreaHeight = height / 2 - 5;
+            int sAreaHeight = height / 2 - 5;
+            int pAreaY = y + 5;
+            int sAreaY = y + height / 2 + 5;
+
+            // Define drawing areas with white borders
+            Rectangle pArea = new Rectangle(x + 5, pAreaY, width - 10, pAreaHeight - 10);
+            Rectangle sArea = new Rectangle(x + 5, sAreaY, width - 10, sAreaHeight - 10);
+
+            // Draw white rectangles to delimit graph areas
+            using (Pen borderPen = new Pen(Color.White, 1))
+            {
+                g.DrawRectangle(borderPen, pArea);
+                g.DrawRectangle(borderPen, sArea);
+            }
+
+            // Draw path visualization above each graph area
+            int pathHeight = 15;
+            Rectangle pPathRect = new Rectangle(pArea.X, pAreaY - pathHeight - 5, pArea.Width, pathHeight);
+            Rectangle sPathRect = new Rectangle(sArea.X, sAreaY - pathHeight - 5, sArea.Width, pathHeight);
+
+            // Draw path backgrounds
+            using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(40, 40, 40)))
+            {
+                g.FillRectangle(bgBrush, pPathRect);
+                g.FillRectangle(bgBrush, sPathRect);
+            }
+
+            // Draw path borders
+            using (Pen pathPen = new Pen(Color.Gray, 1))
+            {
+                g.DrawRectangle(pathPen, pPathRect);
+                g.DrawRectangle(pathPen, sPathRect);
+            }
+
+            // Draw TX, MID, and RX markers on both paths
+            using (SolidBrush txBrush = new SolidBrush(Color.Yellow))
+            using (SolidBrush rxBrush = new SolidBrush(Color.Cyan))
+            using (SolidBrush midBrush = new SolidBrush(Color.Lime))
+            {
+                // P-wave path
+                g.FillEllipse(txBrush, pPathRect.X - 3, pPathRect.Y + pathHeight / 2 - 3, 6, 6);
+                g.FillEllipse(rxBrush, pPathRect.Right - 3, pPathRect.Y + pathHeight / 2 - 3, 6, 6);
+
+                // Add midpoint on P-wave path
+                int pMidX = pPathRect.X + pPathRect.Width / 2;
+                g.FillEllipse(midBrush, pMidX - 3, pPathRect.Y + pathHeight / 2 - 3, 6, 6);
+
+                // S-wave path
+                g.FillEllipse(txBrush, sPathRect.X - 3, sPathRect.Y + pathHeight / 2 - 3, 6, 6);
+                g.FillEllipse(rxBrush, sPathRect.Right - 3, sPathRect.Y + pathHeight / 2 - 3, 6, 6);
+
+                // Add midpoint on S-wave path
+                int sMidX = sPathRect.X + sPathRect.Width / 2;
+                g.FillEllipse(midBrush, sMidX - 3, sPathRect.Y + pathHeight / 2 - 3, 6, 6);
+
+                // Add small labels for mid points
+                using (Font smallFont = new Font("Arial", 7))
+                {
+                    g.DrawString("MID", smallFont, midBrush, pMidX - 8, pPathRect.Y - 12);
+                    g.DrawString("MID", smallFont, midBrush, sMidX - 8, sPathRect.Y - 12);
+                }
+            }
+
+            // Draw current wave position markers on paths
+            lock (_dataLock)
+            {
+                if (_frames.Count > 0 && _currentFrameIndex >= 0 && _currentFrameIndex < _frames.Count)
+                {
+                    // Try to get progress from frame or use simple estimate
+                    float pProgress = 0, sProgress = 0;
+
+                    try
+                    {
+                        pProgress = _frames[_currentFrameIndex].PWavePathProgress;
+                        sProgress = _frames[_currentFrameIndex].SWavePathProgress;
+                    }
+                    catch
+                    {
+                        // Fallback to a simple estimate based on frame index
+                        float simpleProgress = Math.Min(1.0f, (float)(_currentFrameIndex + 1) / _frames.Count);
+                        pProgress = simpleProgress * 1.5f; // P-waves travel faster
+                        if (pProgress > 1.0f) pProgress = 1.0f;
+
+                        sProgress = simpleProgress * 0.8f; // S-waves travel slower
+                        if (sProgress > 1.0f) sProgress = 1.0f;
+                    }
+
+                    int pMarkerX = pPathRect.X + (int)(pProgress * pPathRect.Width);
+                    int sMarkerX = sPathRect.X + (int)(sProgress * sPathRect.Width);
+
+                    using (SolidBrush pWaveBrush = new SolidBrush(Color.DeepSkyBlue))
+                    using (SolidBrush sWaveBrush = new SolidBrush(Color.Crimson))
+                    {
+                        // Draw wave front markers
+                        g.FillRectangle(pWaveBrush, pMarkerX - 2, pPathRect.Y, 4, pathHeight);
+                        g.FillRectangle(sWaveBrush, sMarkerX - 2, sPathRect.Y, 4, pathHeight);
+
+                        // Draw wave paths
+                        using (Pen pPathPen = new Pen(Color.DeepSkyBlue, 2) { DashStyle = DashStyle.Dot })
+                        using (Pen sPathPen = new Pen(Color.Crimson, 2) { DashStyle = DashStyle.Dot })
+                        {
+                            // Draw from TX to current position
+                            g.DrawLine(pPathPen,
+                                pPathRect.X, pPathRect.Y + pathHeight / 2,
+                                pMarkerX, pPathRect.Y + pathHeight / 2);
+
+                            g.DrawLine(sPathPen,
+                                sPathRect.X, sPathRect.Y + pathHeight / 2,
+                                sMarkerX, sPathRect.Y + pathHeight / 2);
+                        }
+
+                        // Draw progress percentages
+                        using (Font progressFont = new Font("Arial", 7))
+                        {
+                            g.DrawString($"{pProgress:P0}", progressFont, pWaveBrush,
+                                pMarkerX - 10, pPathRect.Y);
+
+                            g.DrawString($"{sProgress:P0}", progressFont, sWaveBrush,
+                                sMarkerX - 10, sPathRect.Y);
+                        }
+
+                        // Highlight midpoints when waves pass them
+                        if (pProgress >= 0.5f)
+                        {
+                            using (Pen highlightPen = new Pen(Color.DeepSkyBlue, 2))
+                            {
+                                int midX = pPathRect.X + pPathRect.Width / 2;
+                                g.DrawEllipse(highlightPen, midX - 5, pPathRect.Y + pathHeight / 2 - 5, 10, 10);
+                            }
+                        }
+
+                        if (sProgress >= 0.5f)
+                        {
+                            using (Pen highlightPen = new Pen(Color.Crimson, 2))
+                            {
+                                int midX = sPathRect.X + sPathRect.Width / 2;
+                                g.DrawEllipse(highlightPen, midX - 5, sPathRect.Y + pathHeight / 2 - 5, 10, 10);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // P-wave area title
+            using (Font titleFont = new Font("Arial", 9, FontStyle.Bold))
+            using (SolidBrush pBrush = new SolidBrush(Color.DeepSkyBlue))
+            {
+                g.DrawString("P-Wave", titleFont, pBrush, pArea.X + 5, pAreaY - 15);
+            }
+
+            // S-wave area title
+            using (Font titleFont = new Font("Arial", 9, FontStyle.Bold))
+            using (SolidBrush sBrush = new SolidBrush(Color.Crimson))
+            {
+                g.DrawString("S-Wave", titleFont, sBrush, sArea.X + 5, sAreaY - 15);
+            }
+
+            // Draw center lines
+            using (Pen centerLinePen = new Pen(Color.Gray, 1))
+            {
+                centerLinePen.DashStyle = DashStyle.Dot;
+                int pCenterY = pArea.Y + pArea.Height / 2;
+                int sCenterY = sArea.Y + sArea.Height / 2;
+
+                g.DrawLine(centerLinePen, pArea.X, pCenterY, pArea.X + pArea.Width, pCenterY);
+                g.DrawLine(centerLinePen, sArea.X, sCenterY, sArea.X + sArea.Width, sCenterY);
+            }
+
+            // Draw P-wave time series
+            if (pSeries.Length > 1)
+            {
+                DrawWaveSeries(g, pSeries, pArea, minP, maxP, Color.DeepSkyBlue);
+
+                // Highlight midpoint on the P-wave graph
+                HighlightMidpoint(g, pSeries, pArea, minP, maxP, Color.DeepSkyBlue);
+            }
+
+            // Draw S-wave time series
+            if (sSeries.Length > 1)
+            {
+                DrawWaveSeries(g, sSeries, sArea, minS, maxS, Color.Crimson);
+
+                // Highlight midpoint on the S-wave graph
+                HighlightMidpoint(g, sSeries, sArea, minS, maxS, Color.Crimson);
+            }
+
+            // Draw Time and markers if we have travel times
+            if (_simulationCompleted && _pWaveTravelTime > 0 && _sWaveTravelTime > 0)
+            {
+                DrawArrivalMarkers(g, pSeries, sSeries, pArea, sArea);
+            }
+
+            // Draw amplitude scales
+            using (Font labelFont = new Font("Arial", 7))
+            using (SolidBrush labelBrush = new SolidBrush(Color.LightGray))
+            {
+                // P-wave scales
+                g.DrawString(maxP.ToString("0.000"), labelFont, labelBrush, pArea.X + 2, pArea.Y + 2);
+                g.DrawString("0", labelFont, labelBrush, pArea.X + 2, pArea.Y + pArea.Height / 2);
+                g.DrawString(minP.ToString("0.000"), labelFont, labelBrush, pArea.X + 2, pArea.Y + pArea.Height - 10);
+
+                // S-wave scales
+                g.DrawString(maxS.ToString("0.000"), labelFont, labelBrush, sArea.X + 2, sArea.Y + 2);
+                g.DrawString("0", labelFont, labelBrush, sArea.X + 2, sArea.Y + sArea.Height / 2);
+                g.DrawString(minS.ToString("0.000"), labelFont, labelBrush, sArea.X + 2, sArea.Y + sArea.Height - 10);
+            }
+
+            // Draw amplification factor notice
+            using (Font noteFont = new Font("Arial", 7, FontStyle.Italic))
+            using (SolidBrush noteBrush = new SolidBrush(Color.Silver))
+            {
+                g.DrawString($"Amplification: {SIGNAL_AMPLIFICATION}x", noteFont, noteBrush,
+                            x + width - 120, y + height - 15);
+            }
+        }
+        /// <summary>
+        /// Helper to draw wave series on a specified area
+        /// </summary>
+        private void DrawWaveSeries(Graphics g, float[] series, Rectangle area, float minVal, float maxVal, Color waveColor)
+        {
+            if (series.Length <= 1) return;
+
+            int numPoints = Math.Min(series.Length, 1000);
+            PointF[] points = new PointF[numPoints];
+
+            for (int i = 0; i < numPoints; i++)
+            {
+                float t = i / (float)(numPoints - 1);
+                float x = area.X + t * area.Width;
+
+                // Calculate source index with bounds checking
+                float sourceIdx = t * (series.Length - 1);
+                int idxLow = (int)Math.Floor(sourceIdx);
+                int idxHigh = (int)Math.Ceiling(sourceIdx);
+
+                // Ensure indices are within bounds
+                idxLow = Math.Max(0, Math.Min(idxLow, series.Length - 1));
+                idxHigh = Math.Max(0, Math.Min(idxHigh, series.Length - 1));
+
+                // Get interpolation fraction
+                float fraction = sourceIdx - idxLow;
+
+                // Interpolate for smoother display
+                float val;
+                if (idxLow != idxHigh)
+                    val = series[idxLow] * (1 - fraction) + series[idxHigh] * fraction;
+                else
+                    val = series[idxLow];
+
+                // Normalize to fit in graph area
+                float normalizedVal = (val - minVal) / (maxVal - minVal);
+                // Clamp to prevent drawing outside the area
+                normalizedVal = Math.Max(0, Math.Min(1, normalizedVal));
+
+                float yPos = area.Y + area.Height - normalizedVal * area.Height;
+                points[i] = new PointF(x, yPos);
+            }
+
+            // Draw filled area
+            using (GraphicsPath path = new GraphicsPath())
+            {
+                path.AddLine(points[0].X, area.Y + area.Height / 2, points[0].X, points[0].Y);
+                for (int i = 1; i < points.Length; i++)
+                    path.AddLine(points[i - 1], points[i]);
+
+                path.AddLine(points[points.Length - 1].X, points[points.Length - 1].Y,
+                            points[points.Length - 1].X, area.Y + area.Height / 2);
+                path.CloseFigure();
+
+                using (LinearGradientBrush fillBrush = new LinearGradientBrush(
+                    area, Color.FromArgb(80, waveColor), Color.FromArgb(10, Color.Black),
+                    LinearGradientMode.Vertical))
+                {
+                    g.FillPath(fillBrush, path);
+                }
+            }
+
+            // Draw the wave line
+            using (Pen wavePen = new Pen(waveColor, 1.5f))
+            {
+                g.DrawLines(wavePen, points);
+            }
+        }
+
+        /// <summary>
+        /// Helper to highlight the midpoint on a wave series
+        /// </summary>
+        private void HighlightMidpoint(Graphics g, float[] series, Rectangle area, float minVal, float maxVal, Color color)
+        {
+            if (series.Length <= 1) return;
+
+            // Calculate midpoint index
+            int midIndex = series.Length / 2;
+
+            // Safety check
+            if (midIndex >= series.Length) return;
+
+            // Calculate position
+            float midX = area.X + (midIndex / (float)(series.Length - 1)) * area.Width;
+
+            // Get midpoint value
+            float midpointValue = series[midIndex];
+
+            // Normalize to fit in graph area
+            float normalizedVal = (midpointValue - minVal) / (maxVal - minVal);
+            // Clamp to prevent drawing outside the area
+            normalizedVal = Math.Max(0, Math.Min(1, normalizedVal));
+
+            float midY = area.Y + area.Height - normalizedVal * area.Height;
+
+            // Draw vertical line at midpoint
+            using (Pen midPointPen = new Pen(Color.Lime, 1.5f) { DashStyle = DashStyle.Dash })
+            {
+                g.DrawLine(midPointPen, midX, area.Y, midX, area.Y + area.Height);
+            }
+
+            // Draw marker at the actual data point
+            using (SolidBrush midPointBrush = new SolidBrush(Color.Lime))
+            {
+                g.FillEllipse(midPointBrush, midX - 4, midY - 4, 8, 8);
+
+                // Draw value label
+                using (Font valueFont = new Font("Arial", 7))
+                {
+                    string valueText = $"{midpointValue:F3}";
+                    g.DrawString(valueText, valueFont, midPointBrush, midX + 5, midY - 10);
+                }
+            }
+
+            // Draw "MID" label
+            using (Font labelFont = new Font("Arial", 7, FontStyle.Bold))
+            using (SolidBrush labelBrush = new SolidBrush(Color.Lime))
+            {
+                g.DrawString("MID", labelFont, labelBrush, midX - 10, area.Y + 2);
+            }
+        }
+
+        /// <summary>
+        /// Helper to draw arrival markers
+        /// </summary>
+        private void DrawArrivalMarkers(Graphics g, float[] pSeries, float[] sSeries, Rectangle pArea, Rectangle sArea)
+        {
+            // P-wave arrival marker - with bounds checking
+            if (pSeries.Length > 0) // Avoid division by zero
+            {
+                float pArrivalX = pArea.X + (float)Math.Min(_pWaveTravelTime, pSeries.Length) / pSeries.Length * pArea.Width;
+                using (Pen arrivalPen = new Pen(Color.Yellow, 2))
+                {
+                    g.DrawLine(arrivalPen, pArrivalX, pArea.Y, pArrivalX, pArea.Y + pArea.Height);
+
+                    using (Font font = new Font("Arial", 8))
+                    using (SolidBrush brush = new SolidBrush(Color.Yellow))
+                    {
+                        g.DrawString("Arrival", font, brush, pArrivalX - 15, pArea.Y + 2);
+                    }
+                }
+            }
+
+            // S-wave arrival marker - with bounds checking
+            if (sSeries.Length > 0) // Avoid division by zero
+            {
+                float sArrivalX = sArea.X + (float)Math.Min(_sWaveTravelTime, sSeries.Length) / sSeries.Length * sArea.Width;
+                using (Pen arrivalPen = new Pen(Color.Yellow, 2))
+                {
+                    g.DrawLine(arrivalPen, sArrivalX, sArea.Y, sArrivalX, sArea.Y + sArea.Height);
+
+                    using (Font font = new Font("Arial", 8))
+                    using (SolidBrush brush = new SolidBrush(Color.Yellow))
+                    {
+                        g.DrawString("Arrival", font, brush, sArrivalX - 15, sArea.Y + 2);
+                    }
+                }
             }
         }
 
@@ -3214,43 +3884,8 @@ namespace CTSegmenter
             }
         }
 
-        private void LogAmplitudeInformation(double[,,] vx, double[,,] vy, double[,,] vz)
-        {
-            double maxVx = 0, maxVy = 0, maxVz = 0;
-            double sumVx = 0, sumVy = 0, sumVz = 0;
-            int nonZeroVx = 0, nonZeroVy = 0, nonZeroVz = 0;
-            double threshold = 1e-10; // Very small threshold to count non-zero values
 
-            // Sample the arrays to find statistical information
-            int stride = Math.Max(1, Math.Min(Math.Min(vx.GetLength(0), vx.GetLength(1)), vx.GetLength(2)) / 20);
-
-            for (int z = 0; z < vx.GetLength(2); z += stride)
-                for (int y = 0; y < vx.GetLength(1); y += stride)
-                    for (int x = 0; x < vx.GetLength(0); x += stride)
-                    {
-                        double absVx = Math.Abs(vx[x, y, z]);
-                        double absVy = Math.Abs(vy[x, y, z]);
-                        double absVz = Math.Abs(vz[x, y, z]);
-
-                        maxVx = Math.Max(maxVx, absVx);
-                        maxVy = Math.Max(maxVy, absVy);
-                        maxVz = Math.Max(maxVz, absVz);
-
-                        if (absVx > threshold) { sumVx += absVx; nonZeroVx++; }
-                        if (absVy > threshold) { sumVy += absVy; nonZeroVy++; }
-                        if (absVz > threshold) { sumVz += absVz; nonZeroVz++; }
-                    }
-
-            double avgVx = nonZeroVx > 0 ? sumVx / nonZeroVx : 0;
-            double avgVy = nonZeroVy > 0 ? sumVy / nonZeroVy : 0;
-            double avgVz = nonZeroVz > 0 ? sumVz / nonZeroVz : 0;
-
-            Logger.Log($"[Visualizer] Wave field analysis:");
-            Logger.Log($"  Max values: Vx={maxVx:E4}, Vy={maxVy:E4}, Vz={maxVz:E4}");
-            Logger.Log($"  Avg non-zero: Vx={avgVx:E4}, Vy={avgVy:E4}, Vz={avgVz:E4}");
-            Logger.Log($"  Non-zero count: Vx={nonZeroVx}, Vy={nonZeroVy}, Vz={nonZeroVz}");
-            Logger.Log($"  Amplification: {SIGNAL_AMPLIFICATION}");
-        }
         #endregion
+       
     }
 }

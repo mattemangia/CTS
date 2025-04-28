@@ -22,10 +22,57 @@ public class Throat
 
 public class Point3D
 {
+    // Add default parameterless constructor
+    public Point3D()
+    {
+        // Initialize to origin (0,0,0)
+        X = 0;
+        Y = 0;
+        Z = 0;
+    }
+
+    // Keep existing constructor
+    public Point3D(int x, int y, int z)
+    {
+        X = x;
+        Y = y;
+        Z = z;
+    }
+
+    // Add a constructor that takes doubles directly
+    public Point3D(double x, double y, double z)
+    {
+        X = x;
+        Y = y;
+        Z = z;
+    }
+
+    // Add a copy constructor for convenience
+    public Point3D(Point3D other)
+    {
+        if (other == null)
+        {
+            X = Y = Z = 0;
+        }
+        else
+        {
+            X = other.X;
+            Y = other.Y;
+            Z = other.Z;
+        }
+    }
+
     public double X { get; set; }
     public double Y { get; set; }
     public double Z { get; set; }
+
+    // Add ToString for easier debugging
+    public override string ToString()
+    {
+        return $"({X}, {Y}, {Z})";
+    }
 }
+
 
 public class PoreNetworkModel
 {

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -471,7 +471,7 @@ namespace CTSegmenter
             xzPanel.Controls.Add(xzLayout);
         }
 
-        // Modified implementation for the XZ View slider
+        
         
         // Modified implementation for the YZ View slider
         private void InitializeYZView()

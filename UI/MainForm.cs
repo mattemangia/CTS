@@ -929,6 +929,7 @@ namespace CTSegmenter
                     if (File.Exists(labelsChkPath))
                     {
                         Materials = FileOperations.ReadLabelsChk(path);
+                        Logger.Log($"[LoadDatasetAsync] Loaded materials from labels.chk: {string.Join(", ", Materials.Select(m => $"{m.Name} (ID: {m.ID})"))}");
                     }
                     else if (Directory.Exists(path))
                     {

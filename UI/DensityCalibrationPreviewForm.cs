@@ -239,32 +239,36 @@ namespace CTSegmenter
                 selectionEnd = e.Location;
                 isDrawingSelection = false;
 
-                // Convert screen coordinates to image coordinates
-                Point imgStart = ConvertToImageCoordinates(selectionStart);
-                Point imgEnd = ConvertToImageCoordinates(selectionEnd);
-
-                int x = Math.Min(imgStart.X, imgEnd.X);
-                int y = Math.Min(imgStart.Y, imgEnd.Y);
-                int width = Math.Abs(imgEnd.X - imgStart.X);
-                int height = Math.Abs(imgEnd.Y - imgStart.Y);
-
-                // Ensure within bounds
-                x = Math.Max(0, Math.Min(x, mainForm.GetWidth() - 1));
-                y = Math.Max(0, Math.Min(y, mainForm.GetHeight() - 1));
-                width = Math.Min(width, mainForm.GetWidth() - x);
-                height = Math.Min(height, mainForm.GetHeight() - y);
-
-                if (width > 5 && height > 5)  // Minimum size check
+                // Only process if we have moved the mouse enough to be a selection
+                if (Math.Abs(selectionEnd.X - selectionStart.X) > 2 && Math.Abs(selectionEnd.Y - selectionStart.Y) > 2)
                 {
-                    SelectedRegion = new Rectangle(x, y, width, height);
-                    AverageGrayValue = CalculateAverageGrayValue(SelectedRegion);
-                    btnSelect.Enabled = true;
+                    // Convert screen coordinates to image coordinates
+                    Point imgStart = ConvertToImageCoordinates(selectionStart);
+                    Point imgEnd = ConvertToImageCoordinates(selectionEnd);
+
+                    int x = Math.Min(imgStart.X, imgEnd.X);
+                    int y = Math.Min(imgStart.Y, imgEnd.Y);
+                    int width = Math.Abs(imgEnd.X - imgStart.X);
+                    int height = Math.Abs(imgEnd.Y - imgStart.Y);
+
+                    // Ensure within bounds
+                    x = Math.Max(0, Math.Min(x, mainForm.GetWidth() - 1));
+                    y = Math.Max(0, Math.Min(y, mainForm.GetHeight() - 1));
+                    width = Math.Min(width, mainForm.GetWidth() - x);
+                    height = Math.Min(height, mainForm.GetHeight() - y);
+
+                    // Lower the minimum size check
+                    if (width > 2 && height > 2)
+                    {
+                        SelectedRegion = new Rectangle(x, y, width, height);
+                        AverageGrayValue = CalculateAverageGrayValue(SelectedRegion);
+                        btnSelect.Enabled = true;
+                    }
                 }
 
                 previewBox.Invalidate();
             }
         }
-
         private Point ConvertToImageCoordinates(Point screenPoint)
         {
             // Calculate image scaling within the picture box

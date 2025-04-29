@@ -226,7 +226,8 @@ namespace CTSegmenter
             {
                 Location = new Point(350, 130),
                 Width = 150,
-                DropDownStyle = ComboBoxStyle.DropDownList
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                DisplayMember = "Name"  
             };
 
             // Fill combobox with materials

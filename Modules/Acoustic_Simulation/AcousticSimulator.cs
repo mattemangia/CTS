@@ -646,6 +646,9 @@ namespace CTSegmenter
 
         private void UpdateVelocity()
         {
+            // Define a damping coefficient to prevent wave acceleration
+            const double DAMPING_FACTOR = 0.05; // 5% damping per step
+
             Parallel.For(1, depth - 1, z =>
             {
                 for (int y = 1; y < height - 1; y++)
@@ -684,10 +687,11 @@ namespace CTSegmenter
                         double dvy = dt * (dsxy_dx + dsyy_dy + dsyz_dz) / rho;
                         double dvz = dt * (dsxz_dx + dsyz_dy + dszz_dz) / rho;
 
-                        // Update velocities without damping to ensure oscillations
-                        vx[x, y, z] += dvx;
-                        vy[x, y, z] += dvy;
-                        vz[x, y, z] += dvz;
+                        // Update velocities WITH damping to prevent acceleration
+                        double damping = 1.0 - DAMPING_FACTOR;
+                        vx[x, y, z] = vx[x, y, z] * damping + dvx;
+                        vy[x, y, z] = vy[x, y, z] * damping + dvy;
+                        vz[x, y, z] = vz[x, y, z] * damping + dvz;
 
                         // Only clamp at extreme values to prevent numerical explosion
                         const double MAX_VELOCITY = 1.0e10;

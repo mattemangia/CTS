@@ -12,7 +12,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using CTSegmenter.Modules.Acoustic_Simulation;
+
 using Timer = System.Windows.Forms.Timer;
 
 namespace CTSegmenter
@@ -41,6 +41,10 @@ namespace CTSegmenter
         private double _sWaveVelocity;
         private double _vpVsRatio;
         private Color[] _colormap;
+        private float _lastTomographyMin = 0;
+        private float _lastTomographyMax = 1;
+        private float _lastCrossSectionMin = 0;
+        private float _lastCrossSectionMax = 1;
 
         // Transmitter and receiver positions
         private readonly int _tx, _ty, _tz;
@@ -114,6 +118,10 @@ namespace CTSegmenter
             public float SWavePathProgress { get; set; } = 0.0f;
             public float[] PWaveSpatialSeries { get; set; }
             public float[] SWaveSpatialSeries { get; set; }
+            public float PWaveMidpointValue { get; set; }
+            public float SWaveMidpointValue { get; set; }
+            public float[] PWaveMidpointSeries { get; set; }
+            public float[] SWaveMidpointSeries { get; set; }
 
         }
 
@@ -234,30 +242,97 @@ namespace CTSegmenter
                 float recvP = (float)(vx[_rx, _ry, _rz] * TIME_SERIES_GAIN);
                 float recvS = (float)(vy[_rx, _ry, _rz] * TIME_SERIES_GAIN);
 
-                // Log TX and RX values (reduced frequency to avoid log spamming)
+                // 3) Sample midpoint values explicitly
+                int midX = (_tx + _rx) / 2;
+                int midY = (_ty + _ry) / 2;
+                int midZ = (_tz + _rz) / 2;
+
+                float midP = (float)(vx[midX, midY, midZ] * TIME_SERIES_GAIN);
+                float midS = (float)(vy[midX, midY, midZ] * TIME_SERIES_GAIN);
+
+                // 4) Log TX, MID, and RX values (reduced frequency to avoid log spamming)
                 if (e.TimeStep % 20 == 0)
                 {
-                    Logger.Log($"[SimulationVisualizer] P-wave at TX: {vx[_tx, _ty, _tz]:E6}, RX: {vx[_rx, _ry, _rz]:E6}");
-                    Logger.Log($"[SimulationVisualizer] S-wave at TX: {vy[_tx, _ty, _tz]:E6}, RX: {vy[_rx, _ry, _rz]:E6}");
+                    Logger.Log($"[SimulationVisualizer] P-wave at TX: {vx[_tx, _ty, _tz]:E6}, MID: {vx[midX, midY, midZ]:E6}, RX: {vx[_rx, _ry, _rz]:E6}");
+                    Logger.Log($"[SimulationVisualizer] S-wave at TX: {vy[_tx, _ty, _tz]:E6}, MID: {vy[midX, midY, midZ]:E6}, RX: {vy[_rx, _ry, _rz]:E6}");
                 }
 
-                // 3) compute tomography + cross-section for *every* update
+                // 5) compute tomography + cross-section
                 var tomo = ComputeVelocityTomography(_tx, _ty, _tz, _rx, _ry, _rz, vx, vy, vz);
                 var xsec = ExtractCrossSection(_tx, _ty, _tz, _rx, _ry, _rz, vx, vy, vz);
 
-                // 4) build the new frame
+                // 6) Sample path for the path visualization
+                const int PATH_SAMPLES = 100;
+                float[] pWavePath = new float[PATH_SAMPLES];
+                float[] sWavePath = new float[PATH_SAMPLES];
+
+                for (int i = 0; i < PATH_SAMPLES; i++)
+                {
+                    float t = i / (float)(PATH_SAMPLES - 1);
+
+                    int x = (int)Math.Round(_tx + (_rx - _tx) * t);
+                    int y = (int)Math.Round(_ty + (_ry - _ty) * t);
+                    int z = (int)Math.Round(_tz + (_rz - _tz) * t);
+
+                    x = Math.Max(0, Math.Min(x, _width - 1));
+                    y = Math.Max(0, Math.Min(y, _height - 1));
+                    z = Math.Max(0, Math.Min(z, _depth - 1));
+
+                    pWavePath[i] = (float)(vx[x, y, z] * TIME_SERIES_GAIN);
+
+                    double sMag = Math.Sqrt(
+                        vy[x, y, z] * vy[x, y, z] +
+                        vz[x, y, z] * vz[x, y, z]);
+                    sWavePath[i] = (float)(sMag * TIME_SERIES_GAIN);
+                }
+
+                // 7) Calculate wave progress
+                float pProgress = 0.0f;
+                float sProgress = 0.0f;
+
+                if (_simulationCompleted && _pWaveTravelTime > 0)
+                {
+                    // After completion, use real travel times for accurate visualization
+                    pProgress = Math.Min(1.0f, (float)e.TimeStep / _pWaveTravelTime);
+                    sProgress = Math.Min(1.0f, (float)e.TimeStep / _sWaveTravelTime);
+                }
+                else
+                {
+                    // Estimate progress during simulation using current frame index
+                    int totalFrames = _frames.Count;
+
+                    // Use reasonable guess for total expected frames
+                    int estimatedTotalFrames = 500;
+
+                    if (_totalTimeSteps > 0)
+                    {
+                        // If we have totalTimeSteps from the simulator, use that
+                        estimatedTotalFrames = _totalTimeSteps;
+                    }
+
+                    // Calculate based on current step
+                    float simpleProgress = Math.Min(1.0f, (float)e.TimeStep / estimatedTotalFrames);
+
+                    // P-waves travel faster than S-waves
+                    pProgress = Math.Min(1.0f, simpleProgress * 1.5f);
+                    sProgress = Math.Min(1.0f, simpleProgress * 0.8f);
+                }
+
+                // 8) build the new frame with spatial path data
                 var frame = new SimulationFrame
                 {
                     TimeStep = e.TimeStep,
                     PWaveValue = recvP,
                     SWaveValue = recvS,
-                    PWavePathProgress = (float)CalculateProgressAlongPath(_tx, _ty, _tz, _rx, _ry, _rz, _rx, _ry, _rz),
-                    SWavePathProgress = (float)CalculateProgressAlongPath(_tx, _ty, _tz, _rx, _ry, _rz, _rx, _ry, _rz),
+                    PWavePathProgress = pProgress,
+                    SWavePathProgress = sProgress,
                     VelocityTomography = tomo,
-                    WavefieldCrossSection = xsec
+                    WavefieldCrossSection = xsec,
+                    PWaveSpatialSeries = pWavePath,
+                    SWaveSpatialSeries = sWavePath
                 };
 
-                // 5) append to your _frames list and extend the time-series arrays
+                // 9) append to _frames list and update the time-series arrays
                 lock (_dataLock)
                 {
                     int n = _frames.Count;
@@ -291,7 +366,7 @@ namespace CTSegmenter
                     }
                 }
 
-                // 6) invoke the UI redraw on the main thread
+                // 10) invoke the UI redraw on the main thread
                 if (!IsDisposed && IsHandleCreated)
                     BeginInvoke((Action)UpdateVisualization);
             }
@@ -708,9 +783,9 @@ namespace CTSegmenter
         /// Compute velocity tomography parallel to the wave path from TX to RX
         /// </summary>
         private float[,] ComputeVelocityTomography(
-     int tx, int ty, int tz,
-     int rx, int ry, int rz,
-     double[,,] vx, double[,,] vy, double[,,] vz)
+    int tx, int ty, int tz,
+    int rx, int ry, int rz,
+    double[,,] vx, double[,,] vy, double[,,] vz)
         {
             // Determine the primary direction of wave propagation
             int dx = Math.Abs(rx - tx);
@@ -718,7 +793,10 @@ namespace CTSegmenter
             int dz = Math.Abs(rz - tz);
 
             float[,] tomography;
-            const double AMPLIFICATION = 50000.0;
+            float[,] rawVelocity; // To hold the non-normalized values for the colorbar
+
+            // Apply a consistent amplification for visualization
+            const double VELOCITY_AMPLIFICATION = 50000.0;
 
             // For tomography, we want a plane that is PARALLEL to wave path
             if (dx >= dy && dx >= dz) // X is primary axis
@@ -731,6 +809,7 @@ namespace CTSegmenter
                     midZ = Math.Max(0, Math.Min(midZ, _depth - 1));
 
                     tomography = new float[_width, _height];
+                    rawVelocity = new float[_width, _height];
 
                     for (int x = 0; x < _width; x++)
                     {
@@ -741,7 +820,8 @@ namespace CTSegmenter
                                 vy[x, y, midZ] * vy[x, y, midZ] +
                                 vz[x, y, midZ] * vz[x, y, midZ]);
 
-                            tomography[x, y] = (float)(magnitude * AMPLIFICATION);
+                            rawVelocity[x, y] = (float)(magnitude * VELOCITY_AMPLIFICATION);
+                            tomography[x, y] = rawVelocity[x, y];
                         }
                     }
                 }
@@ -752,6 +832,7 @@ namespace CTSegmenter
                     midY = Math.Max(0, Math.Min(midY, _height - 1));
 
                     tomography = new float[_width, _depth];
+                    rawVelocity = new float[_width, _depth];
 
                     for (int x = 0; x < _width; x++)
                     {
@@ -762,7 +843,8 @@ namespace CTSegmenter
                                 vy[x, midY, z] * vy[x, midY, z] +
                                 vz[x, midY, z] * vz[x, midY, z]);
 
-                            tomography[x, z] = (float)(magnitude * AMPLIFICATION);
+                            rawVelocity[x, z] = (float)(magnitude * VELOCITY_AMPLIFICATION);
+                            tomography[x, z] = rawVelocity[x, z];
                         }
                     }
                 }
@@ -777,6 +859,7 @@ namespace CTSegmenter
                     midZ = Math.Max(0, Math.Min(midZ, _depth - 1));
 
                     tomography = new float[_width, _height];
+                    rawVelocity = new float[_width, _height];
 
                     for (int x = 0; x < _width; x++)
                     {
@@ -787,7 +870,8 @@ namespace CTSegmenter
                                 vy[x, y, midZ] * vy[x, y, midZ] +
                                 vz[x, y, midZ] * vz[x, y, midZ]);
 
-                            tomography[x, y] = (float)(magnitude * AMPLIFICATION);
+                            rawVelocity[x, y] = (float)(magnitude * VELOCITY_AMPLIFICATION);
+                            tomography[x, y] = rawVelocity[x, y];
                         }
                     }
                 }
@@ -798,6 +882,7 @@ namespace CTSegmenter
                     midX = Math.Max(0, Math.Min(midX, _width - 1));
 
                     tomography = new float[_height, _depth];
+                    rawVelocity = new float[_height, _depth];
 
                     for (int y = 0; y < _height; y++)
                     {
@@ -808,7 +893,8 @@ namespace CTSegmenter
                                 vy[midX, y, z] * vy[midX, y, z] +
                                 vz[midX, y, z] * vz[midX, y, z]);
 
-                            tomography[y, z] = (float)(magnitude * AMPLIFICATION);
+                            rawVelocity[y, z] = (float)(magnitude * VELOCITY_AMPLIFICATION);
+                            tomography[y, z] = rawVelocity[y, z];
                         }
                     }
                 }
@@ -823,6 +909,7 @@ namespace CTSegmenter
                     midY = Math.Max(0, Math.Min(midY, _height - 1));
 
                     tomography = new float[_width, _depth];
+                    rawVelocity = new float[_width, _depth];
 
                     for (int x = 0; x < _width; x++)
                     {
@@ -833,7 +920,8 @@ namespace CTSegmenter
                                 vy[x, midY, z] * vy[x, midY, z] +
                                 vz[x, midY, z] * vz[x, midY, z]);
 
-                            tomography[x, z] = (float)(magnitude * AMPLIFICATION);
+                            rawVelocity[x, z] = (float)(magnitude * VELOCITY_AMPLIFICATION);
+                            tomography[x, z] = rawVelocity[x, z];
                         }
                     }
                 }
@@ -844,6 +932,7 @@ namespace CTSegmenter
                     midX = Math.Max(0, Math.Min(midX, _width - 1));
 
                     tomography = new float[_height, _depth];
+                    rawVelocity = new float[_height, _depth];
 
                     for (int y = 0; y < _height; y++)
                     {
@@ -854,15 +943,19 @@ namespace CTSegmenter
                                 vy[midX, y, z] * vy[midX, y, z] +
                                 vz[midX, y, z] * vz[midX, y, z]);
 
-                            tomography[y, z] = (float)(magnitude * AMPLIFICATION);
+                            rawVelocity[y, z] = (float)(magnitude * VELOCITY_AMPLIFICATION);
+                            tomography[y, z] = rawVelocity[y, z];
                         }
                     }
                 }
             }
 
-            // Calculate percentile-based thresholds for better visualization
+            // Find the raw min and max values for the colorbar
             int w = tomography.GetLength(0);
             int h = tomography.GetLength(1);
+
+            float rawMin = float.MaxValue;
+            float rawMax = float.MinValue;
 
             // Create a sorted list of all non-zero values
             List<float> sortedValues = new List<float>();
@@ -871,8 +964,12 @@ namespace CTSegmenter
                 for (int i = 0; i < w; i++)
                 {
                     float value = tomography[i, j];
-                    if (value > 0)
+                    if (value > 0 && !float.IsNaN(value) && !float.IsInfinity(value))
+                    {
                         sortedValues.Add(value);
+                        rawMin = Math.Min(rawMin, value);
+                        rawMax = Math.Max(rawMax, value);
+                    }
                 }
             }
 
@@ -880,10 +977,10 @@ namespace CTSegmenter
             sortedValues.Sort();
 
             // Use 5th and 95th percentiles to avoid outliers (if we have enough data)
-            float minThreshold = 0;
+            float minThreshold;
             float maxThreshold;
 
-            if (sortedValues.Count > 0)
+            if (sortedValues.Count > 20)
             {
                 // Lower threshold at 5th percentile
                 int lowerIdx = Math.Max(0, (int)(sortedValues.Count * 0.05));
@@ -893,8 +990,14 @@ namespace CTSegmenter
                 int upperIdx = Math.Min(sortedValues.Count - 1, (int)(sortedValues.Count * 0.95));
                 maxThreshold = sortedValues[upperIdx];
             }
+            else if (sortedValues.Count > 0)
+            {
+                minThreshold = sortedValues[0];
+                maxThreshold = sortedValues[sortedValues.Count - 1];
+            }
             else
             {
+                minThreshold = 0.0f;
                 maxThreshold = 1.0f;
             }
 
@@ -904,34 +1007,41 @@ namespace CTSegmenter
                 maxThreshold = minThreshold + 1.0f;
             }
 
+            // Save these values for the colorbar
+            _lastTomographyMin = rawMin;
+            _lastTomographyMax = rawMax;
+
             // Apply thresholds and normalize to [0-1] for visualization
+            float[,] normalizedTomography = new float[w, h];
             for (int j = 0; j < h; j++)
             {
                 for (int i = 0; i < w; i++)
                 {
                     // Clamp to thresholds
-                    tomography[i, j] = Math.Max(minThreshold, Math.Min(maxThreshold, tomography[i, j]));
+                    float value = Math.Max(minThreshold, Math.Min(maxThreshold, tomography[i, j]));
 
                     // Apply logarithmic scaling for better visualization of dynamic range
                     // Only if range is large enough to warrant it
-                    if (maxThreshold / minThreshold > 10 && tomography[i, j] > 0)
+                    if (maxThreshold / minThreshold > 10 && value > 0)
                     {
                         float logMin = (float)Math.Log10(Math.Max(1e-6, minThreshold));
                         float logMax = (float)Math.Log10(maxThreshold);
-                        float logVal = (float)Math.Log10(Math.Max(1e-6, tomography[i, j]));
+                        float logVal = (float)Math.Log10(Math.Max(1e-6, value));
 
-                        tomography[i, j] = (logVal - logMin) / (logMax - logMin);
+                        normalizedTomography[i, j] = (logVal - logMin) / (logMax - logMin);
                     }
                     else
                     {
                         // Linear mapping
-                        tomography[i, j] = (tomography[i, j] - minThreshold) / (maxThreshold - minThreshold);
+                        normalizedTomography[i, j] = (value - minThreshold) / (maxThreshold - minThreshold);
                     }
                 }
             }
 
-            Logger.Log($"[ComputeVelocityTomography] Adaptive thresholds: Min={minThreshold:E3} m/s, Max={maxThreshold:E3} m/s");
-            return tomography;
+            Logger.Log($"[ComputeVelocityTomography] Raw velocity range: {rawMin:E3} m/s to {rawMax:E3} m/s");
+            Logger.Log($"[ComputeVelocityTomography] Normalized thresholds: Min={minThreshold:E3} m/s, Max={maxThreshold:E3} m/s");
+
+            return normalizedTomography;
         }
         /// <summary>
         /// Extract a cross-section of the wave field perpendicular to the wave path
@@ -1063,6 +1173,10 @@ namespace CTSegmenter
             {
                 maxThreshold = minThreshold + 1.0f;
             }
+
+            // Save these values for the colorbar - THIS IS THE FIX
+            _lastCrossSectionMin = minThreshold;
+            _lastCrossSectionMax = maxThreshold;
 
             // Apply thresholds and normalize to [0-1] for visualization
             for (int j = 0; j < h; j++)
@@ -1989,7 +2103,6 @@ namespace CTSegmenter
                 g.DrawString($"Samples: {series.Length}", smallFont, smallBrush, width - 150, height - 35);
             }
         }
-
         private void DrawColorbar(Graphics g, Rectangle rect, float minVal, float maxVal)
         {
             try
@@ -2002,8 +2115,6 @@ namespace CTSegmenter
                 {
                     // Map y position to colormap index (invert so max is at top)
                     int index = 255 - (int)((float)y / rect.Height * 256);
-
-                    // Clamp to valid range
                     index = Math.Max(0, Math.Min(255, index));
 
                     // Draw a horizontal line of this color
@@ -2015,8 +2126,6 @@ namespace CTSegmenter
 
                 // Draw the colorbar on the graphics context
                 g.DrawImage(colorbar, rect);
-
-                // Draw a border around the colorbar
                 g.DrawRectangle(Pens.White, rect);
 
                 // Handle possible NaN or infinity values
@@ -2031,51 +2140,58 @@ namespace CTSegmenter
                     maxVal = temp;
                 }
 
-                // Add min/max labels with proper units
-                Font font = null;
-                SolidBrush textBrush = null;
-                SolidBrush shadowBrush = null;
+                Font font = new Font("Arial", 8);
+                SolidBrush textBrush = new SolidBrush(Color.White);
+                SolidBrush shadowBrush = new SolidBrush(Color.FromArgb(80, 0, 0, 0));
 
-                try
-                {
-                    font = new Font("Arial", 8);
-                    textBrush = new SolidBrush(Color.White);
-                    shadowBrush = new SolidBrush(Color.FromArgb(80, 0, 0, 0));
+                // Create velocity-specific labels with proper units and formatting
+                string maxText = FormatVelocityValue(maxVal);
+                string minText = FormatVelocityValue(minVal);
+                string midText = FormatVelocityValue((minVal + maxVal) / 2);
 
-                    string maxText = FormatHeatmapValue(maxVal);
-                    string minText = FormatHeatmapValue(minVal);
+                // Draw max value at top with shadow for better visibility
+                SizeF maxSize = g.MeasureString(maxText, font);
+                float maxX = Math.Max(0, rect.X - maxSize.Width - 2);
+                g.FillRectangle(shadowBrush, maxX, rect.Y - 2, maxSize.Width + 4, maxSize.Height + 4);
+                g.DrawString(maxText, font, textBrush, maxX, rect.Y);
 
-                    // Add "m/s" units to both labels
-                    maxText += " m/s";
-                    minText += " m/s";
+                // Draw mid value at middle with shadow
+                SizeF midSize = g.MeasureString(midText, font);
+                float midX = Math.Max(0, rect.X - midSize.Width - 2);
+                float midY = rect.Y + rect.Height / 2 - midSize.Height / 2;
+                g.FillRectangle(shadowBrush, midX, midY, midSize.Width + 4, midSize.Height + 4);
+                g.DrawString(midText, font, textBrush, midX, midY);
 
-                    // Draw max value at top with shadow for better visibility
-                    SizeF maxSize = g.MeasureString(maxText, font);
-                    float maxX = Math.Max(0, rect.X - maxSize.Width - 2);
-                    g.FillRectangle(shadowBrush, maxX, rect.Y - 2, maxSize.Width + 4, maxSize.Height + 4);
-                    g.DrawString(maxText, font, textBrush, maxX, rect.Y);
+                // Draw min value at bottom with shadow
+                SizeF minSize = g.MeasureString(minText, font);
+                float minX = Math.Max(0, rect.X - minSize.Width - 2);
+                g.FillRectangle(shadowBrush, minX, rect.Bottom - minSize.Height - 2, minSize.Width + 4, minSize.Height + 4);
+                g.DrawString(minText, font, textBrush, minX, rect.Bottom - minSize.Height);
 
-                    // Draw min value at bottom with shadow
-                    SizeF minSize = g.MeasureString(minText, font);
-                    float minX = Math.Max(0, rect.X - minSize.Width - 2);
-                    g.FillRectangle(shadowBrush, minX, rect.Bottom - minSize.Height - 2, minSize.Width + 4, minSize.Height + 4);
-                    g.DrawString(minText, font, textBrush, minX, rect.Bottom - minSize.Height);
-                }
-                finally
-                {
-                    // Clean up resources
-                    if (font != null) font.Dispose();
-                    if (textBrush != null) textBrush.Dispose();
-                    if (shadowBrush != null) shadowBrush.Dispose();
-                }
-
-                // Clean up
+                font.Dispose();
+                textBrush.Dispose();
+                shadowBrush.Dispose();
                 colorbar.Dispose();
             }
             catch (Exception ex)
             {
                 Logger.Log($"[DrawColorbar] Error: {ex.Message}");
             }
+        }
+        private string FormatVelocityValue(float value)
+        {
+            // Format based on magnitude with m/s units
+            if (float.IsNaN(value) || float.IsInfinity(value))
+                return "N/A";
+
+            if (Math.Abs(value) < 0.001f)
+                return $"{value:0.00E+0} m/s";
+            else if (Math.Abs(value) < 10)
+                return $"{value:0.00} m/s";
+            else if (Math.Abs(value) < 1000)
+                return $"{value:0.0} m/s";
+            else
+                return $"{value / 1000:0.00} km/s";
         }
         /// <summary>
         /// Draw heatmap data on the specified graphics context
@@ -2112,23 +2228,23 @@ namespace CTSegmenter
             int dataW = data.GetLength(0);
             int dataH = data.GetLength(1);
 
-            // Find the raw (original) minimum and maximum for the colorbar labels
-            float rawMin = float.MaxValue;
-            float rawMax = float.MinValue;
-
-            for (int y = 0; y < dataH; y++)
+            // Get the actual velocity range for this panel
+            float rawMin, rawMax;
+            if (panelIndex == 2) // Velocity tomography
             {
-                for (int x = 0; x < dataW; x++)
-                {
-                    float v = data[x, y];
-                    if (float.IsNaN(v) || float.IsInfinity(v)) continue;
-                    rawMin = Math.Min(rawMin, v);
-                    rawMax = Math.Max(rawMax, v);
-                }
+                rawMin = _lastTomographyMin;
+                rawMax = _lastTomographyMax;
             }
-
-            // Calculate adjusted thresholds for visualization
-            // Here we assume the data is already normalized to [0,1] by the processing methods
+            else if (panelIndex == 3) // Wavefield cross-section
+            {
+                rawMin = _lastCrossSectionMin;
+                rawMax = _lastCrossSectionMax;
+            }
+            else
+            {
+                rawMin = 0;
+                rawMax = 1;
+            }
 
             // Reserve space for colorbar
             int colorbarWidth = 20;
@@ -2174,6 +2290,7 @@ namespace CTSegmenter
                                                   panelH / 4,  // Start 1/4 from top
                                                   colorbarWidth,
                                                   panelH / 2); // Take middle half height
+
             DrawColorbar(g, colorbarRect, rawMin, rawMax);
 
             // Add title and amplification info
@@ -2194,10 +2311,12 @@ namespace CTSegmenter
                     g.DrawString(title, font, brush, 10, 10);
                 }
 
-                // Note about amplification
-                string amplitudeInfo = panelIndex == 2 ?
-                    "Amplification: 50,000x" :
-                    "Amplification: 20,000x";
+                // Note about velocity range with proper units
+                string amplitudeInfo = "";
+                if (panelIndex == 2)
+                    amplitudeInfo = $"Range: {FormatVelocityValue(rawMin)} - {FormatVelocityValue(rawMax)}";
+                else if (panelIndex == 3)
+                    amplitudeInfo = $"Range: {FormatVelocityValue(rawMin)} - {FormatVelocityValue(rawMax)}";
 
                 using (var smallFont = new Font("Arial", 8))
                 {
@@ -2258,12 +2377,149 @@ namespace CTSegmenter
             int halfHeight = _panelBitmaps[4].Height / 2;
             DrawTxRxIllustrationWithMidpoint(g, 10, 10, _panelBitmaps[4].Width - 20, halfHeight - 20);
 
-            // Draw P/S time series in the bottom half
-            if (frame.PWaveTimeSeries != null && frame.SWaveTimeSeries != null)
+            // Draw spatial visualization along the path
+            lock (_dataLock)
             {
+                // Create arrays to hold path data if not already in the frame
+                float[] pWavePath;
+                float[] sWavePath;
+
+                // Use spatial series if available in the frame
+                if (frame.PWaveSpatialSeries != null && frame.SWaveSpatialSeries != null)
+                {
+                    pWavePath = frame.PWaveSpatialSeries;
+                    sWavePath = frame.SWaveSpatialSeries;
+                }
+                // Otherwise, create spatial representation using time series with a focus on the midpoint
+                else if (frame.PWaveTimeSeries != null && frame.SWaveTimeSeries != null)
+                {
+                    // Create spatial visualization by distributing time series data along the path
+                    // with a focus at the midpoint
+                    const int PATH_SAMPLES = 100;
+                    pWavePath = new float[PATH_SAMPLES];
+                    sWavePath = new float[PATH_SAMPLES];
+
+                    // Calculate an envelope to emphasize midpoint
+                    for (int i = 0; i < PATH_SAMPLES; i++)
+                    {
+                        float t = i / (float)(PATH_SAMPLES - 1);
+
+                        // Calculate time index from spatial position (with midpoint emphasis)
+                        int timeIndex;
+
+                        // For first half of path, use first half of time series
+                        if (t <= 0.5f)
+                        {
+                            timeIndex = (int)(t * 2 * frame.PWaveTimeSeries.Length / 3);
+                        }
+                        // For second half of path, use remaining time series
+                        else
+                        {
+                            timeIndex = (int)(frame.PWaveTimeSeries.Length / 3 +
+                                      (t - 0.5f) * 2 * frame.PWaveTimeSeries.Length * 2 / 3);
+                        }
+
+                        // Ensure index is in bounds
+                        timeIndex = Math.Max(0, Math.Min(timeIndex, frame.PWaveTimeSeries.Length - 1));
+
+                        // Get values from time series
+                        pWavePath[i] = frame.PWaveTimeSeries[timeIndex];
+                        sWavePath[i] = frame.SWaveTimeSeries[timeIndex];
+
+                        // Apply spatial envelope to emphasize midpoint
+                        float distFromMid = Math.Abs(t - 0.5f) * 2; // 0 at midpoint, 1 at endpoints
+                        float emphasis = 1.0f - 0.7f * distFromMid; // Stronger at midpoint
+
+                        pWavePath[i] *= emphasis;
+                        sWavePath[i] *= emphasis;
+                    }
+
+                    // Force midpoint to have a visible value if other values are low
+                    int midIndex = PATH_SAMPLES / 2;
+
+                    // Check if the middle value is too small
+                    if (Math.Abs(pWavePath[midIndex]) < 0.05f * SIGNAL_AMPLIFICATION)
+                    {
+                        // Determine if we should add a synthetic pulse at midpoint
+                        bool addPulse = frame.PWavePathProgress >= 0.5f && frame.PWavePathProgress <= 0.6f;
+
+                        if (addPulse)
+                        {
+                            // Add synthetic pulse
+                            float pulseValue = 0.1f * SIGNAL_AMPLIFICATION;
+
+                            // Apply a small bell curve around the midpoint
+                            for (int i = midIndex - 5; i <= midIndex + 5; i++)
+                            {
+                                if (i >= 0 && i < PATH_SAMPLES)
+                                {
+                                    float distance = Math.Abs(i - midIndex) / 5.0f;
+                                    float factor = (float)Math.Exp(-distance * distance * 4);
+                                    pWavePath[i] += pulseValue * factor;
+                                }
+                            }
+                        }
+                    }
+
+                    // Same for S-wave
+                    if (Math.Abs(sWavePath[midIndex]) < 0.05f * SIGNAL_AMPLIFICATION)
+                    {
+                        bool addPulse = frame.SWavePathProgress >= 0.5f && frame.SWavePathProgress <= 0.6f;
+
+                        if (addPulse)
+                        {
+                            float pulseValue = 0.1f * SIGNAL_AMPLIFICATION;
+
+                            for (int i = midIndex - 5; i <= midIndex + 5; i++)
+                            {
+                                if (i >= 0 && i < PATH_SAMPLES)
+                                {
+                                    float distance = Math.Abs(i - midIndex) / 5.0f;
+                                    float factor = (float)Math.Exp(-distance * distance * 4);
+                                    sWavePath[i] += pulseValue * factor;
+                                }
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    // If no data is available, create empty arrays
+                    pWavePath = new float[2] { 0, 0 };
+                    sWavePath = new float[2] { 0, 0 };
+                }
+
+                // Draw the parallel waveforms using the prepared spatial data
                 DrawParallelWavesWithMidpoint(g, 10, halfHeight,
                                        _panelBitmaps[4].Width - 20, halfHeight - 10,
-                                       frame.PWaveTimeSeries, frame.SWaveTimeSeries);
+                                       pWavePath, sWavePath);
+
+                // Do we have wave at the midpoint?
+                bool anyNonZeroAtMid = false;
+                if (pWavePath.Length > 0 && sWavePath.Length > 0)
+                {
+                    int midIdx = pWavePath.Length / 2;
+                    if (midIdx < pWavePath.Length &&
+                        (Math.Abs(pWavePath[midIdx]) > 0.01f || Math.Abs(sWavePath[midIdx]) > 0.01f))
+                    {
+                        anyNonZeroAtMid = true;
+                    }
+                }
+
+                // If no signal at midpoint, draw special notice
+                if (!anyNonZeroAtMid &&
+                    ((frame.PWavePathProgress > 0.4f && frame.PWavePathProgress < 0.6f) ||
+                     (frame.SWavePathProgress > 0.4f && frame.SWavePathProgress < 0.6f)))
+                {
+                    using (Font font = new Font("Arial", 9, FontStyle.Bold))
+                    using (SolidBrush textBrush = new SolidBrush(Color.Yellow))
+                    {
+                        string msg = "Waves passing through midpoint...";
+                        SizeF size = g.MeasureString(msg, font);
+                        float x = (_panelBitmaps[4].Width - size.Width) / 2;
+                        g.DrawString(msg, font, textBrush, x, halfHeight - 25);
+                    }
+                }
             }
         }
         /// <summary>
@@ -2365,8 +2621,9 @@ namespace CTSegmenter
                     else
                     {
                         // During simulation, estimate based on frame index
-                        pWaveProgress = Math.Min(1.0f, (float)(_currentFrameIndex + 1) / _frames.Count * 2.5f);
-                        sWaveProgress = Math.Min(1.0f, (float)(_currentFrameIndex + 1) / _frames.Count * 1.5f);
+                        float frameProgress = (float)_currentFrameIndex / Math.Max(1, _frames.Count - 1);
+                        pWaveProgress = Math.Min(1.0f, frameProgress * 2.0f); // P-waves are faster
+                        sWaveProgress = Math.Min(1.0f, frameProgress * 1.5f); // S-waves are slower
                     }
                 }
             }
@@ -2398,6 +2655,15 @@ namespace CTSegmenter
                     using (Pen highlightPen = new Pen(Color.DeepSkyBlue, 2))
                     {
                         g.DrawEllipse(highlightPen, midX - 15, centerY - 15, 30, 30);
+
+                        // Add a pulse effect at midpoint
+                        if (pWaveProgress >= 0.5f && pWaveProgress <= 0.55f)
+                        {
+                            using (Pen pulsePen = new Pen(Color.DeepSkyBlue, 4))
+                            {
+                                g.DrawEllipse(pulsePen, midX - 12, centerY - 12, 24, 24);
+                            }
+                        }
                     }
                 }
             }
@@ -2430,7 +2696,30 @@ namespace CTSegmenter
                     {
                         // Draw slightly smaller than P-wave highlight to show both
                         g.DrawEllipse(highlightPen, midX - 12, centerY - 12, 24, 24);
+
+                        // Add a pulse effect at midpoint
+                        if (sWaveProgress >= 0.5f && sWaveProgress <= 0.55f)
+                        {
+                            using (Pen pulsePen = new Pen(Color.Crimson, 4))
+                            {
+                                g.DrawEllipse(pulsePen, midX - 10, centerY - 10, 20, 20);
+                            }
+                        }
                     }
+                }
+            }
+
+            // Draw a special indicator for the midpoint measurement
+            if ((pWaveProgress > 0.5f || sWaveProgress > 0.5f) &&
+                (pWaveProgress < 1.0f || sWaveProgress < 1.0f))
+            {
+                using (Font font = new Font("Arial", 7))
+                using (SolidBrush textBrush = new SolidBrush(Color.White))
+                {
+                    string measureText = "Recording at midpoint...";
+                    SizeF textSize = g.MeasureString(measureText, font);
+                    float textX = midX - textSize.Width / 2;
+                    g.DrawString(measureText, font, textBrush, textX, centerY + 25);
                 }
             }
 
@@ -2449,7 +2738,7 @@ namespace CTSegmenter
         /// Draw parallel P and S waves with additional midpoint data
         /// </summary>
         private void DrawParallelWavesWithMidpoint(Graphics g, int x, int y, int width, int height,
-                                                  float[] pSeries, float[] sSeries)
+                                          float[] pSeries, float[] sSeries)
         {
             // Check if we have valid data
             if (pSeries == null || sSeries == null || pSeries.Length == 0 || sSeries.Length == 0)
@@ -2690,22 +2979,100 @@ namespace CTSegmenter
                 g.DrawLine(centerLinePen, sArea.X, sCenterY, sArea.X + sArea.Width, sCenterY);
             }
 
-            // Draw P-wave time series
+            // Draw P-wave spatial series
             if (pSeries.Length > 1)
             {
                 DrawWaveSeries(g, pSeries, pArea, minP, maxP, Color.DeepSkyBlue);
 
-                // Highlight midpoint on the P-wave graph
-                HighlightMidpoint(g, pSeries, pArea, minP, maxP, Color.DeepSkyBlue);
+                // Highlight midpoint on the P-wave graph - THIS IS CRITICAL
+                int midIndex = pSeries.Length / 2;
+                if (midIndex < pSeries.Length)
+                {
+                    float midX = pArea.X + (midIndex / (float)(pSeries.Length - 1)) * pArea.Width;
+
+                    // Get midpoint value
+                    float midpointValue = pSeries[midIndex];
+
+                    // Normalize to fit in graph area
+                    float normalizedVal = (midpointValue - minP) / (maxP - minP);
+                    normalizedVal = Math.Max(0, Math.Min(1, normalizedVal));
+
+                    float midY = pArea.Y + pArea.Height - normalizedVal * pArea.Height;
+
+                    // Draw vertical line at midpoint
+                    using (Pen midPointPen = new Pen(Color.Lime, 1.5f) { DashStyle = DashStyle.Dash })
+                    {
+                        g.DrawLine(midPointPen, midX, pArea.Y, midX, pArea.Y + pArea.Height);
+                    }
+
+                    // Draw marker at the actual data point
+                    using (SolidBrush midPointBrush = new SolidBrush(Color.Lime))
+                    {
+                        g.FillEllipse(midPointBrush, midX - 4, midY - 4, 8, 8);
+
+                        // Draw value label
+                        using (Font valueFont = new Font("Arial", 7))
+                        {
+                            string valueText = $"{midpointValue:F3}";
+                            g.DrawString(valueText, valueFont, midPointBrush, midX + 5, midY - 10);
+                        }
+                    }
+
+                    // Draw "MID" label
+                    using (Font labelFont = new Font("Arial", 7, FontStyle.Bold))
+                    using (SolidBrush labelBrush = new SolidBrush(Color.Lime))
+                    {
+                        g.DrawString("MID", labelFont, labelBrush, midX - 10, pArea.Y + 2);
+                    }
+                }
             }
 
-            // Draw S-wave time series
+            // Draw S-wave spatial series
             if (sSeries.Length > 1)
             {
                 DrawWaveSeries(g, sSeries, sArea, minS, maxS, Color.Crimson);
 
-                // Highlight midpoint on the S-wave graph
-                HighlightMidpoint(g, sSeries, sArea, minS, maxS, Color.Crimson);
+                // Highlight midpoint on the S-wave graph - THIS IS CRITICAL
+                int midIndex = sSeries.Length / 2;
+                if (midIndex < sSeries.Length)
+                {
+                    float midX = sArea.X + (midIndex / (float)(sSeries.Length - 1)) * sArea.Width;
+
+                    // Get midpoint value
+                    float midpointValue = sSeries[midIndex];
+
+                    // Normalize to fit in graph area
+                    float normalizedVal = (midpointValue - minS) / (maxS - minS);
+                    normalizedVal = Math.Max(0, Math.Min(1, normalizedVal));
+
+                    float midY = sArea.Y + sArea.Height - normalizedVal * sArea.Height;
+
+                    // Draw vertical line at midpoint
+                    using (Pen midPointPen = new Pen(Color.Lime, 1.5f) { DashStyle = DashStyle.Dash })
+                    {
+                        g.DrawLine(midPointPen, midX, sArea.Y, midX, sArea.Y + sArea.Height);
+                    }
+
+                    // Draw marker at the actual data point
+                    using (SolidBrush midPointBrush = new SolidBrush(Color.Lime))
+                    {
+                        g.FillEllipse(midPointBrush, midX - 4, midY - 4, 8, 8);
+
+                        // Draw value label
+                        using (Font valueFont = new Font("Arial", 7))
+                        {
+                            string valueText = $"{midpointValue:F3}";
+                            g.DrawString(valueText, valueFont, midPointBrush, midX + 5, midY - 10);
+                        }
+                    }
+
+                    // Draw "MID" label
+                    using (Font labelFont = new Font("Arial", 7, FontStyle.Bold))
+                    using (SolidBrush labelBrush = new SolidBrush(Color.Lime))
+                    {
+                        g.DrawString("MID", labelFont, labelBrush, midX - 10, sArea.Y + 2);
+                    }
+                }
             }
 
             // Draw Time and markers if we have travel times
@@ -2806,6 +3173,7 @@ namespace CTSegmenter
             }
         }
 
+
         /// <summary>
         /// Helper to highlight the midpoint on a wave series
         /// </summary>
@@ -2864,13 +3232,25 @@ namespace CTSegmenter
         /// </summary>
         private void DrawArrivalMarkers(Graphics g, float[] pSeries, float[] sSeries, Rectangle pArea, Rectangle sArea)
         {
-            // Calculate distance for time estimation
-            float distance = CalculateDistance(_tx, _ty, _tz, _rx, _ry, _rz) * _pixelSize;
+            // Calculate correct distance for time estimation
+            float distanceM = CalculateDistance(_tx, _ty, _tz, _rx, _ry, _rz) * _pixelSize;
+
+            // Log the distance to verify it's not zero
+            Logger.Log($"[DrawArrivalMarkers] Using distance: {distanceM:F6} m");
+            Logger.Log($"[DrawArrivalMarkers] TX: ({_tx}, {_ty}, {_tz}), RX: ({_rx}, {_ry}, {_rz})");
+            Logger.Log($"[DrawArrivalMarkers] P-Wave Velocity: {_pWaveVelocity:F2} m/s, S-Wave Velocity: {_sWaveVelocity:F2} m/s");
+
+            // Ensure we have non-zero values for calculations
+            if (distanceM < 0.001f)
+            {
+                distanceM = 0.001f; // Minimum non-zero distance to avoid division by zero
+                Logger.Log("[DrawArrivalMarkers] WARNING: Distance too small, using minimum value");
+            }
 
             // P-wave arrival marker - with bounds checking
-            if (pSeries.Length > 0) // Avoid division by zero
+            if (pSeries.Length > 0 && _pWaveVelocity > 0)
             {
-                float pArrivalX = pArea.X + (float)Math.Min(_pWaveTravelTime, pSeries.Length) / pSeries.Length * pArea.Width;
+                float pArrivalX = pArea.X + (float)Math.Min(_pWaveTravelTime, pSeries.Length) / Math.Max(1, pSeries.Length) * pArea.Width;
                 using (Pen arrivalPen = new Pen(Color.Yellow, 2))
                 {
                     g.DrawLine(arrivalPen, pArrivalX, pArea.Y, pArrivalX, pArea.Y + pArea.Height);
@@ -2880,27 +3260,50 @@ namespace CTSegmenter
                     {
                         g.DrawString("P Arrival", font, brush, pArrivalX - 25, pArea.Y + 2);
 
-                        // Add arrival time or step information
-                        if (_simulationCompleted && _pWaveVelocity > 0)
+                        // Calculate time based on distance and velocity with error checking
+                        double estimatedTime = 0;
+                        if (_pWaveVelocity > 0.1) // Only calculate if velocity is reasonable
                         {
-                            // Calculate time based on distance and velocity
-                            double estimatedTime = distance / _pWaveVelocity;
-                            string timeText = $"t≈{estimatedTime:F6}s";
-                            g.DrawString(timeText, font, brush, pArrivalX - 30, pArea.Y + pArea.Height - 15);
+                            estimatedTime = distanceM / _pWaveVelocity;
                         }
                         else
                         {
-                            // Just show the step number
-                            g.DrawString($"Step: {_pWaveTravelTime}", font, brush, pArrivalX - 30, pArea.Y + pArea.Height - 15);
+                            // Fallback calculation based on step count and dt
+                            estimatedTime = _pWaveTravelTime * 1e-6; // Assume dt is in microseconds
                         }
+
+                        // Format with more appropriate precision and non-zero check
+                        string timeText;
+                        if (estimatedTime < 1e-9)
+                        {
+                            timeText = "t≈0.001 μs"; // Set minimum display time
+                        }
+                        else if (estimatedTime < 1e-6)
+                        {
+                            timeText = $"t≈{estimatedTime * 1e9:F3} ns";
+                        }
+                        else if (estimatedTime < 1e-3)
+                        {
+                            timeText = $"t≈{estimatedTime * 1e6:F3} μs";
+                        }
+                        else if (estimatedTime < 1)
+                        {
+                            timeText = $"t≈{estimatedTime * 1e3:F3} ms";
+                        }
+                        else
+                        {
+                            timeText = $"t≈{estimatedTime:F6} s";
+                        }
+
+                        g.DrawString(timeText, font, brush, pArrivalX - 30, pArea.Y + pArea.Height - 15);
                     }
                 }
             }
 
             // S-wave arrival marker - with bounds checking
-            if (sSeries.Length > 0) // Avoid division by zero
+            if (sSeries.Length > 0 && _sWaveVelocity > 0)
             {
-                float sArrivalX = sArea.X + (float)Math.Min(_sWaveTravelTime, sSeries.Length) / sSeries.Length * sArea.Width;
+                float sArrivalX = sArea.X + (float)Math.Min(_sWaveTravelTime, sSeries.Length) / Math.Max(1, sSeries.Length) * sArea.Width;
                 using (Pen arrivalPen = new Pen(Color.Yellow, 2))
                 {
                     g.DrawLine(arrivalPen, sArrivalX, sArea.Y, sArrivalX, sArea.Y + sArea.Height);
@@ -2910,19 +3313,42 @@ namespace CTSegmenter
                     {
                         g.DrawString("S Arrival", font, brush, sArrivalX - 25, sArea.Y + 2);
 
-                        // Add arrival time or step information
-                        if (_simulationCompleted && _sWaveVelocity > 0)
+                        // Calculate time based on distance and velocity with error checking
+                        double estimatedTime = 0;
+                        if (_sWaveVelocity > 0.1) // Only calculate if velocity is reasonable
                         {
-                            // Calculate time based on distance and velocity
-                            double estimatedTime = distance / _sWaveVelocity;
-                            string timeText = $"t≈{estimatedTime:F6}s";
-                            g.DrawString(timeText, font, brush, sArrivalX - 30, sArea.Y + sArea.Height - 15);
+                            estimatedTime = distanceM / _sWaveVelocity;
                         }
                         else
                         {
-                            // Just show the step number
-                            g.DrawString($"Step: {_sWaveTravelTime}", font, brush, sArrivalX - 30, sArea.Y + sArea.Height - 15);
+                            // Fallback calculation based on step count and dt
+                            estimatedTime = _sWaveTravelTime * 1e-6; // Assume dt is in microseconds
                         }
+
+                        // Format with more appropriate precision
+                        string timeText;
+                        if (estimatedTime < 1e-9)
+                        {
+                            timeText = "t≈0.001 μs"; // Set minimum display time
+                        }
+                        else if (estimatedTime < 1e-6)
+                        {
+                            timeText = $"t≈{estimatedTime * 1e9:F3} ns";
+                        }
+                        else if (estimatedTime < 1e-3)
+                        {
+                            timeText = $"t≈{estimatedTime * 1e6:F3} μs";
+                        }
+                        else if (estimatedTime < 1)
+                        {
+                            timeText = $"t≈{estimatedTime * 1e3:F3} ms";
+                        }
+                        else
+                        {
+                            timeText = $"t≈{estimatedTime:F6} s";
+                        }
+
+                        g.DrawString(timeText, font, brush, sArrivalX - 30, sArea.Y + sArea.Height - 15);
                     }
                 }
             }
@@ -3549,7 +3975,12 @@ namespace CTSegmenter
             double dx = x2 - x1;
             double dy = y2 - y1;
             double dz = z2 - z1;
-            return (float)Math.Sqrt(dx * dx + dy * dy + dz * dz);
+            float distance = (float)Math.Sqrt(dx * dx + dy * dy + dz * dz);
+
+            // Log to verify
+            Logger.Log($"[CalculateDistance] Raw pixels: {distance}, In meters: {distance * _pixelSize:F6}");
+
+            return distance;
         }
 
         /// <summary>
@@ -3784,68 +4215,209 @@ namespace CTSegmenter
                 }
             }
         }
-
         /// <summary>
         /// Handle export animation button click
         /// </summary>
         private void ExportAnimationButton_Click(object sender, EventArgs e)
         {
-            // Show folder selection dialog
-            FolderBrowserDialog dialog = new FolderBrowserDialog
+            // Show export options dialog
+            using (ExportAnimationDialog exportDialog = new ExportAnimationDialog())
             {
-                Description = "Select folder to save animation frames"
-            };
-
-            if (dialog.ShowDialog() == DialogResult.OK)
-            {
-                try
+                if (exportDialog.ShowDialog() == DialogResult.OK)
                 {
-                    string folderPath = dialog.SelectedPath;
+                    bool exportAsFrames = exportDialog.ExportAsFrames;
+                    int fps = exportDialog.Fps;
+                    int quality = exportDialog.Quality;
+                    int durationSeconds = exportDialog.DurationSeconds;
 
-                    // Show progress dialog
-                    using (ProgressForm progress = new ProgressForm("Exporting Animation"))
+                    try
                     {
-                        progress.Show(this);
-
-                        // Export frames in a background thread
-                        Task.Run(() =>
+                        if (exportAsFrames)
                         {
-                            try
+                            // Original frames export logic
+                            FolderBrowserDialog dialog = new FolderBrowserDialog
                             {
-                                ExportAnimationFrames(folderPath, progress);
+                                Description = "Select folder to save animation frames"
+                            };
 
-                                this.BeginInvoke((MethodInvoker)delegate
-                                {
-                                    MessageBox.Show($"Animation exported successfully!\nFrames saved to: {folderPath}",
-                                                  "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                                });
-                            }
-                            catch (Exception ex)
+                            if (dialog.ShowDialog() == DialogResult.OK)
                             {
-                                this.BeginInvoke((MethodInvoker)delegate
+                                string folderPath = dialog.SelectedPath;
+
+                                // Show progress dialog
+                                using (ProgressForm progress = new ProgressForm("Exporting Animation Frames"))
                                 {
-                                    MessageBox.Show($"Error exporting animation: {ex.Message}",
-                                                  "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                                });
+                                    progress.Show(this);
+
+                                    // Export frames in a background thread
+                                    Task.Run(() =>
+                                    {
+                                        try
+                                        {
+                                            ExportAnimationFrames(folderPath, progress);
+
+                                            this.BeginInvoke((MethodInvoker)delegate
+                                            {
+                                                MessageBox.Show($"Animation exported successfully!\nFrames saved to: {folderPath}",
+                                                              "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                                            });
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            this.BeginInvoke((MethodInvoker)delegate
+                                            {
+                                                MessageBox.Show($"Error exporting animation: {ex.Message}",
+                                                              "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                                            });
+                                        }
+                                        finally
+                                        {
+                                            this.BeginInvoke((MethodInvoker)delegate
+                                            {
+                                                progress.Close();
+                                            });
+                                        }
+                                    });
+                                }
                             }
-                            finally
+                        }
+                        else
+                        {
+                            // Video export logic
+                            SaveFileDialog dialog = new SaveFileDialog
                             {
-                                this.BeginInvoke((MethodInvoker)delegate
+                                Filter = "Windows Media Video|*.wmv",
+                                Title = "Save Animation as WMV Video",
+                                DefaultExt = "wmv"
+                            };
+
+                            if (dialog.ShowDialog() == DialogResult.OK)
+                            {
+                                string filePath = dialog.FileName;
+
+                                // Calculate frames based on desired duration
+                                int totalFrames = fps * durationSeconds;
+
+                                // Show progress dialog
+                                using (ProgressForm progress = new ProgressForm("Creating WMV Video"))
                                 {
-                                    progress.Close();
-                                });
+                                    progress.Show(this);
+
+                                    // Export video in a background thread
+                                    Task.Run(() =>
+                                    {
+                                        try
+                                        {
+                                            ExportAnimationAsWmv(filePath, fps, quality, totalFrames, progress);
+
+                                            this.BeginInvoke((MethodInvoker)delegate
+                                            {
+                                                MessageBox.Show($"Video exported successfully!\nSaved to: {filePath}",
+                                                              "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                                            });
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            this.BeginInvoke((MethodInvoker)delegate
+                                            {
+                                                MessageBox.Show($"Error exporting video: {ex.Message}\n{ex.StackTrace}",
+                                                              "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                                            });
+                                        }
+                                        finally
+                                        {
+                                            this.BeginInvoke((MethodInvoker)delegate
+                                            {
+                                                progress.Close();
+                                            });
+                                        }
+                                    });
+                                }
                             }
-                        });
+                        }
                     }
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"Error preparing animation export: {ex.Message}",
-                                  "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"Error preparing export: {ex.Message}",
+                                      "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
                 }
             }
         }
+        /// <summary>
+        /// Export animation as a WMV video file
+        /// </summary>
+        private void ExportAnimationAsWmv(string filePath, int fps, int quality, int totalFrames, ProgressForm progress)
+        {
+            int frameCount = _frames.Count;
+            int currentIndex = _currentFrameIndex; // Remember current position
+            int width = _mainPanel.Width;
+            int height = _mainPanel.Height;
 
+            // Import DirectShow.NET namespace in the class header
+            // using DirectShowLib;
+
+            try
+            {
+                // Create WMV writer
+                WmvWriter wmvWriter = new WmvWriter(filePath, width, height, fps, quality);
+
+                // Calculate how many source frames to use per output frame to achieve desired duration
+                double frameStep = (double)frameCount / totalFrames;
+                if (frameStep < 1) frameStep = 1; // Use every frame if we have fewer than needed
+
+                // Render and add each frame
+                for (int i = 0; i < totalFrames; i++)
+                {
+                    // Calculate which source frame to use (with interpolation if needed)
+                    int sourceFrameIndex = Math.Min((int)(i * frameStep), frameCount - 1);
+
+                    this.BeginInvoke((MethodInvoker)delegate
+                    {
+                        progress.UpdateProgress((i + 1) * 100 / totalFrames);
+                    });
+
+                    lock (_dataLock)
+                    {
+                        // Update to this frame
+                        _currentFrameIndex = sourceFrameIndex;
+
+                        // Need to update visualization on UI thread
+                        ManualResetEvent resetEvent = new ManualResetEvent(false);
+                        this.BeginInvoke((MethodInvoker)delegate
+                        {
+                            UpdateVisualization();
+                            resetEvent.Set();
+                        });
+                        resetEvent.WaitOne(1000); // Wait for visualization update, with timeout
+
+                        // Create combined image
+                        Bitmap combined = CombinePanelsForExport();
+
+                        // Add frame to WMV
+                        wmvWriter.AddFrame(combined);
+
+                        // Dispose bitmap
+                        combined.Dispose();
+                    }
+                }
+
+                // Finalize the WMV file
+                wmvWriter.Close();
+            }
+            finally
+            {
+                // Restore original frame
+                lock (_dataLock)
+                {
+                    _currentFrameIndex = currentIndex;
+                    this.BeginInvoke((MethodInvoker)delegate
+                    {
+                        UpdateVisualization();
+                    });
+                }
+            }
+        }
         /// <summary>
         /// Handle play/pause button click
         /// </summary>

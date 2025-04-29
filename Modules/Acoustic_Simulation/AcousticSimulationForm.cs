@@ -136,26 +136,26 @@ namespace CTSegmenter
             rx = 0;
             ry = 0;
             rz = 0;
+            isInitializing = true;
+            try
+            {
+                InitializeComponent();
 
-            InitializeComponent();
-           
-            // Load materials first
-            //adMaterials();
+                // Set the initial view parameters
+                rotationX = 30;
+                rotationY = 30;
+                zoom = 1.0f;
+                pan = new PointF(0, 0);
 
-            // Ensure correct material is selected before initializing
-            //sureCorrectMaterialSelected();
-
-            // Set the initial view parameters
-            rotationX = 30;
-            rotationY = 30;
-            zoom = 1.0f;
-            pan = new PointF(0, 0);
-
-            // Initialize the volume with the selected material
-            //itializeHomogeneousDensityVolume();
-
-            // Set initialization flag to false after everything is set up
-            isInitializing = false;
+                // Set initialization flag to false after everything is set up
+                isInitializing = false;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[AcousticSimulationForm] Construction error: {ex.Message}\n{ex.StackTrace}");
+                MessageBox.Show($"Error initializing Acoustic Simulation form: {ex.Message}",
+                    "Initialization Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
         private void InitializeComponent()
         {
@@ -1379,42 +1379,83 @@ namespace CTSegmenter
 
         private void UpdateSimulationVisualization()
         {
-            // This method updates the visualization to reflect the latest simulation settings
-            // including TX/RX positions and path
-
-            // Log current TX/RX positions for debugging
-            Logger.Log($"[UpdateSimulationVisualization] Using TX: ({tx},{ty},{tz}), RX: ({rx},{ry},{rz})");
-
-            // Safety checks for valid coordinates
-            int width = mainForm.GetWidth();
-            int height = mainForm.GetHeight();
-            int depth = mainForm.GetDepth();
-
-            if (tx < 0 || tx >= width || ty < 0 || ty >= height || tz < 0 || tz >= depth ||
-                rx < 0 || rx >= width || ry < 0 || ry >= height || rz < 0 || rz >= depth)
+            try
             {
-                Logger.Log("[UpdateSimulationVisualization] Warning: transducer coordinates out of range");
+                // Verify correct material ID is being used
+                if (selectedMaterialID <= 0)
+                {
+                    Logger.Log("[UpdateSimulationVisualization] WARNING: Invalid material ID, fixing selection");
+                    EnsureCorrectMaterialSelected();
+
+                    if (selectedMaterialID <= 0)
+                    {
+                        Logger.Log("[UpdateSimulationVisualization] ERROR: No valid material ID available");
+                        return;
+                    }
+                }
+
+                // Log current TX/RX positions for debugging
+                Logger.Log($"[UpdateSimulationVisualization] Using TX: ({tx},{ty},{tz}), RX: ({rx},{ry},{rz})");
+
+                // Safety checks for valid coordinates
+                int width = mainForm.GetWidth();
+                int height = mainForm.GetHeight();
+                int depth = mainForm.GetDepth();
+
+                // Validate volume dimensions
+                if (width <= 0 || height <= 0 || depth <= 0)
+                {
+                    Logger.Log("[UpdateSimulationVisualization] ERROR: Invalid volume dimensions");
+                    return;
+                }
+
+                // Check if density volume is initialized
+                if (densityVolume == null)
+                {
+                    Logger.Log("[UpdateSimulationVisualization] Density volume not initialized");
+                    return;
+                }
+
+                // If we need to recreate the simulationRenderer, do it here
+                if (simulationRenderer == null)
+                {
+                    // Ensure we're using a valid material ID
+                    byte materialID = selectedMaterialID;
+                    if (materialID == 0)
+                    {
+                        Logger.Log("[VolumeRenderer] WARNING: Initializing with materialID 0 (Exterior), this may be incorrect!");
+                        // Try to find a valid material ID
+                        foreach (Material mat in mainForm.Materials)
+                        {
+                            if (mat.ID > 0)
+                            {
+                                materialID = mat.ID;
+                                break;
+                            }
+                        }
+                    }
+
+                    simulationRenderer = new VolumeRenderer(
+                        densityVolume,
+                        width, height, depth,
+                        mainForm.GetPixelSize(),
+                        materialID, // Use the selected or fallback material ID
+                        useFullVolumeRendering
+                    );
+                }
+
+                // Always update the transformation to ensure proper view
+                simulationRenderer.SetTransformation(simRotationX, simRotationY, simZoom, simPan);
+
+                // Force a redraw of the simulation visualization
+                if (pictureBoxSimulation != null && !pictureBoxSimulation.IsDisposed)
+                {
+                    pictureBoxSimulation.Invalidate();
+                }
             }
-
-            // If we ever need to recreate the simulationRenderer, do it here
-            if (simulationRenderer == null)
+            catch (Exception ex)
             {
-                simulationRenderer = new VolumeRenderer(
-                    densityVolume,
-                    width, height, depth,
-                    mainForm.GetPixelSize(),
-                    selectedMaterialID,
-                    useFullVolumeRendering
-                );
-            }
-
-            // Always update the transformation to ensure proper view
-            simulationRenderer.SetTransformation(simRotationX, simRotationY, simZoom, simPan);
-
-            // Force a redraw of the simulation visualization
-            if (pictureBoxSimulation != null && !pictureBoxSimulation.IsDisposed)
-            {
-                pictureBoxSimulation.Invalidate();
+                Logger.Log($"[UpdateSimulationVisualization] ERROR: {ex.Message}\n{ex.StackTrace}");
             }
         }
         private void BtnCalculateExtent_Click(object sender, EventArgs e)
@@ -2466,7 +2507,7 @@ namespace CTSegmenter
             if (renderer == null) return;
 
             // Use the instance variables without underscores
-            Logger.Log($"[DrawTransducers] Using TX: ({tx},{ty},{tz}), RX: ({rx},{ry},{rz})");
+            //Logger.Log($"[DrawTransducers] Using TX: ({tx},{ty},{tz}), RX: ({rx},{ry},{rz})");
 
             // Check valid ranges for transducer coordinates
             int width = mainForm.GetWidth();
@@ -3192,78 +3233,179 @@ namespace CTSegmenter
         }
         private void LoadMaterials()
         {
-            comboMaterials.Items.Clear();
-            bool hasNonExteriorMaterial = false;
-
-            foreach (Material material in mainForm.Materials)
+            try
             {
-                // Skip Exterior material (ID 0)
-                if (material.ID != 0)
+                comboMaterials.Items.Clear();
+                bool hasNonExteriorMaterial = false;
+
+                // First find a valid material (ID > 0) to select by default
+                Material defaultMaterial = null;
+                foreach (Material material in mainForm.Materials)
                 {
-                    comboMaterials.Items.Add(material);
-                    hasNonExteriorMaterial = true;
-                    Logger.Log($"[AcousticSimulationForm] Added material {material.Name} (ID: {material.ID}) to dropdown");
+                    if (material.ID > 0) // Skip Exterior material (ID 0)
+                    {
+                        defaultMaterial = material;
+                        break;
+                    }
+                }
+
+                // If no valid material was found, provide better error handling
+                if (defaultMaterial == null)
+                {
+                    Logger.Log("[AcousticSimulationForm] No valid materials (ID > 0) found!");
+                    MessageBox.Show("No valid materials found. Please segment your volume with at least one non-Exterior material first.",
+                        "No Materials", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                // Now add materials to the combo box
+                foreach (Material material in mainForm.Materials)
+                {
+                    // Skip Exterior material (ID 0)
+                    if (material.ID > 0)
+                    {
+                        comboMaterials.Items.Add(material);
+                        hasNonExteriorMaterial = true;
+                        Logger.Log($"[AcousticSimulationForm] Added material {material.Name} (ID: {material.ID}) to dropdown");
+                    }
+                }
+
+                if (hasNonExteriorMaterial)
+                {
+                    // Force select the first valid material
+                    comboMaterials.SelectedIndex = 0;
+
+                    // Set the material explicitly to avoid any race conditions
+                    Material selectedMat = comboMaterials.SelectedItem as Material;
+                    if (selectedMat != null)
+                    {
+                        selectedMaterial = selectedMat;
+                        selectedMaterialID = selectedMat.ID;
+                        Logger.Log($"[AcousticSimulationForm] Initially selected material: {selectedMat.Name} (ID: {selectedMat.ID})");
+                    }
+                }
+                else
+                {
+                    MessageBox.Show("No materials found. Please segment your volume with at least one non-Exterior material first.",
+                        "No Materials", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             }
-
-            if (hasNonExteriorMaterial)
+            catch (Exception ex)
             {
-                comboMaterials.SelectedIndex = 0;
-
-                // Get the selected material and log it
-                Material selectedMat = comboMaterials.SelectedItem as Material;
-                if (selectedMat != null)
-                {
-                    Logger.Log($"[AcousticSimulationForm] Initially selected material: {selectedMat.Name} (ID: {selectedMat.ID})");
-                }
-            }
-            else
-            {
-                MessageBox.Show("No materials found. Please segment your volume with at least one non-Exterior material first.",
-                    "No Materials", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Logger.Log($"[AcousticSimulationForm] Error loading materials: {ex.Message}\n{ex.StackTrace}");
+                MessageBox.Show($"Error loading materials: {ex.Message}", "Material Loading Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
 
-            // Make sure the selected material ID is set
+            // Always ensure a valid material is selected
             EnsureCorrectMaterialSelected();
         }
-
-        
         private void EnsureCorrectMaterialSelected()
         {
-            // If we have a valid selection, make sure the ID is stored
-            if (selectedMaterial != null && selectedMaterial.ID > 0)
+            try
             {
-                selectedMaterialID = selectedMaterial.ID;
-                Logger.Log($"[AcousticSimulationForm] Using material {selectedMaterial.Name} with ID {selectedMaterialID}");
+                // If selected material is already valid, just make sure ID is stored
+                if (selectedMaterial != null && selectedMaterial.ID > 0)
+                {
+                    selectedMaterialID = selectedMaterial.ID;
+                    Logger.Log($"[AcousticSimulationForm] Using material {selectedMaterial.Name} with ID {selectedMaterialID}");
+                    return;
+                }
+
+                // Otherwise, try to find and select first valid material
+                if (comboMaterials.Items.Count > 0)
+                {
+                    // Try all items in the combo box
+                    foreach (object item in comboMaterials.Items)
+                    {
+                        if (item is Material mat && mat.ID > 0)
+                        {
+                            comboMaterials.SelectedItem = mat;
+                            selectedMaterial = mat;
+                            selectedMaterialID = mat.ID;
+                            Logger.Log($"[AcousticSimulationForm] Selected material {mat.Name} with ID {mat.ID}");
+                            return;
+                        }
+                    }
+                }
+
+                // If we get here and still don't have a valid material, try to find one directly
+                foreach (Material material in mainForm.Materials)
+                {
+                    if (material.ID > 0)
+                    {
+                        selectedMaterial = material;
+                        selectedMaterialID = material.ID;
+                        Logger.Log($"[AcousticSimulationForm] Fallback selection: material {material.Name} with ID {material.ID}");
+                        return;
+                    }
+                }
+
+                // If still no valid material, log clear error
+                Logger.Log("[AcousticSimulationForm] ERROR: No valid materials available!");
+                MessageBox.Show("No valid materials found. Please segment your volume with at least one non-Exterior material first.",
+                    "No Materials", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
-            // If not, try to find a valid material
-            else if (comboMaterials.Items.Count > 0)
+            catch (Exception ex)
             {
-                // Trigger selection of first item
-                comboMaterials.SelectedIndex = 0;
-            }
-            else
-            {
-                Logger.Log("[AcousticSimulationForm] Warning: No valid materials available");
+                Logger.Log($"[AcousticSimulationForm] Error ensuring material selection: {ex.Message}");
             }
         }
         private void InitializeHomogeneousDensityVolume()
         {
             try
             {
-                if (mainForm.volumeData == null ||
-                    mainForm.volumeLabels == null ||
-                    selectedMaterial == null)
+                if (mainForm.volumeData == null || mainForm.volumeLabels == null)
+                {
+                    Logger.Log("[AcousticSimulationForm] Cannot initialize volume - data not loaded");
                     return;
+                }
+
+                // Ensure valid material is selected
+                if (selectedMaterial == null || selectedMaterialID <= 0)
+                {
+                    Logger.Log("[AcousticSimulationForm] No valid material selected before volume initialization");
+                    EnsureCorrectMaterialSelected();
+
+                    // If still no valid material, abort
+                    if (selectedMaterial == null || selectedMaterialID <= 0)
+                    {
+                        Logger.Log("[AcousticSimulationForm] Aborting volume initialization - no valid material");
+                        return;
+                    }
+                }
 
                 int width = mainForm.GetWidth();
                 int height = mainForm.GetHeight();
                 int depth = mainForm.GetDepth();
 
-                // Ensure we’re not on the “Exterior” material
+                // Ensure we're using valid material ID (greater than 0)
                 byte materialID = selectedMaterialID;
-                if (materialID == 0 || selectedMaterial.ID == 0)
-                    return;
+                if (materialID == 0)
+                {
+                    Logger.Log("[AcousticSimulationForm] WARNING: Attempting to use Exterior (ID 0) as material");
+                    // Find first non-exterior material
+                    foreach (Material mat in mainForm.Materials)
+                    {
+                        if (mat.ID > 0)
+                        {
+                            materialID = mat.ID;
+                            selectedMaterialID = materialID;
+                            selectedMaterial = mat;
+                            Logger.Log($"[AcousticSimulationForm] Switched to material {mat.Name} with ID {materialID}");
+                            break;
+                        }
+                    }
+
+                    // If still using ID 0, abort
+                    if (materialID == 0)
+                    {
+                        Logger.Log("[AcousticSimulationForm] ERROR: No valid material ID found, cannot initialize volume");
+                        return;
+                    }
+                }
+
+                Logger.Log($"[AcousticSimulationForm] Initializing volume with material ID {materialID}");
 
                 // Build a homogeneous density volume
                 float[,,] homogeneousDensityVolume = new float[width, height, depth];
@@ -3286,6 +3428,8 @@ namespace CTSegmenter
                         }
                 });
 
+                Logger.Log($"[AcousticSimulationForm] Volume initialized with {materialVoxelCount} voxels");
+
                 // Store for later rendering
                 densityVolume = homogeneousDensityVolume;
 
@@ -3300,7 +3444,7 @@ namespace CTSegmenter
                 CalculateInitialZoomAndPosition();
                 volumeRenderer.SetTransformation(rotationX, rotationY, zoom, pan);
 
-                // **Seed the simulationRenderer** (ready for the Simulation tab)
+                // Initialize simulationRenderer only when needed
                 simulationRenderer = new VolumeRenderer(
                     densityVolume,
                     width, height, depth,
@@ -3318,7 +3462,7 @@ namespace CTSegmenter
             }
             catch (Exception ex)
             {
-                Logger.Log($"[AcousticSimulationForm] Error initializing homogeneous density: {ex.Message}");
+                Logger.Log($"[AcousticSimulationForm] Error initializing volume: {ex.Message}\n{ex.StackTrace}");
                 if (!isInitializing)
                 {
                     MessageBox.Show($"Error initializing volume: {ex.Message}",

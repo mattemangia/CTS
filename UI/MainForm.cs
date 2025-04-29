@@ -853,14 +853,13 @@ namespace CTSegmenter
         #region Data Loading and Saving
         public async Task LoadDatasetAsync(string path)
         {
-            Logger.Log($"[MainForm] Loading dataset from path: {path}");
+            Logger.Log($"[LoadDatasetAsync] Loading dataset from path: {path}");
             ProgressFormWithProgress progressForm = null;
 
             try
             {
                 await this.SafeInvokeAsync(() =>
                 {
-                    // Use ProgressFormWithProgress instead of ProgressForm
                     progressForm = new ProgressFormWithProgress("Loading dataset...");
                     progressForm.Show();
                 });
@@ -886,6 +885,23 @@ namespace CTSegmenter
                 GC.WaitForPendingFinalizers();
 
                 bool folderMode = Directory.Exists(path);
+                string labelsChkPath;
+
+                // Determine the correct path to look for labels.chk
+                if (folderMode)
+                {
+                    // Path is a directory - look for labels.chk directly inside
+                    labelsChkPath = Path.Combine(path, "labels.chk");
+                }
+                else
+                {
+                    // Path is a file - look for labels.chk in the parent directory
+                    string directoryPath = Path.GetDirectoryName(path);
+                    labelsChkPath = Path.Combine(directoryPath, "labels.chk");
+                }
+
+                bool labelsChkExists = File.Exists(labelsChkPath);
+                Logger.Log($"[LoadDatasetAsync] Checking for materials file: {labelsChkPath}, exists: {labelsChkExists}");
 
                 // Ask for pixel size only in folder mode
                 if (folderMode)
@@ -900,8 +916,44 @@ namespace CTSegmenter
                     Logger.Log($"[LoadDatasetAsync] Using pixel size from user input: {pixelSize}");
                 }
 
-                // Use FileOperations to load the dataset
-                // Pass progressForm directly - it's now both a ProgressForm and an IProgress<int>
+                // First load materials from labels.chk if it exists
+                if (labelsChkExists)
+                {
+                    try
+                    {
+                        // Use the directory path for FileOperations.ReadLabelsChk
+                        string directoryPath = folderMode ? path : Path.GetDirectoryName(path);
+                        List<Material> loadedMaterials = FileOperations.ReadLabelsChk(directoryPath);
+
+                        if (loadedMaterials != null && loadedMaterials.Count > 0)
+                        {
+                            Materials = loadedMaterials;
+                            Logger.Log($"[LoadDatasetAsync] Successfully loaded {Materials.Count} materials from labels.chk");
+                            foreach (var material in Materials)
+                            {
+                                Logger.Log($"[LoadDatasetAsync] Loaded Material - ID: {material.ID}; Name: \"{material.Name}\"; Color: {material.Color}");
+                            }
+                        }
+                        else
+                        {
+                            Logger.Log("[LoadDatasetAsync] No materials found in labels.chk, initializing defaults");
+                            InitializeMaterials();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[LoadDatasetAsync] Error loading materials from labels.chk: {ex.Message}");
+                        InitializeMaterials();
+                    }
+                }
+                else
+                {
+                    // Initialize default materials if no labels.chk exists
+                    Logger.Log("[LoadDatasetAsync] No labels.chk found, using default materials");
+                    InitializeMaterials();
+                }
+
+                // Now load the dataset (volume.bin and labels.bin)
                 var result = await FileOperations.LoadDatasetAsync(
                     path,
                     useMemoryMapping,
@@ -923,21 +975,20 @@ namespace CTSegmenter
                     currentSelection = new byte[width, height];
                     currentSelectionXZ = new byte[width, depth];
                     currentSelectionYZ = new byte[depth, height];
+                }
 
-                    // Load materials from labels.chk if available
-                    string labelsChkPath = Path.Combine(path, "labels.chk");
-                    if (File.Exists(labelsChkPath))
+                // Create labels.chk if it doesn't exist but we now have a valid dataset
+                if (!labelsChkExists && width > 0 && height > 0 && depth > 0)
+                {
+                    try
                     {
-                        Materials = FileOperations.ReadLabelsChk(path);
-                        Logger.Log($"[LoadDatasetAsync] Loaded materials from labels.chk: {string.Join(", ", Materials.Select(m => $"{m.Name} (ID: {m.ID})"))}");
+                        string directoryPath = folderMode ? path : Path.GetDirectoryName(path);
+                        FileOperations.CreateLabelsChk(directoryPath, Materials);
+                        Logger.Log("[LoadDatasetAsync] Created new labels.chk with current materials");
                     }
-                    else if (Directory.Exists(path))
+                    catch (Exception ex)
                     {
-                        // Initialize materials with defaults if not found
-                        Materials.Clear();
-                        Materials.Add(new Material("Exterior", Color.Transparent, 0, 0, 0) { IsExterior = true });
-                        Materials.Add(new Material("Material1", Color.Blue, 0, 0, GetNextMaterialID()));
-                        FileOperations.CreateLabelsChk(path, Materials);
+                        Logger.Log($"[LoadDatasetAsync] Warning: Failed to create labels.chk: {ex.Message}");
                     }
                 }
 
@@ -955,14 +1006,48 @@ namespace CTSegmenter
                         UpdateViewLabels();
                         orthogonalView.UpdateDimensions(width, height, depth);
                         orthogonalView.UpdatePosition(YzSliceX, XzSliceY, CurrentSlice);
+
                         // Render all views
                         RenderViews(ViewType.All);
                     });
-
-                    MaterialOps = new MaterialOperations(volumeLabels, Materials, width, height, depth);
-                    Logger.Log("[LoadDatasetAsync] MaterialOperations initialized with new dataset");
                 }
-                // After loading dataset, center all views
+
+                // Initialize MaterialOperations with loaded materials
+                if (volumeLabels != null)
+                {
+                    // Ensure unique material IDs before initializing MaterialOperations
+                    HashSet<byte> materialIds = new HashSet<byte>();
+                    foreach (var material in Materials.ToList())
+                    {
+                        if (material.ID == 0 && !material.IsExterior)
+                        {
+                            // Invalid ID for non-exterior material
+                            material.ID = GetNextMaterialID();
+                            Logger.Log($"[LoadDatasetAsync] Fixed zero ID for material {material.Name}, new ID: {material.ID}");
+                        }
+
+                        if (materialIds.Contains(material.ID) && !material.IsExterior)
+                        {
+                            // Duplicate ID found
+                            byte oldId = material.ID;
+                            material.ID = GetNextMaterialID();
+                            Logger.Log($"[LoadDatasetAsync] Fixed duplicate ID {oldId} for material {material.Name}, new ID: {material.ID}");
+                        }
+
+                        materialIds.Add(material.ID);
+                    }
+
+                    // Create MaterialOperations with validated materials
+                    Logger.Log($"[LoadDatasetAsync] Initializing MaterialOperations with {Materials.Count} materials for volume {width}x{height}x{depth}");
+                    MaterialOps = new MaterialOperations(volumeLabels, Materials, width, height, depth);
+                    Logger.Log("[LoadDatasetAsync] MaterialOperations initialization complete");
+                }
+                else
+                {
+                    Logger.Log("[LoadDatasetAsync] Warning: volumeLabels is null, cannot initialize MaterialOperations");
+                }
+
+                // Center all views
                 xyPan = new PointF(
                     (xyView.ClientSize.Width - width * xyZoom) / 2,
                     (xyView.ClientSize.Height - height * xyZoom) / 2);
@@ -1134,11 +1219,32 @@ namespace CTSegmenter
 
         public void SaveLabelsChk()
         {
-            string folder = CurrentPath;
-            if (!Directory.Exists(folder))
+            string folder;
+
+            if (Directory.Exists(CurrentPath))
+            {
+                // CurrentPath is a directory
+                folder = CurrentPath;
+            }
+            else if (File.Exists(CurrentPath))
+            {
+                // CurrentPath is a file, use its directory
+                folder = Path.GetDirectoryName(CurrentPath);
+            }
+            else
+            {
+                Logger.Log($"[SaveLabelsChk] Invalid path: {CurrentPath}");
                 return;
+            }
+
+            Logger.Log($"[SaveLabelsChk] Saving materials to: {Path.Combine(folder, "labels.chk")}");
+            foreach (var material in Materials)
+            {
+                Logger.Log($"[SaveLabelsChk] Saving Material - ID: {material.ID}; Name: \"{material.Name}\"; Color: {material.Color}");
+            }
 
             FileOperations.CreateLabelsChk(folder, Materials);
+            Logger.Log($"[SaveLabelsChk] Successfully saved {Materials.Count} materials");
         }
 
         /// <summary>

@@ -32,7 +32,7 @@ namespace CTSegmenter
         private KryptonButton btnAddCalibration;
         private KryptonButton btnRemoveCalibration;
         private KryptonButton btnBoxSelect;
-        private KryptonComboBox comboMaterials;
+        private ComboBox comboMaterials;
 
         // OK/Cancel buttons
         private KryptonButton btnOK;
@@ -222,19 +222,25 @@ namespace CTSegmenter
             };
             btnBoxSelect.Click += BtnBoxSelect_Click;
 
-            comboMaterials = new KryptonComboBox
+            comboMaterials = new ComboBox
             {
                 Location = new Point(350, 130),
                 Width = 150,
+                FlatStyle= FlatStyle.Flat,
+                BackColor = Color.DarkGray,
+                ForeColor= Color.LightCyan,
                 DropDownStyle = ComboBoxStyle.DropDownList,
-                DisplayMember = "Name"  
+                DropDownWidth = 250, // Make dropdown wider to show full material names
+                DropDownHeight = 200, // Ensure enough height for the dropdown
+                DisplayMember = "Name",
+                ValueMember = "Density" // Add ValueMember property
             };
 
             // Fill combobox with materials
-            foreach (var material in MaterialDensityLibrary.Materials)
-            {
-                comboMaterials.Items.Add(material);
-            }
+            comboMaterials.DataSource = null; // Clear any existing binding
+            comboMaterials.Items.Clear();     // Clear any existing items
+            List<MaterialDensity> materialsList = new List<MaterialDensity>(MaterialDensityLibrary.Materials);
+            comboMaterials.DataSource = materialsList;
 
             if (comboMaterials.Items.Count > 0)
                 comboMaterials.SelectedIndex = 0;

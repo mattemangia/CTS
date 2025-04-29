@@ -287,8 +287,8 @@ namespace CTSegmenter
                         break;
                     }
 
-                    if (stepCount % 10 == 0)
-                        ReportProgress();
+                    // Report progress on every step
+                    ReportProgress();
                 }
                 catch (Exception ex)
                 {
@@ -535,7 +535,7 @@ namespace CTSegmenter
                         double dvz_dx = (vz[x + 1, y, z] - vz[x - 1, y, z]) / (2 * pixelSize);
                         double dvz_dy = (vz[x, y + 1, z] - vz[x, y - 1, z]) / (2 * pixelSize);
 
-                        // Add stability check for very large gradients but with much larger limits
+                        // Add stability check for very large gradients
                         const double MAX_GRADIENT = 1.0e12;
                         dvx_dx = Clamp(dvx_dx, -MAX_GRADIENT, MAX_GRADIENT);
                         dvy_dy = Clamp(dvy_dy, -MAX_GRADIENT, MAX_GRADIENT);
@@ -557,15 +557,6 @@ namespace CTSegmenter
                         double dsxz = dt * (mu * (dvx_dz + dvz_dx));
                         double dsyz = dt * (mu * (dvy_dz + dvz_dy));
 
-                        // NO DAMPING - we need to ensure propagation
-                        // const double DAMPING = 0.95;
-                        // dsxx *= DAMPING;
-                        // dsyy *= DAMPING;
-                        // dszz *= DAMPING;
-                        // dsxy *= DAMPING;
-                        // dsxz *= DAMPING;
-                        // dsyz *= DAMPING;
-
                         double sxxN = sxx[x, y, z] + dsxx;
                         double syyN = syy[x, y, z] + dsyy;
                         double szzN = szz[x, y, z] + dszz;
@@ -573,7 +564,7 @@ namespace CTSegmenter
                         double sxzN = sxz[x, y, z] + dsxz;
                         double syzN = syz[x, y, z] + dsyz;
 
-                        // plastic correction (Mohr‑Coulomb)
+                        // plastic correction (Mohr‑Coulomb) - modified to preserve oscillations
                         if (usePlasticModel)
                         {
                             double mean = (sxxN + syyN + szzN) / 3.0;
@@ -586,14 +577,22 @@ namespace CTSegmenter
                             double yield = tau + p * sinPhi - cohesionPa * cosPhi;
                             if (yield > 0)
                             {
+                                // Modified scale calculation to preserve oscillations
                                 double scale = (tau - (cohesionPa * cosPhi - p * sinPhi)) / tau;
+
+                                // Limit scale to preserve oscillations (never fully zero out)
+                                scale = Math.Min(scale, 0.95);
+
+                                // Apply scale to deviatoric components but preserve sign
                                 dev_xx *= 1 - scale; dev_yy *= 1 - scale; dev_zz *= 1 - scale;
                                 sxyN *= 1 - scale; sxzN *= 1 - scale; syzN *= 1 - scale;
+
+                                // Recombine deviatoric and mean components
                                 sxxN = dev_xx + mean; syyN = dev_yy + mean; szzN = dev_zz + mean;
                             }
                         }
 
-                        // brittle damage (max tensile principal stress)
+                        // brittle damage (max tensile principal stress) - modified to preserve oscillations
                         if (useBrittleModel)
                         {
                             // invariants
@@ -621,9 +620,18 @@ namespace CTSegmenter
                             double tensilePa = tensileStrengthMPa * 1e6;
                             if (sigmaMax > tensilePa && D < 1.0)
                             {
+                                // Modify damage calculation to preserve oscillations
                                 double incr = (sigmaMax - tensilePa) / tensilePa;
-                                damage[x, y, z] = Math.Min(1.0, D + incr * 0.01);
+
+                                // Limit damage increment to allow oscillations
+                                incr = Math.Min(incr, 0.1);
+
+                                // Cap maximum damage to allow continued oscillations
+                                damage[x, y, z] = Math.Min(0.95, D + incr * 0.01);
+
                                 double factor = 1.0 - damage[x, y, z];
+
+                                // Scale stresses but preserve sign for oscillations
                                 sxxN *= factor; syyN *= factor; szzN *= factor;
                                 sxyN *= factor; sxzN *= factor; syzN *= factor;
                             }
@@ -635,6 +643,7 @@ namespace CTSegmenter
                     }
             });
         }
+
         private void UpdateVelocity()
         {
             Parallel.For(1, depth - 1, z =>
@@ -658,7 +667,7 @@ namespace CTSegmenter
                         double dsxz_dx = (sxz[x + 1, y, z] - sxz[x, y, z]) / pixelSize;
                         double dsyz_dy = (syz[x, y + 1, z] - syz[x, y, z]) / pixelSize;
 
-                        // Only use maximum limit for stability, not damping
+                        // Only use maximum limit for stability
                         const double MAX_GRADIENT = 1.0e12;
                         dsxx_dx = Clamp(dsxx_dx, -MAX_GRADIENT, MAX_GRADIENT);
                         dsxy_dy = Clamp(dsxy_dy, -MAX_GRADIENT, MAX_GRADIENT);
@@ -675,7 +684,7 @@ namespace CTSegmenter
                         double dvy = dt * (dsxy_dx + dsyy_dy + dsyz_dz) / rho;
                         double dvz = dt * (dsxz_dx + dsyz_dy + dszz_dz) / rho;
 
-                        // Update velocities without damping
+                        // Update velocities without damping to ensure oscillations
                         vx[x, y, z] += dvx;
                         vy[x, y, z] += dvy;
                         vz[x, y, z] += dvz;
@@ -807,60 +816,30 @@ namespace CTSegmenter
             midY = Math.Max(0, Math.Min(midY, height - 1));
             midZ = Math.Max(0, Math.Min(midZ, depth - 1));
 
-            // Log midpoint measurements
-            Logger.Log($"[MidpointMeasurement] Position: ({midX},{midY},{midZ})");
-            Logger.Log($"[MidpointMeasurement] Values: P={vx[midX, midY, midZ]:E6}, S={vy[midX, midY, midZ]:E6}, Z={vz[midX, midY, midZ]:E6}");
-
-            // Log TX and RX values
-            Logger.Log($"[AcousticSimulator] TX values: P={vx[tx, ty, tz]:E6}, S={vy[tx, ty, tz]:E6}");
-            Logger.Log($"[AcousticSimulator] RX values: P={vx[rx, ry, rz]:E6}, S={vy[rx, ry, rz]:E6}");
-
-            // Log VP/VS ratio as requested
-            double pMag = Math.Abs(vx[rx, ry, rz]);
-            double sMag = Math.Abs(vy[rx, ry, rz]);
-            if (sMag > 1e-10)
-                Logger.Log($"[AcousticSimulator] VP/VS ratio: {pMag / sMag:F4}");
-            else
-                Logger.Log($"[AcousticSimulator] VP/VS ratio: N/A (S-wave too small)");
-
-            // Comprehensive field statistics
-            double maxVx = 0, maxVy = 0, maxVz = 0;
-            int nonZeroVx = 0, nonZeroVy = 0, nonZeroVz = 0;
-
-            // Detailed sampling for maximum field values 
-            for (int z = 0; z < depth; z += 2)
+            // Log midpoint measurements but only occasionally to avoid log spam
+            if (stepCount % 20 == 0)
             {
-                for (int y = 0; y < height; y += 2)
-                {
-                    for (int x = 0; x < width; x += 2)
-                    {
-                        // Check if voxel is in material
-                        if (volumeLabels[x, y, z] != selectedMaterialID) continue;
+                Logger.Log($"[MidpointMeasurement] Position: ({midX},{midY},{midZ})");
+                Logger.Log($"[MidpointMeasurement] Values: P={vx[midX, midY, midZ]:E6}, S={vy[midX, midY, midZ]:E6}, Z={vz[midX, midY, midZ]:E6}");
 
-                        double absVx = Math.Abs(vx[x, y, z]);
-                        double absVy = Math.Abs(vy[x, y, z]);
-                        double absVz = Math.Abs(vz[x, y, z]);
+                // Log TX and RX values
+                Logger.Log($"[AcousticSimulator] TX values: P={vx[tx, ty, tz]:E6}, S={vy[tx, ty, tz]:E6}");
+                Logger.Log($"[AcousticSimulator] RX values: P={vx[rx, ry, rz]:E6}, S={vy[rx, ry, rz]:E6}");
 
-                        maxVx = Math.Max(maxVx, absVx);
-                        maxVy = Math.Max(maxVy, absVy);
-                        maxVz = Math.Max(maxVz, absVz);
-
-                        if (absVx > 1e-12) nonZeroVx++;
-                        if (absVy > 1e-12) nonZeroVy++;
-                        if (absVz > 1e-12) nonZeroVz++;
-                    }
-                }
+                // Log VP/VS ratio
+                double pMag = Math.Abs(vx[rx, ry, rz]);
+                double sMag = Math.Abs(vy[rx, ry, rz]);
+                if (sMag > 1e-10)
+                    Logger.Log($"[AcousticSimulator] VP/VS ratio: {pMag / sMag:F4}");
+                else
+                    Logger.Log($"[AcousticSimulator] VP/VS ratio: N/A (S-wave too small)");
             }
-
-            // Log statistics
-            Logger.Log($"[AcousticSimulator] Max values: Vx={maxVx:E6}, Vy={maxVy:E6}, Vz={maxVz:E6}");
-            Logger.Log($"[AcousticSimulator] Non-zero voxels: Vx={nonZeroVx}, Vy={nonZeroVy}, Vz={nonZeroVz}");
 
             // Convert velocity fields to float arrays for visualization (with amplification)
             float[,,] pWaveField = ConvertToFloat(vx, WAVE_VISUALIZATION_AMPLIFICATION);
             float[,,] sWaveField = ConvertToFloat(vy, WAVE_VISUALIZATION_AMPLIFICATION);
 
-            // Send actual wave field data instead of null
+            // Send actual wave field data
             ProgressUpdated?.Invoke(
                 this,
                 new AcousticSimulationProgressEventArgs(

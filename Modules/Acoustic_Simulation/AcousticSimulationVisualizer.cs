@@ -1208,7 +1208,7 @@ namespace CTSegmenter
             return crossSection;
         }
         #endregion
-
+        
         #region UI Components
         /// <summary>
         /// Initialize UI components
@@ -4417,6 +4417,80 @@ namespace CTSegmenter
                     });
                 }
             }
+        }
+        public void LoadSavedSimulationData(
+    double pWaveVelocity, double sWaveVelocity, double vpVsRatio,
+    int pWaveTravelTime, int sWaveTravelTime, int totalTimeSteps,
+    double[,,] vxData, double[,,] vyData, double[,,] vzData)
+        {
+            // Store the simulation results
+            _simulationCompleted = true;
+            _pWaveVelocity = pWaveVelocity;
+            _sWaveVelocity = sWaveVelocity;
+            _vpVsRatio = vpVsRatio;
+            _pWaveTravelTime = pWaveTravelTime;
+            _sWaveTravelTime = sWaveTravelTime;
+            _totalTimeSteps = totalTimeSteps;
+            _simulationStatus = "Completed";
+
+            // Create a frame with calculated data
+            var frame = new SimulationFrame
+            {
+                TimeStep = sWaveTravelTime,
+                PWavePathProgress = 1.0f,
+                SWavePathProgress = 1.0f
+            };
+
+            // Generate time series based on arrival times
+            int seriesLength = Math.Max(100, sWaveTravelTime * 2);
+            frame.PWaveTimeSeries = new float[seriesLength];
+            frame.SWaveTimeSeries = new float[seriesLength];
+
+            // Create wave patterns at arrival times
+            for (int i = 0; i < seriesLength; i++)
+            {
+                // Background noise
+                frame.PWaveTimeSeries[i] = (float)(new Random(i).NextDouble() - 0.5) * 0.02f;
+                frame.SWaveTimeSeries[i] = (float)(new Random(i + 100).NextDouble() - 0.5) * 0.02f;
+
+                // P-wave arrival peak
+                if (i >= pWaveTravelTime && i < pWaveTravelTime + 30)
+                {
+                    float envelope = (float)Math.Exp(-(i - pWaveTravelTime) * 0.1);
+                    frame.PWaveTimeSeries[i] = (float)(Math.Sin((i - pWaveTravelTime) * 0.5) * envelope);
+                }
+
+                // S-wave arrival peak
+                if (i >= sWaveTravelTime && i < sWaveTravelTime + 40)
+                {
+                    float envelope = (float)Math.Exp(-(i - sWaveTravelTime) * 0.08);
+                    frame.SWaveTimeSeries[i] = (float)(Math.Sin((i - sWaveTravelTime) * 0.3) * envelope);
+                }
+            }
+
+            // Store sample values
+            frame.PWaveValue = frame.PWaveTimeSeries[Math.Min(pWaveTravelTime, frame.PWaveTimeSeries.Length - 1)];
+            frame.SWaveValue = frame.SWaveTimeSeries[Math.Min(sWaveTravelTime, frame.SWaveTimeSeries.Length - 1)];
+
+            // Calculate tomography and cross-section views
+            frame.VelocityTomography = ComputeVelocityTomography(_tx, _ty, _tz, _rx, _ry, _rz, vxData, vyData, vzData);
+            frame.WavefieldCrossSection = ExtractCrossSection(_tx, _ty, _tz, _rx, _ry, _rz, vxData, vyData, vzData);
+
+            // Add the frame
+            lock (_dataLock)
+            {
+                _frames.Clear();
+                _frames.Add(frame);
+                _currentFrameIndex = 0;
+            }
+
+            // Update UI
+            this.BeginInvoke((MethodInvoker)delegate {
+                this.Text = $"Acoustic Simulation Results - P-Wave: {_pWaveVelocity:F2} m/s, S-Wave: {_sWaveVelocity:F2} m/s";
+                if (_timelineTrackBar != null)
+                    _timelineTrackBar.Maximum = 0;
+                UpdateVisualization();
+            });
         }
         /// <summary>
         /// Handle play/pause button click

@@ -160,6 +160,7 @@ namespace CTSegmenter
         #endregion
 
         #region core loop ---------------------------------------------------------------
+        public AcousticSimulator() { }
         private void Run(CancellationToken token)
         {
             ComputeStableTimeStep();                 // sets dt

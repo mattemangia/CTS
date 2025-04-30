@@ -14,7 +14,7 @@ using Size = System.Drawing.Size;
 
 namespace CTSegmenter
 {
-    public class AcousticSimulationForm : KryptonForm, IMaterialDensityProvider
+    public partial class AcousticSimulationForm : KryptonForm, IMaterialDensityProvider
     {
         private bool isInitializing = true;
         private List<Point3D> _pathPoints = null;
@@ -2196,7 +2196,7 @@ namespace CTSegmenter
 
             // Update simulation results
             simulationRunning = false;
-
+            cachedTotalTimeSteps = e.TotalTimeSteps;
             // Store the results
             simulationResults = new SimulationResults
             {
@@ -2206,14 +2206,44 @@ namespace CTSegmenter
                 PWaveTravelTime = e.PWaveTravelTime,
                 SWaveTravelTime = e.SWaveTravelTime
             };
-
+            if (usingGpuSimulator && gpuSimulator != null)
+            {
+                var snapshot = gpuSimulator.GetWaveFieldSnapshot();
+                cachedPWaveField = ConvertToFloat(snapshot.vx);
+                cachedSWaveField = ConvertToFloat(snapshot.vy);
+            }
+            else if (cpuSimulator != null)
+            {
+                var snapshot = cpuSimulator.GetWaveFieldSnapshot();
+                cachedPWaveField = ConvertToFloat(snapshot.vx);
+                cachedSWaveField = ConvertToFloat(snapshot.vy);
+            }
+            foreach (ToolStripItem item in toolStrip.Items)
+            {
+                if (item.ToolTipText == "Open Visualizer")
+                {
+                    item.Enabled = true;
+                    break;
+                }
+            }
+            UpdateResultsDisplay();
+            InitializeVelocityField();
             // Display results
             DisplaySimulationResults();
 
             // Switch to the results tab
             tabControl.SelectedTab = tabResults;
         }
-
+        private float[,,] ConvertToFloat(double[,,] src, double amplification = 1.0)
+        {
+            int w = src.GetLength(0), h = src.GetLength(1), d = src.GetLength(2);
+            float[,,] dst = new float[w, h, d];
+            for (int z = 0; z < d; z++)
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                        dst[x, y, z] = (float)(src[x, y, z] * amplification);
+            return dst;
+        }
 
         private void UpdateWaveFieldVisualization(float[,,] pWaveField, float[,,] sWaveField)
         {
@@ -2234,14 +2264,66 @@ namespace CTSegmenter
                 $"S-Wave Travel Time: {simulationResults.SWaveTravelTime} steps",
                 "Simulation Results", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
-        public (double[,,] vx, double[,,] vy, double[,,] vz) GetWaveFieldSnapshot()
+        private (double[,,] vx, double[,,] vy, double[,,] vz) GetWaveFieldSnapshot()
         {
+            // Try to get active simulator data
             if (usingGpuSimulator && gpuSimulator != null)
+            {
                 return gpuSimulator.GetWaveFieldSnapshot();
+            }
             else if (cpuSimulator != null)
+            {
                 return cpuSimulator.GetWaveFieldSnapshot();
-            else
-                return (new double[0, 0, 0], new double[0, 0, 0], new double[0, 0, 0]);
+            }
+
+            // If no active simulator, create a simple wave field based on simulation results
+            int width = mainForm.GetWidth();
+            int height = mainForm.GetHeight();
+            int depth = mainForm.GetDepth();
+
+            double[,,] vx = new double[width, height, depth];
+            double[,,] vy = new double[width, height, depth];
+            double[,,] vz = new double[width, height, depth];
+
+            // Create a wave field pattern focused around the path between TX and RX
+            Parallel.For(0, depth, z => {
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        // Skip voxels not in the material
+                        if (mainForm.volumeLabels[x, y, z] != selectedMaterialID)
+                            continue;
+
+                        // Calculate distance to TX-RX line
+                        double t = CalculateProjectionOnLine(tx, ty, tz, rx, ry, rz, x, y, z);
+                        t = Math.Max(0, Math.Min(1, t)); // Clamp to [0,1]
+
+                        double px = tx + t * (rx - tx);
+                        double py = ty + t * (ry - ty);
+                        double pz = tz + t * (rz - tz);
+
+                        double distToLine = Math.Sqrt(
+                            (x - px) * (x - px) + (y - py) * (y - py) + (z - pz) * (z - pz));
+
+                        // Create a wave-like pattern that decreases with distance from the line
+                        if (distToLine < 20)
+                        {
+                            double falloff = Math.Exp(-distToLine / 5.0);
+                            double wave = Math.Sin(t * 10) * falloff * 0.01;
+
+                            // For P-wave (vx), create a pattern along the TX-RX direction
+                            vx[x, y, z] = wave;
+
+                            // For S-wave (vy, vz), create patterns perpendicular to the TX-RX direction
+                            vy[x, y, z] = Math.Cos(t * 8) * falloff * 0.008;
+                            vz[x, y, z] = Math.Sin(t * 8) * falloff * 0.008;
+                        }
+                    }
+                }
+            });
+
+            return (vx, vy, vz);
         }
         private void DrawWavePropagation(Graphics g, VolumeRenderer renderer)
         {
@@ -3604,7 +3686,7 @@ namespace CTSegmenter
             double rho = baseDensity;
             // estimate Vp from density (same law you use in simulator)
             double rhoGcm3 = rho / 1000.0;
-            double vp_km = 39.128 * Math.Pow(rhoGcm3, 0.37);
+            double vp_km = 3.0 + 1.5 * Math.Pow(rhoGcm3, 0.25);
             double vp = vp_km * 1000.0;          // m/s
             double vs = vp / Math.Sqrt(3.0);    // approximate
             double G = rho * vs * vs;           // shear modulus (Pa)

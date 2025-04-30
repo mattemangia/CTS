@@ -36,6 +36,7 @@ namespace CTSegmenter
         #endregion
 
         #region Constructor
+        public AcousticSimulatorGPUWrapper() { }
         public AcousticSimulatorGPUWrapper(
             int width, int height, int depth, float pixelSize,
             byte[,,] volumeLabels, float[,,] densityVolume, byte selectedMaterialID,

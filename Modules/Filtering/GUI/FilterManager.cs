@@ -2102,6 +2102,7 @@ namespace CTSegmenter
 
             try
             {
+                e.Graphics.Clear(xyPreview.BackColor);
                 // Calculate safe dimensions to avoid overflow
                 int safeWidth = (int)Math.Min(int.MaxValue / 2, xyPreview.Image.Width * zoomFactor);
                 int safeHeight = (int)Math.Min(int.MaxValue / 2, xyPreview.Image.Height * zoomFactor);

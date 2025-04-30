@@ -130,6 +130,9 @@
     </Compile>
     <Compile Include="Misc\Triangle.cs" />
     <Compile Include="Misc\WMVWriter.cs" />
+    <Compile Include="Modules\Acoustic_Simulation\AcousticResults.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Modules\Acoustic_Simulation\AcousticSimulationForm.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -140,6 +143,9 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Modules\Acoustic_Simulation\AStar.cs" />
+    <Compile Include="Modules\Acoustic_Simulation\ToolbarExtension.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Modules\Acoustic_Simulation\VolumeRenderer.cs" />
     <Compile Include="Modules\ArtificialIntelligence\GroundingDINO\DirectSAM.cs" />
     <Compile Include="Modules\ArtificialIntelligence\GroundingDINO\GroundingDINODetector.cs" />

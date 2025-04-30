@@ -203,7 +203,7 @@ namespace CTSegmenter
                 SetupMainLayout();
                 InitializeDocking();
                 // Initialize materials
-                InitializeMaterials();
+                //InitializeMaterials();
 
                 // If started with an argument, load dataset
                 if (args.Length > 0)

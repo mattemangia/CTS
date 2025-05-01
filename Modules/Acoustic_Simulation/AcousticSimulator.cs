@@ -396,13 +396,27 @@ namespace CTSegmenter
             Array.Clear(vx, 0, vx.Length);
             Array.Clear(vy, 0, vy.Length);
             Array.Clear(vz, 0, vz.Length);
-            Array.Clear(sxx, 0, sxx.Length);
-            Array.Clear(syy, 0, syy.Length);
-            Array.Clear(szz, 0, szz.Length);
             Array.Clear(sxy, 0, sxy.Length);
             Array.Clear(sxz, 0, sxz.Length);
             Array.Clear(syz, 0, syz.Length);
             Array.Clear(damage, 0, damage.Length);
+
+            // Apply confining pressure to initial stress state (convert MPa to Pa)
+            double confiningPressurePa = confiningPressureMPa * 1e6;
+
+            // Apply initial stress state with confining pressure to all cells
+            for (int z = 0; z < depth; z++)
+                for (int y = 0; y < height; y++)
+                    for (int x = 0; x < width; x++)
+                    {
+                        if (volumeLabels[x, y, z] == selectedMaterialID)
+                        {
+                            // Negative sign because compression is negative in solid mechanics
+                            sxx[x, y, z] = -confiningPressurePa;
+                            syy[x, y, z] = -confiningPressurePa;
+                            szz[x, y, z] = -confiningPressurePa;
+                        }
+                    }
 
             // Calculate pulse magnitude and DRAMATICALLY amplify it
             double pulse = sourceAmplitude * Math.Sqrt(sourceEnergyJ);
@@ -572,9 +586,14 @@ namespace CTSegmenter
                             double dev_xx = sxxN - mean;
                             double dev_yy = syyN - mean;
                             double dev_zz = szzN - mean;
-                            double J2 = 0.5 * (dev_xx * dev_xx + dev_yy * dev_yy + dev_zz * dev_zz) + (sxyN * sxyN + sxzN * sxzN + syzN * syzN);
+                            double J2 = 0.5 * (dev_xx * dev_xx + dev_yy * dev_yy + dev_zz * dev_zz) +
+                                        (sxyN * sxyN + sxzN * sxzN + syzN * syzN);
                             double tau = Math.Sqrt(J2);
-                            double p = -mean;
+
+                            // Include confining pressure in the pressure calculation (Pa)
+                            double confiningPressurePa = confiningPressureMPa * 1e6;
+                            double p = -mean + confiningPressurePa;  // Add confining pressure
+
                             double yield = tau + p * sinPhi - cohesionPa * cosPhi;
                             if (yield > 0)
                             {

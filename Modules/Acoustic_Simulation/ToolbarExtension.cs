@@ -396,6 +396,8 @@ namespace CTSegmenter
             public bool HasDensityVariation { get; set; }
             public float[,,] DensityVolume { get; set; }
 
+            public bool UseVisualizer { get; set; }
+
             // Coordinate state
             public int TX { get; set; }
             public int TY { get; set; }
@@ -486,6 +488,7 @@ namespace CTSegmenter
                 UsePlasticModel = chkPlasticModel.Checked,
                 UseBrittleModel = chkBrittleModel.Checked,
                 UseGPU = chkRunOnGpu.Checked,
+                UseVisualizer = chkUseVisualizer.Checked, // Add this line
                 YoungsModulus = (double)numYoungsModulus.Value,
                 PoissonRatio = (double)numPoissonRatio.Value,
 
@@ -498,7 +501,6 @@ namespace CTSegmenter
 
                 PathPoints = new List<SimulationState.Point3DSerializable>()
             };
-
             // Add results if available
             if (simulationResults != null)
             {
@@ -613,6 +615,7 @@ namespace CTSegmenter
             chkPlasticModel.Checked = state.UsePlasticModel;
             chkBrittleModel.Checked = state.UseBrittleModel;
             chkRunOnGpu.Checked = state.UseGPU;
+            chkUseVisualizer.Checked = state.UseVisualizer; 
             numYoungsModulus.Value = (decimal)state.YoungsModulus;
             numPoissonRatio.Value = (decimal)state.PoissonRatio;
 

@@ -17,6 +17,7 @@ namespace CTSegmenter
     public partial class AcousticSimulationForm : KryptonForm, IMaterialDensityProvider
     {
         private bool isInitializing = true;
+        private KryptonCheckBox chkUseVisualizer;
         private List<Point3D> _pathPoints = null;
         private MainForm mainForm;
         private dynamic simulator;
@@ -85,6 +86,7 @@ namespace CTSegmenter
         private SimulationResults simulationResults;
         private KryptonNumericUpDown numYoungsModulus;
         private KryptonNumericUpDown numPoissonRatio;
+        public bool UseVisualizer { get; set; }
 
         // A class to store simulation results
         private class SimulationResults
@@ -601,6 +603,18 @@ namespace CTSegmenter
             chkBrittleModel.CheckedChanged += ModelCheckBox_CheckedChanged;
             controlPanel.Controls.Add(chkBrittleModel);
 
+            currentY += verticalSpacing;
+            chkUseVisualizer = new KryptonCheckBox
+            {
+                Text = "Use visualizer during simulation",
+                Location = new Point(10, currentY),
+                Width = controlWidth - 20,
+                Checked = true,
+                ToolTipValues = {
+        Description = "Disabling visualization during simulation improves performance"
+    }
+            };
+            controlPanel.Controls.Add(chkUseVisualizer);
             currentY += verticalSpacing;
             chkRunOnGpu = new KryptonCheckBox
             {
@@ -1921,10 +1935,18 @@ namespace CTSegmenter
                 // Create a straight-line path between TX and RX (for visualization)
                 _pathPoints = CreateStraightLinePath(tx, ty, tz, rx, ry, rz, 100);
 
-                // Create the SimulationVisualizer before starting the simulation
-                visualizer = new AcousticSimulationVisualizer(
-                    width, height, depth, pixelSizeF,
-                    tx, ty, tz, rx, ry, rz);
+                // Create the SimulationVisualizer only if it's enabled
+                if (chkUseVisualizer.Checked)
+                {
+                    visualizer = new AcousticSimulationVisualizer(
+                        width, height, depth, pixelSizeF,
+                        tx, ty, tz, rx, ry, rz);
+                }
+                else
+                {
+                    visualizer = null;
+                    Logger.Log("[AcousticSimulationForm] Visualizer disabled to improve performance");
+                }
 
                 // Prepare progress UI - CHANGED: Use Owner to set proper ownership
                 simulationProgressForm = new CancellableProgressForm(
@@ -1967,7 +1989,10 @@ namespace CTSegmenter
                         gpuSimulator.SimulationCompleted += Simulator_SimulationCompleted;
 
                         // Connect visualizer to the GPU simulator
-                        visualizer.ConnectToGpuSimulator(gpuSimulator);
+                        if (visualizer != null)
+                        {
+                            visualizer.ConnectToGpuSimulator(gpuSimulator);
+                        }
 
                         usingGpuSimulator = true;
                         simulationProgressForm.UpdateMessage("Initializing GPU simulation...");
@@ -1997,7 +2022,10 @@ namespace CTSegmenter
                         cpuSimulator.SimulationCompleted += Simulator_SimulationCompleted;
 
                         // Connect visualizer to the CPU simulator
-                        visualizer.ConnectToCpuSimulator(cpuSimulator);
+                        if (visualizer != null)
+                        {
+                            visualizer.ConnectToCpuSimulator(cpuSimulator);
+                        }
                     }
                 }
                 else
@@ -2095,7 +2123,10 @@ namespace CTSegmenter
             }
 
             // Update the visualization with current wave fields
-            UpdateWaveFieldVisualization(pField, sField);
+            if (chkUseVisualizer.Checked)
+            {
+                UpdateWaveFieldVisualization(pField, sField);
+            }
         }
         private float[,,] ConvertToFloatArray(double[,,] array)
         {
@@ -4304,7 +4335,11 @@ namespace CTSegmenter
                    cpuSimulator?.Dispose();
                     gpuSimulator?.Dispose();
                 }
-                visualizer?.Dispose();
+                if (visualizer != null)
+                {
+                    visualizer.Dispose();
+                    visualizer = null;
+                }
             }
             base.Dispose(disposing);
         }

@@ -500,9 +500,10 @@ namespace CTSegmenter
                 J2 = XMath.Max(J2, 0.0);
 
                 double tau = XMath.Sqrt(J2);
-                double p = -mean;
+                // Include confining pressure in the pressure calculation
+                double p = -mean + physics.ConfiningPressure;
 
-                // Calculate yield function
+                // Calculate yield function with the correct pressure
                 double yield = tau + p * physics.SinPhi - physics.Cohesion * physics.CosPhi;
 
                 // Apply plastic correction if yielding
@@ -952,11 +953,30 @@ namespace CTSegmenter
         }
         private void ApplySource()
         {
-            // Clear all fields to zero (same as CPU's ClearFields)
+            // Clear velocity fields to zero
             vxBuffer.MemSetToZero(); vyBuffer.MemSetToZero(); vzBuffer.MemSetToZero();
-            sxxBuffer.MemSetToZero(); syyBuffer.MemSetToZero(); szzBuffer.MemSetToZero();
+            // Clear shear stress fields to zero
             sxyBuffer.MemSetToZero(); sxzBuffer.MemSetToZero(); syzBuffer.MemSetToZero();
             damageBuffer.MemSetToZero();
+            accelerator.Synchronize();
+
+            // Initialize normal stress components with confining pressure (compressive is negative)
+            double[] initialStressValues = new double[totalCells];
+            // Fill array with confining pressure values for cells with the selected material
+            byte[] materialData = materialBuffer.GetAsArray1D();
+            for (int i = 0; i < totalCells; i++)
+            {
+                if (materialData[i] == selectedMaterialID)
+                {
+                    // Negative value for compression
+                    initialStressValues[i] = -confiningPressurePa;
+                }
+            }
+
+            // Upload initial stress state
+            sxxBuffer.CopyFromCPU(initialStressValues);
+            syyBuffer.CopyFromCPU(initialStressValues);
+            szzBuffer.CopyFromCPU(initialStressValues);
             accelerator.Synchronize();
 
             // Calculate pulse magnitude - EXACT match to CPU version
@@ -991,16 +1011,15 @@ namespace CTSegmenter
 
                         // Check if voxel is in the material - EXACT match to CPU
                         int idx = FlattenIndex(sx, sy, sz);
-                        byte[] materialSample = materialBuffer.GetAsArray1D();
-                        if (idx >= materialSample.Length || materialSample[idx] != selectedMaterialID)
+                        if (idx >= materialData.Length || materialData[idx] != selectedMaterialID)
                             continue;
 
                         // Apply falloff based on distance from center - EXACT match to CPU
                         double falloff = 1.0 - (dist / sourceRadius);
                         double localPulse = pulse * falloff * falloff;
 
-                        // Set array value for bulk upload
-                        tmpArray[idx] = localPulse;
+                        // Add pulse to existing initial stress values
+                        tmpArray[idx] = initialStressValues[idx] + localPulse;
                     }
                 }
             }

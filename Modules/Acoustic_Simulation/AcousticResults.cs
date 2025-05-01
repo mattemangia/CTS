@@ -180,7 +180,38 @@ namespace CTSegmenter
                 toolStrip.Items.Add(btnVisualizer);
             }
         }
+        private float CalculateAverageDensity()
+        {
+            // Get dimensions
+            int width = mainForm.GetWidth();
+            int height = mainForm.GetHeight();
+            int depth = mainForm.GetDepth();
 
+            if (width <= 0 || height <= 0 || depth <= 0)
+                return 1000.0f; // Default if no valid dimensions
+
+            float totalDensity = 0.0f;
+            int count = 0;
+
+            // Calculate average density for the selected material only
+            for (int z = 0; z < depth; z++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        if (mainForm.volumeLabels[x, y, z] == selectedMaterialID)
+                        {
+                            totalDensity += densityVolume[x, y, z];
+                            count++;
+                        }
+                    }
+                }
+            }
+
+            // Return the average or default if no material found
+            return count > 0 ? totalDensity / count : 1000.0f;
+        }
         private Image CreateVisualizerIcon()
         {
             Bitmap bmp = new Bitmap(32, 32);
@@ -773,6 +804,7 @@ namespace CTSegmenter
         }
         private void InitializeResultsDetailsTab()
         {
+            baseDensity = CalculateAverageDensity();
             // Create scrollable panel
             KryptonPanel scrollablePanel = new KryptonPanel
             {
@@ -2883,6 +2915,9 @@ namespace CTSegmenter
                 lblDeadTime.Text = "0 steps (0.00 ms)";
                 return;
             }
+
+            // Calculate and update the actual average density
+            baseDensity = CalculateAverageDensity();
 
             // Update result labels with data from simulation
             lblPWaveVelocity.Text = $"{simulationResults.PWaveVelocity:F2} m/s";

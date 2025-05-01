@@ -173,11 +173,14 @@ namespace CTSegmenter
 
         private void InitializeComponent()
         {
+            // ==== Form Setup ====
             this.FormBorderStyle = FormBorderStyle.None;
             this.CloseBox = false;
             this.TopMost = false;
             this.Text = "Controls";
             this.Size = new Size(700, 645);
+
+            // Try to load the icon if it exists
             try
             {
                 string iconPath = Path.Combine(Application.StartupPath, "favicon.ico");
@@ -186,19 +189,109 @@ namespace CTSegmenter
             }
             catch { }
 
+            // ==== Menu Setup ====
+            InitializeMenus();
+
+            // ==== Main Layout ====
+            TableLayoutPanel table = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 1,
+                AutoSize = true,
+            };
+            table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            this.Controls.Add(table);
+
+            // ==== Left Panel (Tools & Materials) ====
+            FlowLayoutPanel leftPanel = CreateLeftPanel();
+            table.Controls.Add(leftPanel, 0, 0);
+
+            // ==== Right Panel (Slices & Views) ====
+            FlowLayoutPanel rightPanel = CreateRightPanel();
+            table.Controls.Add(rightPanel, 1, 0);
+
+            // ==== Final Setup ====
+            RefreshMaterialList();
+
+            // Initialize the threshold slider as disabled
+            thresholdRangeSlider.Enabled = false;
+            numThresholdMin.Enabled = false;
+            numThresholdMax.Enabled = false;
+
+            // Setup brush overlay timer
+            brushOverlayTimer = new Timer { Interval = 500 };
+            brushOverlayTimer.Tick += (s, e) =>
+            {
+                mainForm.HideBrushOverlay();
+                brushOverlayTimer.Stop();
+            };
+
+            this.ActiveControl = menuStrip;
+        }
+        private void InitializeMenus()
+        {
+            // Create the main menu strip
             menuStrip = new MenuStrip();
+            menuStrip.Dock = DockStyle.Top;
+            this.Controls.Add(menuStrip);
+            this.MainMenuStrip = menuStrip;
+
+            // ==== File Menu ====
+            CreateFileMenu();
+            menuStrip.Items.Add(fileMenu);
+
+            // ==== Edit Menu ====
+            CreateEditMenu();
+            menuStrip.Items.Add(editMenu);
+
+            // ==== View Menu ====
+            CreateViewMenu();
+            menuStrip.Items.Add(viewMenu);
+
+            // ==== Tools Menu ====
+            CreateToolsMenu();
+
+            // ==== Simulation Menu ====
+            CreateSimulationMenu();
+            menuStrip.Items.Add(simulationMenu);
+
+            // ==== Help Menu ====
+            CreateHelpMenu();
+            menuStrip.Items.Add(helpMenu);
+
+            // Insert Tools menu before Help
+            menuStrip.Items.Insert(menuStrip.Items.IndexOf(helpMenu), toolsMenu);
+        }
+        private void CreateFileMenu()
+        {
             fileMenu = new ToolStripMenuItem("File");
+
+            // Load Folder
             loadFolderMenuItem = new ToolStripMenuItem("Load Folder");
             loadFolderMenuItem.Click += async (s, e) => await OnLoadFolderClicked();
+
+            // Import .bin
             importBinMenuItem = new ToolStripMenuItem("Import .bin");
             importBinMenuItem.Click += async (s, e) => await OnImportClicked();
+
+            // Separator
             fileSep1 = new ToolStripSeparator();
+
+            // Save .bin
             saveBinMenuItem = new ToolStripMenuItem("Save .bin");
             saveBinMenuItem.Click += (s, e) => OnSaveClicked();
+
+            // Export Images
             exportImagesMenuItem = new ToolStripMenuItem("Export Images");
             exportImagesMenuItem.Click += (s, e) => mainForm.ExportImages();
+
+            // Close Dataset
             closeDatasetMenuItem = new ToolStripMenuItem("Close B/W Dataset");
             closeDatasetMenuItem.Click += (s, e) => OnCloseDataset();
+
+            // Exit
             exitMenuItem = new ToolStripMenuItem("Exit");
             exitMenuItem.Click += (s, e) =>
             {
@@ -206,45 +299,47 @@ namespace CTSegmenter
                 // Force termination even if windows remain open.
                 System.Diagnostics.Process.GetCurrentProcess().Kill();
             };
+
+            // Add items to File menu
             fileMenu.DropDownItems.AddRange(new ToolStripItem[]
             {
-                loadFolderMenuItem, importBinMenuItem, fileSep1, saveBinMenuItem,
-                exportImagesMenuItem, closeDatasetMenuItem, exitMenuItem
+        loadFolderMenuItem, importBinMenuItem, fileSep1, saveBinMenuItem,
+        exportImagesMenuItem, closeDatasetMenuItem, exitMenuItem
             });
-            menuStrip.Items.Add(fileMenu);
-            ToolStripMenuItem view3DMenuItem = new ToolStripMenuItem("3D Volume View");
-            view3DMenuItem.Click += (s, e) =>
-            {
-                if (mainForm.volumeData == null && mainForm.volumeLabels == null)
-                {
-                    MessageBox.Show("No volume data loaded. Please load a dataset first.",
-                                   "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    return;
-                }
+        }
 
-                // Create and show the 3D viewer form
-                SharpDXViewerForm viewer3DForm = new SharpDXViewerForm(mainForm);
-                viewer3DForm.Show();
-            };
-            ToolStripMenuItem textureClassifierMenuItem = new ToolStripMenuItem("Texture Classifier");
-            textureClassifierMenuItem.Click += (s, e) => OpenTextureClassifier();
+        private void CreateEditMenu()
+        {
             editMenu = new ToolStripMenuItem("Edit");
+
+            // Material management
             addMaterialMenuItem = new ToolStripMenuItem("Add Material");
             addMaterialMenuItem.Click += (s, e) => OnAddMaterial();
+
             deleteMaterialMenuItem = new ToolStripMenuItem("Delete Material");
             deleteMaterialMenuItem.Click += (s, e) => OnRemoveMaterial();
+
             renameMaterialMenuItem = new ToolStripMenuItem("Rename Material");
             renameMaterialMenuItem.Click += (s, e) => OnRenameMaterial();
+
             mergeMaterialMenuItem = new ToolStripMenuItem("Merge Material");
             mergeMaterialMenuItem.Click += (s, e) => OnMergeMaterial();
+
+            // Separator
             editSep1 = new ToolStripSeparator();
+
+            // Threshold operations
             addThresholdedMenuItem = new ToolStripMenuItem("Add Thresholded");
             addThresholdedMenuItem.Click += (s, e) => AddThresholdedSelection();
+
             subtractThresholdedMenuItem = new ToolStripMenuItem("Subtract Thresholded");
             subtractThresholdedMenuItem.Click += (s, e) => SubThresholdedSelection();
+
+            // Separator
             editSep2 = new ToolStripSeparator();
+
+            // Segment Anything
             segmentAnythingMenuItem = new ToolStripMenuItem("Segment Anything");
-            // Update the segmentAnythingMenuItem.Click event handler in ControlForm
             segmentAnythingMenuItem.Click += (s, e) =>
             {
                 if (mainForm.volumeData == null)
@@ -275,14 +370,19 @@ namespace CTSegmenter
                 segmentAnything.Show();
             };
 
+            // Add items to Edit menu
             editMenu.DropDownItems.AddRange(new ToolStripItem[]
             {
-                addMaterialMenuItem, deleteMaterialMenuItem, renameMaterialMenuItem,mergeMaterialMenuItem, editSep1,
-                addThresholdedMenuItem, subtractThresholdedMenuItem, editSep2, segmentAnythingMenuItem
+        addMaterialMenuItem, deleteMaterialMenuItem, renameMaterialMenuItem, mergeMaterialMenuItem, editSep1,
+        addThresholdedMenuItem, subtractThresholdedMenuItem, editSep2, segmentAnythingMenuItem
             });
-            menuStrip.Items.Add(editMenu);
+        }
 
+        private void CreateViewMenu()
+        {
             viewMenu = new ToolStripMenuItem("View");
+
+            // Show Mask
             showMaskMenuItem = new ToolStripMenuItem("Show Mask")
             {
                 CheckOnClick = true,
@@ -295,7 +395,7 @@ namespace CTSegmenter
                 _ = mainForm.RenderOrthoViewsAsync();
             };
 
-            // This menu item now toggles RenderMaterials.
+            // Render Materials
             enableThresholdMaskMenuItem = new ToolStripMenuItem("Render Materials")
             {
                 CheckOnClick = true,
@@ -309,6 +409,7 @@ namespace CTSegmenter
                 mainForm.RenderViews();
             };
 
+            // Show Histogram
             showHistogramMenuItem = new ToolStripMenuItem("Show Histogram")
             {
                 CheckOnClick = true,
@@ -321,40 +422,70 @@ namespace CTSegmenter
                     UpdateHistogram(histogramPictureBox);
             };
 
+            // 3D Volume View
+            ToolStripMenuItem view3DMenuItem = new ToolStripMenuItem("3D Volume View");
+            view3DMenuItem.Click += (s, e) =>
+            {
+                if (mainForm.volumeData == null && mainForm.volumeLabels == null)
+                {
+                    MessageBox.Show("No volume data loaded. Please load a dataset first.",
+                                  "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                // Create and show the 3D viewer form
+                SharpDXViewerForm viewer3DForm = new SharpDXViewerForm(mainForm);
+                viewer3DForm.Show();
+            };
+
+            // Reset Zoom
             resetZoomMenuItem = new ToolStripMenuItem("Reset Zoom");
             resetZoomMenuItem.Click += (s, e) => mainForm.ResetView();
 
+            // Add items to View menu
             viewMenu.DropDownItems.AddRange(new ToolStripItem[]
             {
-                showMaskMenuItem, enableThresholdMaskMenuItem, showHistogramMenuItem,
-                view3DMenuItem, resetZoomMenuItem
+        showMaskMenuItem, enableThresholdMaskMenuItem, showHistogramMenuItem,
+        view3DMenuItem, resetZoomMenuItem
             });
-            menuStrip.Items.Add(viewMenu);
-
-            helpMenu = new ToolStripMenuItem("Help");
-            dbgConsole = new ToolStripMenuItem("Log Window");
-            about = new ToolStripMenuItem("About");
-            // ---- New: Create Tools menu and insert before Help.
+        }
+        private void CreateToolsMenu()
+        {
+            // Tools menu
             toolsMenu = new ToolStripMenuItem("Tools");
+
+            // Basic tools
             panMenuItem = new ToolStripMenuItem("Pan") { CheckOnClick = true, Checked = true };
             eraserMenuItem = new ToolStripMenuItem("Eraser") { CheckOnClick = true };
             brushMenuItem = new ToolStripMenuItem("Brush") { CheckOnClick = true };
             thresholdingMenuItem = new ToolStripMenuItem("Thresholding") { CheckOnClick = true };
 
-            // Attach a common click handler.
+            // Attach a common click handler
             panMenuItem.Click += ToolsMenuItem_Click;
             eraserMenuItem.Click += ToolsMenuItem_Click;
             brushMenuItem.Click += ToolsMenuItem_Click;
             thresholdingMenuItem.Click += ToolsMenuItem_Click;
+
+            // Add basic tools to menu
             toolsMenu.DropDownItems.AddRange(new ToolStripItem[]
             {
-                panMenuItem, eraserMenuItem, brushMenuItem, thresholdingMenuItem
+        panMenuItem, eraserMenuItem, brushMenuItem, thresholdingMenuItem
             });
+
+            // Add statistics submenu
             AddStatisticsMenu();
+
+            // Separator
             ToolStripSeparator toolsSeparator = new ToolStripSeparator();
             toolsMenu.DropDownItems.Add(toolsSeparator);
+
+            // Brightness/Contrast
             AddBrightnessContrastMenu();
+
+            // AI submenu
             ToolStripMenuItem aiSubmenu = new ToolStripMenuItem("Artificial Intelligence");
+
+            // Segment Anything
             ToolStripMenuItem segmentAnythingToolMenuItem = new ToolStripMenuItem("Segment Anything");
             segmentAnythingToolMenuItem.Click += (s, e) =>
             {
@@ -385,9 +516,9 @@ namespace CTSegmenter
 
                 segmentAnything.Show();
             };
-            ToolStripMenuItem microSamToolMenuItem = new ToolStripMenuItem("MicroSAM");
 
-            // Set click event handler
+            // MicroSAM
+            ToolStripMenuItem microSamToolMenuItem = new ToolStripMenuItem("MicroSAM");
             microSamToolMenuItem.Click += (s, e) =>
             {
                 if (mainForm.volumeData == null)
@@ -419,8 +550,7 @@ namespace CTSegmenter
                 microSam.Show();
             };
 
-            // Add the MicroSAM menu item to the AI submenu
-            aiSubmenu.DropDownItems.Add(microSamToolMenuItem);
+            // Grounding DINO
             ToolStripMenuItem groundingDinoMenuItem = new ToolStripMenuItem("Grounding DINO");
             groundingDinoMenuItem.Click += (s, e) =>
             {
@@ -451,9 +581,19 @@ namespace CTSegmenter
 
                 groundingDino.Show();
             };
+
+            // Texture Classifier
+            ToolStripMenuItem textureClassifierMenuItem = new ToolStripMenuItem("Texture Classifier");
+            textureClassifierMenuItem.Click += (s, e) => OpenTextureClassifier();
+
+            // Add items to AI submenu
+            aiSubmenu.DropDownItems.Add(microSamToolMenuItem);
             aiSubmenu.DropDownItems.Add(groundingDinoMenuItem);
-            ToolStripMenuItem integrateResampleMenuItem = new ToolStripMenuItem("Integrate / Resample");
             aiSubmenu.DropDownItems.Add(segmentAnythingToolMenuItem);
+            aiSubmenu.DropDownItems.Add(textureClassifierMenuItem);
+
+            // Integrate/Resample
+            ToolStripMenuItem integrateResampleMenuItem = new ToolStripMenuItem("Integrate / Resample");
             integrateResampleMenuItem.Click += (s, e) =>
             {
                 if (mainForm.volumeData == null)
@@ -466,9 +606,10 @@ namespace CTSegmenter
                 IntegrateResampleForm integrateForm = new IntegrateResampleForm(mainForm);
                 integrateForm.Show();
             };
-            toolsMenu.DropDownItems.Add(integrateResampleMenuItem);
-            ToolStripMenuItem filterManagerMenuItem = new ToolStripMenuItem("Filter Manager");
-            filterManagerMenuItem.Click += (s, e) =>
+
+            // Band Detection
+            ToolStripMenuItem bandDetectionMenuItem = new ToolStripMenuItem("Band Detection");
+            bandDetectionMenuItem.Click += (s, e) =>
             {
                 if (mainForm.volumeData == null)
                 {
@@ -477,10 +618,12 @@ namespace CTSegmenter
                     return;
                 }
 
-                // Create and show the FilterManager form
-                FilterManager filterManager = new FilterManager(mainForm);
-                filterManager.Show();
+                Logger.Log("[ControlForm] Opening Band Detection tool");
+                BandDetectionForm bandDetectionForm = new BandDetectionForm(mainForm);
+                bandDetectionForm.Show();
             };
+
+            // Transform Dataset
             ToolStripMenuItem transformDatasetMenuItem = new ToolStripMenuItem("Transform Dataset");
             transformDatasetMenuItem.Click += (s, e) =>
             {
@@ -506,8 +649,10 @@ namespace CTSegmenter
                     MessageBox.Show($"Error opening Transform Dataset form: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             };
-            ToolStripMenuItem bandDetectionMenuItem = new ToolStripMenuItem("Band Detection");
-            bandDetectionMenuItem.Click += (s, e) =>
+
+            // Filter Manager
+            ToolStripMenuItem filterManagerMenuItem = new ToolStripMenuItem("Filter Manager");
+            filterManagerMenuItem.Click += (s, e) =>
             {
                 if (mainForm.volumeData == null)
                 {
@@ -516,15 +661,27 @@ namespace CTSegmenter
                     return;
                 }
 
-                Logger.Log("[ControlForm] Opening Band Detection tool");
-                BandDetectionForm bandDetectionForm = new BandDetectionForm(mainForm);
-                bandDetectionForm.Show();
+                // Create and show the FilterManager form
+                FilterManager filterManager = new FilterManager(mainForm);
+                filterManager.Show();
             };
+
+            // Add remaining items to Tools menu
+            toolsMenu.DropDownItems.Add(integrateResampleMenuItem);
             toolsMenu.DropDownItems.Add(bandDetectionMenuItem);
             toolsMenu.DropDownItems.Add(transformDatasetMenuItem);
             toolsMenu.DropDownItems.Add(filterManagerMenuItem);
             toolsMenu.DropDownItems.Add(aiSubmenu);
-            toolsMenu.DropDownItems.Add(textureClassifierMenuItem);
+
+            // Add Label Operations submenu
+            AddLabelOperationsMenu();
+        }
+        private void CreateHelpMenu()
+        {
+            helpMenu = new ToolStripMenuItem("Help");
+
+            // Log Window
+            dbgConsole = new ToolStripMenuItem("Log Window");
             dbgConsole.Click += (s, e) =>
             {
                 if (Logger.LogWindowInstance == null || Logger.LogWindowInstance.IsDisposed)
@@ -539,29 +696,145 @@ namespace CTSegmenter
                     }));
                 }
             };
-            AddLabelOperationsMenu();
 
+            // About
+            about = new ToolStripMenuItem("About");
+
+            // Add items to Help menu
             helpMenu.DropDownItems.AddRange(new ToolStripItem[] { dbgConsole, about });
-            AddSimulationMenu();
-            AddStressAnalysisToMenu();
-            menuStrip.Items.Add(simulationMenu);
-            menuStrip.Items.Add(helpMenu);
-            menuStrip.Items.Insert(menuStrip.Items.IndexOf(helpMenu), toolsMenu);
-            menuStrip.Dock = DockStyle.Top;
-            this.Controls.Add(menuStrip);
-            this.MainMenuStrip = menuStrip;
+        }
+        private void CreateSimulationMenu()
+        {
+            // Create the Simulation menu
+            simulationMenu = new ToolStripMenuItem("Simulation");
 
-            TableLayoutPanel table = new TableLayoutPanel
+            // Create Pore Network Modeling menu item
+            ToolStripMenuItem poreNetworkMenuItem = new ToolStripMenuItem("Pore Network Modeling");
+            poreNetworkMenuItem.Click += (s, e) =>
             {
-                Dock = DockStyle.Fill,
-                ColumnCount = 2,
-                RowCount = 1,
-                AutoSize = true,
-            };
-            table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-            table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-            this.Controls.Add(table);
+                if (mainForm.volumeData == null || mainForm.volumeLabels == null)
+                {
+                    // Instead of showing an error, ask if the user wants to load a saved model
+                    DialogResult result = MessageBox.Show(
+                        "No dataset is currently loaded. Would you like to load a saved pore network model file?",
+                        "Load Pore Network Model",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question);
 
+                    if (result == DialogResult.Yes)
+                    {
+                        // Show file dialog to select a .dat file
+                        using (OpenFileDialog openDialog = new OpenFileDialog())
+                        {
+                            openDialog.Filter = "Pore Network Model|*.dat";
+                            openDialog.Title = "Load Pore Network Model";
+
+                            if (openDialog.ShowDialog() == DialogResult.OK)
+                            {
+                                try
+                                {
+                                    // Create and show the pore network modeling form with the selected file
+                                    PoreNetworkModelingForm poreNetworkForm = new PoreNetworkModelingForm(mainForm, openDialog.FileName);
+                                    poreNetworkForm.Show();
+                                }
+                                catch (Exception ex)
+                                {
+                                    MessageBox.Show($"Error loading pore network model: {ex.Message}",
+                                        "Loading Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                                    Logger.Log($"[ControlForm] Error loading pore network model: {ex.Message}");
+                                }
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    // Create and show the pore network modeling form with dataset as before
+                    PoreNetworkModelingForm poreNetworkForm = new PoreNetworkModelingForm(mainForm);
+                    poreNetworkForm.Show();
+                }
+            };
+
+            // Acoustic Simulation
+            ToolStripMenuItem acousticSimulationMenuItem = new ToolStripMenuItem("Acoustic Simulation");
+            acousticSimulationMenuItem.Click += (s, e) =>
+            {
+                try
+                {
+                    // Create and show the acoustic simulation form
+                    AcousticSimulationForm acousticSimulationForm = new AcousticSimulationForm(mainForm);
+                    acousticSimulationForm.Show();
+                    Logger.Log("[ControlForm] Opened Acoustic Simulation form");
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Error opening Acoustic Simulation form: {ex.Message}",
+                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    Logger.Log($"[ControlForm] Error opening Acoustic Simulation form: {ex.Message}");
+                }
+            };
+
+            // Stress Analysis
+            ToolStripMenuItem stressAnalysisMenuItem = new ToolStripMenuItem("Stress Analysis");
+            stressAnalysisMenuItem.Click += (s, e) =>
+            {
+                if (mainForm.volumeData == null || mainForm.volumeLabels == null)
+                {
+                    MessageBox.Show("Please load a dataset first to perform stress analysis.",
+                        "No Dataset", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                try
+                {
+                    // Create and show the stress analysis form
+                    StressAnalysisForm stressAnalysisForm = new StressAnalysisForm(mainForm);
+                    stressAnalysisForm.Show();
+                    Logger.Log("[ControlForm] Opened Stress Analysis form");
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Error opening Stress Analysis form: {ex.Message}",
+                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    Logger.Log($"[ControlForm] Error opening Stress Analysis form: {ex.Message}");
+                }
+            };
+
+            // Triaxial Simulation
+            ToolStripMenuItem triaxialSimulationMenuItem = new ToolStripMenuItem("Triaxial Simulation");
+            triaxialSimulationMenuItem.Click += (s, e) =>
+            {
+                if (mainForm.volumeData == null || mainForm.volumeLabels == null)
+                {
+                    MessageBox.Show("Please load a dataset first to perform triaxial simulation.",
+                        "No Dataset", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                try
+                {
+                    // Create and show the triaxial simulation form
+                    CTSegmenter.Modules.Triaxial_Simulation.TriaxialSimulationForm triaxialSimulationForm =
+                        new CTSegmenter.Modules.Triaxial_Simulation.TriaxialSimulationForm(mainForm);
+                    triaxialSimulationForm.Show();
+                    Logger.Log("[ControlForm] Opened Triaxial Simulation form");
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Error opening Triaxial Simulation form: {ex.Message}",
+                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    Logger.Log($"[ControlForm] Error opening Triaxial Simulation form: {ex.Message}");
+                }
+            };
+
+            // Add items to Simulation menu
+            simulationMenu.DropDownItems.Add(poreNetworkMenuItem);
+            simulationMenu.DropDownItems.Add(acousticSimulationMenuItem);
+            simulationMenu.DropDownItems.Add(stressAnalysisMenuItem);
+            simulationMenu.DropDownItems.Add(triaxialSimulationMenuItem);
+        }
+        private FlowLayoutPanel CreateLeftPanel()
+        {
             FlowLayoutPanel leftPanel = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
@@ -570,39 +843,8 @@ namespace CTSegmenter
                 WrapContents = false,
                 Padding = new Padding(30),
             };
-            btnInterpolate = new Button { Text = "Interpolate", Width = 120, Enabled = false };
-            btnInterpolate.Click += (s, e) =>
-            {
-                // Make sure a valid non-Exterior material is selected.
-                int idx = lstMaterials.SelectedIndex;
-                if (idx < 0 || idx >= mainForm.Materials.Count)
-                {
-                    MessageBox.Show("No material selected for interpolation.");
-                    return;
-                }
-                Material mat = mainForm.Materials[idx];
-                if (mat.IsExterior)
-                {
-                    MessageBox.Show("Cannot interpolate for the Exterior material.");
-                    return;
-                }
 
-                // Disable the button while processing.
-                btnInterpolate.Enabled = false;
-                // Run the interpolation on a background thread.
-                Task.Run(() =>
-                {
-                    mainForm.InterpolateSelection(mat.ID);
-                }).ContinueWith(t =>
-                {
-                    // Re-enable the button on the UI thread once complete.
-                    this.Invoke(new Action(() =>
-                    {
-                        btnInterpolate.Enabled = true;
-                    }));
-                });
-            };
-
+            // Load Full checkbox
             chkLoadFull = new CheckBox
             {
                 Text = "Load Full (no mapping)",
@@ -616,25 +858,32 @@ namespace CTSegmenter
             };
             leftPanel.Controls.Add(chkLoadFull);
 
+            // Material buttons panel
             FlowLayoutPanel materialPanel = new FlowLayoutPanel
             {
                 FlowDirection = FlowDirection.LeftToRight,
                 AutoSize = true,
                 WrapContents = false
             };
+
             btnAddMaterial = new Button { Text = "Add", Width = 70, Height = 25 };
             btnAddMaterial.Click += (s, e) => OnAddMaterial();
+
             btnRemoveMaterial = new Button { Text = "Delete", Width = 70, Height = 25 };
             btnRemoveMaterial.Click += (s, e) => OnRemoveMaterial();
+
             btnRenameMaterial = new Button { Text = "Rename", Width = 70, Height = 25 };
             btnRenameMaterial.Click += (s, e) => OnRenameMaterial();
+
             materialPanel.Controls.Add(btnAddMaterial);
             materialPanel.Controls.Add(btnRemoveMaterial);
             materialPanel.Controls.Add(btnRenameMaterial);
             leftPanel.Controls.Add(materialPanel);
 
+            // Materials list
             Label lblMaterials = new Label { Text = "Materials:", AutoSize = true };
             leftPanel.Controls.Add(lblMaterials);
+
             lstMaterials = new ListBox
             {
                 Width = 260,
@@ -646,13 +895,12 @@ namespace CTSegmenter
             lstMaterials.MouseDown += LstMaterials_MouseDown;
             leftPanel.Controls.Add(lstMaterials);
 
+            // Threshold controls
             lblThreshold = new Label { Text = "Threshold [min..max]", AutoSize = true };
             leftPanel.Controls.Add(lblThreshold);
 
-            // Create panel for threshold controls
             Panel thresholdPanel = new Panel { Width = 260, Height = 100 };
 
-            // Create the RangeSlider
             thresholdRangeSlider = new RangeSlider
             {
                 Width = 260,
@@ -664,7 +912,6 @@ namespace CTSegmenter
                 Location = new Point(0, 0)
             };
 
-            // Add event handler for the RangeChanged event
             thresholdRangeSlider.RangeChanged += (s, e) =>
             {
                 numThresholdMin.Value = thresholdRangeSlider.RangeMinimum;
@@ -676,7 +923,6 @@ namespace CTSegmenter
             };
             thresholdPanel.Controls.Add(thresholdRangeSlider);
 
-            // Add the numeric controls for more precise input
             numThresholdMin = new NumericUpDown
             {
                 Width = 80,
@@ -721,7 +967,14 @@ namespace CTSegmenter
 
             leftPanel.Controls.Add(thresholdPanel);
 
-            FlowLayoutPanel thresholdButtonsPanel = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, WrapContents = false };
+            // Threshold action buttons
+            FlowLayoutPanel thresholdButtonsPanel = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                WrapContents = false
+            };
+
             btnAddSelection = new Button { Text = "+", Width = 50, Height = 25 };
             btnAddSelection.Click += (s, e) =>
             {
@@ -751,6 +1004,7 @@ namespace CTSegmenter
                 }
                 mainForm.SaveLabelsChk();
             };
+
             btnSubSelection = new Button { Text = "-", Width = 50, Height = 25 };
             btnSubSelection.Click += (s, e) =>
             {
@@ -777,6 +1031,7 @@ namespace CTSegmenter
                 }
                 mainForm.SaveLabelsChk();
             };
+
             Button btnClearSelection = new Button { Text = "Clear", Width = 50, Height = 25 };
             btnClearSelection.Click += (s, e) =>
             {
@@ -790,6 +1045,7 @@ namespace CTSegmenter
                 mainForm.RenderViews();
                 _ = mainForm.RenderOrthoViewsAsync();
             };
+
             Button btnApply = new Button { Text = "Apply", Width = 50, Height = 25 };
             btnApply.Click += (s, e) =>
             {
@@ -804,13 +1060,17 @@ namespace CTSegmenter
                 mainForm.RenderViews();
                 _ = mainForm.RenderOrthoViewsAsync();
             };
+
             thresholdButtonsPanel.Controls.Add(btnAddSelection);
             thresholdButtonsPanel.Controls.Add(btnSubSelection);
             thresholdButtonsPanel.Controls.Add(btnClearSelection);
             thresholdButtonsPanel.Controls.Add(btnApply);
             leftPanel.Controls.Add(thresholdButtonsPanel);
+
+            // Tool size controls
             toolSizeLabel = new Label { Text = "Tool Size: 50px", AutoSize = true };
             leftPanel.Controls.Add(toolSizeLabel);
+
             toolSizeSlider = new TrackBar
             {
                 Minimum = 1,
@@ -823,13 +1083,50 @@ namespace CTSegmenter
             toolSizeSlider.Scroll += ToolSizeSlider_Scroll;
             leftPanel.Controls.Add(toolSizeSlider);
 
+            // Refresh and interpolate buttons
             btnRefresh = new Button { Text = "Refresh Render", Width = 120 };
             btnRefresh.Click += (s, e) => mainForm.RenderViews();
             leftPanel.Controls.Add(btnRefresh);
 
-            leftPanel.Controls.Add(btnInterpolate);
-            table.Controls.Add(leftPanel, 0, 0);
+            btnInterpolate = new Button { Text = "Interpolate", Width = 120, Enabled = false };
+            btnInterpolate.Click += (s, e) =>
+            {
+                // Make sure a valid non-Exterior material is selected.
+                int idx = lstMaterials.SelectedIndex;
+                if (idx < 0 || idx >= mainForm.Materials.Count)
+                {
+                    MessageBox.Show("No material selected for interpolation.");
+                    return;
+                }
+                Material mat = mainForm.Materials[idx];
+                if (mat.IsExterior)
+                {
+                    MessageBox.Show("Cannot interpolate for the Exterior material.");
+                    return;
+                }
 
+                // Disable the button while processing.
+                btnInterpolate.Enabled = false;
+                // Run the interpolation on a background thread.
+                Task.Run(() =>
+                {
+                    mainForm.InterpolateSelection(mat.ID);
+                }).ContinueWith(t =>
+                {
+                    // Re-enable the button on the UI thread once complete.
+                    this.Invoke(new Action(() =>
+                    {
+                        btnInterpolate.Enabled = true;
+                    }));
+                });
+            };
+            leftPanel.Controls.Add(btnInterpolate);
+
+            return leftPanel;
+        }
+
+        private FlowLayoutPanel CreateRightPanel()
+        {
             FlowLayoutPanel rightPanel = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
@@ -838,8 +1135,11 @@ namespace CTSegmenter
                 WrapContents = false,
                 Padding = new Padding(30),
             };
+
+            // XY Slice controls
             lblSlice = new Label { Text = "XY Slice: 0 / 0", AutoSize = true };
             rightPanel.Controls.Add(lblSlice);
+
             sliceSlider = new TrackBar { Width = 260, Minimum = 0, Maximum = 0, TickStyle = TickStyle.None };
             sliceSlider.Scroll += (s, e) =>
             {
@@ -860,6 +1160,7 @@ namespace CTSegmenter
                 xySliceUpdateTimer.Start();
             };
             rightPanel.Controls.Add(sliceSlider);
+
             numSlice = new NumericUpDown { Width = 80, Minimum = 0, Maximum = 0, Value = 0 };
             numSlice.ValueChanged += (s, e) =>
             {
@@ -868,8 +1169,11 @@ namespace CTSegmenter
                 lblSlice.Text = $"XY Slice: {sliceSlider.Value} / {sliceSlider.Maximum}";
             };
             rightPanel.Controls.Add(numSlice);
+
+            // XZ Slice controls
             lblXz = new Label { Text = "XZ Projection Row: 0 / 0", AutoSize = true };
             rightPanel.Controls.Add(lblXz);
+
             sliderXZ = new TrackBar { Width = 260, Minimum = 0, Maximum = mainForm.GetHeight() > 0 ? mainForm.GetHeight() - 1 : 0, TickStyle = TickStyle.None };
             sliderXZ.Scroll += (s, e) =>
             {
@@ -880,6 +1184,7 @@ namespace CTSegmenter
                 _ = mainForm.RenderOrthoViewsAsync();
             };
             rightPanel.Controls.Add(sliderXZ);
+
             numXz = new NumericUpDown { Width = 80, Minimum = 0, Maximum = sliderXZ.Maximum, Value = sliderXZ.Maximum > 0 ? sliderXZ.Maximum / 2 : 0 };
             numXz.ValueChanged += (s, e) =>
             {
@@ -890,8 +1195,11 @@ namespace CTSegmenter
                 _ = mainForm.RenderOrthoViewsAsync();
             };
             rightPanel.Controls.Add(numXz);
+
+            // YZ Slice controls
             lblYz = new Label { Text = "YZ Projection Col: 0 / 0", AutoSize = true };
             rightPanel.Controls.Add(lblYz);
+
             sliderYZ = new TrackBar { Width = 260, Minimum = 0, Maximum = mainForm.GetWidth() > 0 ? mainForm.GetWidth() - 1 : 0, TickStyle = TickStyle.None };
             sliderYZ.Scroll += (s, e) =>
             {
@@ -902,6 +1210,7 @@ namespace CTSegmenter
                 _ = mainForm.RenderOrthoViewsAsync();
             };
             rightPanel.Controls.Add(sliderYZ);
+
             numYz = new NumericUpDown { Width = 80, Minimum = 0, Maximum = sliderYZ.Maximum, Value = sliderYZ.Maximum > 0 ? sliderYZ.Maximum / 2 : 0 };
             numYz.ValueChanged += (s, e) =>
             {
@@ -912,9 +1221,12 @@ namespace CTSegmenter
                 _ = mainForm.RenderOrthoViewsAsync();
             };
             rightPanel.Controls.Add(numYz);
+
+            // Histogram
             histogramPictureBox = new PictureBox { Width = 260, Height = 100, BorderStyle = BorderStyle.FixedSingle, Visible = false };
             rightPanel.Controls.Add(histogramPictureBox);
 
+            // Screenshot button
             Button btnScreenshot = new Button
             {
                 Text = "Take Screenshot",
@@ -924,23 +1236,8 @@ namespace CTSegmenter
             btnScreenshot.Click += (s, e) => mainForm.SaveScreenshot();
             rightPanel.Controls.Add(btnScreenshot);
 
-            table.Controls.Add(rightPanel, 1, 0);
-            RefreshMaterialList();
-
-            // Initialize the threshold slider as disabled
-            thresholdRangeSlider.Enabled = false;
-            numThresholdMin.Enabled = false;
-            numThresholdMax.Enabled = false;
-
-            brushOverlayTimer = new Timer { Interval = 500 };
-            brushOverlayTimer.Tick += (s, e) =>
-            {
-                mainForm.HideBrushOverlay();
-                brushOverlayTimer.Stop();
-            };
-            this.ActiveControl = menuStrip;
+            return rightPanel;
         }
-
         private void ToolsMenuItem_Click(object sender, EventArgs e)
         {
             // Uncheck all tool menu items.
@@ -1499,30 +1796,6 @@ namespace CTSegmenter
             statsForm.Show();
         }
 
-        private void AddPoreNetworkModelingMenu()
-        {
-            // Create menu item for Pore Network Modeling
-            ToolStripMenuItem poreNetworkMenuItem = new ToolStripMenuItem("Pore Network Modeling");
-
-            // Set click event handler
-            poreNetworkMenuItem.Click += (s, e) =>
-            {
-                if (mainForm.volumeData == null || mainForm.volumeLabels == null)
-                {
-                    MessageBox.Show("Please load a dataset first.", "No Data",
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-
-                // Create and show the pore network modeling form
-                PoreNetworkModelingForm poreNetworkForm = new PoreNetworkModelingForm(mainForm);
-                poreNetworkForm.Show();
-            };
-
-            // Add to Tools menu
-            toolsMenu.DropDownItems.Add(poreNetworkMenuItem);
-        }
-
         public void RefreshMaterialList()
         {
             lstMaterials.Items.Clear();
@@ -1537,130 +1810,7 @@ namespace CTSegmenter
                 lstMaterials.SelectedIndex = 0;
         }
 
-        private void AddSimulationMenu()
-        {
-            // Create the Simulation menu
-            simulationMenu = new ToolStripMenuItem("Simulation");
-
-            // Create Pore Network Modeling menu item
-            ToolStripMenuItem poreNetworkMenuItem = new ToolStripMenuItem("Pore Network Modeling");
-
-            // Set click event handler with updated logic
-            poreNetworkMenuItem.Click += (s, e) =>
-            {
-                if (mainForm.volumeData == null || mainForm.volumeLabels == null)
-                {
-                    // Instead of showing an error, ask if the user wants to load a saved model
-                    DialogResult result = MessageBox.Show(
-                        "No dataset is currently loaded. Would you like to load a saved pore network model file?",
-                        "Load Pore Network Model",
-                        MessageBoxButtons.YesNo,
-                        MessageBoxIcon.Question);
-
-                    if (result == DialogResult.Yes)
-                    {
-                        // Show file dialog to select a .dat file
-                        using (OpenFileDialog openDialog = new OpenFileDialog())
-                        {
-                            openDialog.Filter = "Pore Network Model|*.dat";
-                            openDialog.Title = "Load Pore Network Model";
-
-                            if (openDialog.ShowDialog() == DialogResult.OK)
-                            {
-                                try
-                                {
-                                    // Create and show the pore network modeling form with the selected file
-                                    PoreNetworkModelingForm poreNetworkForm = new PoreNetworkModelingForm(mainForm, openDialog.FileName);
-                                    poreNetworkForm.Show();
-                                }
-                                catch (Exception ex)
-                                {
-                                    MessageBox.Show($"Error loading pore network model: {ex.Message}",
-                                        "Loading Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                                    Logger.Log($"[ControlForm] Error loading pore network model: {ex.Message}");
-                                }
-                            }
-                        }
-                    }
-                }
-                else
-                {
-                    // Create and show the pore network modeling form with dataset as before
-                    PoreNetworkModelingForm poreNetworkForm = new PoreNetworkModelingForm(mainForm);
-                    poreNetworkForm.Show();
-                }
-            };
-
-            // Add to Simulation menu
-            simulationMenu.DropDownItems.Add(poreNetworkMenuItem);
-            AddAcousticSimulationToMenu();
-        }
-        private void AddAcousticSimulationToMenu()
-        {
-            // Create Acoustic Simulation menu item
-            ToolStripMenuItem acousticSimulationMenuItem = new ToolStripMenuItem("Acoustic Simulation");
-
-            // Set click event handler
-            acousticSimulationMenuItem.Click += (s, e) =>
-            {
-                try
-                {
-                    // Create and show the acoustic simulation form
-                    AcousticSimulationForm acousticSimulationForm = new AcousticSimulationForm(mainForm);
-                    acousticSimulationForm.Show();
-                    Logger.Log("[ControlForm] Opened Acoustic Simulation form");
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"Error opening Acoustic Simulation form: {ex.Message}",
-                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    Logger.Log($"[ControlForm] Error opening Acoustic Simulation form: {ex.Message}");
-                }
-            };
-
-            // Add to Simulation menu
-            if (simulationMenu != null)
-            {
-                simulationMenu.DropDownItems.Add(acousticSimulationMenuItem);
-            }
-        }
-        private void AddStressAnalysisToMenu()
-        {
-            // Create Stress Analysis menu item
-            stressAnalysisMenuItem = new ToolStripMenuItem("Stress Analysis");
-
-            // Set click event handler
-            stressAnalysisMenuItem.Click += (s, e) =>
-            {
-                if (mainForm.volumeData == null || mainForm.volumeLabels == null)
-                {
-                    MessageBox.Show("Please load a dataset first to perform stress analysis.",
-                        "No Dataset", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-
-                try
-                {
-                    // Create and show the stress analysis form
-                    StressAnalysisForm stressAnalysisForm = new StressAnalysisForm(mainForm);
-                    stressAnalysisForm.Show();
-                    Logger.Log("[ControlForm] Opened Stress Analysis form");
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"Error opening Stress Analysis form: {ex.Message}",
-                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    Logger.Log($"[ControlForm] Error opening Stress Analysis form: {ex.Message}");
-                }
-            };
-
-            // Add to Simulation menu (make sure simulationMenu exists)
-            if (simulationMenu != null)
-            {
-                simulationMenu.DropDownItems.Add(stressAnalysisMenuItem);
-            }
-        }
-
+        
         private void OnMergeMaterial()
         {
             int idxTarget = lstMaterials.SelectedIndex;

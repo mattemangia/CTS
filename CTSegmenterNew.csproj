@@ -170,6 +170,12 @@
     </Compile>
     <Compile Include="Modules\StressAnalysis\StressAnalysisFormExtension.cs" />
     <Compile Include="Modules\StressAnalysis\TriaxialSimulation.cs" />
+    <Compile Include="Modules\Triaxial_Simulation\TriaxialSimulationForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Modules\Triaxial_Simulation\TriaxialSimulator.cs" />
+    <Compile Include="Modules\Triaxial_Simulation\TriaxialSimulatorExtension.cs" />
+    <Compile Include="Modules\Triaxial_Simulation\TriaxialSimulatorGPU.cs" />
     <Compile Include="UI\CancellableProgressForm.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -193,6 +199,7 @@
     </Compile>
     <Compile Include="IO\FileOperations.cs" />
     <Compile Include="Interfaces\IVolumeData.cs" />
+    <Compile Include="VolumeOperations\LabelVolumeDataArray.cs" />
     <Compile Include="VolumeOperations\LabelVolumeHelper.cs" />
     <Compile Include="Modules\MaterialStatistics\MaterialStatistics.cs" />
     <Compile Include="Modules\MaterialStatistics\MaterialStatisticsForm.cs">

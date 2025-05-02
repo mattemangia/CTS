@@ -2809,71 +2809,8 @@ namespace CTSegmenter
                               MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
-        private WaveFieldSnapshot GetWaveFieldSnapshot(bool ident = false)
-        {
-            // Try to get active simulator data
-            if (usingGpuSimulator && gpuSimulator != null)
-            {
-                var tuple = gpuSimulator.GetWaveFieldSnapshot();
-                return new WaveFieldSnapshot { vx = tuple.vx, vy = tuple.vy, vz = tuple.vz };
-            }
-            else if (cpuSimulator != null)
-            {
-                var tuple = cpuSimulator.GetWaveFieldSnapshot();
-                return new WaveFieldSnapshot { vx = tuple.vx, vy = tuple.vy, vz = tuple.vz };
-            }
-
-            // If no active simulator, create a simple wave field based on simulation results
-            // This is for visualizing completed simulations
-            int width = mainForm.GetWidth();
-            int height = mainForm.GetHeight();
-            int depth = mainForm.GetDepth();
-
-            double[,,] vx = new double[width, height, depth];
-            double[,,] vy = new double[width, height, depth];
-            double[,,] vz = new double[width, height, depth];
-
-            // Create a wave field pattern focused around the path between TX and RX
-            Parallel.For(0, depth, z => {
-                for (int y = 0; y < height; y++)
-                {
-                    for (int x = 0; x < width; x++)
-                    {
-                        // Skip voxels not in the material
-                        if (mainForm.volumeLabels[x, y, z] != selectedMaterialID)
-                            continue;
-
-                        // Calculate distance to TX-RX line
-                        double t = CalculateProjectionOnLine(tx, ty, tz, rx, ry, rz, x, y, z);
-                        t = Math.Max(0, Math.Min(1, t)); // Clamp to [0,1]
-
-                        double px = tx + t * (rx - tx);
-                        double py = ty + t * (ry - ty);
-                        double pz = tz + t * (rz - tz);
-
-                        double distToLine = Math.Sqrt(
-                            (x - px) * (x - px) + (y - py) * (y - py) + (z - pz) * (z - pz));
-
-                        // Create a wave-like pattern that decreases with distance from the line
-                        if (distToLine < 20)
-                        {
-                            double falloff = Math.Exp(-distToLine / 5.0);
-                            double wave = Math.Sin(t * 10) * falloff * 0.01;
-
-                            // For P-wave (vx), create a pattern along the TX-RX direction
-                            vx[x, y, z] = wave;
-
-                            // For S-wave (vy, vz), create patterns perpendicular to the TX-RX direction
-                            vy[x, y, z] = Math.Cos(t * 8) * falloff * 0.008;
-                            vz[x, y, z] = Math.Sin(t * 8) * falloff * 0.008;
-                        }
-                    }
-                }
-            });
-
-            return new WaveFieldSnapshot { vx = vx, vy = vy, vz = vz };
-        }
-
+       
+       
         private double CalculateProjectionOnLine(int x1, int y1, int z1, int x2, int y2, int z2, int px, int py, int pz)
         {
             double dx = x2 - x1;
@@ -2887,19 +2824,6 @@ namespace CTSegmenter
             double t = ((px - x1) * dx + (py - y1) * dy + (pz - z1) * dz) / lengthSq;
 
             return t;
-        }
-
-        private double[,,] ConvertToDouble(float[,,] src)
-        {
-            int w = src.GetLength(0), h = src.GetLength(1), d = src.GetLength(2);
-            double[,,] dst = new double[w, h, d];
-
-            for (int z = 0; z < d; z++)
-                for (int y = 0; y < h; y++)
-                    for (int x = 0; x < w; x++)
-                        dst[x, y, z] = src[x, y, z];
-
-            return dst;
         }
 
         private void UpdateResultsDisplay()
@@ -3065,16 +2989,26 @@ namespace CTSegmenter
                         SWaveTravelTime = sWaveTravelTime
                     };
 
-                    // Store wave field data for visualization
-                    WaveFieldSnapshot snapshot = new WaveFieldSnapshot
+                    // Store wave field data for visualization - THIS IS THE KEY FIX
+                    cachedPWaveField = ConvertToFloat(vxData);
+                    cachedSWaveField = ConvertToFloat(vyData);
+                    cachedTotalTimeSteps = pWaveTravelTime + sWaveTravelTime;
+
+                    // Enable the visualizer button
+                    foreach (ToolStripItem item in toolStrip.Items)
                     {
-                        vx = vxData,
-                        vy = vyData,
-                        vz = vzData
-                    };
+                        if (item.ToolTipText == "Open Visualizer")
+                        {
+                            item.Enabled = true;
+                            break;
+                        }
+                    }
 
                     // Update UI with loaded results
                     UpdateResultsDisplay();
+
+                    // Initialize velocity field for visualization
+                    InitializeVelocityField();
 
                     MessageBox.Show("Simulation loaded successfully.", "Load Complete",
                                   MessageBoxButtons.OK, MessageBoxIcon.Information);

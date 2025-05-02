@@ -814,8 +814,8 @@ namespace CTSegmenter
                 try
                 {
                     // Create and show the triaxial simulation form
-                    CTSegmenter.Modules.Triaxial_Simulation.TriaxialSimulationForm triaxialSimulationForm =
-                        new CTSegmenter.Modules.Triaxial_Simulation.TriaxialSimulationForm(mainForm);
+                    TriaxialSimulationForm triaxialSimulationForm =
+                        new TriaxialSimulationForm(mainForm);
                     triaxialSimulationForm.Show();
                     Logger.Log("[ControlForm] Opened Triaxial Simulation form");
                 }

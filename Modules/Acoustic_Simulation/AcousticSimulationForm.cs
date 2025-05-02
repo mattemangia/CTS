@@ -2307,20 +2307,56 @@ namespace CTSegmenter
                 return cpuSimulator.GetWaveFieldSnapshot();
             }
 
-            // If no active simulator, create a simple wave field based on simulation results
-            int width = mainForm.GetWidth();
-            int height = mainForm.GetHeight();
-            int depth = mainForm.GetDepth();
+            // Check if we have cached wave field data from a loaded file - THIS IS THE FIX
+            if (cachedPWaveField != null && cachedSWaveField != null)
+            {
+                // Convert cached float arrays back to double
+                int volumeWidth = mainForm.GetWidth();
+                int volumeHeight = mainForm.GetHeight();
+                int volumeDepth = mainForm.GetDepth();
 
-            double[,,] vx = new double[width, height, depth];
-            double[,,] vy = new double[width, height, depth];
-            double[,,] vz = new double[width, height, depth];
+                double[,,] fieldVx = new double[volumeWidth, volumeHeight, volumeDepth];
+                double[,,] fieldVy = new double[volumeWidth, volumeHeight, volumeDepth];
+                double[,,] fieldVz = new double[volumeWidth, volumeHeight, volumeDepth];
+
+                // Copy data from cached fields
+                for (int z = 0; z < volumeDepth; z++)
+                    for (int y = 0; y < volumeHeight; y++)
+                        for (int x = 0; x < volumeWidth; x++)
+                        {
+                            if (x < cachedPWaveField.GetLength(0) &&
+                                y < cachedPWaveField.GetLength(1) &&
+                                z < cachedPWaveField.GetLength(2))
+                            {
+                                fieldVx[x, y, z] = cachedPWaveField[x, y, z];
+                            }
+
+                            if (x < cachedSWaveField.GetLength(0) &&
+                                y < cachedSWaveField.GetLength(1) &&
+                                z < cachedSWaveField.GetLength(2))
+                            {
+                                fieldVy[x, y, z] = cachedSWaveField[x, y, z];
+                            }
+                            // fieldVz stays zero
+                        }
+
+                return (fieldVx, fieldVy, fieldVz);
+            }
+
+            // If no active simulator or cached data, create a simple wave field
+            int w = mainForm.GetWidth();
+            int h = mainForm.GetHeight();
+            int d = mainForm.GetDepth();
+
+            double[,,] resultVx = new double[w, h, d];
+            double[,,] resultVy = new double[w, h, d];
+            double[,,] resultVz = new double[w, h, d];
 
             // Create a wave field pattern focused around the path between TX and RX
-            Parallel.For(0, depth, z => {
-                for (int y = 0; y < height; y++)
+            Parallel.For(0, d, z => {
+                for (int y = 0; y < h; y++)
                 {
-                    for (int x = 0; x < width; x++)
+                    for (int x = 0; x < w; x++)
                     {
                         // Skip voxels not in the material
                         if (mainForm.volumeLabels[x, y, z] != selectedMaterialID)
@@ -2344,17 +2380,17 @@ namespace CTSegmenter
                             double wave = Math.Sin(t * 10) * falloff * 0.01;
 
                             // For P-wave (vx), create a pattern along the TX-RX direction
-                            vx[x, y, z] = wave;
+                            resultVx[x, y, z] = wave;
 
                             // For S-wave (vy, vz), create patterns perpendicular to the TX-RX direction
-                            vy[x, y, z] = Math.Cos(t * 8) * falloff * 0.008;
-                            vz[x, y, z] = Math.Sin(t * 8) * falloff * 0.008;
+                            resultVy[x, y, z] = Math.Cos(t * 8) * falloff * 0.008;
+                            resultVz[x, y, z] = Math.Sin(t * 8) * falloff * 0.008;
                         }
                     }
                 }
             });
 
-            return (vx, vy, vz);
+            return (resultVx, resultVy, resultVz);
         }
         private void DrawWavePropagation(Graphics g, VolumeRenderer renderer)
         {

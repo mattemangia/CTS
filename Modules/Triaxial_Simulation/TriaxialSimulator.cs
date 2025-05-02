@@ -110,6 +110,8 @@ namespace CTSegmenter
         private volatile bool simulationPaused = false;
         private List<double> strainHistory = new List<double>();
         private List<double> stressHistory = new List<double>();
+        public List<double> StrainHistory => strainHistory;
+        public List<double> StressHistory => stressHistory;
         private readonly double failureThreshold = 0.75; // Damage threshold to detect material failure
         // Events
         public event EventHandler<TriaxialSimulationProgressEventArgs> ProgressUpdated;

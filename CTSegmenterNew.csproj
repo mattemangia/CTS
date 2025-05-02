@@ -117,6 +117,7 @@
     </Compile>
     <Compile Include="Misc\FastBitmap.cs" />
     <Compile Include="Misc\MaterialDensityLibrary.cs" />
+    <Compile Include="Misc\Matrix3DProjection.cs" />
     <Compile Include="Misc\MeshGenerator.cs" />
     <Compile Include="Misc\MiscUtils.cs" />
     <Compile Include="Misc\OrthogonalViewPanel.cs">
@@ -146,7 +147,7 @@
     <Compile Include="Modules\Acoustic_Simulation\ToolbarExtension.cs">
       <SubType>Form</SubType>
     </Compile>
-    <Compile Include="Modules\Acoustic_Simulation\VolumeRenderer.cs" />
+    <Compile Include="Misc\VolumeRenderer.cs" />
     <Compile Include="Modules\ArtificialIntelligence\GroundingDINO\DirectSAM.cs" />
     <Compile Include="Modules\ArtificialIntelligence\GroundingDINO\GroundingDINODetector.cs" />
     <Compile Include="Modules\ArtificialIntelligence\MicroSAM\MicroSAM.cs" />
@@ -176,6 +177,8 @@
     <Compile Include="Modules\Triaxial_Simulation\TriaxialSimulator.cs" />
     <Compile Include="Modules\Triaxial_Simulation\TriaxialSimulatorExtension.cs" />
     <Compile Include="Modules\Triaxial_Simulation\TriaxialSimulatorGPU.cs" />
+    <Compile Include="Modules\Triaxial_Simulation\TriaxialVisualizationAdapter.cs" />
+    <Compile Include="Modules\Triaxial_Simulation\TriaxialVisualizationExtension.cs" />
     <Compile Include="UI\CancellableProgressForm.cs">
       <SubType>Form</SubType>
     </Compile>

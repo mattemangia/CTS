@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using ILGPU;
 using ILGPU.Runtime;
+using ILGPU.Algorithms;
 using ILGPU.Runtime.CPU;
 using ILGPU.Runtime.Cuda;
 using ILGPU.Runtime.OpenCL;
@@ -157,7 +158,7 @@ namespace CTSegmenter
         private void InitGpu()
         {
             Logger.Log("[GPUTriaxialSimulator] Initializing GPU");
-            _context = Context.Create(builder => builder.Cuda().OpenCL().CPU());
+            _context = Context.Create(builder => builder.Cuda().OpenCL().CPU().EnableAlgorithms());
             var device = _context.Devices.FirstOrDefault(d => d.AcceleratorType == AcceleratorType.Cuda)
                          ?? _context.Devices.First();
             _accelerator = device.CreateAccelerator(_context);

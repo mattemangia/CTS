@@ -13,17 +13,20 @@ using MessageBox = System.Windows.Forms.MessageBox;
 using Size = System.Drawing.Size;
 using System.Linq;
 using MediaFoundation.OPM;
+using System.Reflection;
 
 namespace CTSegmenter
 {
     public partial class TriaxialSimulationForm : KryptonForm, IMaterialDensityProvider
     {
+        private TriaxialResultsExtension resultsExtension;
         private bool isInitializing = true;
         private MainForm mainForm;
         private Material selectedMaterial;
         private double baseDensity = 0.0; // in kg/m³
         private bool hasDensityVariation = false;
         private byte selectedMaterialID = 0;
+        private KryptonCheckBox chkDebugMode;
 
         // Volume visualization
         private float[,,] densityVolume; // Stores density values for each voxel
@@ -101,6 +104,10 @@ namespace CTSegmenter
         private double peakStress = 0;
         private int failureStep = -1;
         private bool failureDetected = false;
+
+        // damage array
+        private double[,,] damage;
+        public double[,,] DamageData => damage;
 
         public TriaxialSimulationForm(MainForm mainForm)
         {
@@ -1572,7 +1579,22 @@ namespace CTSegmenter
             chkUseGPU.Width = controlWidth - 20;
             chkUseGPU.Enabled = false;
             controlPanel.Controls.Add(chkUseGPU);
-
+            currentY += verticalSpacing;
+            chkDebugMode = new KryptonCheckBox();
+            this.chkDebugMode.Text = "Debug Mode (Fast Failure)";
+            this.chkDebugMode.AutoSize = true;
+            this.chkDebugMode.Location = new Point(nudCohesion.Left, nudCohesion.Bottom + 10);
+            this.chkDebugMode.Checked = false;
+            this.chkDebugMode.ForeColor = Color.Red;
+            this.chkDebugMode.CheckedChanged += (s, e) => {
+                if (chkDebugMode.Checked)
+                {
+                    Logger.Log("Debug mode enabled: Accelerated damage and lower thresholds.\n" +
+                                    "This is for TESTING ONLY - not realistic material behavior."+
+                                    " !!!Debug Mode!!!");
+                }
+            };
+            controlPanel.Controls.Add(chkDebugMode);
             currentY += verticalSpacing;
 
             // Buttons
@@ -1962,51 +1984,26 @@ namespace CTSegmenter
             tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
             tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
 
-            // Create chart for stress-strain curve
-            chart = new Chart();
-            chart.Dock = DockStyle.Fill;
-            chart.BackColor = Color.FromArgb(40, 40, 40);
-            chart.ForeColor = Color.White;
-            chart.AntiAliasing = AntiAliasingStyles.All;
-            chart.TextAntiAliasingQuality = TextAntiAliasingQuality.High;
-
-            ChartArea ca = new ChartArea("CA");
-            ca.BackColor = Color.FromArgb(50, 50, 50);
-            ca.AxisX.LabelStyle.ForeColor = Color.White;
-            ca.AxisY.LabelStyle.ForeColor = Color.White;
-            ca.AxisX.LineColor = Color.White;
-            ca.AxisY.LineColor = Color.White;
-            ca.AxisX.MajorGrid.LineColor = Color.FromArgb(70, 70, 70);
-            ca.AxisY.MajorGrid.LineColor = Color.FromArgb(70, 70, 70);
-            ca.AxisX.Title = "Axial Strain";
-            ca.AxisY.Title = "Axial Stress (MPa)";
-            ca.AxisX.TitleForeColor = Color.White;
-            ca.AxisY.TitleForeColor = Color.White;
-            chart.ChartAreas.Add(ca);
-
-            Series series = new Series("Curve");
-            series.ChartType = SeriesChartType.Line;
-            series.Color = Color.LightGreen;
-            series.BorderWidth = 2;
-            chart.Series.Add(series);
-
-            // Add chart to layout
-            tl.Controls.Add(chart, 0, 0);
-
-            // Create progress bar
+            // Create the progress bar
             progressBar = new KryptonProgressBar();
             progressBar.Dock = DockStyle.Fill;
             progressBar.Minimum = 0;
             progressBar.Maximum = 100;
             progressBar.Value = 0;
-            tl.Controls.Add(progressBar, 0, 1);
 
-            // Create status label
+            // Create the status label
             lblStatus = new KryptonLabel();
             lblStatus.Text = "Ready";
             lblStatus.Dock = DockStyle.Fill;
             lblStatus.StateCommon.ShortText.Color1 = Color.White;
+
+            // Add controls to layout
+            tl.Controls.Add(progressBar, 0, 1);
             tl.Controls.Add(lblStatus, 0, 2);
+
+            // Create the results extension
+            resultsExtension = new TriaxialResultsExtension(this);
+            resultsExtension.Initialize(tabResults);
 
             // Add the layout to the tab
             tabResults.Controls.Add(tl);
@@ -2059,7 +2056,7 @@ namespace CTSegmenter
                 MessageBox.Show("No data loaded.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
-
+            InitializeDamageArray();
             // Ensure we have a valid density volume
             if (densityVolume == null)
             {
@@ -2096,14 +2093,14 @@ namespace CTSegmenter
             // Fewer time steps per increment to maintain reasonable performance
             int stepsPerIncrement = 5; // Reduced from 200 to 5
 
-            double E = (double)nudE.Value * 1000; // Convert GPa to MPa
+            double E = (double)nudE.Value; // Keep as GPa - simulator will convert
             double nu = (double)nudNu.Value;
             bool ue = chkElastic.Checked;
             bool up = chkPlastic.Checked;
             bool ub = chkBrittle.Checked;
-            double ts = (double)nudTensile.Value;
+            double ts = (double)nudTensile.Value; // Keep as MPa - simulator will convert
             double phi = (double)nudFriction.Value;
-            double co = (double)nudCohesion.Value;
+            double co = (double)nudCohesion.Value; // Keep as MPa - simulator will convert
             bool useGpu = chkUseGPU.Checked && chkUseGPU.Enabled;
 
             // Initialize or update the triaxial visualization with current parameters
@@ -2120,7 +2117,6 @@ namespace CTSegmenter
             }
 
             // Reset UI state
-            chart.Series["Curve"].Points.Clear();
             stressStrainCurve.Clear();
             progressBar.Value = 0;
             lblStatus.Text = "Starting simulation with " + pressureIncrements + " pressure increments...";
@@ -2143,7 +2139,7 @@ namespace CTSegmenter
 
             // Log density information for debugging
             LogDensityStatistics(matID);
-
+            bool debugMode = chkDebugMode.Checked;
             if (useGpu)
             {
                 // GPU simulation code
@@ -2164,7 +2160,7 @@ namespace CTSegmenter
                     matID,
                     E, nu,
                     ue, up, ub,
-                    ts, phi, co
+                    ts, phi, co, debugMode
                 );
 
                 gpuSim.ProgressUpdated += OnProgress;
@@ -2190,7 +2186,7 @@ namespace CTSegmenter
                     ue, up, ub,
                     ts, phi, co,
                     E, nu,
-                    stepsPerIncrement
+                    stepsPerIncrement, debugMode
                 );
 
                 cpuSim.ProgressUpdated += OnProgress;
@@ -2254,12 +2250,19 @@ namespace CTSegmenter
             // Get current strain and stress from active simulator
             double currentStrain = GetCurrentStrain();
             double currentStress = GetCurrentStress();
-
+            UpdateDamageData();
             // Store data point
             stressStrainCurve.Add(new PointF((float)currentStrain, (float)currentStress));
 
-            // Add point to chart
-            chart.Series["Curve"].Points.AddXY(currentStrain, currentStress);
+            // Update result extension with current data
+            resultsExtension?.UpdateData(
+                stressStrainCurve,
+                stressStrainCurve.Count > 0 ? stressStrainCurve.Max(p => p.Y) : 0,
+                currentStrain,
+                failureDetected,
+                failureStep,
+                damage // This is the damage field array from the simulator
+            );
 
             // Update progress indicators
             progressBar.Value = e.Percent;
@@ -2279,6 +2282,61 @@ namespace CTSegmenter
             // Update simulation visualization
             pictureBoxSimulation.Invalidate();
         }
+        private void UpdateDamageData()
+        {
+            try
+            {
+                // Handle CPU simulator
+                if (cpuSim != null)
+                {
+                    // Use reflection to access the private damage field
+                    FieldInfo damageField = typeof(TriaxialSimulator).GetField("damage",
+                        BindingFlags.NonPublic | BindingFlags.Instance);
+
+                    if (damageField != null)
+                    {
+                        double[,,] simulatorDamage = (double[,,])damageField.GetValue(cpuSim);
+                        if (simulatorDamage != null)
+                        {
+                            // Copy the damage data
+                            Array.Copy(simulatorDamage, damage, damage.Length);
+                        }
+                    }
+                }
+                // Handle GPU simulator
+                else if (gpuSim != null)
+                {
+                    // Copy damage data from GPU simulator
+                    // We need to fetch it from device memory first
+                    MethodInfo copyToCPUMethod = gpuSim.GetType().GetMethod("CopyDamageToCPU",
+                        BindingFlags.NonPublic | BindingFlags.Instance);
+
+                    if (copyToCPUMethod != null)
+                    {
+                        copyToCPUMethod.Invoke(gpuSim, new object[] { damage });
+                    }
+                    else
+                    {
+                        // Alternative: access _damage field directly using reflection
+                        FieldInfo damageField = gpuSim.GetType().GetField("_damage",
+                            BindingFlags.NonPublic | BindingFlags.Instance);
+
+                        if (damageField != null)
+                        {
+                            double[,,] gpuDamage = (double[,,])damageField.GetValue(gpuSim);
+                            if (gpuDamage != null)
+                            {
+                                Array.Copy(gpuDamage, damage, damage.Length);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[TriaxialSimulationForm] Error updating damage data: {ex.Message}");
+            }
+        }
         private void OnFailure(object sender, FailureDetectedEventArgs e)
         {
             Logger.Log($"[TriaxialSimulationForm] Failure at step {e.CurrentStep}");
@@ -2288,7 +2346,7 @@ namespace CTSegmenter
                 Invoke((Action)(() => OnFailure(sender, e)));
                 return;
             }
-
+            UpdateDamageData();
             btnPause.Enabled = false;
             btnContinue.Visible = true;
             lblStatus.Text = "Failure detected — click Continue or Cancel";
@@ -2301,18 +2359,15 @@ namespace CTSegmenter
             {
                 peakStress = stressStrainCurve.Max(p => p.Y);
 
-                // Mark the peak stress point on the chart
-                for (int i = 0; i < stressStrainCurve.Count; i++)
-                {
-                    if (Math.Abs(stressStrainCurve[i].Y - peakStress) < 0.001)
-                    {
-                        var dataPoint = chart.Series["Curve"].Points[i];
-                        dataPoint.MarkerSize = 8;
-                        dataPoint.MarkerStyle = MarkerStyle.Circle;
-                        dataPoint.MarkerColor = Color.Red;
-                        break;
-                    }
-                }
+                // Update results extension with failure data
+                resultsExtension?.UpdateData(
+                    stressStrainCurve,
+                    peakStress,
+                    e.CurrentStrain,
+                    failureDetected,
+                    failureStep,
+                    damage // This is the damage field array from the simulator
+                );
             }
 
             // Update simulation visualization
@@ -2328,7 +2383,7 @@ namespace CTSegmenter
                 Invoke((Action)(() => OnComplete(sender, e)));
                 return;
             }
-
+            UpdateDamageData();
             simulationRunning = false;
             simulationPaused = false;
             btnPause.Enabled = btnCancel.Enabled = false;
@@ -2342,30 +2397,25 @@ namespace CTSegmenter
             // Update chart with final data if available
             if (e.AxialStrain.Length > 0 && e.AxialStress.Length > 0)
             {
-                chart.Series["Curve"].Points.Clear();
                 stressStrainCurve.Clear();
 
                 for (int i = 0; i < e.AxialStrain.Length; i++)
                 {
                     stressStrainCurve.Add(new PointF((float)e.AxialStrain[i], (float)e.AxialStress[i]));
-                    chart.Series["Curve"].Points.AddXY(e.AxialStrain[i], e.AxialStress[i]);
                 }
 
                 // Store peak stress
                 peakStress = e.PeakStress;
 
-                // Mark peak stress point
-                if (e.PeakStress > 0)
-                {
-                    int peakIndex = Array.IndexOf(e.AxialStress, e.PeakStress);
-                    if (peakIndex >= 0)
-                    {
-                        var dataPoint = chart.Series["Curve"].Points[peakIndex];
-                        dataPoint.MarkerSize = 8;
-                        dataPoint.MarkerStyle = MarkerStyle.Circle;
-                        dataPoint.MarkerColor = Color.Red;
-                    }
-                }
+                // Update results extension with final data
+                resultsExtension?.UpdateData(
+                    stressStrainCurve,
+                    peakStress,
+                    e.PeakStrain,
+                    failureDetected,
+                    failureStep,
+                    damage 
+                );
             }
 
             lblStatus.Text = e.FailureDetected
@@ -2508,7 +2558,35 @@ namespace CTSegmenter
             }
             return bmp;
         }
+        public Point3D FindMaxDamagePoint()
+        {
+            if (damage == null)
+                return new Point3D(0, 0, 0);
 
+            double maxDamage = 0.0;
+            int maxX = 0, maxY = 0, maxZ = 0;
+            byte materialID = selectedMaterialID;
+
+            // Find the point with maximum damage
+            for (int z = 0; z < mainForm.GetDepth(); z++)
+            {
+                for (int y = 0; y < mainForm.GetHeight(); y++)
+                {
+                    for (int x = 0; x < mainForm.GetWidth(); x++)
+                    {
+                        if (mainForm.volumeLabels[x, y, z] == materialID && damage[x, y, z] > maxDamage)
+                        {
+                            maxDamage = damage[x, y, z];
+                            maxX = x;
+                            maxY = y;
+                            maxZ = z;
+                        }
+                    }
+                }
+            }
+
+            return new Point3D(maxX, maxY, maxZ);
+        }
         private Image CreateStartIcon()
         {
             Bitmap bmp = new Bitmap(16, 16);
@@ -2811,6 +2889,37 @@ namespace CTSegmenter
             }
             return bmp;
         }
+        private void InitializeDamageArray()
+        {
+            try
+            {
+                if (mainForm.volumeLabels == null)
+                    return;
+
+                int width = mainForm.GetWidth();
+                int height = mainForm.GetHeight();
+                int depth = mainForm.GetDepth();
+
+                // Create the damage array if not already created or if dimensions changed
+                if (damage == null ||
+                    damage.GetLength(0) != width ||
+                    damage.GetLength(1) != height ||
+                    damage.GetLength(2) != depth)
+                {
+                    damage = new double[width, height, depth];
+                    Logger.Log($"[TriaxialSimulationForm] Initialized damage array with dimensions {width}x{height}x{depth}");
+                }
+
+                // Initialize all elements to zero
+                Array.Clear(damage, 0, damage.Length);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[TriaxialSimulationForm] Error initializing damage array: {ex.Message}");
+            }
+        }
+
+
         private byte[,,] CreateLabelVolumeArray()
         {
             int width = mainForm.GetWidth();
@@ -2984,6 +3093,7 @@ namespace CTSegmenter
 
                 // Dispose of managed resources
                 chart?.Dispose();
+                resultsExtension?.Dispose();
             }
             base.Dispose(disposing);
         }

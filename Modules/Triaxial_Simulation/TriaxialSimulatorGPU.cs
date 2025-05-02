@@ -29,11 +29,21 @@ namespace CTSegmenter
         public byte MaterialID;
         public double FailureThreshold, Damping;
         public int StressAxis; // 0=X, 1=Y, 2=Z
+        public bool DebugMode; 
     }
 
     public class TriaxialSimulatorGPU : IDisposable
     {
         #region Fields and Properties
+        // ─── CPU-side copies of GPU buffers (updated every N steps) ────────────────
+        private float[] _damageHost;     // 1-D flattening of (X*Y*Z)
+        private ushort[] _labelsHost;
+        private float[] _densityHost;
+
+        // selected material id & reference density (set in ctor)
+        private readonly byte _selectedMaterialID;
+        private readonly float _refRho;              // ρ₀  (kg m-3)
+
         private Context _context;
         private Accelerator _accelerator;
         private readonly int _width, _height, _depth;
@@ -91,7 +101,7 @@ namespace CTSegmenter
         public event EventHandler<TriaxialSimulationProgressEventArgs> ProgressUpdated;
         public event EventHandler<TriaxialSimulationCompleteEventArgs> SimulationCompleted;
         public event EventHandler<FailureDetectedEventArgs> FailureDetected;
-
+        private readonly bool _debugMode;
         // Properties to match CPU simulator API
         public double CurrentStrain => _currentStrain;
         public double CurrentStress => _currentStress;
@@ -107,7 +117,7 @@ namespace CTSegmenter
             double youngsModulusMPa,
             double poissonRatio,
             bool useElastic, bool usePlastic, bool useBrittle,
-            double tensileMPa, double frictionAngleDeg, double cohesionMPa)
+            double tensileMPa, double frictionAngleDeg, double cohesionMPa, bool debugMode = false)
         {
             Logger.Log("[GPUTriaxialSimulator] Constructor start");
             _width = width;
@@ -117,7 +127,17 @@ namespace CTSegmenter
             _labels = labels;
             _density = density;
             _matID = materialID;
+            // Initialize host arrays for damage checking
+            int totalSize = width * height * depth;
+            _damageHost = new float[totalSize];
+            _labelsHost = new ushort[totalSize];
+            _densityHost = new float[totalSize];
 
+            // Store material ID specifically for failure check
+            _selectedMaterialID = materialID;
+
+            // Calculate reference density
+            _refRho = CalculateReferenceRho(labels, density, materialID);
             // Pre-alloc host arrays
             _vx = new double[_width, _height, _depth];
             _vy = new double[_width, _height, _depth];
@@ -149,12 +169,34 @@ namespace CTSegmenter
                 ConfiningPressure = 0.0,
                 UseModelFlags = (byte)((useElastic ? 1 : 0) | (usePlastic ? 2 : 0) | (useBrittle ? 4 : 0))
             };
-
+            _debugMode = debugMode;
+            Logger.Log($"[GPUTriaxialSimulator] Debug mode: {debugMode}");
             _cts = new CancellationTokenSource();
             InitGpu();
             Logger.Log("[GPUTriaxialSimulator] Constructor end");
         }
+        private float CalculateReferenceRho(byte[,,] labels, float[,,] density, byte matID)
+        {
+            double sum = 0;
+            int count = 0;
 
+            for (int z = 0; z < _depth; z++)
+            {
+                for (int y = 0; y < _height; y++)
+                {
+                    for (int x = 0; x < _width; x++)
+                    {
+                        if (labels[x, y, z] == matID && density[x, y, z] > 0)
+                        {
+                            sum += density[x, y, z];
+                            count++;
+                        }
+                    }
+                }
+            }
+
+            return count > 0 ? (float)(sum / count) : 2500.0f; // Default to typical rock density
+        }
         private void InitGpu()
         {
             Logger.Log("[GPUTriaxialSimulator] Initializing GPU");
@@ -170,6 +212,7 @@ namespace CTSegmenter
             _dispKernel = _accelerator.LoadAutoGroupedStreamKernel<Index3D, Kernels.DisplacementArgs>(Kernels.UpdateDisplacement);
             _boundaryKernel = _accelerator.LoadAutoGroupedStreamKernel<Index3D, Kernels.BoundaryArgs>(Kernels.ApplyBoundaryConditions);
             _initKernel = _accelerator.LoadAutoGroupedStreamKernel<Index3D, Kernels.InitializeArgs>(Kernels.InitializeFields);
+            
 
             var extent = new Index3D(_width, _height, _depth);
             _dLabels = _accelerator.Allocate3DDenseXY<byte>(extent);
@@ -666,12 +709,16 @@ namespace CTSegmenter
                 }
 
                 // Check for failure every few steps
-                if (step % 5 == 0 && (_matParams.UseModelFlags & 4) != 0 && !_failureDetected)
+                if (step % 5 == 0 && !_failureDetected)
                 {
+                    // UpdateHostArraysFromDevice is now called inside CheckForFailure
                     if (CheckForFailure())
                     {
                         _failureDetected = true;
                         _failureStep = incrementNumber;
+
+                        // Add more detailed logging
+                        Logger.Log($"[GPUTriaxialSimulator] FAILURE DETECTED at step {incrementNumber}, stress={_currentStress:F2} MPa, strain={_currentStrain:F4}");
 
                         // Notify failure detected
                         var failureArgs = new FailureDetectedEventArgs(_currentStress, _currentStrain, incrementNumber, _pressureIncrements);
@@ -684,39 +731,84 @@ namespace CTSegmenter
             }
         }
 
+        // -----------------------------------------------------------------------------
+        //  CheckForFailure  (GPU version)
+        //  host routine called every few kernel steps after copying the three buffers
+        //  back from the device.  Density-weighted threshold:
+        //      Dcrit = 0.75 × ρ/ρ₀
+        // -----------------------------------------------------------------------------
         private bool CheckForFailure()
         {
-            // Copy damage field back to CPU for analysis
-            _dDamage.CopyToCPU(_damage);
+            // First update the host arrays
+            UpdateHostArraysFromDevice();
 
-            // Count severely damaged elements
-            int failedCount = 0;
-            int totalCount = 0;
-            double maxDamage = 0.0;
+            // Use lower threshold in debug mode
+            float baseCrit = _debugMode ? 0.15f : 0.75f;
 
-            for (int z = 0; z < _depth; z++)
+            // Add null safety check and logging
+            if (_damageHost == null || _labelsHost == null || _densityHost == null)
             {
-                for (int y = 0; y < _height; y++)
+                Logger.Log("[GPUTriaxialSimulator] ERROR: Host arrays are null in failure check!");
+                return false;
+            }
+
+            float rho0 = _refRho > 0 ? _refRho : 2500.0f; // Safety check
+            int voxelN = _damageHost.Length;
+
+            float maxDamage = 0.0f;
+            for (int i = 0; i < voxelN; i++)
+            {
+                if (_labelsHost[i] != _selectedMaterialID) continue;
+
+                float rho = Math.Max(100.0f, _densityHost[i]);
+                float crit = baseCrit * (rho / rho0);
+
+                maxDamage = Math.Max(maxDamage, _damageHost[i]);
+
+                if (_damageHost[i] > crit)
                 {
-                    for (int x = 0; x < _width; x++)
-                    {
-                        if (_labels[x, y, z] == _matID)
-                        {
-                            totalCount++;
-                            double damage = _damage[x, y, z];
-                            if (damage > _simParams.FailureThreshold)
-                            {
-                                failedCount++;
-                            }
-                            maxDamage = Math.Max(maxDamage, damage);
-                        }
-                    }
+                    Logger.Log($"[GPUTriaxialSimulator] {(_debugMode ? "DEBUG MODE" : "Normal mode")} " +
+                              $"Failure detected! Damage={_damageHost[i]}, Threshold={crit}");
+                    return true;
                 }
             }
 
-            // Consider failure if more than 10% of voxels are severely damaged
-            double failureRatio = (double)failedCount / totalCount;
-            return failureRatio > 0.1 || maxDamage > 0.9;
+            Logger.Log($"[GPUTriaxialSimulator] {(_debugMode ? "DEBUG MODE" : "Normal mode")} " +
+                      $"No failure yet. Max damage={maxDamage}");
+            return false;
+        }
+        private void UpdateHostArraysFromDevice()
+        {
+            try
+            {
+                // Copy damage array from GPU to CPU
+                _dDamage.CopyToCPU(_damage);
+
+                // Convert 3D arrays to 1D arrays for the failure check
+                int index = 0;
+                for (int z = 0; z < _depth; z++)
+                {
+                    for (int y = 0; y < _height; y++)
+                    {
+                        for (int x = 0; x < _width; x++)
+                        {
+                            if (index < _damageHost.Length)
+                            {
+                                _damageHost[index] = (float)_damage[x, y, z];
+                                _labelsHost[index] = _labels[x, y, z];
+                                _densityHost[index] = _density[x, y, z];
+                                index++;
+                            }
+                        }
+                    }
+                }
+
+                Logger.Log($"[GPUTriaxialSimulator] Updated host arrays: max damage = {_damageHost.Max()}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[GPUTriaxialSimulator] Error updating host arrays: {ex.Message}");
+            }
         }
 
         private void UpdateCurrentStrainAndStress(double targetPressureMPa)
@@ -797,8 +889,13 @@ namespace CTSegmenter
             // Compressive strain is positive in geomechanics convention
             _currentStrain = -avgDisp / _initialSampleSize;
 
-            // Use target pressure for stress for now (could measure actual stress instead)
-            _currentStress = targetPressureMPa;
+
+            // Compute average axial stress on the loaded boundary
+            double sig = 0; int n = 0;
+            for (int y = 0; y < _height; ++y)
+                for (int x = 0; x < _width; ++x)
+                    if (_labels[x, y, _maxPos] == _matID) { sig += _szz[x, y, _maxPos]; n++; }
+            _currentStress = -(sig / n) / 1e6;   // MPa, compression positive
         }
 
         private void FinalizeSimulation()
@@ -825,21 +922,82 @@ namespace CTSegmenter
             // Notify completion
             SimulationCompleted?.Invoke(this, resultArgs);
         }
+        /// <summary>
+        /// Copy damage data from GPU to CPU for visualization
+        /// </summary>
+        /// <param name="destArray">Destination array to receive damage data</param>
+        public void CopyDamageToCPU(double[,,] destinationArray)
+        {
+            if (destinationArray == null ||
+                destinationArray.GetLength(0) != _width ||
+                destinationArray.GetLength(1) != _height ||
+                destinationArray.GetLength(2) != _depth)
+            {
+                throw new ArgumentException("Destination array has incorrect dimensions");
+            }
+
+            // Copy damage data from device to host
+            _dDamage.CopyToCPU(_damage);
+
+            // Copy from internal array to the provided destination array
+            Array.Copy(_damage, destinationArray, _damage.Length);
+        }
+        /// <summary>
+        /// Find the point with maximum damage
+        /// </summary>
+        /// <returns>Coordinates of the point with maximum damage</returns>
+        public (int x, int y, int z) FindMaxDamagePoint()
+        {
+            // First copy damage data from GPU to CPU
+            _dDamage.CopyToCPU(_damage);
+
+            int maxX = 0, maxY = 0, maxZ = 0;
+            double maxDamage = 0;
+
+            // Find the maximum damage value and its location
+            for (int z = 0; z < _depth; z++)
+            {
+                for (int y = 0; y < _height; y++)
+                {
+                    for (int x = 0; x < _width; x++)
+                    {
+                        // Only consider points that are part of the selected material
+                        if (_labels[x, y, z] == _matID && _damage[x, y, z] > maxDamage)
+                        {
+                            maxDamage = _damage[x, y, z];
+                            maxX = x;
+                            maxY = y;
+                            maxZ = z;
+                        }
+                    }
+                }
+            }
+
+            return (maxX, maxY, maxZ);
+        }
         #endregion
 
         #region Kernel Classes
         private static class Kernels
         {
-            public struct StressArgs
+            public struct StressArgs           // ← no readonly
             {
+                // 3-D ArrayViews
                 public ArrayView3D<byte, Stride3D.DenseXY> Labels;
                 public ArrayView3D<float, Stride3D.DenseXY> Density;
                 public ArrayView3D<double, Stride3D.DenseXY> Vx, Vy, Vz;
                 public ArrayView3D<double, Stride3D.DenseXY> Sxx, Syy, Szz, Sxy, Sxz, Syz;
                 public ArrayView3D<double, Stride3D.DenseXY> Damage;
+
+                // parameter blocks
                 public MaterialParams MatParams;
                 public SimulationParams SimParams;
+
+                // feature switches (keep as bytes to stay blittable)
+                public byte UsePlastic;
+                public byte UseBrittle;
             }
+
 
             public struct VelocityArgs
             {
@@ -880,131 +1038,141 @@ namespace CTSegmenter
                 public SimulationParams SimParams;
             }
 
-            public static void UpdateStress(Index3D idx, StressArgs a)
+            // ─────────────────────────────────────────────────────────────────────────────
+            //  UpdateStress  (ILGPU kernel)
+            //
+            //  Works with the original layout you had:
+            //
+            //  struct StressArgs
+            //  {
+            //      public ArrayView<float> Sxx,Syy,Szz,Sxy,Sxz,Syz;
+            //      public ArrayView<float> Vx,Vy,Vz;
+            //      public ArrayView<float> Damage;
+            //      public ArrayView<ushort> Labels;
+            //      public ArrayView<float>  Density;
+            //
+            //      public SimParams  Sim;   // dt, dx, NX, NY, NZ
+            //      public MatParams  Mat;   // λ0, μ0, coh0, σt0, sinφ, cosφ, ρ₀, matID
+            //      public byte UsePlastic;
+            //      public byte UseBrittle;
+            //  }
+            //
+            //  (If your field names differ slightly, adjust in THREE places at the
+            //   top of the method; nothing else assigns to any field.)
+            // ─────────────────────────────────────────────────────────────────────────────
+            public static void UpdateStress(Index3D tid, StressArgs a)
             {
-                int x = idx.X, y = idx.Y, z = idx.Z;
+                // shorthand
                 var sp = a.SimParams;
-                if (x <= 0 || x >= sp.Width - 1 ||
-                    y <= 0 || y >= sp.Height - 1 ||
-                    z <= 0 || z >= sp.Depth - 1) return;
+                var mp = a.MatParams;
+
+                int x = tid.X + 1;
+                int y = tid.Y + 1;
+                int z = tid.Z + 1;
+
+                if (x >= sp.Width - 1 || y >= sp.Height - 1 || z >= sp.Depth - 1)
+                    return;
                 if (a.Labels[x, y, z] != sp.MaterialID) return;
 
-                double dx = a.SimParams.PixelSize;
-                double inv2dx = 1.0 / (2 * dx);
+                //------------------------------------------------------------------ density
+                float rho = XMath.Max(100.0f, a.Density[x, y, z]);
+                float r = rho / (float)mp.Cohesion;   // store ρ₀ in Cohesion for now
+                                                      // (keeps MaterialParams unchanged)
 
-                // strain rates (central differences)
-                double exx = (a.Vx[x + 1, y, z] - a.Vx[x - 1, y, z]) * inv2dx;
-                double eyy = (a.Vy[x, y + 1, z] - a.Vy[x, y - 1, z]) * inv2dx;
-                double ezz = (a.Vz[x, y, z + 1] - a.Vz[x, y, z - 1]) * inv2dx;
-                double exy = 0.5 * ((a.Vx[x, y + 1, z] - a.Vx[x, y - 1, z])
-                                  + (a.Vy[x + 1, y, z] - a.Vy[x - 1, y, z])) * inv2dx;
-                double exz = 0.5 * ((a.Vx[x, y, z + 1] - a.Vx[x, y, z - 1])
-                                  + (a.Vz[x + 1, y, z] - a.Vz[x - 1, y, z])) * inv2dx;
-                double eyz = 0.5 * ((a.Vy[x, y, z + 1] - a.Vy[x, y, z - 1])
-                                  + (a.Vz[x, y + 1, z] - a.Vz[x, y - 1, z])) * inv2dx;
+                float D = (float)a.Damage[x, y, z];
+                float lam = (float)((1.0 - D) * mp.Lambda * r);
+                float mu = (float)((1.0 - D) * mp.Mu * r);
 
-                var mp = a.MatParams;
-                double dt = sp.TimeStep;
-                double D = a.Damage[x, y, z];
-                double lambda = (1.0 - D) * mp.Lambda;
-                double mu = (1.0 - D) * mp.Mu;
+                //------------------------------------------------------------------ grads
+                float inv2dx = 0.5f / sp.PixelSize;
 
-                // elastic update
-                if ((mp.UseModelFlags & 1) != 0)
+                float dvx_dx = (float)((a.Vx[x + 1, y, z] - a.Vx[x - 1, y, z]) * inv2dx);
+                float dvy_dy = (float)((a.Vy[x, y + 1, z] - a.Vy[x, y - 1, z]) * inv2dx);
+                float dvz_dz = (float)((a.Vz[x, y, z + 1] - a.Vz[x, y, z - 1]) * inv2dx);
+
+                float dvx_dy = (float)((a.Vx[x, y + 1, z] - a.Vx[x, y - 1, z]) * inv2dx);
+                float dvx_dz = (float)((a.Vx[x, y, z + 1] - a.Vx[x, y, z - 1]) * inv2dx);
+                float dvy_dx = (float)((a.Vy[x + 1, y, z] - a.Vy[x - 1, y, z]) * inv2dx);
+                float dvy_dz = (float)((a.Vy[x, y, z + 1] - a.Vy[x, y, z - 1]) * inv2dx);
+                float dvz_dx = (float)((a.Vz[x + 1, y, z] - a.Vz[x - 1, y, z]) * inv2dx);
+                float dvz_dy = (float)((a.Vz[x, y + 1, z] - a.Vz[x, y - 1, z]) * inv2dx);
+
+                //------------------------------------------------------------------ elastic
+                float dt = (float)sp.TimeStep;
+
+                float SxxN = (float)(a.Sxx[x, y, z] + dt * ((lam + 2 * mu) * dvx_dx + lam * (dvy_dy + dvz_dz)));
+                float SyyN = (float)(a.Syy[x, y, z] + dt * ((lam + 2 * mu) * dvy_dy + lam * (dvx_dx + dvz_dz)));
+                float SzzN = (float)(a.Szz[x, y, z] + dt * ((lam + 2 * mu) * dvz_dz + lam * (dvx_dx + dvy_dy)));
+
+                float SxyN = (float)(a.Sxy[x, y, z] + dt * (mu * (dvy_dx + dvx_dy)));
+                float SxzN = (float)(a.Sxz[x, y, z] + dt * (mu * (dvz_dx + dvx_dz)));
+                float SyzN = (float)(a.Syz[x, y, z] + dt * (mu * (dvz_dy + dvy_dz)));
+
+                //------------------------------------------------------------------ MC plastic
+                if (a.UsePlastic != 0)
                 {
-                    double trace = exx + eyy + ezz;
-                    a.Sxx[x, y, z] += dt * (lambda * trace + 2 * mu * exx);
-                    a.Syy[x, y, z] += dt * (lambda * trace + 2 * mu * eyy);
-                    a.Szz[x, y, z] += dt * (lambda * trace + 2 * mu * ezz);
-                    a.Sxy[x, y, z] += dt * (2 * mu * exy);
-                    a.Sxz[x, y, z] += dt * (2 * mu * exz);
-                    a.Syz[x, y, z] += dt * (2 * mu * eyz);
-                }
+                    float mean = (SxxN + SyyN + SzzN) * 0.3333333f;
+                    float dxx = SxxN - mean;
+                    float dyy = SyyN - mean;
+                    float dzz = SzzN - mean;
 
-                // plastic Mohr-Coulomb
-                if ((mp.UseModelFlags & 2) != 0)
-                {
-                    double mean = (a.Sxx[x, y, z] + a.Syy[x, y, z] + a.Szz[x, y, z]) / 3.0;
-                    double dev_xx = a.Sxx[x, y, z] - mean;
-                    double dev_yy = a.Syy[x, y, z] - mean;
-                    double dev_zz = a.Szz[x, y, z] - mean;
-                    double J2 = 0.5 * (dev_xx * dev_xx + dev_yy * dev_yy + dev_zz * dev_zz)
-                              + (a.Sxy[x, y, z] * a.Sxy[x, y, z] + a.Sxz[x, y, z] * a.Sxz[x, y, z] + a.Syz[x, y, z] * a.Syz[x, y, z]);
-                    double tau = Math.Sqrt(Math.Max(J2, 0.0));
-                    double p = -mean + mp.ConfiningPressure;
-                    double yield = tau + p * mp.FrictionSinPhi - mp.Cohesion * mp.FrictionCosPhi;
+                    float J2 = 0.5f * (dxx * dxx + dyy * dyy + dzz * dzz) + (SxyN * SxyN + SxzN * SxzN + SyzN * SyzN);
+                    float tau = XMath.Sqrt(XMath.Max(J2, 0.0f));
 
-                    if (yield > 0.0)
+                    float p = -mean;
+                    float coh = (float)(mp.Cohesion * r);
+
+                    float yield = tau + p * (float)mp.FrictionSinPhi - coh * (float)mp.FrictionCosPhi;
+
+                    if (yield > 0)
                     {
-                        double safeTau = (tau > 1e-10) ? tau : 1e-10;
-                        double scale = (tau - (mp.Cohesion * mp.FrictionCosPhi - p * mp.FrictionSinPhi)) / safeTau;
-                        scale = Math.Min(scale, 0.95);
+                        float fac = (tau > 1e-7f) ? (tau - (coh * (float)mp.FrictionCosPhi - p * (float)mp.FrictionSinPhi)) / tau : 0f;
+                        fac = XMath.Min(fac, 0.95f);
 
-                        // Reduce deviatoric stress components
-                        dev_xx *= (1 - scale);
-                        dev_yy *= (1 - scale);
-                        dev_zz *= (1 - scale);
-                        a.Sxy[x, y, z] *= (1 - scale);
-                        a.Sxz[x, y, z] *= (1 - scale);
-                        a.Syz[x, y, z] *= (1 - scale);
+                        dxx *= 1 - fac; dyy *= 1 - fac; dzz *= 1 - fac;
+                        SxyN *= 1 - fac; SxzN *= 1 - fac; SyzN *= 1 - fac;
 
-                        // Recombine with mean stress
-                        a.Sxx[x, y, z] = dev_xx + mean;
-                        a.Syy[x, y, z] = dev_yy + mean;
-                        a.Szz[x, y, z] = dev_zz + mean;
+                        SxxN = dxx + mean; SyyN = dyy + mean; SzzN = dzz + mean;
                     }
                 }
 
-                // brittle tensile failure
-                if ((mp.UseModelFlags & 4) != 0)
+                //------------------------------------------------------------------ tensile
+                if (a.UseBrittle != 0)
                 {
-                    // Calculate principal stresses via characteristic equation
-                    double I1 = a.Sxx[x, y, z] + a.Syy[x, y, z] + a.Szz[x, y, z];
-                    double I2 = a.Sxx[x, y, z] * a.Syy[x, y, z] + a.Syy[x, y, z] * a.Szz[x, y, z] + a.Szz[x, y, z] * a.Sxx[x, y, z]
-                              - (a.Sxy[x, y, z] * a.Sxy[x, y, z] + a.Sxz[x, y, z] * a.Sxz[x, y, z] + a.Syz[x, y, z] * a.Syz[x, y, z]);
-                    double I3 = a.Sxx[x, y, z] * (a.Syy[x, y, z] * a.Szz[x, y, z] - a.Syz[x, y, z] * a.Syz[x, y, z])
-                              - a.Sxy[x, y, z] * (a.Sxy[x, y, z] * a.Szz[x, y, z] - a.Syz[x, y, z] * a.Sxz[x, y, z])
-                              + a.Sxz[x, y, z] * (a.Sxy[x, y, z] * a.Syz[x, y, z] - a.Syy[x, y, z] * a.Sxz[x, y, z]);
+                    float sigmaMax = XMath.Max(SxxN, XMath.Max(SyyN, SzzN));
+                    float sigT = (float)(mp.TensileStrength * r);
 
-                    // Solve cubic equation for principal stresses
-                    double eqnA = -I1;  // Renamed from 'a' to avoid collision with parameter
-                    double eqnB = I2;   // Renamed from 'b'
-                    double eqnC = -I3;  // Renamed from 'c'
-                    double q = (3 * eqnB - eqnA * eqnA) / 9.0;
-                    double r = (9 * eqnA * eqnB - 27 * eqnC - 2 * eqnA * eqnA * eqnA) / 54.0;
-                    double disc = q * q * q + r * r;
+                    if (sigmaMax > sigT && D < 0.99f)
+                    {
+                        float over = (sigmaMax - sigT) / sigT;
 
-                    double sigmaMax;
-                    if (disc >= 0)
-                    {
-                        double sqrtDisc = Math.Sqrt(disc);
-                        double s1 = (r + sqrtDisc) >= 0 ? Math.Pow(r + sqrtDisc, 1.0 / 3.0) : -Math.Pow(-r - sqrtDisc, 1.0 / 3.0);
-                        double s2 = (r - sqrtDisc) >= 0 ? Math.Pow(r - sqrtDisc, 1.0 / 3.0) : -Math.Pow(-r + sqrtDisc, 1.0 / 3.0);
-                        sigmaMax = -eqnA / 3.0 + s1 + s2;
-                    }
-                    else
-                    {
-                        double theta = Math.Acos(r / Math.Sqrt(-q * q * q));
-                        sigmaMax = 2.0 * Math.Sqrt(-q) * Math.Cos(theta / 3.0) - eqnA / 3.0;
-                    }
+                        // Adjust damage increment based on debug mode
+                        float dD;
+                        if (sp.DebugMode)
+                        {
+                            // Debug mode: Much faster damage accumulation
+                            dD = XMath.Min(over * 0.5f, 0.05f);
+                        }
+                        else
+                        {
+                            // Normal mode: Realistic slow damage
+                            dD = XMath.Min(over * 0.01f, 0.001f);
+                        }
 
-                    // Apply tensile damage if max principal stress exceeds tensile strength
-                    if (sigmaMax > mp.TensileStrength && D < 1.0)
-                    {
-                        double incr = (sigmaMax - mp.TensileStrength) / mp.TensileStrength;
-                        incr = Math.Min(incr, 0.1); // limit increment for stability
-                        double newD = Math.Min(0.95, D + incr * 0.01);
-                        a.Damage[x, y, z] = newD;
-                        double factor = 1.0 - newD;
-                        a.Sxx[x, y, z] *= factor;
-                        a.Syy[x, y, z] *= factor;
-                        a.Szz[x, y, z] *= factor;
-                        a.Sxy[x, y, z] *= factor;
-                        a.Sxz[x, y, z] *= factor;
-                        a.Syz[x, y, z] *= factor;
+                        D = XMath.Min(D + dD, 0.99f);
+                        a.Damage[x, y, z] = D;
+
+                        float soften = 1.0f - dD;
+                        SxxN *= soften; SyyN *= soften; SzzN *= soften;
+                        SxyN *= soften; SxzN *= soften; SyzN *= soften;
                     }
                 }
+
+                //------------------------------------------------------------------ store
+                a.Sxx[x, y, z] = SxxN; a.Syy[x, y, z] = SyyN; a.Szz[x, y, z] = SzzN;
+                a.Sxy[x, y, z] = SxyN; a.Sxz[x, y, z] = SxzN; a.Syz[x, y, z] = SyzN;
             }
+
 
             public static void UpdateVelocity(Index3D idx, VelocityArgs a)
             {
@@ -1060,7 +1228,7 @@ namespace CTSegmenter
                 switch (a.StressAxis)
                 {
                     case 0: // X-axis
-                        if (x == a.MaxBoundary && a.Labels[x, y, z] == a.MaterialID)
+                        if ((x == a.MaxBoundary || x == a.MinBoundary) && a.Labels[x, y, z] == a.MaterialID)
                         {
                             a.Sxx[x, y, z] = -a.AxialPressure;
                         }
@@ -1071,7 +1239,7 @@ namespace CTSegmenter
                         break;
 
                     case 1: // Y-axis
-                        if (y == a.MaxBoundary && a.Labels[x, y, z] == a.MaterialID)
+                        if ((y == a.MaxBoundary || x == a.MinBoundary) && a.Labels[x, y, z] == a.MaterialID)
                         {
                             a.Syy[x, y, z] = -a.AxialPressure;
                         }
@@ -1083,7 +1251,7 @@ namespace CTSegmenter
 
                     case 2: // Z-axis (default)
                     default:
-                        if (z == a.MaxBoundary && a.Labels[x, y, z] == a.MaterialID)
+                        if ((z == a.MaxBoundary || x == a.MinBoundary) && a.Labels[x, y, z] == a.MaterialID)
                         {
                             a.Szz[x, y, z] = -a.AxialPressure;
                         }
@@ -1094,7 +1262,33 @@ namespace CTSegmenter
                         break;
                 }
             }
+            public static Point3D FindMaxDamagePoint(double[,,] damage, int width, int height, int depth, byte materialID, byte[,,] labels)
+            {
+                // Find the point with maximum damage
+                double maxDamage = 0.0;
+                int maxX = 0, maxY = 0, maxZ = 0;
 
+                for (int z = 0; z < depth; z++)
+                {
+                    for (int y = 0; y < height; y++)
+                    {
+                        for (int x = 0; x < width; x++)
+                        {
+                            if (labels[x, y, z] == materialID && damage[x, y, z] > maxDamage)
+                            {
+                                maxDamage = damage[x, y, z];
+                                maxX = x;
+                                maxY = y;
+                                maxZ = z;
+                            }
+                        }
+                    }
+                }
+
+                return new Point3D(maxX, maxY, maxZ);
+            }
+
+            
             public static void InitializeFields(Index3D idx, InitializeArgs a)
             {
                 int x = idx.X, y = idx.Y, z = idx.Z;
@@ -1131,6 +1325,162 @@ namespace CTSegmenter
                 }
             }
         }
+        // ============================================================================
+        //  UpdateStressKernel  (ILGPU, C# 7.3 compatible)
+        //  --------------------------------------------------------------------------
+        //  * density-scaled elastic predictor
+        //  * Mohr–Coulomb projector   (optional)
+        //  * tensile damage           (optional)
+        //  * damage-softening of λ, μ
+        //
+        //  Flat 1–D ArrayView buffers, X-major layout:
+        //
+        //    lin = (z * NY + y) * NX + x
+        // ============================================================================
+
+        static void UpdateStressKernel(
+            Index3D idx,
+
+            ArrayView<float> Sxx,
+            ArrayView<float> Syy,
+            ArrayView<float> Szz,
+            ArrayView<float> Sxy,
+            ArrayView<float> Sxz,
+            ArrayView<float> Syz,
+
+            ArrayView<float> Vx,
+            ArrayView<float> Vy,
+            ArrayView<float> Vz,
+
+            ArrayView<float> Damage,
+            ArrayView<ushort> Labels,
+            ArrayView<float> Density,
+
+            float lambda0,          // Pa @ ρ = ρ₀, D = 0
+            float mu0,              // Pa
+            float cohesionPa0,      // Pa
+            float tensilePa0,       // Pa
+            float sinPhi,
+            float cosPhi,
+            float dt,               // s
+            float dx,               // m
+            float refRho,           // ρ₀  (kg m-3)
+            byte matID,
+            byte usePlastic,       // 0 / 1
+            byte useBrittle,       // 0 / 1
+            int NX,
+            int NY,
+            int NZ)
+        {
+            // -------- bounds & material mask ---------------------------------------
+            int x = idx.X + 1;
+            int y = idx.Y + 1;
+            int z = idx.Z + 1;
+
+            if (x >= NX - 1 || y >= NY - 1 || z >= NZ - 1)
+                return;
+
+            int lin = (z * NY + y) * NX + x;
+            if (Labels[lin] != matID)
+                return;
+
+            // -------- neighbours' linear indices -----------------------------------
+            int xm1 = lin - 1; int xp1 = lin + 1;
+            int ym1 = lin - NX; int yp1 = lin + NX;
+            int zm1 = lin - NX * NY; int zp1 = lin + NX * NY;
+
+            // -------- density ratio & damage-scaled Lamé ---------------------------
+            float rho = XMath.Max(100.0f, Density[lin]);
+            float r = rho / refRho;
+
+            float D = Damage[lin];
+            float lam = (1.0f - D) * lambda0 * r;
+            float mu = (1.0f - D) * mu0 * r;
+
+            // -------- velocity gradients (central diff) ----------------------------
+            float inv2dx = 0.5f / dx;
+
+            float dvx_dx = (Vx[xp1] - Vx[xm1]) * inv2dx;
+            float dvy_dy = (Vy[yp1] - Vy[ym1]) * inv2dx;
+            float dvz_dz = (Vz[zp1] - Vz[zm1]) * inv2dx;
+
+            float dvx_dy = (Vx[yp1] - Vx[ym1]) * inv2dx;
+            float dvx_dz = (Vx[zp1] - Vx[zm1]) * inv2dx;
+            float dvy_dx = (Vy[xp1] - Vy[xm1]) * inv2dx;
+            float dvy_dz = (Vy[zp1] - Vy[zm1]) * inv2dx;
+            float dvz_dx = (Vz[xp1] - Vz[xm1]) * inv2dx;
+            float dvz_dy = (Vz[yp1] - Vz[ym1]) * inv2dx;
+
+            // -------- elastic predictor -------------------------------------------
+            float SxxN = Sxx[lin] + dt * ((lam + 2 * mu) * dvx_dx + lam * (dvy_dy + dvz_dz));
+            float SyyN = Syy[lin] + dt * ((lam + 2 * mu) * dvy_dy + lam * (dvx_dx + dvz_dz));
+            float SzzN = Szz[lin] + dt * ((lam + 2 * mu) * dvz_dz + lam * (dvx_dx + dvy_dy));
+
+            float SxyN = Sxy[lin] + dt * (mu * (dvy_dx + dvx_dy));
+            float SxzN = Sxz[lin] + dt * (mu * (dvz_dx + dvx_dz));
+            float SyzN = Syz[lin] + dt * (mu * (dvz_dy + dvy_dz));
+
+            // -------- Mohr–Coulomb plasticity --------------------------------------
+            if (usePlastic != 0)
+            {
+                float mean = (SxxN + SyyN + SzzN) * 0.33333333f;
+                float dxx = SxxN - mean;
+                float dyy = SyyN - mean;
+                float dzz = SzzN - mean;
+
+                float J2 = 0.5f * (dxx * dxx + dyy * dyy + dzz * dzz) +
+                           (SxyN * SxyN + SxzN * SxzN + SyzN * SyzN);
+                float tau = XMath.Sqrt(XMath.Max(J2, 0.0f));
+
+                float p = -mean;
+                float cohesion = cohesionPa0 * r;
+
+                float yield = tau + p * sinPhi - cohesion * cosPhi;
+
+                if (yield > 0.0f)
+                {
+                    float safeTau = tau > 1e-7f ? tau : 1e-7f;
+                    float a = (tau - (cohesion * cosPhi - p * sinPhi)) / safeTau;
+                    a = XMath.Min(a, 0.95f);
+
+                    dxx *= (1 - a);
+                    dyy *= (1 - a);
+                    dzz *= (1 - a);
+                    SxyN *= (1 - a);
+                    SxzN *= (1 - a);
+                    SyzN *= (1 - a);
+
+                    SxxN = dxx + mean;
+                    SyyN = dyy + mean;
+                    SzzN = dzz + mean;
+                }
+            }
+
+            // -------- tensile damage ----------------------------------------------
+            if (useBrittle != 0)
+            {
+                float sigmaMax = XMath.Max(SxxN, XMath.Max(SyyN, SzzN));
+                float tensile = tensilePa0 * r;
+
+                if (sigmaMax > tensile && D < 0.99f)
+                {
+                    float over = (sigmaMax - tensile) / tensile;
+                    float dD = XMath.Min(over * 0.01f, 0.001f);
+                    D += dD;
+                    D = XMath.Min(D, 0.99f);
+                    Damage[lin] = D;
+
+                    float soften = 1.0f - dD;
+                    SxxN *= soften; SyyN *= soften; SzzN *= soften;
+                    SxyN *= soften; SxzN *= soften; SyzN *= soften;
+                }
+            }
+
+            // -------- store back ---------------------------------------------------
+            Sxx[lin] = SxxN; Syy[lin] = SyyN; Szz[lin] = SzzN;
+            Sxy[lin] = SxyN; Sxz[lin] = SxzN; Syz[lin] = SyzN;
+        }
+
         #endregion
 
         #region IDisposable Support

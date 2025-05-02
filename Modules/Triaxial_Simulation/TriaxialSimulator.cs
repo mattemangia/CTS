@@ -207,6 +207,8 @@ namespace CTSegmenter
         {
             double sum = 0.0;
             long n = 0;
+            double minDensity = double.MaxValue;
+            double maxDensity = double.MinValue;
 
             for (int z = 0; z < depth; z++)
                 for (int y = 0; y < height; y++)
@@ -214,12 +216,22 @@ namespace CTSegmenter
                         if (labels[x, y, z] == selectedMaterialID &&
                             densityVolume[x, y, z] > 0)
                         {
-                            sum += densityVolume[x, y, z];
+                            double value = densityVolume[x, y, z];
+                            sum += value;
                             n++;
+                            minDensity = Math.Min(minDensity, value);
+                            maxDensity = Math.Max(maxDensity, value);
                         }
 
-            return (n > 0) ? sum / n : 2500.0;   // kg m-3 fallback
+            double refRho = (n > 0) ? sum / n : 2500.0;
+
+            // Log detailed statistics to help with debugging
+            Logger.Log($"[TriaxialSimulator] Density statistics: min={minDensity:F0}, max={maxDensity:F0}, " +
+                       $"avg={refRho:F0} kg/m³, samples={n}");
+
+            return refRho;
         }
+
         // Compute stable time step (CFL condition + safety factor)
         private void ComputeStableTimeStep()
         {
@@ -560,6 +572,10 @@ namespace CTSegmenter
 
             double maxDamage = 0.0;  // Track max damage for logging
             bool failureFound = false;
+            int materialVoxels = 0;
+            double avgDensity = 0.0;
+            double maxRatio = 0.0;
+            int maxDamageX = -1, maxDamageY = -1, maxDamageZ = -1;
 
             for (int z = 0; z < depth; z++)
             {
@@ -569,25 +585,46 @@ namespace CTSegmenter
                     {
                         if (GetVoxelLabel(x, y, z) != selectedMaterialID) continue;
 
+                        materialVoxels++;
                         double rho = Math.Max(100.0, densityVolume[x, y, z]);
+                        avgDensity += rho;
                         double crit = baseCrit * (rho / referenceDensity);
+                        double damageVal = damage[x, y, z];
+                        double ratio = damageVal / crit;
 
-                        maxDamage = Math.Max(maxDamage, damage[x, y, z]);
+                        if (damageVal > maxDamage)
+                        {
+                            maxDamage = damageVal;
+                            maxDamageX = x;
+                            maxDamageY = y;
+                            maxDamageZ = z;
+                        }
 
-                        if (damage[x, y, z] > crit)
+                        if (ratio > maxRatio)
+                        {
+                            maxRatio = ratio;
+                        }
+
+                        if (damageVal > crit)
                         {
                             failureFound = true;
                             Logger.Log($"[TriaxialSimulator] Failure detected at ({x},{y},{z}). " +
-                                      $"Damage={damage[x, y, z]:F3}, Threshold={crit:F3}");
-                            // Don't return immediately - continue to get max damage value
+                                      $"Damage={damageVal:F3}, Density={rho:F0}, Threshold={crit:F3}, Ratio={ratio:F3}");
                         }
                     }
                 }
             }
 
+            if (materialVoxels > 0)
+            {
+                avgDensity /= materialVoxels;
+            }
+
             string modeLabel = _debugMode ? "DEBUG MODE" : "Normal mode";
-            Logger.Log($"[TriaxialSimulator] {modeLabel} Failure check: max damage={maxDamage:F3}, " +
-                      $"base threshold={baseCrit:F2}, failure detected={failureFound}");
+            Logger.Log($"[TriaxialSimulator] {modeLabel} Failure check: max damage={maxDamage:F3} at ({maxDamageX},{maxDamageY},{maxDamageZ}), " +
+                      $"max ratio={maxRatio:F3}, material voxels={materialVoxels}, " +
+                      $"avg density={avgDensity:F0} kg/m³, ref density={referenceDensity:F0} kg/m³, " +
+                      $"failure detected={failureFound}");
 
             return failureFound;
         }
@@ -644,6 +681,7 @@ namespace CTSegmenter
         // -----------------------------------------------------------------------------
         //  Main simulation loop (pressure increments)
         // -----------------------------------------------------------------------------
+     
         private void Run(CancellationToken token)
         {
             if (useBrittle)
@@ -654,6 +692,7 @@ namespace CTSegmenter
             {
                 Logger.Log("[TriaxialSimulator] WARNING: Brittle model is disabled - failure detection may not work!");
             }
+
             ComputeStableTimeStep();
             InitializeFields();
 
@@ -724,10 +763,8 @@ namespace CTSegmenter
             for (int inc = 1; inc <= pressureIncrements; inc++)
             {
                 if (simulationCancelled || token.IsCancellationRequested) break;
-
                 while (simulationPaused && !simulationCancelled && !token.IsCancellationRequested)
                     Thread.Sleep(100);
-
                 if (simulationCancelled || token.IsCancellationRequested) break;
 
                 double targetMPa = initialAxialPressureMPa + dP * inc;
@@ -778,60 +815,21 @@ namespace CTSegmenter
                 for (int step = 0; step < stepsPerIncrement; step++)
                 {
                     if (simulationCancelled || token.IsCancellationRequested) break;
-
                     while (simulationPaused && !simulationCancelled && !token.IsCancellationRequested)
                         Thread.Sleep(100);
-
                     if (simulationCancelled || token.IsCancellationRequested) break;
 
                     UpdateStress();
                     UpdateVelocity();
-
-                    // show progress every 10 internal steps
-                    if (step % 10 == 0)
-                    {
-                        int pct = (int)((double)inc / pressureIncrements * 100.0);
-                        ProgressUpdated?.Invoke(this,
-                            new TriaxialSimulationProgressEventArgs(pct, inc,
-                                $"Loading {targetMPa:F2} MPa  step {step + 1}/{stepsPerIncrement}"));
-                    }
-
-                    // ---------- failure check with enhanced logging ----------
-                    if (!failureDetected)
-                    {
-                        // Add logging to track what's happening
-                        Logger.Log($"[TriaxialSimulator] Checking for failure at step {inc}, pressure={targetMPa:F2}MPa");
-
-                        if (CheckForFailure())
-                        {
-                            failureDetected = true;
-                            failureStep = inc;
-
-                            double curStrain = CalculateAverageStrain(primaryStressAxis, minPos, maxPos, sampleSize);
-                            Logger.Log($"[TriaxialSimulator] FAILURE DETECTED at step {inc}/{pressureIncrements}, stress={targetMPa:F2}MPa, strain={curStrain:F4}");
-
-                            FailureDetected?.Invoke(this,
-                                new FailureDetectedEventArgs(targetMPa, curStrain, inc, pressureIncrements));
-
-                            simulationPaused = true;   // let the UI decide
-                        }
-                        else
-                        {
-                            // Log during steps, less frequently (every 5 steps)
-                            if (inc % 5 == 0)
-                            {
-                                Logger.Log($"[TriaxialSimulator] No failure at step {inc}, pressure={targetMPa:F2}MPa");
-                            }
-                        }
-                    }
                 }
 
                 //-----------------------------------------------------------------------
-                // 3c. Measure axial strain & **measured** stress after equilibration
+                // 3c. Measure axial strain & measured stress after equilibration
                 //-----------------------------------------------------------------------
                 double axialStrain = CalculateAverageStrain(primaryStressAxis, minPos, maxPos, sampleSize);
 
-                double sigSum = 0.0; int sigN = 0;
+                double sigSum = 0.0;
+                int sigN = 0;
 
                 switch (primaryStressAxis)
                 {
@@ -839,10 +837,8 @@ namespace CTSegmenter
                         for (int z = 0; z < depth; z++)
                             for (int y = 0; y < height; y++)
                             {
-                                if (GetVoxelLabel(minPos, y, z) == selectedMaterialID)
-                                { sigSum += -sxx[minPos, y, z]; sigN++; }
-                                if (GetVoxelLabel(maxPos, y, z) == selectedMaterialID)
-                                { sigSum += -sxx[maxPos, y, z]; sigN++; }
+                                if (GetVoxelLabel(minPos, y, z) == selectedMaterialID) { sigSum += -sxx[minPos, y, z]; sigN++; }
+                                if (GetVoxelLabel(maxPos, y, z) == selectedMaterialID) { sigSum += -sxx[maxPos, y, z]; sigN++; }
                             }
                         break;
 
@@ -850,10 +846,8 @@ namespace CTSegmenter
                         for (int z = 0; z < depth; z++)
                             for (int x = 0; x < width; x++)
                             {
-                                if (GetVoxelLabel(x, minPos, z) == selectedMaterialID)
-                                { sigSum += -syy[x, minPos, z]; sigN++; }
-                                if (GetVoxelLabel(x, maxPos, z) == selectedMaterialID)
-                                { sigSum += -syy[x, maxPos, z]; sigN++; }
+                                if (GetVoxelLabel(x, minPos, z) == selectedMaterialID) { sigSum += -syy[x, minPos, z]; sigN++; }
+                                if (GetVoxelLabel(x, maxPos, z) == selectedMaterialID) { sigSum += -syy[x, maxPos, z]; sigN++; }
                             }
                         break;
 
@@ -861,26 +855,43 @@ namespace CTSegmenter
                         for (int y = 0; y < height; y++)
                             for (int x = 0; x < width; x++)
                             {
-                                if (GetVoxelLabel(x, y, minPos) == selectedMaterialID)
-                                { sigSum += -szz[x, y, minPos]; sigN++; }
-                                if (GetVoxelLabel(x, y, maxPos) == selectedMaterialID)
-                                { sigSum += -szz[x, y, maxPos]; sigN++; }
+                                if (GetVoxelLabel(x, y, minPos) == selectedMaterialID) { sigSum += -szz[x, y, minPos]; sigN++; }
+                                if (GetVoxelLabel(x, y, maxPos) == selectedMaterialID) { sigSum += -szz[x, y, maxPos]; sigN++; }
                             }
                         break;
                 }
 
-                double measuredMPa = (sigN > 0 ? sigSum / sigN : targetPa) / 1e6;
+                // **FLIP sign to match GPU:** compression → positive descent
+                double measuredMPa = -(sigN > 0 ? sigSum / sigN : targetPa) / 1e6;
 
                 strainHistory.Add(axialStrain);
                 stressHistory.Add(measuredMPa);
 
+                //-----------------------------------------------------------------------
+                // 3d. Check failure if brittle
+                //-----------------------------------------------------------------------
+                if (useBrittle && !failureDetected)
+                {
+                    failureDetected = CheckForFailure();
+                    if (failureDetected)
+                    {
+                        failureStep = inc;
+                        FailureDetected?.Invoke(this,
+                            new FailureDetectedEventArgs(measuredMPa, axialStrain, inc, pressureIncrements));
+                        if (simulationPaused) break;
+                    }
+                }
+
+                //-----------------------------------------------------------------------
+                // 3e. Progress update
+                //-----------------------------------------------------------------------
                 int pctInc = (int)((double)inc / pressureIncrements * 100.0);
                 ProgressUpdated?.Invoke(this,
                     new TriaxialSimulationProgressEventArgs(pctInc, inc, $"Loading {targetMPa:F2} MPa"));
             }
 
             //---------------------------------------------------------------------------
-            //  4. wrap-up / cancellation handling
+            //  4. Wrap-up / completion
             //---------------------------------------------------------------------------
             if (simulationCancelled || token.IsCancellationRequested)
             {
@@ -905,49 +916,36 @@ namespace CTSegmenter
         // -----------------------------------------------------------------------------
         private double CalculateAverageStrain(StressAxis axis, int minPos, int maxPos, double originalSize)
         {
-            double dispMin = 0.0, dispMax = 0.0;
-            int nMin = 0, nMax = 0;
+            // find the smallest and largest displacement of any material voxel
+            double dispMin = double.MaxValue;
+            double dispMax = double.MinValue;
 
-            switch (axis)
+            for (int z = 0; z < depth; z++)
+                for (int y = 0; y < height; y++)
+                    for (int x = 0; x < width; x++)
+                    {
+                        if (GetVoxelLabel(x, y, z) != selectedMaterialID) continue;
+
+                        double d = 0;
+                        switch (axis)
+                        {
+                            case StressAxis.X: d = dispX[x, y, z]; break;
+                            case StressAxis.Y: d = dispY[x, y, z]; break;
+                            default: d = dispZ[x, y, z]; break;
+                        }
+
+                        if (d < dispMin) dispMin = d;
+                        if (d > dispMax) dispMax = d;
+                    }
+
+            // if no voxels moved (or none found), treat as zero deformation
+            if (dispMin == double.MaxValue || dispMax == double.MinValue)
             {
-                case StressAxis.X:
-                    for (int z = 0; z < depth; z++)
-                    {
-                        for (int y = 0; y < height; y++)
-                        {
-                            if (GetVoxelLabel(minPos, y, z) == selectedMaterialID) { dispMin += dispX[minPos, y, z]; nMin++; }
-                            if (GetVoxelLabel(maxPos, y, z) == selectedMaterialID) { dispMax += dispX[maxPos, y, z]; nMax++; }
-                        }
-                    }
-                    break;
-
-                case StressAxis.Y:
-                    for (int z = 0; z < depth; z++)
-                    {
-                        for (int x = 0; x < width; x++)
-                        {
-                            if (GetVoxelLabel(x, minPos, z) == selectedMaterialID) { dispMin += dispY[x, minPos, z]; nMin++; }
-                            if (GetVoxelLabel(x, maxPos, z) == selectedMaterialID) { dispMax += dispY[x, maxPos, z]; nMax++; }
-                        }
-                    }
-                    break;
-
-                default: // Z
-                    for (int y = 0; y < height; y++)
-                    {
-                        for (int x = 0; x < width; x++)
-                        {
-                            if (GetVoxelLabel(x, y, minPos) == selectedMaterialID) { dispMin += dispZ[x, y, minPos]; nMin++; }
-                            if (GetVoxelLabel(x, y, maxPos) == selectedMaterialID) { dispMax += dispZ[x, y, maxPos]; nMax++; }
-                        }
-                    }
-                    break;
+                dispMin = dispMax = 0.0;
             }
 
-            if (nMin > 0) dispMin /= nMin;
-            if (nMax > 0) dispMax /= nMax;
-
-            return -(dispMax - dispMin) / originalSize;   // compression positive
+            // compression positive: ε = -(Δu_max − Δu_min) / L₀
+            return -(dispMax - dispMin) / originalSize;
         }
 
         // Export stress-strain data to CSV/XLS and generate images

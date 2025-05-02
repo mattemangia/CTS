@@ -1581,22 +1581,23 @@ namespace CTSegmenter
             controlPanel.Controls.Add(chkUseGPU);
             currentY += verticalSpacing;
             chkDebugMode = new KryptonCheckBox();
+            
+            currentY += verticalSpacing;
             this.chkDebugMode.Text = "Debug Mode (Fast Failure)";
             this.chkDebugMode.AutoSize = true;
-            this.chkDebugMode.Location = new Point(nudCohesion.Left, nudCohesion.Bottom + 10);
+            this.chkDebugMode.Location = new Point(10, currentY);
             this.chkDebugMode.Checked = false;
             this.chkDebugMode.ForeColor = Color.Red;
             this.chkDebugMode.CheckedChanged += (s, e) => {
                 if (chkDebugMode.Checked)
                 {
                     Logger.Log("Debug mode enabled: Accelerated damage and lower thresholds.\n" +
-                                    "This is for TESTING ONLY - not realistic material behavior."+
+                                    "This is for TESTING ONLY - not realistic material behavior." +
                                     " !!!Debug Mode!!!");
                 }
             };
-            controlPanel.Controls.Add(chkDebugMode);
             currentY += verticalSpacing;
-
+            controlPanel.Controls.Add(chkDebugMode);
             // Buttons
             btnRun = new KryptonButton();
             btnRun.Text = "Run Simulation";
@@ -2358,6 +2359,59 @@ namespace CTSegmenter
             if (stressStrainCurve.Count > 0)
             {
                 peakStress = stressStrainCurve.Max(p => p.Y);
+
+                // Get the failure stress value
+                double failureStress = e.CurrentStress > 0 ? e.CurrentStress : stressStrainCurve[failureStep].Y;
+
+                // Get simulation parameters
+                double confiningPressure = 0;
+                double frictionAngle = 0;
+                double cohesion = 0;
+
+                // Get current parameters from UI controls
+                if (nudConfiningP != null) confiningPressure = (double)nudConfiningP.Value;
+                if (nudFriction != null) frictionAngle = (double)nudFriction.Value;
+                if (nudCohesion != null) cohesion = (double)nudCohesion.Value;
+
+                // Force-draw the tangent line on the Mohr-Coulomb chart
+                if (resultsExtension != null)
+                {
+                    // Force the chart to update with the failure data
+                    Type extensionType = resultsExtension.GetType();
+
+                    // First try to call UpdateData to refresh the chart
+                    MethodInfo updateDataMethod = extensionType.GetMethod("UpdateData");
+                    if (updateDataMethod != null)
+                    {
+                        updateDataMethod.Invoke(resultsExtension, new object[] {
+                    stressStrainCurve,
+                    peakStress,
+                    e.CurrentStrain,
+                    failureDetected,
+                    failureStep,
+                    damage
+                });
+                    }
+
+                    // Then force direct drawing of the tangent line
+                    MethodInfo drawTangentMethod = extensionType.GetMethod("DrawTangentLineOnMohrChart",
+                        BindingFlags.NonPublic | BindingFlags.Instance);
+
+                    if (drawTangentMethod != null)
+                    {
+                        drawTangentMethod.Invoke(resultsExtension, new object[] {
+                    confiningPressure,
+                    failureStress,
+                    frictionAngle,
+                    cohesion
+                });
+                    }
+                    else
+                    {
+                        // If the method doesn't exist, log it
+                        Logger.Log("[TriaxialSimulationForm] DrawTangentLineOnMohrChart method not found");
+                    }
+                }
 
                 // Update results extension with failure data
                 resultsExtension?.UpdateData(

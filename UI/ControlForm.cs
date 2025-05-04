@@ -1,4 +1,4 @@
-﻿using CTSegmenter.SharpDXIntegration;
+﻿using CTS.SharpDXIntegration;
 using Krypton.Toolkit;
 using System;
 using System.Drawing;
@@ -7,7 +7,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace CTSegmenter
+namespace CTS
 {
     // ------------------------------------------------------------------------
     // ControlForm – provides UI controls for loading, segmentation, materials etc.
@@ -541,8 +541,8 @@ namespace CTSegmenter
                 }
 
                 Logger.Log("[ControlForm] Opening MicroSAM tool");
-                CTSegmenter.Modules.ArtificialIntelligence.MicroSAM.MicroSAM microSam =
-                    new CTSegmenter.Modules.ArtificialIntelligence.MicroSAM.MicroSAM(
+                CTS.Modules.ArtificialIntelligence.MicroSAM.MicroSAM microSam =
+                    new CTS.Modules.ArtificialIntelligence.MicroSAM.MicroSAM(
                         mainForm,
                         selectedMaterial,
                         sharedAnnotationManager);
@@ -574,8 +574,8 @@ namespace CTSegmenter
                 }
 
                 Logger.Log("[ControlForm] Opening Grounding DINO detector");
-                CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO.GroundingDINODetector groundingDino =
-                    new CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO.GroundingDINODetector(
+                CTS.Modules.ArtificialIntelligence.GroundingDINO.GroundingDINODetector groundingDino =
+                    new CTS.Modules.ArtificialIntelligence.GroundingDINO.GroundingDINODetector(
                         mainForm,
                         selectedMaterial);
 

@@ -1,6 +1,6 @@
 ﻿using System.Drawing;
 
-namespace CTSegmenter
+namespace CTS
 {
     // ------------------------------------------------------------------------
     // Material class

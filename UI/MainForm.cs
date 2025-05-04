@@ -12,7 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace CTSegmenter
+namespace CTS
 {
     // ------------------------------------------------------------------------
     // MainForm – main viewer and controller of segmentation with optimized rendering
@@ -193,7 +193,7 @@ namespace CTSegmenter
                 }
                 catch { }
                 // Set basic form properties
-                this.Text = "CT Segmentation Suite - Main Viewer";
+                this.Text = "CTS - Computed Tomography Simulation environment";
                 this.Size = new Size(1700, 800);
                 this.DoubleBuffered = true;
                 var km = new KryptonManager();
@@ -2799,7 +2799,7 @@ namespace CTSegmenter
             // For XZ view
             if (currentSelectionXZ != null)
             {
-                MaterialOps.ApplyOrthogonalSelection(currentSelectionXZ, XzSliceY, (CTSegmenter.OrthogonalView)OrthogonalView.XZ);
+                MaterialOps.ApplyOrthogonalSelection(currentSelectionXZ, XzSliceY, (CTS.OrthogonalView)OrthogonalView.XZ);
 
                 // Store in sparseSelectionsY
                 byte[,] copyXZ = new byte[width, depth];
@@ -2812,7 +2812,7 @@ namespace CTSegmenter
             // For YZ view
             if (currentSelectionYZ != null)
             {
-                MaterialOps.ApplyOrthogonalSelection(currentSelectionYZ, YzSliceX, (CTSegmenter.OrthogonalView)OrthogonalView.YZ);
+                MaterialOps.ApplyOrthogonalSelection(currentSelectionYZ, YzSliceX, (CTS.OrthogonalView)OrthogonalView.YZ);
 
                 // Store in sparseSelectionsX
                 byte[,] copyYZ = new byte[depth, height];
@@ -2832,14 +2832,14 @@ namespace CTSegmenter
             // For XZ view
             if (currentSelectionXZ != null)
             {
-                MaterialOps.SubtractOrthogonalSelection(currentSelectionXZ, XzSliceY, (CTSegmenter.OrthogonalView)OrthogonalView.XZ);
+                MaterialOps.SubtractOrthogonalSelection(currentSelectionXZ, XzSliceY, (CTS.OrthogonalView)OrthogonalView.XZ);
                 currentSelectionXZ = new byte[width, depth];
             }
 
             // For YZ view
             if (currentSelectionYZ != null)
             {
-                MaterialOps.SubtractOrthogonalSelection(currentSelectionYZ, YzSliceX, (CTSegmenter.OrthogonalView)OrthogonalView.YZ);
+                MaterialOps.SubtractOrthogonalSelection(currentSelectionYZ, YzSliceX, (CTS.OrthogonalView)OrthogonalView.YZ);
                 currentSelectionYZ = new byte[depth, height];
             }
 

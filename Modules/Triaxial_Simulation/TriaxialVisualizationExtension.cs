@@ -5,7 +5,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Threading.Tasks;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Extension class for generating triaxial simulation visualizations

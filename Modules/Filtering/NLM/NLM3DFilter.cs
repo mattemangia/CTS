@@ -4,7 +4,7 @@ using ILGPU.Runtime;
 using ILGPU.Runtime.CPU;
 using System;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// A production-ready 3D Non-Local Means (NLM) filter with both GPU and CPU modes,

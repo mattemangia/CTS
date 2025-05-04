@@ -3,7 +3,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Full‑physics acoustic / elastodynamic simulator with linear‑elastic, perfectly‑plastic (Mohr–Coulomb)

@@ -14,7 +14,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Implementation of an acoustic velocity simulation

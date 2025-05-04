@@ -8,7 +8,7 @@
 // </auto-generated>
 //------------------------------------------------------------------------------
 
-namespace CTSegmenter.Properties {
+namespace CTS.Properties {
     
     
     

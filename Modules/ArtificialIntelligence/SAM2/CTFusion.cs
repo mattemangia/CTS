@@ -5,7 +5,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.Linq;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Provides various fusion strategies for segmentation volumes:

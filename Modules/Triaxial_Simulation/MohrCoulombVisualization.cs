@@ -2,7 +2,7 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Extension class to handle Mohr-Coulomb visualization

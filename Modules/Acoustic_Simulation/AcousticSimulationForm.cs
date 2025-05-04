@@ -12,7 +12,7 @@ using MessageBox = System.Windows.Forms.MessageBox;
 using Point = System.Drawing.Point;
 using Size = System.Drawing.Size;
 
-namespace CTSegmenter
+namespace CTS
 {
     public partial class AcousticSimulationForm : KryptonForm, IMaterialDensityProvider
     {

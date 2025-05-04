@@ -2,7 +2,7 @@
 using System.Drawing;
 using System.Windows.Forms;
 
-namespace CTSegmenter
+namespace CTS
 {
     public partial class ProgressForm : Form, IProgress<int>
     {

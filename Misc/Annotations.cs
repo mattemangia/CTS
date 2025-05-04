@@ -2,7 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Manages user annotations (points/boxes) for the SAM-based segmentation.

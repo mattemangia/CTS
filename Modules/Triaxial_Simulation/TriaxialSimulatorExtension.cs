@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace CTSegmenter
+namespace CTS
 {
     // Extension class to add required properties to TriaxialSimulator
     public static class TriaxialSimulatorExtension

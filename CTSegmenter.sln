@@ -3,7 +3,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.12.35707.178
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CTSegmenterNew", "CTSegmenterNew.csproj", "{A890BC78-2B81-4116-A284-9A76A35D1996}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CTS", "CTS.csproj", "{A890BC78-2B81-4116-A284-9A76A35D1996}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "CTViewer", "..\3DViewer\3DViewer.vcxproj", "{62B7D874-1E68-4032-AE8D-60E78B51EBE4}"
 EndProject

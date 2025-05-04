@@ -10,7 +10,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace CTSegmenter.Modules.ArtificialIntelligence.MicroSAM
+namespace CTS.Modules.ArtificialIntelligence.MicroSAM
 {
     internal class MicroSAM
     {

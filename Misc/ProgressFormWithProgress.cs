@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Extended version of ProgressForm that also implements IProgress<int>

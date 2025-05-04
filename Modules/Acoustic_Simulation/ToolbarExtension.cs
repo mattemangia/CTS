@@ -10,7 +10,7 @@ using System.Collections.Generic;
 using Krypton.Toolkit;
 using System.Drawing.Drawing2D;
 
-namespace CTSegmenter
+namespace CTS
 {
     public partial class AcousticSimulationForm
     {

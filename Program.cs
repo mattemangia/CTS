@@ -1,4 +1,4 @@
-﻿using CTSegmenter;
+﻿using CTS;
 using System;
 using System.Windows.Forms;
 

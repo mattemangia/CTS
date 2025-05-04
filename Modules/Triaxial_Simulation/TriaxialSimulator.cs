@@ -8,7 +8,7 @@ using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace CTSegmenter
+namespace CTS
 {
     public enum StressAxis
     {

@@ -1,7 +1,7 @@
 ﻿using System.Globalization;
 using System.Numerics;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Converts the free-form text coming from the parent form

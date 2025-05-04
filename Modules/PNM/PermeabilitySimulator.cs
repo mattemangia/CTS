@@ -6,7 +6,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Simulates absolute permeability through a pore network model using Darcy's law

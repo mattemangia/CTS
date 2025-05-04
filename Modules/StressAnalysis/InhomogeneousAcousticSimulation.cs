@@ -6,7 +6,7 @@ using System.Drawing.Drawing2D;
 using System.Numerics;
 using System.Threading.Tasks;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Extended implementation of acoustic velocity simulation that accounts for inhomogeneous density

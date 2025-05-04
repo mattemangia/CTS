@@ -2,7 +2,7 @@
 using System.Collections.Generic;
 using System.Numerics;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Factory class to create appropriate simulations based on parameters

@@ -2,7 +2,7 @@
 using System.Drawing;
 using System.Windows.Forms;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Progress form with cancellation support

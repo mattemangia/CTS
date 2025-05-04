@@ -2,7 +2,7 @@
 using System.Drawing;
 using System.Threading.Tasks;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Adapter that integrates ILabelVolumeData with TriaxialVisualizationExtension for triaxial visualization

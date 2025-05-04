@@ -1,7 +1,7 @@
 ﻿using System.Collections.Generic;
 using static MaterialDensityLibrary;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Interface for forms that need to provide material density functionality

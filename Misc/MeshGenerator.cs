@@ -4,10 +4,10 @@ using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Drawing;
-using CTSegmenter.Misc;
+using CTS.Misc;
 using System.Linq;
 
-namespace CTSegmenter
+namespace CTS
 {
     public class MeshGenerator
     {

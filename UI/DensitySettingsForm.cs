@@ -1,4 +1,4 @@
-﻿using CTSegmenter;
+﻿using CTS;
 using Krypton.Toolkit;
 using System;
 using System.Collections.Generic;
@@ -6,7 +6,7 @@ using System.Drawing;
 using System.Windows.Forms;
 using static MaterialDensityLibrary;
 
-namespace CTSegmenter
+namespace CTS
 {
     public class DensitySettingsForm : KryptonForm
     {

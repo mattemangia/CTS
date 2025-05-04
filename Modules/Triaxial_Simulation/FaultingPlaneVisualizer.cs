@@ -6,7 +6,7 @@ using System.Drawing.Imaging;
 using System.Numerics;
 using System.Windows.Forms;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Extension class to handle 3D visualization of faulting planes

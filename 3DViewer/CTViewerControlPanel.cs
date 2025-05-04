@@ -3,7 +3,7 @@ using System.Drawing;
 using System.IO;
 using System.Windows.Forms;
 
-namespace CTSegmenter.SharpDXIntegration
+namespace CTS.SharpDXIntegration
 {
     public partial class SharpDXControlPanel : Form
     {

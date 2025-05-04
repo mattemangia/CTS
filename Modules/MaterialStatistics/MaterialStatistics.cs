@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Class to store statistics for a single material

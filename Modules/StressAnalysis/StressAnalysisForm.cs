@@ -14,7 +14,7 @@ using System.Linq;
 using System.Windows.Forms;
 using static MaterialDensityLibrary;
 
-namespace CTSegmenter
+namespace CTS
 {
     public partial class StressAnalysisForm : KryptonForm
     {
@@ -3913,8 +3913,8 @@ namespace CTSegmenter
                 Cursor = Cursors.WaitCursor;
 
                 //--- convert mesh ---------------------------------------------------
-                List<CTSegmenter.Triangle> simulationTriangles = meshTriangles
-                    .Select(t => new CTSegmenter.Triangle(
+                List<CTS.Triangle> simulationTriangles = meshTriangles
+                    .Select(t => new CTS.Triangle(
                                 new System.Numerics.Vector3(t.V1.X, t.V1.Y, t.V1.Z),
                                 new System.Numerics.Vector3(t.V2.X, t.V2.Y, t.V2.Z),
                                 new System.Numerics.Vector3(t.V3.X, t.V3.Y, t.V3.Z)))
@@ -4384,7 +4384,7 @@ namespace CTSegmenter
             }
 
             // collect fractured triangles
-            var fractured = new List<(CTSegmenter.Triangle tri, float depth)>();
+            var fractured = new List<(CTS.Triangle tri, float depth)>();
             foreach (var tri in currentTriaxial.SimulationMeshAtFailure)
             {
                 if (!tri.IsFractured) continue;
@@ -4563,8 +4563,8 @@ namespace CTSegmenter
                 Cursor = Cursors.WaitCursor;
 
                 //--- convert mesh ---------------------------------------------------
-                List<CTSegmenter.Triangle> simulationTriangles = meshTriangles
-                    .Select(t => new CTSegmenter.Triangle(
+                List<CTS.Triangle> simulationTriangles = meshTriangles
+                    .Select(t => new CTS.Triangle(
                                 new System.Numerics.Vector3(t.V1.X, t.V1.Y, t.V1.Z),
                                 new System.Numerics.Vector3(t.V2.X, t.V2.Y, t.V2.Z),
                                 new System.Numerics.Vector3(t.V3.X, t.V3.Y, t.V3.Z)))

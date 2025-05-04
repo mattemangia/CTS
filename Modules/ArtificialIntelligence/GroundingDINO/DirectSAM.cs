@@ -5,7 +5,7 @@ using System.Linq;
 using System.Reflection;
 using System.Windows.Forms;
 
-namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
+namespace CTS.Modules.ArtificialIntelligence.GroundingDINO
 {
     // Helper class to manage integrated SAM workflow
     public static class SAMPointsHelper

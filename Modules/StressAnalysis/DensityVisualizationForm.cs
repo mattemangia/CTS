@@ -7,7 +7,7 @@ using System.Linq;
 using System.Numerics;
 using System.Windows.Forms;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Interface for density visualization across different simulation types

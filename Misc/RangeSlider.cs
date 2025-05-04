@@ -2,7 +2,7 @@
 using System.Drawing;
 using System.Windows.Forms;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// A custom slider control that allows selecting a range between minimum and maximum values

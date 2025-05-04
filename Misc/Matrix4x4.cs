@@ -1,7 +1,7 @@
 ﻿using System;
 using Vector4 = SharpDX.Vector4;
 
-namespace CTSegmenter
+namespace CTS
 {
     // Simple Matrix4x4 implementation for transformations in TransformDatasetForm
     public struct Matrix4x4

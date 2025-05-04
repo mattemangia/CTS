@@ -8,7 +8,7 @@ using System.Drawing.Imaging;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace CTSegmenter
+namespace CTS
 {
     internal class TextureClassifier
     {

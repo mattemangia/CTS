@@ -15,7 +15,7 @@ using System.Windows.Forms;
 
 using Timer = System.Windows.Forms.Timer;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Real-time visualization window for acoustic simulation results

@@ -2,7 +2,7 @@
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace CTSegmenter
+namespace CTS
 {
     public static class ControlExtensions
     {

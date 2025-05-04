@@ -18,7 +18,7 @@ using Brush = System.Drawing.Brush;
 using DashStyle = System.Drawing.Drawing2D.DashStyle;
 using LinearGradientBrush = System.Drawing.Drawing2D.LinearGradientBrush;
 
-namespace CTSegmenter
+namespace CTS
 {
     public partial class AcousticSimulationForm
     {

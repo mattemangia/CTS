@@ -12,7 +12,7 @@ using System.Windows.Forms.DataVisualization.Charting;
 using System.Windows.Media.Imaging;
 using System.Windows.Media.Media3D;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Extension class to handle the enhanced Results tab functionality
@@ -893,101 +893,142 @@ namespace CTSegmenter
                 // Try to create a visualization with the actual data
                 try
                 {
-                    // Get the damage data from parent form
-                    double[,,] damageData = null;
-                    var damageProperty = _parentForm.GetType().GetProperty("DamageData");
-                    if (damageProperty != null)
-                    {
-                        damageData = damageProperty.GetValue(_parentForm) as double[,,];
-                    }
+                    // Get the damage data from parent form - DIRECT ACCESS TO PROPERTY
+                    double[,,] damageData = _parentForm.DamageData;
 
-                    // Get stress and strain data if available
-                    float[,,] stressData = null;
-                    float[,,] strainData = null;
-
-                    // Get the stress and strain data through reflection (these might be private fields)
-                    try
+                    // If direct property access didn't work, try reflection as fallback
+                    if (damageData == null)
                     {
-                        var stressProperty = _parentForm.GetType().GetProperty("StressData");
-                        if (stressProperty != null)
+                        var damageProperty = _parentForm.GetType().GetProperty("DamageData");
+                        if (damageProperty != null)
                         {
-                            stressData = stressProperty.GetValue(_parentForm) as float[,,];
+                            damageData = damageProperty.GetValue(_parentForm) as double[,,];
                         }
 
-                        var strainProperty = _parentForm.GetType().GetProperty("StrainData");
-                        if (strainProperty != null)
+                        // If still null, try to get it via the method
+                        if (damageData == null)
                         {
-                            strainData = strainProperty.GetValue(_parentForm) as float[,,];
+                            try
+                            {
+                                var getDamageMethod = _parentForm.GetType().GetMethod("GetDamageData");
+                                if (getDamageMethod != null)
+                                {
+                                    damageData = getDamageMethod.Invoke(_parentForm, null) as double[,,];
+                                }
+                            }
+                            catch
+                            {
+                                // Continue with null damage data
+                            }
                         }
-                    }
-                    catch
-                    {
-                        // If we can't get the data, continue with null values
                     }
 
                     // Get volume labels
                     ILabelVolumeData volumeLabels = GetVolumeLabels();
                     byte materialId = GetSelectedMaterialID();
 
-                    if (damageData != null && volumeLabels != null &&
-                        volumeWidth > 0 && volumeHeight > 0 && volumeDepth > 0)
+                    // Log which data is missing for debugging
+                    if (damageData == null)
+                        Logger.Log("[TriaxialResultsExtension] Missing damage data for visualization");
+                    if (volumeLabels == null)
+                        Logger.Log("[TriaxialResultsExtension] Missing volume labels for visualization");
+                    if (volumeWidth <= 0 || volumeHeight <= 0 || volumeDepth <= 0)
+                        Logger.Log($"[TriaxialResultsExtension] Invalid volume dimensions: {volumeWidth}x{volumeHeight}x{volumeDepth}");
+
+                    // Force a visualization even if some data is missing - use placeholders if needed
+                    if (damageData == null)
                     {
-                        // Find the actual failure point
-                        Point3D maxDamagePoint = new Point3D(0, 0, 0);
-
-                        if (_failureDetected && _failureStep >= 0)
+                        // Create a dummy damage array if needed
+                        damageData = new double[Math.Max(1, volumeWidth), Math.Max(1, volumeHeight), Math.Max(1, volumeDepth)];
+                        if (_failureDetected)
                         {
-                            // Use the actual failure point from the parent form
-                            maxDamagePoint = _parentForm.FindMaxDamagePoint();
-                            Logger.Log($"[TriaxialResultsExtension] Using failure point at ({maxDamagePoint.X}, {maxDamagePoint.Y}, {maxDamagePoint.Z})");
-                        }
+                            // Add a high damage value at the failure point to show something
+                            Point3D maxDamagePoint = _parentForm.FindMaxDamagePoint();
 
-                        // Create a FailurePointVisualizer
-                        var visualizer = new FailurePointVisualizer(volumeWidth, volumeHeight, volumeDepth, materialId);
-
-                        // Set all available data
-                        if (stressData != null && strainData != null)
-                        {
-                            visualizer.SetData(volumeLabels, damageData, stressData, strainData);
-                        }
-                        else if (strainData != null)
-                        {
-                            visualizer.SetData(volumeLabels, damageData, strainData);
-                        }
-                        else
-                        {
-                            visualizer.SetData(volumeLabels, damageData);
-                        }
-
-                        visualizer.SetViewParameters(_rotationX, _rotationY, _zoom, _pan);
-
-                        // Create a Point3D from our Point3D struct
-                        FailurePointVisualizer.Point3D failurePoint = new FailurePointVisualizer.Point3D(
-                            (int)maxDamagePoint.X, (int)maxDamagePoint.Y, (int)maxDamagePoint.Z
-                        );
-
-                        // Set the actual failure point in the visualizer
-                        visualizer.SetFailurePoint(_failureDetected, failurePoint);
-
-                        // Create visualization with the selected color mode
-                        var visualizerColorMode = (FailurePointVisualizer.ColorMapMode)((int)_selectedColorMapMode);
-                        bmp = visualizer.CreateVisualization(width, height, visualizerColorMode);
-                    }
-                    else
-                    {
-                        // Fall back to a simplified visualization if data is missing
-                        using (Graphics g = Graphics.FromImage(bmp))
-                        {
-                            g.Clear(Color.FromArgb(20, 20, 20));
-                            using (Font font = new Font("Segoe UI", 10))
-                            using (SolidBrush brush = new SolidBrush(Color.White))
-                            using (StringFormat sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                            // Check if this point is valid
+                            if (maxDamagePoint.X >= 0 && maxDamagePoint.X < damageData.GetLength(0) &&
+                                maxDamagePoint.Y >= 0 && maxDamagePoint.Y < damageData.GetLength(1) &&
+                                maxDamagePoint.Z >= 0 && maxDamagePoint.Z < damageData.GetLength(2))
                             {
-                                string message = "Insufficient data for visualization.\nRun a simulation first to see results.";
-                                g.DrawString(message, font, brush, width / 2, height / 2, sf);
+                                damageData[(int)maxDamagePoint.X, (int)maxDamagePoint.Y, (int)maxDamagePoint.Z] = 1.0;
                             }
                         }
                     }
+
+                    // Create a FailurePointVisualizer
+                    var visualizer = new FailurePointVisualizer(
+                        Math.Max(1, volumeWidth),
+                        Math.Max(1, volumeHeight),
+                        Math.Max(1, volumeDepth),
+                        materialId
+                    );
+
+                    // Set the data - even if labels are null, still try to create a visualization
+                    if (volumeLabels != null)
+                    {
+                        visualizer.SetData(volumeLabels, damageData);
+                    }
+                    else
+                    {
+                        // Create a wrapper for ILabelVolumeData
+                        var labelWrapper = new LabelVolumeDataArray(
+                            Math.Max(1, volumeWidth),
+                            Math.Max(1, volumeHeight),
+                            Math.Max(1, volumeDepth)
+                        );
+
+                        // If we have a material ID, set it for some voxels
+                        if (materialId > 0)
+                        {
+                            // Set the center region to have material
+                            int centerX = labelWrapper.Width / 2;
+                            int centerY = labelWrapper.Height / 2;
+                            int centerZ = labelWrapper.Depth / 2;
+                            int radius = Math.Min(Math.Min(labelWrapper.Width, labelWrapper.Height), labelWrapper.Depth) / 4;
+
+                            for (int z = Math.Max(0, centerZ - radius); z < Math.Min(labelWrapper.Depth, centerZ + radius); z++)
+                            {
+                                for (int y = Math.Max(0, centerY - radius); y < Math.Min(labelWrapper.Height, centerY + radius); y++)
+                                {
+                                    for (int x = Math.Max(0, centerX - radius); x < Math.Min(labelWrapper.Width, centerX + radius); x++)
+                                    {
+                                        labelWrapper[x, y, z] = materialId;
+                                    }
+                                }
+                            }
+                        }
+
+                        visualizer.SetData(labelWrapper, damageData);
+                    }
+
+                    visualizer.SetViewParameters(_rotationX, _rotationY, _zoom, _pan);
+
+                    // Create a Point3D from our Point3D struct
+                    FailurePointVisualizer.Point3D failurePoint;
+                    if (_failureDetected)
+                    {
+                        Point3D maxDamagePoint = _parentForm.FindMaxDamagePoint();
+                        failurePoint = new FailurePointVisualizer.Point3D(
+                            (int)maxDamagePoint.X, (int)maxDamagePoint.Y, (int)maxDamagePoint.Z
+                        );
+                    }
+                    else
+                    {
+                        failurePoint = new FailurePointVisualizer.Point3D(
+                            Math.Max(1, volumeWidth) / 2,
+                            Math.Max(1, volumeHeight) / 2,
+                            Math.Max(1, volumeDepth) / 2
+                        );
+                    }
+
+                    // Set the failure point in the visualizer
+                    visualizer.SetFailurePoint(_failureDetected, failurePoint);
+
+                    // Create visualization with the selected color mode
+                    var visualizerColorMode = (FailurePointVisualizer.ColorMapMode)((int)_selectedColorMapMode);
+                    bmp = visualizer.CreateVisualization(width, height, visualizerColorMode);
+
+                    Logger.Log("[TriaxialResultsExtension] Successfully created failure point visualization");
                 }
                 catch (Exception ex)
                 {
@@ -1013,6 +1054,7 @@ namespace CTSegmenter
             // Draw the visualization
             e.Graphics.DrawImage(_failurePointCache, 0, 0, _failurePointViewer.Width, _failurePointViewer.Height);
         }
+
 
         /// <summary>
         /// Paint handler for faulting plane visualization

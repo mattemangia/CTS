@@ -1,4 +1,4 @@
-﻿using CTSegmenter.SharpDXIntegration;
+﻿using CTS.SharpDXIntegration;
 using SharpDX;
 using SharpDX.Direct3D;
 using SharpDX.Direct3D11;
@@ -16,7 +16,7 @@ using Device = SharpDX.Direct3D11.Device;
 using Format = SharpDX.DXGI.Format;
 using Timer = System.Windows.Forms.Timer;
 
-namespace CTSegmenter
+namespace CTS
 {
     public class SharpDXVolumeRenderer : IDisposable
     {

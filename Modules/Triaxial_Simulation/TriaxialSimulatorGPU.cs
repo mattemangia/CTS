@@ -13,7 +13,7 @@ using ILGPU.Runtime.OpenCL;
 using Microsoft.Office.Interop.Word;
 using Task = System.Threading.Tasks.Task;
 
-namespace CTSegmenter
+namespace CTS
 {
     [StructLayout(LayoutKind.Sequential)]
     public struct MaterialParams

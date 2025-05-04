@@ -7,7 +7,7 @@ using System.IO.MemoryMappedFiles;
 using System.Linq;
 using System.Threading.Tasks;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Provides file operations for CT datasets including loading, saving, and exporting volumes

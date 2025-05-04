@@ -3,7 +3,7 @@ using System.Globalization;
 using System.IO;
 using System.Threading.Tasks;
 
-namespace CTSegmenter
+namespace CTS
 {
     public static class Binning
     {

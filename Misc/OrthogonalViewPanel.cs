@@ -1,5 +1,5 @@
 ﻿// Custom panel for 3D orthogonal view
-using CTSegmenter;
+using CTS;
 using System;
 using System.Drawing;
 using System.Windows.Forms;

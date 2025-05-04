@@ -11,7 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// A form that allows the user to apply various filters (Gaussian, median, Non-Local Means, etc.)

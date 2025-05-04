@@ -9,7 +9,7 @@ using ILGPU.Runtime.Cuda;
 using ILGPU.Runtime.OpenCL;
 using ILGPU.Runtime.CPU;
 
-namespace CTSegmenter
+namespace CTS
 {
     #region Kernel parameter structures
     public struct PhysicsParams

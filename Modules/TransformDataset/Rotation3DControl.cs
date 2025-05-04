@@ -3,7 +3,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
 
-namespace CTSegmenter
+namespace CTS
 {
     public class Rotation3DControl : UserControl
     {

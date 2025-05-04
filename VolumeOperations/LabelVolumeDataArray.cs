@@ -2,7 +2,7 @@
 using System.IO;
 using System.IO.MemoryMappedFiles;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// In-memory implementation of ILabelVolumeData using a contiguous byte array.

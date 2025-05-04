@@ -1,4 +1,4 @@
-﻿namespace CTSegmenter
+﻿namespace CTS
 {
     /// <summary>
     /// Interface for material and voxel operations on volume data.

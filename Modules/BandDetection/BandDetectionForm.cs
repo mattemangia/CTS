@@ -12,7 +12,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Windows.Forms.DataVisualization.Charting;
 
-namespace CTSegmenter
+namespace CTS
 {
     public partial class BandDetectionForm : Form
     {

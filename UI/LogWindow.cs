@@ -3,7 +3,7 @@ using System.Drawing;
 using System.IO;
 using System.Windows.Forms;
 
-namespace CTSegmenter
+namespace CTS
 {
     public class LogWindow : Form
     {

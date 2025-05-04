@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Drawing;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Helper class for 3D to 2D projections.

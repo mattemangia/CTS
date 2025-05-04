@@ -12,7 +12,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace CTSegmenter.Modules.ArtificialIntelligence.GroundingDINO
+namespace CTS.Modules.ArtificialIntelligence.GroundingDINO
 {
     // Enum for mask creation methods with descriptions
     public enum MaskCreationMethod

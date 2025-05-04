@@ -7,7 +7,7 @@ using System.Windows.Forms;
 using Color = System.Drawing.Color;
 using RectangleF = System.Drawing.RectangleF;
 
-namespace CTSegmenter
+namespace CTS
 {
     public class MeasurementTextRenderer : IDisposable
     {

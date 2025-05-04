@@ -12,7 +12,7 @@ using System.Windows.Forms.DataVisualization.Charting;
 
 // Make sure to add reference to System.Windows.Forms.DataVisualization.dll in project
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Form to display and calculate material statistics

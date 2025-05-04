@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Numerics;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Represents a 3D triangle with physical properties for simulation

@@ -15,7 +15,7 @@ using System.Linq;
 using MediaFoundation.OPM;
 using System.Reflection;
 
-namespace CTSegmenter
+namespace CTS
 {
     public partial class TriaxialSimulationForm : KryptonForm, IMaterialDensityProvider
     {

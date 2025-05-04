@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Windows.Forms;
 
-namespace CTSegmenter
+namespace CTS
 {
     public class ExportAnimationDialog : Form
     {

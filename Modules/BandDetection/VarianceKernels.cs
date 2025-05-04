@@ -1,7 +1,7 @@
 ﻿using System;
 using ILGPU;
 
-namespace CTSegmenter
+namespace CTS
 {
     // Define the kernel for variance calculation
     public static class VarianceKernels

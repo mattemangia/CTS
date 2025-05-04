@@ -1,6 +1,6 @@
 ﻿using System.Collections.Generic;
 
-namespace CTSegmenter
+namespace CTS
 {
     // LRU Cache implementation
     public class LRUCache<TKey, TValue>

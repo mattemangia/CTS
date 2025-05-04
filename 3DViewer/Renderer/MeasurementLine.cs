@@ -1,6 +1,6 @@
 ﻿using SharpDX;
 
-namespace CTSegmenter.SharpDXIntegration
+namespace CTS.SharpDXIntegration
 {
     public class MeasurementLine
     {

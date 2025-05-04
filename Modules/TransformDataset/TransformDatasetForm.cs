@@ -16,7 +16,7 @@ using RectangleF = System.Drawing.RectangleF;
 using Vector3 = SharpDX.Vector3;
 using Vector4 = SharpDX.Vector4;
 
-namespace CTSegmenter
+namespace CTS
 {
     public partial class TransformDatasetForm : Form
     {

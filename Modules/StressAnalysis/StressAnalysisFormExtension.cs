@@ -14,7 +14,7 @@ using System.Numerics;
 using System.Reflection;
 using System.Windows.Forms;
 
-namespace CTSegmenter
+namespace CTS
 {
 
     public partial class TriaxialSimulation
@@ -75,7 +75,7 @@ namespace CTSegmenter
 // -----------------------------------------------------------------------------
 
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Patch‑layer that adds rock‑strength UI + extended simulation handler.
@@ -413,7 +413,7 @@ namespace CTSegmenter
 
             // Convert local (inner‑struct) triangles to library triangles ------
             // Map inner-form triangles to library triangles with System.Numerics vectors
-            var simMesh = meshTriangles.Select(t => new CTSegmenter.Triangle(
+            var simMesh = meshTriangles.Select(t => new CTS.Triangle(
                 new System.Numerics.Vector3(t.V1.X, t.V1.Y, t.V1.Z),
                 new System.Numerics.Vector3(t.V2.X, t.V2.Y, t.V2.Z),
                 new System.Numerics.Vector3(t.V3.X, t.V3.Y, t.V3.Z))).ToList();

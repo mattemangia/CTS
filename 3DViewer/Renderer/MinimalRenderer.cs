@@ -6,7 +6,7 @@ using System;
 using System.Diagnostics;
 using System.Windows.Forms;
 
-namespace CTSegmenter.SharpDXIntegration
+namespace CTS.SharpDXIntegration
 {
     public class MinimalRenderer : IDisposable
     {

@@ -1,6 +1,6 @@
 ﻿using System.Windows.Forms;
 
-namespace CTSegmenter
+namespace CTS
 {
     // ------------------------------------------------------------------------
     // Prompt helper

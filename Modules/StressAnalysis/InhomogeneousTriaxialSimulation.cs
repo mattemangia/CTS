@@ -12,7 +12,7 @@ using Color = System.Drawing.Color;
 using Rectangle = System.Drawing.Rectangle;
 using Vector3 = System.Numerics.Vector3;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Extended implementation of triaxial simulation that accounts for inhomogeneous density

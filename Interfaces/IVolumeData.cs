@@ -2,7 +2,7 @@
 using System.IO;
 using System.IO.MemoryMappedFiles;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Base interface for all volume data types

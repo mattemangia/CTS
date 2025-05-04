@@ -7,7 +7,7 @@ using System.Windows.Forms;
 using Color = System.Drawing.Color;
 using Point = System.Drawing.Point;
 
-namespace CTSegmenter.SharpDXIntegration
+namespace CTS.SharpDXIntegration
 {
     public partial class SharpDXViewerForm : Form
     {

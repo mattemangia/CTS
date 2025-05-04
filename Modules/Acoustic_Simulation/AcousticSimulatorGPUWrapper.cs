@@ -3,7 +3,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Wrapper class that provides the same interface as AcousticSimulator

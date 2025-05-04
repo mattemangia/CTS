@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Drawing;
 
-namespace CTSegmenter
+namespace CTS
 {
     /// <summary>
     /// Extension methods for ChunkedVolume that match the signatures 

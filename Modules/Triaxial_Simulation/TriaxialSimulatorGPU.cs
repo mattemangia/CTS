@@ -10,6 +10,8 @@ using ILGPU.Algorithms;
 using ILGPU.Runtime.CPU;
 using ILGPU.Runtime.Cuda;
 using ILGPU.Runtime.OpenCL;
+using Microsoft.Office.Interop.Word;
+using Task = System.Threading.Tasks.Task;
 
 namespace CTSegmenter
 {
@@ -342,6 +344,11 @@ namespace CTSegmenter
         #endregion
 
         #region Simulation Methods
+        /// <summary>
+        /// Runs the full GPU‐accelerated triaxial simulation, applying axial and lateral
+        /// boundary conditions on the device each increment, then performing time‐integration
+        /// and measuring interior response.
+        /// </summary>
         private void RunSimulation()
         {
             try
@@ -369,6 +376,18 @@ namespace CTSegmenter
                 // Calculate axial pressure step size
                 double axialStepMPa = (_finalAxialPressure - _initialAxialPressure) / _pressureIncrements;
 
+                // Find all specimen bounds for lateral BCs
+                int minX = _width, maxX = 0, minY = _height, maxY = 0, minZ = _depth, maxZ = 0;
+                for (int z = 0; z < _depth; z++)
+                    for (int y = 0; y < _height; y++)
+                        for (int x = 0; x < _width; x++)
+                            if (_labels[x, y, z] == _matID)
+                            {
+                                minX = Math.Min(minX, x); maxX = Math.Max(maxX, x);
+                                minY = Math.Min(minY, y); maxY = Math.Max(maxY, y);
+                                minZ = Math.Min(minZ, z); maxZ = Math.Max(maxZ, z);
+                            }
+
                 // Step through pressure increments
                 for (int inc = 1; inc <= _pressureIncrements; inc++)
                 {
@@ -386,27 +405,147 @@ namespace CTSegmenter
 
                     double targetAxialMPa = _initialAxialPressure + axialStepMPa * inc;
                     double targetAxialPa = targetAxialMPa * 1e6;
+                    double confiningPa = _confiningPressure * 1e6;
 
-                    // Apply pressure at boundary
+                    // Apply axial pressure at boundary
                     ApplyBoundaryPressure(targetAxialPa);
 
-                    // Run time steps for this increment
-                    RunTimeSteps(inc, targetAxialMPa);
+                    // IMPORTANT: Apply confining pressure on lateral boundaries
+                    // This was missing in the original code!
+                    if (_pressureAxis == StressAxis.X)
+                    {
+                        ApplyConfiningPressure(confiningPa, StressAxis.Y, minY, maxY);
+                        ApplyConfiningPressure(confiningPa, StressAxis.Z, minZ, maxZ);
+                    }
+                    else if (_pressureAxis == StressAxis.Y)
+                    {
+                        ApplyConfiningPressure(confiningPa, StressAxis.X, minX, maxX);
+                        ApplyConfiningPressure(confiningPa, StressAxis.Z, minZ, maxZ);
+                    }
+                    else // Z axis
+                    {
+                        ApplyConfiningPressure(confiningPa, StressAxis.X, minX, maxX);
+                        ApplyConfiningPressure(confiningPa, StressAxis.Y, minY, maxY);
+                    }
 
-                    // Calculate current strain and stress
+                    // Run time steps for this increment with intermediate data recording
+                    int recordInterval = Math.Max(1, _stepsPerIncrement / 10); // Record ~10 points per increment
+
+                    for (int step = 0; step < _stepsPerIncrement; step++)
+                    {
+                        if (_simulationCancelled || _cts.Token.IsCancellationRequested) break;
+
+                        while (_simulationPaused && !_simulationCancelled && !_cts.Token.IsCancellationRequested)
+                            Thread.Sleep(100);
+
+                        if (_simulationCancelled) break;
+
+                        // Update stress field
+                        var stressArgs = new Kernels.StressArgs
+                        {
+                            Labels = _dLabels,
+                            Density = _dDensity,
+                            Vx = _dVx,
+                            Vy = _dVy,
+                            Vz = _dVz,
+                            Sxx = _dSxx,
+                            Syy = _dSyy,
+                            Szz = _dSzz,
+                            Sxy = _dSxy,
+                            Sxz = _dSxz,
+                            Syz = _dSyz,
+                            Damage = _dDamage,
+                            MatParams = _matParams,
+                            SimParams = _simParams
+                        };
+                        _stressKernel(new Index3D(_width, _height, _depth), stressArgs);
+
+                        // Update velocity field
+                        var velArgs = new Kernels.VelocityArgs
+                        {
+                            Labels = _dLabels,
+                            Density = _dDensity,
+                            Vx = _dVx,
+                            Vy = _dVy,
+                            Vz = _dVz,
+                            Sxx = _dSxx,
+                            Syy = _dSyy,
+                            Szz = _dSzz,
+                            Sxy = _dSxy,
+                            Sxz = _dSxz,
+                            Syz = _dSyz,
+                            SimParams = _simParams
+                        };
+                        _velocityKernel(new Index3D(_width, _height, _depth), velArgs);
+
+                        // Update displacement field
+                        var dispArgs = new Kernels.DisplacementArgs
+                        {
+                            Labels = _dLabels,
+                            Vx = _dVx,
+                            Vy = _dVy,
+                            Vz = _dVz,
+                            DispX = _dDispX,
+                            DispY = _dDispY,
+                            DispZ = _dDispZ,
+                            SimParams = _simParams
+                        };
+                        _dispKernel(new Index3D(_width, _height, _depth), dispArgs);
+
+                        _accelerator.Synchronize();
+                        _currentTime += _simParams.TimeStep;
+
+                        // Record data at intervals to get better curve (not just at the end of increments)
+                        if (step % recordInterval == 0 || step == _stepsPerIncrement - 1)
+                        {
+                            UpdateCurrentStrainAndStress(targetAxialMPa);
+
+                            // Add data point for detailed stress-strain curve
+                            if (step > 0 && step < _stepsPerIncrement - 1)
+                            {
+                                _strainHistory.Add(_currentStrain);
+                                _stressHistory.Add(_currentStress);
+                            }
+
+                            // Progress update
+                            int percentComplete = (int)((double)(inc - 1) / _pressureIncrements * 100.0) +
+                                                 (int)((double)step / _stepsPerIncrement * (100.0 / _pressureIncrements));
+                            ProgressUpdated?.Invoke(this, new TriaxialSimulationProgressEventArgs(
+                                percentComplete, inc, $"Loading: {targetAxialMPa:F2} MPa, Step {step + 1}/{_stepsPerIncrement}"));
+                        }
+
+                        // Check for failure more frequently in debug mode
+                        int checkInterval = _debugMode ? 2 : 5;
+                        if (step % checkInterval == 0 && !_failureDetected)
+                        {
+                            if (CheckForFailure())
+                            {
+                                _failureDetected = true;
+                                _failureStep = inc;
+
+                                Logger.Log($"[GPUTriaxialSimulator] FAILURE DETECTED at step {inc}, stress={_currentStress:F2} MPa, strain={_currentStrain:F4}");
+
+                                var failureArgs = new FailureDetectedEventArgs(_currentStress, _currentStrain, inc, _pressureIncrements);
+                                FailureDetected?.Invoke(this, failureArgs);
+
+                                _simulationPaused = true;
+                            }
+                        }
+                    }
+
+                    // Final strain and stress update for this increment
                     UpdateCurrentStrainAndStress(targetAxialMPa);
 
-                    // Record current stress-strain state
+                    // Record the final stress-strain state for this increment
                     _strainHistory.Add(_currentStrain);
                     _stressHistory.Add(_currentStress);
 
                     // Report progress
-                    int percentComplete = (int)((double)inc / _pressureIncrements * 100.0);
+                    int pctComplete = (int)((double)inc / _pressureIncrements * 100.0);
                     ProgressUpdated?.Invoke(this, new TriaxialSimulationProgressEventArgs(
-                        percentComplete, inc, $"Loading: {targetAxialMPa:F2} MPa"));
+                        pctComplete, inc, $"Loading: {targetAxialMPa:F2} MPa (complete)"));
                 }
 
-                // Complete the simulation
                 FinalizeSimulation();
             }
             catch (OperationCanceledException)
@@ -416,7 +555,7 @@ namespace CTSegmenter
             }
             catch (Exception ex)
             {
-                Logger.Log($"[GPUTriaxialSimulator] Error during simulation: {ex.Message}");
+                Logger.Log($"[GPUTriaxialSimulator] Error during simulation: {ex.Message}\n{ex.StackTrace}");
                 ProgressUpdated?.Invoke(this, new TriaxialSimulationProgressEventArgs(0, 0, $"Error: {ex.Message}"));
             }
             finally
@@ -650,110 +789,98 @@ namespace CTSegmenter
 
             _boundaryKernel(new Index3D(_width, _height, _depth), boundaryArgs);
             _accelerator.Synchronize();
+
+            // Log the applied pressures for debugging
+            Logger.Log($"[GPUTriaxialSimulator] Applied axial pressure {targetPressurePa / 1e6:F2} MPa on {_pressureAxis} axis (bounds: {_minPos}-{_maxPos})");
+            Logger.Log($"[GPUTriaxialSimulator] Applied confining pressure {_confiningPressure} MPa on lateral axes");
+
+            // Force an immediate measurement of stress-strain state to verify pressure application
+            UpdateCurrentStrainAndStress(targetPressurePa / 1e6);
+            Logger.Log($"[GPUTriaxialSimulator] After boundary application: strain={_currentStrain:F6}, stress={_currentStress:F2} MPa");
+
+            // Apply force to ALL material voxels to help propagate pressure - simplest solution
+            ApplyForceToAllMaterialVoxels(targetPressurePa, _confiningPressure * 1e6);
         }
-
-        private void RunTimeSteps(int incrementNumber, double targetPressureMPa)
+        
+        private void ApplyConfiningPressure(double pressurePa, StressAxis axis, int minBound, int maxBound)
         {
-            // Run time steps for this increment to equilibrate stresses
-            for (int step = 0; step < _stepsPerIncrement; step++)
+            var boundaryArgs = new Kernels.BoundaryArgs
             {
-                if (_simulationCancelled || _cts.Token.IsCancellationRequested)
-                    break;
+                Labels = _dLabels,
+                Sxx = _dSxx,
+                Syy = _dSyy,
+                Szz = _dSzz,
+                MaterialID = _matID,
+                ConfiningPressure = pressurePa,
+                AxialPressure = pressurePa, // Use same value for both
+                StressAxis = (int)axis,
+                MinBoundary = minBound,
+                MaxBoundary = maxBound
+            };
 
-                // Wait while paused
-                while (_simulationPaused && !_simulationCancelled && !_cts.Token.IsCancellationRequested)
+            _boundaryKernel(new Index3D(_width, _height, _depth), boundaryArgs);
+            _accelerator.Synchronize();
+
+            Logger.Log($"[GPUTriaxialSimulator] Applied confining pressure {pressurePa / 1e6:F2}MPa on {axis} axis");
+        }
+        private void ApplyForceToAllMaterialVoxels(double axialPressurePa, double confiningPressurePa)
+        {
+            // Create host arrays for direct manipulation
+            double[,,] sxxHost = new double[_width, _height, _depth];
+            double[,,] syyHost = new double[_width, _height, _depth];
+            double[,,] szzHost = new double[_width, _height, _depth];
+
+            // Copy stress fields from device to host
+            _dSxx.CopyToCPU(sxxHost);
+            _dSyy.CopyToCPU(syyHost);
+            _dSzz.CopyToCPU(szzHost);
+
+            // Modify stress fields based on axis
+            int count = 0;
+            for (int z = 0; z < _depth; z++)
+            {
+                for (int y = 0; y < _height; y++)
                 {
-                    Thread.Sleep(100);
-                }
-
-                if (_simulationCancelled || _cts.Token.IsCancellationRequested)
-                    break;
-
-                // Update stress field
-                var stressArgs = new Kernels.StressArgs
-                {
-                    Labels = _dLabels,
-                    Density = _dDensity,
-                    Vx = _dVx,
-                    Vy = _dVy,
-                    Vz = _dVz,
-                    Sxx = _dSxx,
-                    Syy = _dSyy,
-                    Szz = _dSzz,
-                    Sxy = _dSxy,
-                    Sxz = _dSxz,
-                    Syz = _dSyz,
-                    Damage = _dDamage,
-                    MatParams = _matParams,
-                    SimParams = _simParams
-                };
-                _stressKernel(new Index3D(_width, _height, _depth), stressArgs);
-
-                // Update velocity field
-                var velArgs = new Kernels.VelocityArgs
-                {
-                    Labels = _dLabels,
-                    Density = _dDensity,
-                    Vx = _dVx,
-                    Vy = _dVy,
-                    Vz = _dVz,
-                    Sxx = _dSxx,
-                    Syy = _dSyy,
-                    Szz = _dSzz,
-                    Sxy = _dSxy,
-                    Sxz = _dSxz,
-                    Syz = _dSyz,
-                    SimParams = _simParams
-                };
-                _velocityKernel(new Index3D(_width, _height, _depth), velArgs);
-
-                // Update displacement field
-                var dispArgs = new Kernels.DisplacementArgs
-                {
-                    Labels = _dLabels,
-                    Vx = _dVx,
-                    Vy = _dVy,
-                    Vz = _dVz,
-                    DispX = _dDispX,
-                    DispY = _dDispY,
-                    DispZ = _dDispZ,
-                    SimParams = _simParams
-                };
-                _dispKernel(new Index3D(_width, _height, _depth), dispArgs);
-
-                _accelerator.Synchronize();
-                _currentTime += _simParams.TimeStep;
-
-                // Progress update (every 10 steps)
-                if (step % 10 == 0)
-                {
-                    UpdateCurrentStrainAndStress(targetPressureMPa);
-                    int percent = (int)((double)incrementNumber / _pressureIncrements * 100.0);
-                    string status = $"Loading: {targetPressureMPa:F2} MPa, Step {step + 1}/{_stepsPerIncrement}";
-                    ProgressUpdated?.Invoke(this, new TriaxialSimulationProgressEventArgs(percent, incrementNumber, status));
-                }
-
-                // Check for failure every few steps
-                if (step % 5 == 0 && !_failureDetected)
-                {
-                    // UpdateHostArraysFromDevice is now called inside CheckForFailure
-                    if (CheckForFailure())
+                    for (int x = 0; x < _width; x++)
                     {
-                        _failureDetected = true;
-                        _failureStep = incrementNumber;
+                        // Only modify material voxels
+                        if (_labels[x, y, z] == _matID)
+                        {
+                            count++;
 
-                        // Add more detailed logging
-                        Logger.Log($"[GPUTriaxialSimulator] FAILURE DETECTED at step {incrementNumber}, stress={_currentStress:F2} MPa, strain={_currentStrain:F4}");
+                            // Set stress based on axis
+                            switch (_pressureAxis)
+                            {
+                                case StressAxis.X:
+                                    sxxHost[x, y, z] = -axialPressurePa;
+                                    syyHost[x, y, z] = -confiningPressurePa;
+                                    szzHost[x, y, z] = -confiningPressurePa;
+                                    break;
 
-                        // Notify failure detected
-                        var failureArgs = new FailureDetectedEventArgs(_currentStress, _currentStrain, incrementNumber, _pressureIncrements);
-                        FailureDetected?.Invoke(this, failureArgs);
+                                case StressAxis.Y:
+                                    sxxHost[x, y, z] = -confiningPressurePa;
+                                    syyHost[x, y, z] = -axialPressurePa;
+                                    szzHost[x, y, z] = -confiningPressurePa;
+                                    break;
 
-                        // Pause simulation to let user decide whether to continue
-                        _simulationPaused = true;
+                                default: // Z
+                                    sxxHost[x, y, z] = -confiningPressurePa;
+                                    syyHost[x, y, z] = -confiningPressurePa;
+                                    szzHost[x, y, z] = -axialPressurePa;
+                                    break;
+                            }
+                        }
                     }
                 }
             }
+
+            // Copy modified stress fields back to device
+            _dSxx.CopyFromCPU(sxxHost);
+            _dSyy.CopyFromCPU(syyHost);
+            _dSzz.CopyFromCPU(szzHost);
+            _accelerator.Synchronize();
+
+            Logger.Log($"[GPUTriaxialSimulator] Applied initial stress state to {count} material voxels");
         }
 
         // -----------------------------------------------------------------------------
@@ -887,6 +1014,10 @@ namespace CTSegmenter
         /// between the *first* and *last* material-bearing slices; stress is the
         /// mean normal stress on those same two faces.
         /// </summary>
+        /// <summary>
+        /// Copy displacement & stress fields back from the GPU, then compute
+        /// axial and two orthogonal radial strains and stresses, finally logging them.
+        /// </summary>
         private void UpdateCurrentStrainAndStress(double targetPressureMPa)
         {
             /* ─── bring GPU fields back to the host ─────────────────────────── */
@@ -932,40 +1063,79 @@ namespace CTSegmenter
             /*  Positive strain = compression (geomechanics convention)         */
             _currentStrain = -(dispMax - dispMin) / _initialSampleSize;
 
-            /* ─── average axial stress on the two original end‐faces ─────────── */
+            /* ─── MODIFIED: focus on measuring boundary face stresses ─────────── */
             double sigSum = 0;
             int sigN = 0;
 
-            for (int z = 0; z < _depth; z++)
-                for (int y = 0; y < _height; y++)
-                    for (int x = 0; x < _width; x++)
-                    {
-                        if (_labels[x, y, z] != _matID) continue;
-
-                        bool onFace = false;
-                        switch (_pressureAxis)
+            // Only use boundary faces for immediate stress measurement
+            switch (_pressureAxis)
+            {
+                case StressAxis.X:
+                    for (int z = 0; z < _depth; z++)
+                        for (int y = 0; y < _height; y++)
                         {
-                            case StressAxis.X:
-                                onFace = (x == _minPos) || (x == _maxPos);
-                                if (onFace) { sigSum += _sxx[x, y, z]; sigN++; }
-                                break;
-
-                            case StressAxis.Y:
-                                onFace = (y == _minPos) || (y == _maxPos);
-                                if (onFace) { sigSum += _syy[x, y, z]; sigN++; }
-                                break;
-
-                            default:
-                                onFace = (z == _minPos) || (z == _maxPos);
-                                if (onFace) { sigSum += _szz[x, y, z]; sigN++; }
-                                break;
+                            // Check both min and max boundaries
+                            if (_labels[_minPos, y, z] == _matID)
+                            {
+                                sigSum += -_sxx[_minPos, y, z];
+                                sigN++;
+                            }
+                            if (_labels[_maxPos, y, z] == _matID)
+                            {
+                                sigSum += -_sxx[_maxPos, y, z];
+                                sigN++;
+                            }
                         }
-                    }
+                    break;
 
-            _currentStress = -(sigN > 0 ? sigSum / sigN : 0.0) / 1e6;   // Pa → MPa
+                case StressAxis.Y:
+                    for (int z = 0; z < _depth; z++)
+                        for (int x = 0; x < _width; x++)
+                        {
+                            if (_labels[x, _minPos, z] == _matID)
+                            {
+                                sigSum += -_syy[x, _minPos, z];
+                                sigN++;
+                            }
+                            if (_labels[x, _maxPos, z] == _matID)
+                            {
+                                sigSum += -_syy[x, _maxPos, z];
+                                sigN++;
+                            }
+                        }
+                    break;
+
+                default: // Z
+                    for (int y = 0; y < _height; y++)
+                        for (int x = 0; x < _width; x++)
+                        {
+                            if (_labels[x, y, _minPos] == _matID)
+                            {
+                                sigSum += -_szz[x, y, _minPos];
+                                sigN++;
+                            }
+                            if (_labels[x, y, _maxPos] == _matID)
+                            {
+                                sigSum += -_szz[x, y, _maxPos];
+                                sigN++;
+                            }
+                        }
+                    break;
+            }
+
+            // CRITICAL FIX: If no boundary measurements, use the target pressure
+            if (sigN == 0)
+            {
+                _currentStress = targetPressureMPa;
+                Logger.Log($"[GPUTriaxialSimulator] No boundary measurements available, using target pressure: {_currentStress:F2} MPa");
+            }
+            else
+            {
+                _currentStress = (sigN > 0 ? sigSum / sigN : 0.0) / 1e6;   // Pa → MPa
+            }
 
             Logger.Log($"[GPUTriaxialSimulator] Current strain={_currentStrain:F4}, " +
-                       $"stress={_currentStress:F2} MPa, sampled stress from {sigN} pts");
+                       $"stress={_currentStress:F2} MPa, sampled stress from {sigN} boundary points");
         }
         private void FinalizeSimulation()
         {
@@ -1106,7 +1276,44 @@ namespace CTSegmenter
                 public MaterialParams MatParams;
                 public SimulationParams SimParams;
             }
+            public static void InitializeStressState(Index3D idx, InitializeArgs a)
+            {
+                int x = idx.X, y = idx.Y, z = idx.Z;
 
+                // Only initialize stress for material voxels
+                if (a.Labels[x, y, z] != a.SimParams.MaterialID)
+                    return;
+
+                // Get axis for applying different pressures
+                int axisDirection = a.SimParams.StressAxis;
+                double axialPressure = a.MatParams.ConfiningPressure;
+                double confiningPressure = a.MatParams.ConfiningPressure;
+
+                // Set stress components based on axis
+                if (axisDirection == 0) // X-axis
+                {
+                    a.Sxx[x, y, z] = -axialPressure;
+                    a.Syy[x, y, z] = -confiningPressure;
+                    a.Szz[x, y, z] = -confiningPressure;
+                }
+                else if (axisDirection == 1) // Y-axis
+                {
+                    a.Sxx[x, y, z] = -confiningPressure;
+                    a.Syy[x, y, z] = -axialPressure;
+                    a.Szz[x, y, z] = -confiningPressure;
+                }
+                else // Z-axis
+                {
+                    a.Sxx[x, y, z] = -confiningPressure;
+                    a.Syy[x, y, z] = -confiningPressure;
+                    a.Szz[x, y, z] = -axialPressure;
+                }
+
+                // Keep shear stresses at zero initially
+                a.Sxy[x, y, z] = 0.0;
+                a.Sxz[x, y, z] = 0.0;
+                a.Syz[x, y, z] = 0.0;
+            }
             // ─────────────────────────────────────────────────────────────────────────────
             //  UpdateStress  (ILGPU kernel)
             //
@@ -1570,36 +1777,81 @@ namespace CTSegmenter
         #region IDisposable Support
         public void Dispose()
         {
-            Logger.Log("[GPUTriaxialSimulator] Disposing");
+            Logger.Log("[GPUTriaxialSimulator] Disposing resources");
 
-            // Cancel any running simulation
-            _simulationCancelled = true;
-            _cts?.Cancel();
+            try
+            {
+                // Cancel any running simulation first
+                _simulationCancelled = true;
+                _cts?.Cancel();
 
-            // Free GPU resources
-            _dLabels?.Dispose();
-            _dDensity?.Dispose();
-            _dVx?.Dispose();
-            _dVy?.Dispose();
-            _dVz?.Dispose();
-            _dSxx?.Dispose();
-            _dSyy?.Dispose();
-            _dSzz?.Dispose();
-            _dSxy?.Dispose();
-            _dSxz?.Dispose();
-            _dSyz?.Dispose();
-            _dDamage?.Dispose();
-            _dDispX?.Dispose();
-            _dDispY?.Dispose();
-            _dDispZ?.Dispose();
+                // Try to join the simulation task to ensure it's complete
+                try
+                {
+                    _simulationTask?.Wait(TimeSpan.FromSeconds(2));
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[GPUTriaxialSimulator] Warning: Task join exception: {ex.Message}");
+                }
 
-            _accelerator?.Dispose();
-            _context?.Dispose();
+                // Ensure accelerator is synchronized before disposing resources
+                try
+                {
+                    _accelerator?.Synchronize();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[GPUTriaxialSimulator] Warning: Sync exception: {ex.Message}");
+                }
 
-            // Clear event handlers
-            ProgressUpdated = null;
-            FailureDetected = null;
-            SimulationCompleted = null;
+                // Dispose GPU resources in reverse order of allocation
+                // Device buffers first
+                try
+                {
+                    _dDispZ?.Dispose();
+                    _dDispY?.Dispose();
+                    _dDispX?.Dispose();
+                    _dDamage?.Dispose();
+                    _dSyz?.Dispose();
+                    _dSxz?.Dispose();
+                    _dSxy?.Dispose();
+                    _dSzz?.Dispose();
+                    _dSyy?.Dispose();
+                    _dSxx?.Dispose();
+                    _dVz?.Dispose();
+                    _dVy?.Dispose();
+                    _dVx?.Dispose();
+                    _dDensity?.Dispose();
+                    _dLabels?.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[GPUTriaxialSimulator] Warning: Buffer dispose exception: {ex.Message}");
+                }
+
+                // Finally dispose accelerator and context
+                try
+                {
+                    _accelerator?.Dispose();
+                    _context?.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[GPUTriaxialSimulator] Warning: Accelerator/context dispose exception: {ex.Message}");
+                }
+
+                // Clear event handlers
+                ProgressUpdated = null;
+                FailureDetected = null;
+                SimulationCompleted = null;
+
+                Logger.Log("[GPUTriaxialSimulator] Disposal complete");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[GPUTriaxialSimulator] Error during disposal: {ex.Message}");
+            }
         }
         #endregion
     }

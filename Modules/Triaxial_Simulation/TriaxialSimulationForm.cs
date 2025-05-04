@@ -2384,32 +2384,33 @@ namespace CTSegmenter
                     if (updateDataMethod != null)
                     {
                         updateDataMethod.Invoke(resultsExtension, new object[] {
-                    stressStrainCurve,
-                    peakStress,
-                    e.CurrentStrain,
-                    failureDetected,
-                    failureStep,
-                    damage
-                });
+            stressStrainCurve,
+            peakStress,
+            e.CurrentStrain,
+            failureDetected,
+            failureStep,
+            damage
+        });
                     }
 
                     // Then force direct drawing of the tangent line
-                    MethodInfo drawTangentMethod = extensionType.GetMethod("DrawTangentLineOnMohrChart",
+                    // FIXED: Make sure the method name matches exactly what's in TriaxialResultsExtension
+                    MethodInfo drawTangentMethod = extensionType.GetMethod("DrawTangentOnMohrChart",
                         BindingFlags.NonPublic | BindingFlags.Instance);
 
                     if (drawTangentMethod != null)
                     {
                         drawTangentMethod.Invoke(resultsExtension, new object[] {
-                    confiningPressure,
-                    failureStress,
-                    frictionAngle,
-                    cohesion
-                });
+            confiningPressure,
+            failureStress,
+            frictionAngle,
+            cohesion
+        });
                     }
                     else
                     {
-                        // If the method doesn't exist, log it
-                        Logger.Log("[TriaxialSimulationForm] DrawTangentLineOnMohrChart method not found");
+                        // FIXED: Update error message to match the correct method name
+                        Logger.Log("[TriaxialSimulationForm] DrawTangentOnMohrChart method not found");
                     }
                 }
 

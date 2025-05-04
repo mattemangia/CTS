@@ -134,6 +134,8 @@ namespace CTSegmenter
         private volatile bool simulationPaused = false;
         private volatile bool simulationCancelled = false;
         private double dt;
+        private int currentStep = 0;
+        private int totalSteps = 0;
         #endregion
 
         public TriaxialSimulator(
@@ -678,90 +680,79 @@ namespace CTSegmenter
             }
         }
 
-        // -----------------------------------------------------------------------------
-        //  Main simulation loop (pressure increments)
-        // -----------------------------------------------------------------------------
-     
+        // CPU version – full Run method with lateral BC, radial measurements, and pause/cancel
         private void Run(CancellationToken token)
         {
             if (useBrittle)
-            {
                 Logger.Log($"[TriaxialSimulator] Brittle model enabled with tensile strength={tensileStrengthMPa}MPa");
-            }
             else
-            {
                 Logger.Log("[TriaxialSimulator] WARNING: Brittle model is disabled - failure detection may not work!");
-            }
 
             ComputeStableTimeStep();
             InitializeFields();
 
-            //---------------------------------------------------------------------------
-            //  1. Locate specimen boundaries along the primary axis
-            //---------------------------------------------------------------------------
-            int minPos = int.MaxValue, maxPos = int.MinValue;
-
-            switch (primaryStressAxis)
-            {
-                case StressAxis.X:
+            // 1. Find specimen bounds on all three axes
+            int minX = width, maxX = 0,
+                minY = height, maxY = 0,
+                minZ = depth, maxZ = 0;
+            for (int z = 0; z < depth; z++)
+                for (int y = 0; y < height; y++)
                     for (int x = 0; x < width; x++)
-                        for (int y = 0; y < height; y++)
-                            for (int z = 0; z < depth; z++)
-                                if (GetVoxelLabel(x, y, z) == selectedMaterialID)
-                                {
-                                    minPos = Math.Min(minPos, x);
-                                    maxPos = Math.Max(maxPos, x);
-                                }
-                    break;
-
-                case StressAxis.Y:
-                    for (int y = 0; y < height; y++)
-                        for (int x = 0; x < width; x++)
-                            for (int z = 0; z < depth; z++)
-                                if (GetVoxelLabel(x, y, z) == selectedMaterialID)
-                                {
-                                    minPos = Math.Min(minPos, y);
-                                    maxPos = Math.Max(maxPos, y);
-                                }
-                    break;
-
-                default: // Z
-                    for (int z = 0; z < depth; z++)
-                        for (int y = 0; y < height; y++)
-                            for (int x = 0; x < width; x++)
-                                if (GetVoxelLabel(x, y, z) == selectedMaterialID)
-                                {
-                                    minPos = Math.Min(minPos, z);
-                                    maxPos = Math.Max(maxPos, z);
-                                }
-                    break;
-            }
-
-            if (minPos > maxPos)   // no material found
+                        if (GetVoxelLabel(x, y, z) == selectedMaterialID)
+                        {
+                            minX = Math.Min(minX, x);
+                            maxX = Math.Max(maxX, x);
+                            minY = Math.Min(minY, y);
+                            maxY = Math.Max(maxY, y);
+                            minZ = Math.Min(minZ, z);
+                            maxZ = Math.Max(maxZ, z);
+                        }
+            if (minX > maxX)
             {
                 ProgressUpdated?.Invoke(this, new TriaxialSimulationProgressEventArgs(0, 0, "No specimen found"));
                 return;
             }
 
-            double sampleSize = (maxPos - minPos + 1) * pixelSize;
+            // 2. Identify primary (axial) bounds and lateral bounds
+            int minPos, maxPos, minLat1, maxLat1, minLat2, maxLat2;
+            switch (primaryStressAxis)
+            {
+                case StressAxis.X:
+                    minPos = minX; maxPos = maxX;
+                    minLat1 = minY; maxLat1 = maxY;
+                    minLat2 = minZ; maxLat2 = maxZ;
+                    break;
+                case StressAxis.Y:
+                    minPos = minY; maxPos = maxY;
+                    minLat1 = minX; maxLat1 = maxX;
+                    minLat2 = minZ; maxLat2 = maxZ;
+                    break;
+                default: // Z
+                    minPos = minZ; maxPos = maxZ;
+                    minLat1 = minX; maxLat1 = maxX;
+                    minLat2 = minY; maxLat2 = maxY;
+                    break;
+            }
 
-            //---------------------------------------------------------------------------
-            //  2. Initialise histories
-            //---------------------------------------------------------------------------
+            // 3. Compute initial sample sizes
+            double axialSize = (maxPos - minPos + 1) * pixelSize;
+            double radialSize1Init = (maxLat1 - minLat1 + 1) * pixelSize;
+            double radialSize2Init = (maxLat2 - minLat2 + 1) * pixelSize;
+
+            // 4. Histories
             strainHistory.Clear();
             stressHistory.Clear();
             strainHistory.Add(0.0);
             stressHistory.Add(initialAxialPressureMPa);
 
-            //---------------------------------------------------------------------------
-            //  3. Pressure-increment loop
-            //---------------------------------------------------------------------------
+            // 5. Increment loop
             double dP = (finalAxialPressureMPa - initialAxialPressureMPa) / pressureIncrements;
             bool failureDetected = false;
             int failureStep = -1;
 
             for (int inc = 1; inc <= pressureIncrements; inc++)
             {
+                // 5.1 handle pause/cancel before starting increment
                 if (simulationCancelled || token.IsCancellationRequested) break;
                 while (simulationPaused && !simulationCancelled && !token.IsCancellationRequested)
                     Thread.Sleep(100);
@@ -769,10 +760,10 @@ namespace CTSegmenter
 
                 double targetMPa = initialAxialPressureMPa + dP * inc;
                 double targetPa = targetMPa * 1e6;
+                double confPa = confiningPressureMPa * 1e6;
 
-                //-----------------------------------------------------------------------
-                // 3a. Apply axial load on **both** platens
-                //-----------------------------------------------------------------------
+                // 5.2 Apply axial & lateral BC on all faces
+                //  – Axial faces:
                 switch (primaryStressAxis)
                 {
                     case StressAxis.X:
@@ -785,7 +776,6 @@ namespace CTSegmenter
                             }
                         });
                         break;
-
                     case StressAxis.Y:
                         Parallel.For(0, depth, z =>
                         {
@@ -796,8 +786,7 @@ namespace CTSegmenter
                             }
                         });
                         break;
-
-                    default: // Z
+                    default:
                         Parallel.For(0, height, y =>
                         {
                             for (int x = 0; x < width; x++)
@@ -808,108 +797,251 @@ namespace CTSegmenter
                         });
                         break;
                 }
+                //  – Lateral faces (axis1):
+                switch (primaryStressAxis)
+                {
+                    case StressAxis.X:
+                        Parallel.For(0, depth, z =>
+                        {
+                            for (int x = minX; x <= maxX; x++)
+                            {
+                                if (GetVoxelLabel(x, minLat1, z) == selectedMaterialID) syy[x, minLat1, z] = -confPa;
+                                if (GetVoxelLabel(x, maxLat1, z) == selectedMaterialID) syy[x, maxLat1, z] = -confPa;
+                            }
+                        });
+                        break;
+                    case StressAxis.Y:
+                        Parallel.For(0, depth, z =>
+                        {
+                            for (int y = minY; y <= maxY; y++)
+                            {
+                                if (GetVoxelLabel(minLat1, y, z) == selectedMaterialID) sxx[minLat1, y, z] = -confPa;
+                                if (GetVoxelLabel(maxLat1, y, z) == selectedMaterialID) sxx[maxLat1, y, z] = -confPa;
+                            }
+                        });
+                        break;
+                    default:
+                        Parallel.For(0, height, y =>
+                        {
+                            for (int z = minZ; z <= maxZ; z++)
+                            {
+                                if (GetVoxelLabel(minLat1, y, z) == selectedMaterialID) sxx[minLat1, y, z] = -confPa;
+                                if (GetVoxelLabel(maxLat1, y, z) == selectedMaterialID) sxx[maxLat1, y, z] = -confPa;
+                            }
+                        });
+                        break;
+                }
+                //  – Lateral faces (axis2):
+                switch (primaryStressAxis)
+                {
+                    case StressAxis.X:
+                        Parallel.For(0, height, y =>
+                        {
+                            for (int x = minX; x <= maxX; x++)
+                            {
+                                if (GetVoxelLabel(x, y, minLat2) == selectedMaterialID) szz[x, y, minLat2] = -confPa;
+                                if (GetVoxelLabel(x, y, maxLat2) == selectedMaterialID) szz[x, y, maxLat2] = -confPa;
+                            }
+                        });
+                        break;
+                    case StressAxis.Y:
+                        Parallel.For(0, height, y =>
+                        {
+                            for (int x = minX; x <= maxX; x++)
+                            {
+                                if (GetVoxelLabel(x, y, minLat2) == selectedMaterialID) szz[x, y, minLat2] = -confPa;
+                                if (GetVoxelLabel(x, y, maxLat2) == selectedMaterialID) szz[x, y, maxLat2] = -confPa;
+                            }
+                        });
+                        break;
+                    default:
+                        Parallel.For(0, depth, z =>
+                        {
+                            for (int x = minX; x <= maxX; x++)
+                            {
+                                if (GetVoxelLabel(x, minLat2, z) == selectedMaterialID) syy[x, minLat2, z] = -confPa;
+                                if (GetVoxelLabel(x, maxLat2, z) == selectedMaterialID) syy[x, maxLat2, z] = -confPa;
+                            }
+                        });
+                        break;
+                }
 
-                //-----------------------------------------------------------------------
-                // 3b. Time-integration inside this increment
-                //-----------------------------------------------------------------------
+                // 5.3 Time-integration with pause/cancel and intermediate data recording
+                int recordInterval = Math.Max(1, stepsPerIncrement / 10); // Record ~10 points per increment
+
                 for (int step = 0; step < stepsPerIncrement; step++)
                 {
                     if (simulationCancelled || token.IsCancellationRequested) break;
                     while (simulationPaused && !simulationCancelled && !token.IsCancellationRequested)
                         Thread.Sleep(100);
-                    if (simulationCancelled || token.IsCancellationRequested) break;
 
                     UpdateStress();
                     UpdateVelocity();
-                }
 
-                //-----------------------------------------------------------------------
-                // 3c. Measure axial strain & measured stress after equilibration
-                //-----------------------------------------------------------------------
-                double axialStrain = CalculateAverageStrain(primaryStressAxis, minPos, maxPos, sampleSize);
-
-                double sigSum = 0.0;
-                int sigN = 0;
-
-                switch (primaryStressAxis)
-                {
-                    case StressAxis.X:
-                        for (int z = 0; z < depth; z++)
-                            for (int y = 0; y < height; y++)
-                            {
-                                if (GetVoxelLabel(minPos, y, z) == selectedMaterialID) { sigSum += -sxx[minPos, y, z]; sigN++; }
-                                if (GetVoxelLabel(maxPos, y, z) == selectedMaterialID) { sigSum += -sxx[maxPos, y, z]; sigN++; }
-                            }
-                        break;
-
-                    case StressAxis.Y:
-                        for (int z = 0; z < depth; z++)
-                            for (int x = 0; x < width; x++)
-                            {
-                                if (GetVoxelLabel(x, minPos, z) == selectedMaterialID) { sigSum += -syy[x, minPos, z]; sigN++; }
-                                if (GetVoxelLabel(x, maxPos, z) == selectedMaterialID) { sigSum += -syy[x, maxPos, z]; sigN++; }
-                            }
-                        break;
-
-                    default: // Z
-                        for (int y = 0; y < height; y++)
-                            for (int x = 0; x < width; x++)
-                            {
-                                if (GetVoxelLabel(x, y, minPos) == selectedMaterialID) { sigSum += -szz[x, y, minPos]; sigN++; }
-                                if (GetVoxelLabel(x, y, maxPos) == selectedMaterialID) { sigSum += -szz[x, y, maxPos]; sigN++; }
-                            }
-                        break;
-                }
-
-                // **FLIP sign to match GPU:** compression → positive descent
-                double measuredMPa = -(sigN > 0 ? sigSum / sigN : targetPa) / 1e6;
-
-                strainHistory.Add(axialStrain);
-                stressHistory.Add(measuredMPa);
-
-                //-----------------------------------------------------------------------
-                // 3d. Check failure if brittle
-                //-----------------------------------------------------------------------
-                if (useBrittle && !failureDetected)
-                {
-                    failureDetected = CheckForFailure();
-                    if (failureDetected)
+                    // Record intermediate data points for smoother curve
+                    if (step % recordInterval == 0 && step > 0 && step < stepsPerIncrement - 1)
                     {
-                        failureStep = inc;
-                        FailureDetected?.Invoke(this,
-                            new FailureDetectedEventArgs(measuredMPa, axialStrain, inc, pressureIncrements));
-                        if (simulationPaused) break;
+                        double axialStrain = CalculateAverageStrain(primaryStressAxis, minPos, maxPos, axialSize);
+                        double stressMPa = MeasureBoundaryStress(primaryStressAxis, minPos, maxPos);
+
+                        // Add intermediate data point
+                        strainHistory.Add(axialStrain);
+                        stressHistory.Add(stressMPa);
+
+                        // Log progress
+                        int percentComplete = (int)((double)(inc - 1) / pressureIncrements * 100.0) +
+                                              (int)((double)step / stepsPerIncrement * (100.0 / pressureIncrements));
+                        ProgressUpdated?.Invoke(this, new TriaxialSimulationProgressEventArgs(
+                            percentComplete, inc, $"Loading: {targetMPa:F2} MPa, Step {step + 1}/{stepsPerIncrement}"));
+                    }
+
+                    // Check for failure more frequently in debug mode
+                    int checkInterval = _debugMode ? 2 : 5;
+                    if (step % checkInterval == 0 && !failureDetected)
+                    {
+                        if (CheckForFailure())
+                        {
+                            failureDetected = true;
+                            failureStep = inc;
+
+                            // Record strain and stress at failure
+                            double axialStrain = CalculateAverageStrain(primaryStressAxis, minPos, maxPos, axialSize);
+                            double stressMPa = MeasureBoundaryStress(primaryStressAxis, minPos, maxPos);
+
+                            FailureDetected?.Invoke(this, new FailureDetectedEventArgs(
+                                stressMPa, axialStrain, inc, pressureIncrements));
+
+                            // Pause simulation to let user decide whether to continue
+                            simulationPaused = true;
+                        }
                     }
                 }
+                if (simulationCancelled || token.IsCancellationRequested) break;
 
-                //-----------------------------------------------------------------------
-                // 3e. Progress update
-                //-----------------------------------------------------------------------
-                int pctInc = (int)((double)inc / pressureIncrements * 100.0);
-                ProgressUpdated?.Invoke(this,
-                    new TriaxialSimulationProgressEventArgs(pctInc, inc, $"Loading {targetMPa:F2} MPa"));
+                // 5.4 Measure final strains and stresses for this increment
+                double finalAxialStrain = CalculateAverageStrain(primaryStressAxis, minPos, maxPos, axialSize);
+                double radialStrain1 = CalculateAverageStrain(
+                    primaryStressAxis == StressAxis.X ? StressAxis.Y :
+                    primaryStressAxis == StressAxis.Y ? StressAxis.X : StressAxis.X,
+                    minLat1, maxLat1, radialSize1Init);
+                double radialStrain2 = CalculateAverageStrain(
+                    primaryStressAxis == StressAxis.Z ? StressAxis.Y : StressAxis.Z,
+                    minLat2, maxLat2, radialSize2Init);
+
+                // 5.5 Measure boundary stresses at end of increment
+                double finalStressMPa = MeasureBoundaryStress(primaryStressAxis, minPos, maxPos, targetMPa);
+                double radialStress1MPa = MeasureBoundaryStress(
+                    primaryStressAxis == StressAxis.X ? StressAxis.Y :
+                    primaryStressAxis == StressAxis.Y ? StressAxis.X : StressAxis.X,
+                    minLat1, maxLat1, confiningPressureMPa);
+                double radialStress2MPa = MeasureBoundaryStress(
+                    primaryStressAxis == StressAxis.Z ? StressAxis.Y : StressAxis.Z,
+                    minLat2, maxLat2, confiningPressureMPa);
+
+                // 5.6 Record final point for this increment
+                strainHistory.Add(finalAxialStrain);
+                stressHistory.Add(finalStressMPa);
+                Logger.Log($"Step {inc}: axial ε={finalAxialStrain:F4}, σ={finalStressMPa:F2}MPa; " +
+                           $"radial ε₁={radialStrain1:F4}, σ₁={radialStress1MPa:F2}MPa; " +
+                           $"ε₂={radialStrain2:F4}, σ₂={radialStress2MPa:F2}MPa");
+
+                // Report progress
+                int pctComplete = (int)((double)inc / pressureIncrements * 100.0);
+                ProgressUpdated?.Invoke(this, new TriaxialSimulationProgressEventArgs(
+                    pctComplete, inc, $"Loading: {finalStressMPa:F2} MPa (complete)"));
             }
 
-            //---------------------------------------------------------------------------
-            //  4. Wrap-up / completion
-            //---------------------------------------------------------------------------
-            if (simulationCancelled || token.IsCancellationRequested)
-            {
-                ProgressUpdated?.Invoke(this, new TriaxialSimulationProgressEventArgs(0, 0, "Cancelled"));
-                return;
-            }
+            // 6. Finish and report completion with failure info
+            var resultArgs = new TriaxialSimulationCompleteEventArgs(
+                strainHistory.ToArray(),
+                stressHistory.ToArray(),
+                failureDetected: failureDetected,
+                failureStep: failureStep);
+            SimulationCompleted?.Invoke(this, resultArgs);
 
-            SimulationCompleted?.Invoke(this,
-                new TriaxialSimulationCompleteEventArgs(
-                    strainHistory.ToArray(),
-                    stressHistory.ToArray(),
-                    failureDetected,
-                    failureStep));
-
+            // 7. Export results if requested
             ExportResultsAndImages();
         }
 
 
+        private double MeasureBoundaryStress(StressAxis axis, int minPos, int maxPos, double targetPressureMPa = 0)
+        {
+            double sigSum = 0;
+            int sigN = 0;
+
+            switch (axis)
+            {
+                case StressAxis.X:
+                    for (int z = 0; z < depth; z++)
+                        for (int y = 0; y < height; y++)
+                        {
+                            if (GetVoxelLabel(minPos, y, z) == selectedMaterialID)
+                            {
+                                sigSum += -sxx[minPos, y, z];
+                                sigN++;
+                            }
+                            if (GetVoxelLabel(maxPos, y, z) == selectedMaterialID)
+                            {
+                                sigSum += -sxx[maxPos, y, z];
+                                sigN++;
+                            }
+                        }
+                    break;
+
+                case StressAxis.Y:
+                    for (int z = 0; z < depth; z++)
+                        for (int x = 0; x < width; x++)
+                        {
+                            if (GetVoxelLabel(x, minPos, z) == selectedMaterialID)
+                            {
+                                sigSum += -syy[x, minPos, z];
+                                sigN++;
+                            }
+                            if (GetVoxelLabel(x, maxPos, z) == selectedMaterialID)
+                            {
+                                sigSum += -syy[x, maxPos, z];
+                                sigN++;
+                            }
+                        }
+                    break;
+
+                default: // Z
+                    for (int y = 0; y < height; y++)
+                        for (int x = 0; x < width; x++)
+                        {
+                            if (GetVoxelLabel(x, y, minPos) == selectedMaterialID)
+                            {
+                                sigSum += -szz[x, y, minPos];
+                                sigN++;
+                            }
+                            if (GetVoxelLabel(x, y, maxPos) == selectedMaterialID)
+                            {
+                                sigSum += -szz[x, y, maxPos];
+                                sigN++;
+                            }
+                        }
+                    break;
+            }
+
+            // If no boundary measurements, use target pressure
+            double stressMPa;
+            if (sigN == 0)
+            {
+                // Use the provided target pressure instead of calculating it
+                stressMPa = (axis == primaryStressAxis) ?
+                    targetPressureMPa :
+                    confiningPressureMPa;
+
+                Logger.Log($"[TriaxialSimulator] No boundary measurements available for {axis}, using programmed pressure: {stressMPa:F2} MPa");
+            }
+            else
+            {
+                stressMPa = (sigSum / sigN) / 1e6;   // Pa → MPa
+                Logger.Log($"[TriaxialSimulator] Measured {axis} stress at {sigN} boundary points: {stressMPa:F2} MPa");
+            }
+
+            return stressMPa;
+        }
         // -----------------------------------------------------------------------------
         //  CalculateAverageStrain – engineering strain along the primary axis
         //  ε = (Δu_max − Δu_min) / L₀   (compression > 0)

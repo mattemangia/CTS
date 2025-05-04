@@ -173,6 +173,7 @@
     <Compile Include="Modules\StressAnalysis\TriaxialSimulation.cs" />
     <Compile Include="Modules\Triaxial_Simulation\FailurePointVisualizer.cs" />
     <Compile Include="Modules\Triaxial_Simulation\FaultingPlaneVisualizer.cs" />
+    <Compile Include="Modules\Triaxial_Simulation\MohrCircle.cs" />
     <Compile Include="Modules\Triaxial_Simulation\MohrCoulombVisualization.cs" />
     <Compile Include="Modules\Triaxial_Simulation\TriaxialResultExtension.cs" />
     <Compile Include="Modules\Triaxial_Simulation\TriaxialSimulationForm.cs">

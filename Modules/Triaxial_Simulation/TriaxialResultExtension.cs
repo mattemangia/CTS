@@ -212,23 +212,50 @@ namespace CTSegmenter
             // Create chart for Mohr-Coulomb visualization
             _mohrCoulombChart = new Chart();
             _mohrCoulombChart.Dock = DockStyle.Fill;
-            _mohrCoulombChart.BackColor = Color.FromArgb(0, 0, 0);
+            _mohrCoulombChart.BackColor = Color.Black;
             _mohrCoulombChart.ForeColor = Color.White;
             _mohrCoulombChart.AntiAliasing = AntiAliasingStyles.All;
             _mohrCoulombChart.TextAntiAliasingQuality = TextAntiAliasingQuality.High;
 
             ChartArea ca = new ChartArea("CA");
-            ca.BackColor = Color.FromArgb(50, 50, 50);
+            ca.BackColor = Color.Black;
+
+            // Configure X and Y axes with white labels and lines
             ca.AxisX.LabelStyle.ForeColor = Color.White;
             ca.AxisY.LabelStyle.ForeColor = Color.White;
             ca.AxisX.LineColor = Color.White;
             ca.AxisY.LineColor = Color.White;
             ca.AxisX.MajorGrid.LineColor = Color.FromArgb(70, 70, 70);
             ca.AxisY.MajorGrid.LineColor = Color.FromArgb(70, 70, 70);
+
+            // Position X-axis at bottom and start at 0
+            ca.AxisY.Minimum = 0;  // Set Y-axis minimum to 0 to position X-axis at bottom
+            ca.AxisX.Minimum = 0;  // Force X-axis to start at 0
+
+            // Fix circle appearance by setting the position and size of the chart area
+            ca.Position.Auto = false;
+            ca.Position.X = 10;
+            ca.Position.Y = 10;
+            ca.Position.Width = 80;
+            ca.Position.Height = 80;
+
+            // Set inner plot position to be square
+            ca.InnerPlotPosition.Auto = false;
+            ca.InnerPlotPosition.X = 10;
+            ca.InnerPlotPosition.Y = 10;
+            ca.InnerPlotPosition.Width = 80;
+            ca.InnerPlotPosition.Height = 80;
+
+            // Set pixel/data scaling ratio to be equal for both axes
+            ca.AxisX.IsStartedFromZero = true;
+            ca.AxisY.IsStartedFromZero = true;
+
+            // Set axis titles
             ca.AxisX.Title = "Normal Stress (MPa)";
             ca.AxisY.Title = "Shear Stress (MPa)";
             ca.AxisX.TitleForeColor = Color.White;
             ca.AxisY.TitleForeColor = Color.White;
+
             _mohrCoulombChart.ChartAreas.Add(ca);
 
             // Add Mohr circles series
@@ -245,27 +272,27 @@ namespace CTSegmenter
             envelopeSeries.BorderWidth = 2;
             _mohrCoulombChart.Series.Add(envelopeSeries);
 
-            // Add stress state points 
+            // Add stress state points
             Series pointsSeries = new Series("Points");
             pointsSeries.ChartType = SeriesChartType.Point;
             pointsSeries.MarkerStyle = MarkerStyle.Circle;
-            pointsSeries.Color = Color.Yellow;
+            pointsSeries.Color = Color.Red;
             pointsSeries.MarkerSize = 8;
             _mohrCoulombChart.Series.Add(pointsSeries);
 
-            // Add legend
+            // Add legend with black background
             Legend legend = new Legend("Legend");
-            legend.BackColor = Color.FromArgb(50, 50, 50);
+            legend.BackColor = Color.Black;
             legend.ForeColor = Color.White;
+            
             _mohrCoulombChart.Legends.Add(legend);
 
-            // Add PostPaint event to ensure tangent line is drawn
+            // Add PostPaint event
             _mohrCoulombChart.PostPaint += MohrCoulombChart_PostPaint;
 
             // Add to tab
             _mohrCoulombTab.Controls.Add(_mohrCoulombChart);
         }
-
         /// <summary>
         /// Initialize the Failure Point 3D View tab
         /// </summary>
@@ -424,78 +451,30 @@ namespace CTSegmenter
                 _stressStrainChart.Series["Peak"].Points[0].Label = $"Peak: {_peakStress:F1} MPa";
             }
         }
+
         /// <summary>
-        /// Draws the tangent line on the Mohr-Coulomb chart at the failure point
-        /// This method is specifically called by TriaxialSimulationForm's OnFailure method via reflection
+        /// Implementation for an alternative, direct drawing approach to ensure the tangent always appears
         /// </summary>
-        /// <param name="confiningPressure">The confining pressure at failure</param>
-        /// <param name="failureStress">The axial stress at failure</param>
-        /// <param name="frictionAngle">The friction angle in degrees</param>
-        /// <param name="cohesion">The cohesion in MPa</param>
-        private void DrawTangentLineOnMohrChart(double confiningPressure, double failureStress, double frictionAngle, double cohesion)
+        private void DrawTangentOnMohrChart(double confiningPressure, double failureStress,
+                                    double frictionAngle, double cohesion)
         {
             try
             {
-                // Ensure chart exists
-                if (_mohrCoulombChart == null)
+                if (_mohrCoulombChart == null) return;
+
+                // Ensure we have a MohrCircle object
+                if (_currentMohrCircle == null)
                 {
-                    Logger.Log("[TriaxialResultsExtension] Cannot draw tangent - chart is null");
-                    return;
+                    _currentMohrCircle = new MohrCircle(failureStress, confiningPressure);
                 }
 
-                Logger.Log($"[TriaxialResultsExtension] Drawing tangent line: conf={confiningPressure}, failure={failureStress}, phi={frictionAngle}, c={cohesion}");
+                // Get the tangent point on the circle
+                PointF tangentPoint = _currentMohrCircle.GetTangentPoint(frictionAngle);
 
-                // Calculate Mohr circle parameters at failure
-                double sig1 = Math.Max(failureStress, confiningPressure);
-                double sig3 = Math.Min(failureStress, confiningPressure);
-                double center = (sig1 + sig3) / 2.0;
-                double radius = Math.Max((sig1 - sig3) / 2.0, 0.001);
+                // Only proceed if the tangent point has a positive Y value
+                if (tangentPoint.Y <= 0) return;
 
-                // Convert friction angle to radians
-                double phi = frictionAngle * Math.PI / 180.0;
-                double sinPhi = Math.Sin(phi);
-                double cosPhi = Math.Cos(phi);
-                double tanPhi = Math.Tan(phi);
-
-                // Ensure we have valid values
-                if (double.IsNaN(sinPhi) || double.IsInfinity(sinPhi)) sinPhi = 0;
-                if (double.IsNaN(cosPhi) || double.IsInfinity(cosPhi)) cosPhi = 1;
-                if (double.IsNaN(tanPhi) || double.IsInfinity(tanPhi)) tanPhi = 0;
-
-                // Calculate angle parameters
-                double beta = Math.Atan(tanPhi);
-                double alpha = Math.PI / 4.0 - beta / 2.0;
-
-                // Calculate tangent point coordinates
-                double sigmaF = center - radius * Math.Cos(2 * alpha);
-                double tauF = radius * Math.Sin(2 * alpha);
-
-                // Ensure valid values
-                if (double.IsNaN(sigmaF) || double.IsInfinity(sigmaF)) sigmaF = center;
-                if (double.IsNaN(tauF) || double.IsInfinity(tauF)) tauF = 0;
-
-                // Create or retrieve the tangent point series
-                Series tangentPointSeries;
-                if (_mohrCoulombChart.Series.IndexOf("TangentPoint") < 0)
-                {
-                    tangentPointSeries = new Series("TangentPoint");
-                    tangentPointSeries.ChartType = SeriesChartType.Point;
-                    tangentPointSeries.Color = Color.Yellow;
-                    tangentPointSeries.MarkerStyle = MarkerStyle.Circle;
-                    tangentPointSeries.MarkerSize = 10;
-                    _mohrCoulombChart.Series.Add(tangentPointSeries);
-                }
-                else
-                {
-                    tangentPointSeries = _mohrCoulombChart.Series["TangentPoint"];
-                    tangentPointSeries.Points.Clear();
-                }
-
-                // Add tangent point to series
-                tangentPointSeries.Points.AddXY(sigmaF, tauF);
-                tangentPointSeries.Points[0].Label = "Failure Point";
-
-                // Create or retrieve tangent line series
+                // Create or retrieve the tangent series
                 Series tangentSeries;
                 if (_mohrCoulombChart.Series.IndexOf("Tangent") < 0)
                 {
@@ -511,200 +490,71 @@ namespace CTSegmenter
                     tangentSeries.Points.Clear();
                 }
 
-                // Calculate radial and tangent slopes
-                double dx = sigmaF - center;
-                double mRadial = 0;
-
-                if (Math.Abs(dx) > 0.0001)
-                    mRadial = tauF / dx;
+                // Create or retrieve the point series for the tangent point
+                Series pointSeries;
+                if (_mohrCoulombChart.Series.IndexOf("TangentPoint") < 0)
+                {
+                    pointSeries = new Series("TangentPoint");
+                    pointSeries.ChartType = SeriesChartType.Point;
+                    pointSeries.Color = Color.Lime;
+                    pointSeries.MarkerStyle = MarkerStyle.Circle;
+                    pointSeries.MarkerSize = 10;
+                    _mohrCoulombChart.Series.Add(pointSeries);
+                }
                 else
-                    mRadial = 1000;
+                {
+                    pointSeries = _mohrCoulombChart.Series["TangentPoint"];
+                    pointSeries.Points.Clear();
+                }
 
-                double mTangent = 0;
-                if (Math.Abs(mRadial) > 0.0001)
-                    mTangent = -1.0 / mRadial;
-                else
-                    mTangent = -1000;
+                // Add the tangent point
+                pointSeries.Points.AddXY(tangentPoint.X, tangentPoint.Y);
+                pointSeries.Points[0].Label = "Failure Point";
 
-                // Get chart bounds
+                // Calculate the tangent line
                 ChartArea ca = _mohrCoulombChart.ChartAreas[0];
                 double minX = ca.AxisX.Minimum;
                 double maxX = ca.AxisX.Maximum;
 
-                // Calculate tangent line endpoints
-                double x1 = minX;
-                double y1 = tauF + mTangent * (x1 - sigmaF);
-                double x2 = maxX;
-                double y2 = tauF + mTangent * (x2 - sigmaF);
+                // Get the slope for the tangent line (tan of friction angle)
+                double slope = Math.Tan(frictionAngle * Math.PI / 180.0);
 
-                // Add tangent line points
+                // Calculate points for tangent line
+                // Start point (at x=0 or where the line intersects y=0, whichever is greater)
+                double x1 = Math.Max(minX, tangentPoint.X - tangentPoint.Y / slope);
+                double y1 = Math.Max(0, tangentPoint.Y - slope * (tangentPoint.X - x1));
+
+                // End point
+                double x2 = maxX;
+                double y2 = tangentPoint.Y + slope * (maxX - tangentPoint.X);
+
+                // Add the tangent line points
                 tangentSeries.Points.AddXY(x1, y1);
                 tangentSeries.Points.AddXY(x2, y2);
 
-                // Also try direct drawing on the chart for redundancy
-                try
-                {
-                    using (Graphics g = _mohrCoulombChart.CreateGraphics())
-                    {
-                        // Get chart area dimensions
-                        int x = (int)(_mohrCoulombChart.Width * ca.Position.X / 100);
-                        int y = (int)(_mohrCoulombChart.Height * ca.Position.Y / 100);
-                        int width = (int)(_mohrCoulombChart.Width * ca.Position.Width / 100);
-                        int height = (int)(_mohrCoulombChart.Height * ca.Position.Height / 100);
-
-                        Rectangle plotArea = new Rectangle(x, y, width, height);
-
-                        // Transform data coordinates to pixel coordinates
-                        double xDataRange = ca.AxisX.Maximum - ca.AxisX.Minimum;
-                        double yDataRange = ca.AxisY.Maximum - ca.AxisY.Minimum;
-
-                        float xSignaF = plotArea.X + (float)((sigmaF - ca.AxisX.Minimum) / xDataRange * plotArea.Width);
-                        float yTauF = plotArea.Y + plotArea.Height - (float)((tauF - ca.AxisY.Minimum) / yDataRange * plotArea.Height);
-
-                        // Draw tangent point
-                        using (SolidBrush pointBrush = new SolidBrush(Color.Yellow))
-                        {
-                            g.FillEllipse(pointBrush, xSignaF - 5, yTauF - 5, 10, 10);
-                        }
-
-                        // Convert tangent line endpoints to screen coordinates
-                        float px1 = plotArea.X + (float)((x1 - ca.AxisX.Minimum) / xDataRange * plotArea.Width);
-                        float py1 = plotArea.Y + plotArea.Height - (float)((y1 - ca.AxisY.Minimum) / yDataRange * plotArea.Height);
-                        float px2 = plotArea.X + (float)((x2 - ca.AxisX.Minimum) / xDataRange * plotArea.Width);
-                        float py2 = plotArea.Y + plotArea.Height - (float)((y2 - ca.AxisY.Minimum) / yDataRange * plotArea.Height);
-
-                        // Draw tangent line
-                        using (Pen tangentPen = new Pen(Color.Yellow, 2))
-                        {
-                            g.DrawLine(tangentPen, px1, py1, px2, py2);
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    // If direct drawing fails, the series approach should still work
-                    Logger.Log($"[TriaxialResultsExtension] Direct drawing failed: {ex.Message}");
-                }
-
-                // Force chart to redraw
+                // Ensure the chart is updated
                 _mohrCoulombChart.Invalidate();
-
-                Logger.Log("[TriaxialResultsExtension] Tangent line drawn successfully");
             }
             catch (Exception ex)
             {
-                Logger.Log($"[TriaxialResultsExtension] Error drawing tangent line: {ex.Message}\n{ex.StackTrace}");
+                Logger.Log($"[TriaxialResultsExtension] Error drawing tangent: {ex.Message}");
             }
         }
         /// <summary>
-        /// Update the Mohr-Coulomb chart with current data
+        /// Calculate failure point coordinates on the Mohr circle based on Mohr-Coulomb criterion
         /// </summary>
-        /// <summary>
-        /// Implementation for an alternative, direct drawing approach to ensure the tangent always appears
-        /// </summary>
-        private void DrawTangentOnMohrChart(Graphics g, ChartArea ca, Rectangle plotArea, double center, double radius, double frictionAngle, double cohesion)
-        {
-            try
-            {
-                // Convert friction angle to radians
-                double phi = frictionAngle * Math.PI / 180.0;
-
-                // Calculate angle parameters
-                double sinPhi = Math.Sin(phi);
-                double cosPhi = Math.Cos(phi);
-                double tanPhi = Math.Tan(phi);
-
-                // Calculate beta and alpha for correct tangent point
-                double beta = Math.Atan(tanPhi);
-                double alpha = Math.PI / 4.0 - beta / 2.0;
-
-                // Calculate coordinates of tangent point on the circle
-                double sigmaF = center - radius * Math.Cos(2 * alpha);
-                double tauF = radius * Math.Sin(2 * alpha);
-
-                // Transform data coordinates to pixel coordinates
-                double xDataRange = ca.AxisX.Maximum - ca.AxisX.Minimum;
-                double yDataRange = ca.AxisY.Maximum - ca.AxisY.Minimum;
-
-                // Convert tangent point to screen coordinates
-                float xSignaF = plotArea.X + (float)((sigmaF - ca.AxisX.Minimum) / xDataRange * plotArea.Width);
-                float yTauF = plotArea.Y + plotArea.Height - (float)((tauF - ca.AxisY.Minimum) / yDataRange * plotArea.Height);
-
-                // Draw the tangent point
-                using (SolidBrush pointBrush = new SolidBrush(Color.Yellow))
-                {
-                    g.FillEllipse(pointBrush, xSignaF - 6, yTauF - 6, 12, 12);
-                }
-
-                // Calculate slope of radial line from center to tangent point
-                double dx = sigmaF - center;
-                double mRadial = 0;
-
-                if (Math.Abs(dx) > 0.0001)
-                    mRadial = tauF / dx;
-                else
-                    mRadial = 1000; // Very steep
-
-                // Calculate slope of tangent line (perpendicular to radial)
-                double mTangent = 0;
-
-                if (Math.Abs(mRadial) > 0.0001)
-                    mTangent = -1.0 / mRadial;
-                else
-                    mTangent = -1000; // Very steep
-
-                // Calculate tangent line endpoints
-                double x1 = ca.AxisX.Minimum;
-                double y1 = tauF + mTangent * (x1 - sigmaF);
-                double x2 = ca.AxisX.Maximum;
-                double y2 = tauF + mTangent * (x2 - sigmaF);
-
-                // Convert to pixel coordinates
-                float px1 = plotArea.X + (float)((x1 - ca.AxisX.Minimum) / xDataRange * plotArea.Width);
-                float py1 = plotArea.Y + plotArea.Height - (float)((y1 - ca.AxisY.Minimum) / yDataRange * plotArea.Height);
-                float px2 = plotArea.X + (float)((x2 - ca.AxisX.Minimum) / xDataRange * plotArea.Width);
-                float py2 = plotArea.Y + plotArea.Height - (float)((y2 - ca.AxisY.Minimum) / yDataRange * plotArea.Height);
-
-                // Draw the tangent line
-                using (Pen tangentPen = new Pen(Color.Yellow, 2))
-                {
-                    g.DrawLine(tangentPen, px1, py1, px2, py2);
-                }
-
-                // Add a label
-                using (Font font = new Font("Segoe UI", 8, FontStyle.Bold))
-                using (SolidBrush textBrush = new SolidBrush(Color.Yellow))
-                {
-                    g.DrawString("Tangent at Failure", font, textBrush, xSignaF + 8, yTauF - 15);
-                }
-
-                // Draw radial line for clarity
-                float xCenter = plotArea.X + (float)((center - ca.AxisX.Minimum) / xDataRange * plotArea.Width);
-                float yCenter = plotArea.Y + plotArea.Height; // Center is on X-axis (y=0)
-
-                using (Pen radialPen = new Pen(Color.FromArgb(120, 255, 255, 0), 1))
-                {
-                    g.DrawLine(radialPen, xCenter, yCenter, xSignaF, yTauF);
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Log($"[TriaxialResultsExtension] Error drawing tangent directly: {ex.Message}");
-            }
-        }
         private void CalculateFailurePointCoordinates(double center, double radius, double frictionAngle, double cohesion,
-                                              out double sigmaF, out double tauF)
+                                                      out double sigmaF, out double tauF)
         {
             // Convert friction angle to radians
             double phi = frictionAngle * Math.PI / 180.0;
+            double sinPhi = Math.Sin(phi);
+            double cosPhi = Math.Cos(phi);
 
-            // Calculate angle parameters using proper Mohr-Coulomb theory
-            double beta = Math.Atan(Math.Tan(phi));
-            double alpha = Math.PI / 4.0 - beta / 2.0;
-
-            // Calculate coordinates of tangent point on the circle
-            sigmaF = center - radius * Math.Cos(2 * alpha);
-            tauF = radius * Math.Sin(2 * alpha);
+            // The tangent point is where the Mohr-Coulomb failure envelope touches the circle
+            // For a circle with center (center, 0) and radius, the tangent point is:
+            sigmaF = center - radius * sinPhi;
+            tauF = radius * cosPhi;
 
             // Ensure values are valid
             if (double.IsNaN(sigmaF) || double.IsInfinity(sigmaF))
@@ -713,33 +563,21 @@ namespace CTSegmenter
             if (double.IsNaN(tauF) || double.IsInfinity(tauF))
                 tauF = 0;
         }
+
         private void MohrCoulombChart_PostPaint(object sender, ChartPaintEventArgs e)
         {
+            // This event will draw directly on the chart graphics if needed
+            // We'll just call our main method which now handles everything properly
             if (!_failureDetected || _failureStep < 0 || e.ChartElement.GetType() != typeof(ChartArea))
                 return;
 
             try
             {
-                // Get the current chart area
-                ChartArea ca = _mohrCoulombChart.ChartAreas[0];
-
-                // Create rectangle from element position (manually since ToRectangle() isn't available)
-                int x = (int)(_mohrCoulombChart.Width * ca.Position.X / 100);
-                int y = (int)(_mohrCoulombChart.Height * ca.Position.Y / 100);
-                int width = (int)(_mohrCoulombChart.Width * ca.Position.Width / 100);
-                int height = (int)(_mohrCoulombChart.Height * ca.Position.Height / 100);
-
-                Rectangle plotArea = new Rectangle(x, y, width, height);
-
-                // Get stress values at failure
+                // Get failure data
                 double failureStress = _stressStrainData[_failureStep].Y;
                 double confiningPressure = GetConfiningPressure();
-                double sig1 = Math.Max(failureStress, confiningPressure);
-                double sig3 = Math.Min(failureStress, confiningPressure);
-                double center = (sig1 + sig3) / 2.0;
-                double radius = (sig1 - sig3) / 2.0;
 
-                // Get friction angle and cohesion
+                // Get material properties
                 double frictionAngle = 30; // Default
                 double cohesion = 5;      // Default
 
@@ -765,8 +603,8 @@ namespace CTSegmenter
                 }
                 catch { }
 
-                // Draw the tangent directly on the chart
-                DrawTangentOnMohrChart(e.ChartGraphics.Graphics, ca, plotArea, center, radius, frictionAngle, cohesion);
+                // Draw tangent
+                DrawTangentOnMohrChart(confiningPressure, failureStress, frictionAngle, cohesion);
             }
             catch (Exception ex)
             {
@@ -779,30 +617,26 @@ namespace CTSegmenter
             if (_mohrCoulombChart == null)
                 return;
 
-            // Get simulation parameters from parent form
-            double confiningPressure = 0;
-            double frictionAngle = 0;
-            double cohesion = 0;
+            // Get simulation parameters
+            double confiningPressure = GetConfiningPressure();
+            double frictionAngle = 30; // Default
+            double cohesion = 5;      // Default
 
-            // Try to get the parameters through reflection to avoid modifying the parent class
+            // Try to get the parameters through reflection
             try
             {
-                var confField = _parentForm.GetType().GetField("nudConfiningP",
-                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
                 var frictionField = _parentForm.GetType().GetField("nudFriction",
                     System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
                 var cohesionField = _parentForm.GetType().GetField("nudCohesion",
                     System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
 
-                if (confField != null && frictionField != null && cohesionField != null)
+                if (frictionField != null && cohesionField != null)
                 {
-                    var confControl = confField.GetValue(_parentForm) as NumericUpDown;
                     var frictionControl = frictionField.GetValue(_parentForm) as NumericUpDown;
                     var cohesionControl = cohesionField.GetValue(_parentForm) as NumericUpDown;
 
-                    if (confControl != null && frictionControl != null && cohesionControl != null)
+                    if (frictionControl != null && cohesionControl != null)
                     {
-                        confiningPressure = (double)confControl.Value;
                         frictionAngle = (double)frictionControl.Value;
                         cohesion = (double)cohesionControl.Value;
                     }
@@ -810,155 +644,21 @@ namespace CTSegmenter
             }
             catch (Exception ex)
             {
-                // Fallback values if reflection fails
                 Logger.Log($"[TriaxialResultsExtension] Error getting parameters: {ex.Message}");
-                confiningPressure = 10;
-                frictionAngle = 30;
-                cohesion = 5;
             }
 
-            // Clear existing series
-            _mohrCoulombChart.Series["Circles"].Points.Clear();
-            _mohrCoulombChart.Series["Envelope"].Points.Clear();
-            _mohrCoulombChart.Series["Points"].Points.Clear();
-
-            // Get current axial stress from stress-strain data
+            // Get current axial stress
             double axialStress = _stressStrainData.Count > 0 ? _stressStrainData.Last().Y : confiningPressure;
 
-            // Draw Mohr circles for current stress state
+            // Draw the Mohr circle and failure envelope
             DrawMohrCircle(confiningPressure, axialStress);
-
-            // Draw failure envelope (Mohr-Coulomb criterion)
             DrawFailureEnvelope(frictionAngle, cohesion);
 
-            // If failure has been detected, draw the tangent line directly on the chart
+            // If failure has been detected, draw the tangent
             if (_failureDetected && _failureStep >= 0 && _failureStep < _stressStrainData.Count)
             {
-                try
-                {
-                    // Get the stress value at failure
-                    double failureStress = _stressStrainData[_failureStep].Y;
-                    ChartArea ca = _mohrCoulombChart.ChartAreas[0];
-
-                    // Calculate Mohr circle parameters at failure
-                    double sig1 = Math.Max(failureStress, confiningPressure);
-                    double sig3 = Math.Min(failureStress, confiningPressure);
-                    double center = (sig1 + sig3) / 2.0;
-                    double radius = Math.Max((sig1 - sig3) / 2.0, 0.001);
-
-                    // Calculate failure envelope parameters
-                    double phi = frictionAngle * Math.PI / 180.0;
-                    double sinPhi = Math.Sin(phi);
-                    double cosPhi = Math.Cos(phi);
-                    double k = cohesion * cosPhi;
-
-                    // Calculate the tangent point
-                    double sinPhiSq = sinPhi * sinPhi;
-                    if (Math.Abs(1.0 - sinPhiSq) < 0.0001)
-                        sinPhiSq = 0.9999;
-
-                    double sigmaF = (center * (1.0 - sinPhiSq) - 2.0 * k * sinPhi) / (1.0 - sinPhiSq);
-                    if (double.IsNaN(sigmaF) || double.IsInfinity(sigmaF))
-                        sigmaF = center;
-
-                    double tauF = k + sigmaF * sinPhi;
-                    if (double.IsNaN(tauF) || double.IsInfinity(tauF))
-                        tauF = radius;
-
-                    // Force the chart to display this point
-                    Series tangentSeries = null;
-
-                    // Create a tangent series if it doesn't exist
-                    if (!_mohrCoulombChart.Series.Any(s => s.Name == "Tangent"))
-                    {
-                        tangentSeries = new Series("Tangent");
-                        tangentSeries.ChartType = SeriesChartType.Line;
-                        tangentSeries.Color = Color.Yellow;
-                        tangentSeries.BorderWidth = 2;
-                        _mohrCoulombChart.Series.Add(tangentSeries);
-
-                        // Add tangent point
-                        Series pointSeries = new Series("TangentPoint");
-                        pointSeries.ChartType = SeriesChartType.Point;
-                        pointSeries.Color = Color.Yellow;
-                        pointSeries.MarkerStyle = MarkerStyle.Circle;
-                        pointSeries.MarkerSize = 8;
-                        _mohrCoulombChart.Series.Add(pointSeries);
-
-                        pointSeries.Points.AddXY(sigmaF, tauF);
-                        pointSeries.Points[0].Label = "Failure Point";
-                    }
-                    else
-                    {
-                        tangentSeries = _mohrCoulombChart.Series["Tangent"];
-                        tangentSeries.Points.Clear();
-
-                        Series pointSeries = _mohrCoulombChart.Series["TangentPoint"];
-                        pointSeries.Points.Clear();
-                        pointSeries.Points.AddXY(sigmaF, tauF);
-                        pointSeries.Points[0].Label = "Failure Point";
-                    }
-
-                    // Calculate tangent line endpoints
-                    double dx = sigmaF - center;
-                    double mRadial = 0;
-
-                    if (Math.Abs(dx) > 0.0001)
-                        mRadial = tauF / dx;
-                    else
-                        mRadial = 1000; // Very steep
-
-                    double mTangent = 0;
-                    if (Math.Abs(mRadial) > 0.0001)
-                        mTangent = -1.0 / mRadial;
-                    else
-                        mTangent = -1000; // Very steep
-
-                    // Graph bounds
-                    double xMin = ca.AxisX.Minimum;
-                    double xMax = ca.AxisX.Maximum;
-
-                    // Calculate line endpoint coordinates
-                    double x1 = xMin;
-                    double y1 = tauF + mTangent * (xMin - sigmaF);
-                    double x2 = xMax;
-                    double y2 = tauF + mTangent * (xMax - sigmaF);
-
-                    // Add the tangent line points
-                    tangentSeries.Points.AddXY(x1, y1);
-                    tangentSeries.Points.AddXY(x2, y2);
-
-                    // Force immediate update
-                    _mohrCoulombChart.Invalidate();
-
-                    // Create and store a bitmap of the current visualization for exports
-                    try
-                    {
-                        // Create a bitmap using MohrCoulombVisualization for more detailed visualization
-                        var mohrVis = new MohrCoulombVisualization();
-                        int width = _mohrCoulombChart.Width;
-                        int height = _mohrCoulombChart.Height;
-
-                        // Create the visualization with failure data
-                        var mohrBitmap = mohrVis.CreateMohrCircleVisualization(
-                            width, height, confiningPressure, axialStress,
-                            frictionAngle, cohesion, _failureDetected, failureStress);
-
-                        // Store this bitmap for potential export
-                        if (_mohrCoulombImage != null)
-                            _mohrCoulombImage.Dispose();
-
-                        _mohrCoulombImage = mohrBitmap;
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Log($"[TriaxialResultsExtension] Error creating Mohr visualization: {ex.Message}");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Logger.Log($"[TriaxialResultsExtension] Error drawing tangent: {ex.Message}");
-                }
+                double failureStress = _stressStrainData[_failureStep].Y;
+                DrawTangentOnMohrChart(confiningPressure, failureStress, frictionAngle, cohesion);
             }
         }
         private ILabelVolumeData GetVolumeLabels()
@@ -1021,69 +721,70 @@ namespace CTSegmenter
         {
             if (_mohrCoulombChart == null) return;
 
-            // Calculate circle center and radius
-            double sig1 = Math.Max(axialStress, confiningPressure);
-            double sig3 = Math.Min(axialStress, confiningPressure);
-            double center = (sig1 + sig3) / 2.0;
-            double radius = (sig1 - sig3) / 2.0;
-
-            // Ensure we have valid values to prevent visualization errors
-            if (double.IsNaN(center) || double.IsInfinity(center)) center = confiningPressure;
-            if (double.IsNaN(radius) || double.IsInfinity(radius) || radius < 0.001) radius = 0.001;
+            // Create a MohrCircle object to handle calculations
+            MohrCircle mohrCircle = new MohrCircle(axialStress, confiningPressure);
 
             // Clear existing series
             _mohrCoulombChart.Series["Circles"].Points.Clear();
             _mohrCoulombChart.Series["Points"].Points.Clear();
 
-            // Draw the Mohr circle with 181 points for smoothness
+            // Set chart area properties
+            ChartArea ca = _mohrCoulombChart.ChartAreas[0];
+
+            // Calculate axis limits with proper margins
+            double margin = mohrCircle.Radius * 0.2;
+            double minX = 0; // Force X-axis to start at 0
+            double maxX = Math.Max(mohrCircle.Sigma1 + margin, minX + mohrCircle.Radius * 2);
+
+            // This is the key for fixing the egg shape problem
+            // Make sure Y-axis maximum is proportional to X-axis range
+            // to maintain equal scaling on both axes
+            double maxY = maxX - minX;
+
+            // Set axis limits
+            ca.AxisX.Minimum = minX;
+            ca.AxisX.Maximum = maxX;
+            ca.AxisY.Minimum = 0; // Start at 0 to position X-axis at bottom
+            ca.AxisY.Maximum = maxY;
+
+            // Draw the Mohr circle (only top half - positive shear)
             for (int i = 0; i <= 180; i++)
             {
                 double angle = i * Math.PI / 180.0;
-                double x = center + radius * Math.Cos(angle);
-                double y = radius * Math.Sin(angle);
-                _mohrCoulombChart.Series["Circles"].Points.AddXY(x, y);
+                double x = mohrCircle.Center + mohrCircle.Radius * Math.Cos(angle);
+                double y = mohrCircle.Radius * Math.Sin(angle);
+
+                // Only add points with positive y (upper half of circle)
+                if (y >= 0)
+                {
+                    _mohrCoulombChart.Series["Circles"].Points.AddXY(x, y);
+                }
             }
 
-            // Mark the principal stress points
-            _mohrCoulombChart.Series["Points"].Points.AddXY(sig3, 0);
-            _mohrCoulombChart.Series["Points"].Points.AddXY(sig1, 0);
+            // Mark principal stress points on X-axis (y=0)
+            _mohrCoulombChart.Series["Points"].Points.AddXY(mohrCircle.Sigma3, 0);
+            _mohrCoulombChart.Series["Points"].Points.AddXY(mohrCircle.Sigma1, 0);
 
             // Add labels for principal stresses
-            _mohrCoulombChart.Series["Points"].Points[0].Label = $"σ₃ ({sig3:F1})";
-            _mohrCoulombChart.Series["Points"].Points[1].Label = $"σ₁ ({sig1:F1})";
+            _mohrCoulombChart.Series["Points"].Points[0].Label = $"σ₃ ({mohrCircle.Sigma3:F1})";
+            _mohrCoulombChart.Series["Points"].Points[1].Label = $"σ₁ ({mohrCircle.Sigma1:F1})";
 
-            // Set chart area to fit the circle with proper margins
-            ChartArea ca = _mohrCoulombChart.ChartAreas[0];
-            double margin = radius * 0.2;
-            double minX = Math.Max(0, sig3 - radius - margin);
-            double maxX = sig1 + radius + margin;
-            double maxY = radius + margin;
-
-            ca.AxisX.Minimum = minX;
-            ca.AxisX.Maximum = maxX;
-            ca.AxisY.Minimum = -maxY;
-            ca.AxisY.Maximum = maxY;
-
-            // Set axis titles
-            ca.AxisX.Title = "Normal Stress (MPa)";
-            ca.AxisY.Title = "Shear Stress (MPa)";
+            // Store the MohrCircle object for use in other methods
+            _currentMohrCircle = mohrCircle;
         }
+
+        private MohrCircle _currentMohrCircle;
 
         /// <summary>
         /// Draw Mohr-Coulomb failure envelope
         /// </summary>
         private void DrawFailureEnvelope(double frictionAngle, double cohesion)
         {
-            if (_mohrCoulombChart == null) return;
+            if (_mohrCoulombChart == null || _currentMohrCircle == null) return;
 
-            // Convert friction angle to radians
+            // Convert friction angle to radians and calculate tangent
             double phi = frictionAngle * Math.PI / 180.0;
-            double sinPhi = Math.Sin(phi);
-            double cosPhi = Math.Cos(phi);
-
-            // Ensure valid values
-            if (double.IsNaN(sinPhi) || double.IsInfinity(sinPhi)) sinPhi = 0;
-            if (double.IsNaN(cosPhi) || double.IsInfinity(cosPhi)) cosPhi = 1;
+            double tanPhi = Math.Tan(phi);
 
             // Get axis limits
             ChartArea ca = _mohrCoulombChart.ChartAreas[0];
@@ -1093,114 +794,22 @@ namespace CTSegmenter
             // Clear existing envelope
             _mohrCoulombChart.Series["Envelope"].Points.Clear();
 
-            // Calculate envelope parameters
-            // tau = c + sigma * tan(phi)
-            double c = cohesion;
-            double tanPhi = Math.Tan(phi);
+            // Draw failure envelope line: tau = c + sigma * tan(phi)
+            // Starting from x=0 (or minX if greater)
+            double startX = Math.Max(0, minX);
+            double y1 = cohesion + startX * tanPhi;
+            double y2 = cohesion + maxX * tanPhi;
 
-            // Draw failure envelope line
-            _mohrCoulombChart.Series["Envelope"].Points.AddXY(minX, c + minX * tanPhi);
-            _mohrCoulombChart.Series["Envelope"].Points.AddXY(maxX, c + maxX * tanPhi);
+            _mohrCoulombChart.Series["Envelope"].Points.AddXY(startX, y1);
+            _mohrCoulombChart.Series["Envelope"].Points.AddXY(maxX, y2);
 
-            // If we have TangentPoint and Tangent series, clear them for redrawing
+            // Clear any existing tangent lines
             if (_mohrCoulombChart.Series.IndexOf("TangentPoint") >= 0)
                 _mohrCoulombChart.Series["TangentPoint"].Points.Clear();
 
             if (_mohrCoulombChart.Series.IndexOf("Tangent") >= 0)
                 _mohrCoulombChart.Series["Tangent"].Points.Clear();
-
-            // If failure has been detected, calculate and draw the tangent
-            if (_failureDetected && _failureStep >= 0 && _failureStep < _stressStrainData.Count)
-            {
-                try
-                {
-                    // Get current stresses at failure
-                    double failureStress = _stressStrainData[_failureStep].Y;
-                    double sig1 = Math.Max(failureStress, GetConfiningPressure());
-                    double sig3 = Math.Min(failureStress, GetConfiningPressure());
-                    double center = (sig1 + sig3) / 2.0;
-                    double radius = (sig1 - sig3) / 2.0;
-
-                    // Calculate the tangent point using geometric method
-                    // This point is where the Mohr-Coulomb criterion is satisfied
-                    // and the tangent to circle passes through this point
-                    double beta = Math.Atan(tanPhi);
-                    double alpha = Math.PI / 4.0 - beta / 2.0;
-
-                    // Calculate coordinates of tangent point on the circle
-                    double sigmaF = center - radius * Math.Cos(2 * alpha);
-                    double tauF = radius * Math.Sin(2 * alpha);
-
-                    // Ensure valid coordinates
-                    if (double.IsNaN(sigmaF) || double.IsInfinity(sigmaF)) sigmaF = center;
-                    if (double.IsNaN(tauF) || double.IsInfinity(tauF)) tauF = 0;
-
-                    // Make sure we have a TangentPoint series
-                    Series tangentPointSeries;
-                    if (_mohrCoulombChart.Series.IndexOf("TangentPoint") < 0)
-                    {
-                        tangentPointSeries = new Series("TangentPoint");
-                        tangentPointSeries.ChartType = SeriesChartType.Point;
-                        tangentPointSeries.Color = Color.Yellow;
-                        tangentPointSeries.MarkerStyle = MarkerStyle.Circle;
-                        tangentPointSeries.MarkerSize = 10;
-                        _mohrCoulombChart.Series.Add(tangentPointSeries);
-                    }
-                    else
-                    {
-                        tangentPointSeries = _mohrCoulombChart.Series["TangentPoint"];
-                    }
-
-                    // Add the tangent point
-                    tangentPointSeries.Points.AddXY(sigmaF, tauF);
-                    tangentPointSeries.Points[0].Label = "Failure Point";
-
-                    // Draw tangent line (perpendicular to the radius at tangent point)
-                    Series tangentSeries;
-                    if (_mohrCoulombChart.Series.IndexOf("Tangent") < 0)
-                    {
-                        tangentSeries = new Series("Tangent");
-                        tangentSeries.ChartType = SeriesChartType.Line;
-                        tangentSeries.Color = Color.Yellow;
-                        tangentSeries.BorderWidth = 2;
-                        _mohrCoulombChart.Series.Add(tangentSeries);
-                    }
-                    else
-                    {
-                        tangentSeries = _mohrCoulombChart.Series["Tangent"];
-                    }
-
-                    // Calculate slope of radial line from center to tangent point
-                    double mRadial;
-                    if (Math.Abs(sigmaF - center) > 0.0001)
-                        mRadial = tauF / (sigmaF - center);
-                    else
-                        mRadial = 1000; // Nearly vertical
-
-                    // Tangent line is perpendicular to radial line
-                    double mTangent;
-                    if (Math.Abs(mRadial) > 0.0001)
-                        mTangent = -1.0 / mRadial;
-                    else
-                        mTangent = -1000; // Nearly vertical
-
-                    // Calculate tangent line endpoints
-                    double x1 = minX;
-                    double y1 = tauF + mTangent * (x1 - sigmaF);
-                    double x2 = maxX;
-                    double y2 = tauF + mTangent * (x2 - sigmaF);
-
-                    // Add tangent line points
-                    tangentSeries.Points.AddXY(x1, y1);
-                    tangentSeries.Points.AddXY(x2, y2);
-                }
-                catch (Exception ex)
-                {
-                    Logger.Log($"[TriaxialResultsExtension] Error drawing failure tangent: {ex.Message}");
-                }
-            }
         }
-
         /// <summary>
         /// Get the current confining pressure value
         /// </summary>

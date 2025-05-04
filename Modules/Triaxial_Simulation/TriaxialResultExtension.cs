@@ -6,6 +6,7 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using System.Threading.Tasks;
 using System.Windows.Documents;
 using System.Windows.Forms;
 using System.Windows.Forms.DataVisualization.Charting;
@@ -38,13 +39,18 @@ namespace CTS
         private PictureBox _faultingPlaneViewer;
         private ComboBox _cmbColorMapMode;
         private CheckBox _chkShowVolume;
-
+        private TrackBar _wireframeSlider;
+        private bool _isDragging = false;
+        private bool _isRightDragging = false;
+        private Point _lastMousePosition;
+        private FailurePointVisualizer _visualizer;
 
         // Data
         private List<PointF> _stressStrainData = new List<PointF>();
         private double _peakStress = 0;
         private double _peakStrain = 0;
         private int _failureStep = -1;
+        private double[,,] _externalDamage;
         private bool _failureDetected = false;
 
         // Visualization state
@@ -67,9 +73,9 @@ namespace CTS
         /// </summary>
         public enum ColorMapMode
         {
+            Damage, 
             Stress,
-            Strain,
-            Damage
+            Strain
         }
 
         /// <summary>
@@ -228,6 +234,10 @@ namespace CTS
             ca.AxisX.MajorGrid.LineColor = Color.FromArgb(70, 70, 70);
             ca.AxisY.MajorGrid.LineColor = Color.FromArgb(70, 70, 70);
 
+            // Fix formatting to 2 decimal places
+            ca.AxisX.LabelStyle.Format = "F2";
+            ca.AxisY.LabelStyle.Format = "F2";
+
             // Position X-axis at bottom and start at 0
             ca.AxisY.Minimum = 0;  // Set Y-axis minimum to 0 to position X-axis at bottom
             ca.AxisX.Minimum = 0;  // Force X-axis to start at 0
@@ -255,7 +265,23 @@ namespace CTS
             ca.AxisY.Title = "Shear Stress (MPa)";
             ca.AxisX.TitleForeColor = Color.White;
             ca.AxisY.TitleForeColor = Color.White;
-
+            foreach (ChartArea area in _mohrCoulombChart.ChartAreas)
+            {
+                area.AxisX.LabelStyle.ForeColor = Color.White;
+                area.AxisY.LabelStyle.ForeColor = Color.White;
+                area.AxisX.LineColor = Color.White;
+                area.AxisY.LineColor = Color.White;
+                area.AxisX.TitleForeColor = Color.White;
+                area.AxisY.TitleForeColor = Color.White;
+                area.AxisX.MajorTickMark.LineColor = Color.White;
+                area.AxisY.MajorTickMark.LineColor = Color.White;
+                area.AxisX.LabelStyle.Format = "F2";
+                area.AxisY.LabelStyle.Format = "F2";
+            }
+            foreach (Series series in _mohrCoulombChart.Series)
+            {
+                series.LabelForeColor = Color.White;
+            }
             _mohrCoulombChart.ChartAreas.Add(ca);
 
             // Add Mohr circles series
@@ -284,7 +310,7 @@ namespace CTS
             Legend legend = new Legend("Legend");
             legend.BackColor = Color.Black;
             legend.ForeColor = Color.White;
-            
+
             _mohrCoulombChart.Legends.Add(legend);
 
             // Add PostPaint event
@@ -294,48 +320,315 @@ namespace CTS
             _mohrCoulombTab.Controls.Add(_mohrCoulombChart);
         }
         /// <summary>
-        /// Initialize the Failure Point 3D View tab
+        /// Initialize the Failure Point 3D View tab with proper slice controls and enhanced visualization
         /// </summary>
         private void InitializeFailurePointTab()
         {
-            // Create picture box for custom visualization
-            _failurePointViewer = new PictureBox();
-            _failurePointViewer.Dock = DockStyle.Fill;
-            _failurePointViewer.BackColor = Color.FromArgb(30, 30, 30);
-            _failurePointViewer.SizeMode = PictureBoxSizeMode.Zoom;
-            _failurePointViewer.Paint += FailurePointViewer_Paint;
+            // Main layout panel
+            TableLayoutPanel mainPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                RowCount = 2,
+                ColumnCount = 1,
+                BackColor = Color.FromArgb(30, 30, 30)
+            };
+            mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 80));
+            mainPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-            // Create panel for controls
-            Panel controlPanel = new Panel();
-            controlPanel.Dock = DockStyle.Top;
-            controlPanel.Height = 40;
-            controlPanel.BackColor = Color.FromArgb(45, 45, 48);
+            // Controls panel for the top section
+            Panel controlPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.FromArgb(45, 45, 48),
+                Padding = new Padding(5)
+            };
 
-            // Create color map mode selector
-            Label lblColorMap = new Label();
-            lblColorMap.Text = "Color Map:";
-            lblColorMap.ForeColor = Color.White;
-            lblColorMap.Location = new Point(10, 10);
-            lblColorMap.Width = 80;
+            // Create picture box for visualization
+            _failurePointViewer = new PictureBox
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.FromArgb(25, 25, 25),
+                SizeMode = PictureBoxSizeMode.Zoom
+            };
+
+            // Create mouse event handlers for interaction
+            _failurePointViewer.MouseDown += FailurePointViewer_MouseDown;
+            _failurePointViewer.MouseMove += FailurePointViewer_MouseMove;
+            _failurePointViewer.MouseUp += FailurePointViewer_MouseUp;
+            _failurePointViewer.MouseWheel += FailurePointViewer_MouseWheel;
+
+            // Slice controls for X, Y, Z axes
+            Label lblSliceX = new Label
+            {
+                Text = "X Slice:",
+                ForeColor = Color.White,
+                Location = new Point(10, 10),
+                Size = new Size(60, 20),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            controlPanel.Controls.Add(lblSliceX);
+
+            TrackBar sliceXControl = new TrackBar
+            {
+                Location = new Point(70, 8),
+                Width = 150,
+                TickStyle = TickStyle.BottomRight,
+                TickFrequency = 10
+            };
+            controlPanel.Controls.Add(sliceXControl);
+
+            Label lblSliceY = new Label
+            {
+                Text = "Y Slice:",
+                ForeColor = Color.White,
+                Location = new Point(230, 10),
+                Size = new Size(60, 20),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            controlPanel.Controls.Add(lblSliceY);
+
+            TrackBar sliceYControl = new TrackBar
+            {
+                Location = new Point(290, 8),
+                Width = 150,
+                TickStyle = TickStyle.BottomRight,
+                TickFrequency = 10
+            };
+            controlPanel.Controls.Add(sliceYControl);
+
+            Label lblSliceZ = new Label
+            {
+                Text = "Z Slice:",
+                ForeColor = Color.White,
+                Location = new Point(450, 10),
+                Size = new Size(60, 20),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            controlPanel.Controls.Add(lblSliceZ);
+
+            TrackBar sliceZControl = new TrackBar
+            {
+                Location = new Point(510, 8),
+                Width = 150,
+                TickStyle = TickStyle.BottomRight,
+                TickFrequency = 10
+            };
+            controlPanel.Controls.Add(sliceZControl);
+
+            // Wireframe coarseness slider
+            Label lblWireframe = new Label
+            {
+                Text = "Wireframe Detail:",
+                ForeColor = Color.White,
+                Location = new Point(10, 45),
+                Size = new Size(100, 20),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            controlPanel.Controls.Add(lblWireframe);
+
+            TrackBar wireframeSlider = new TrackBar
+            {
+                Location = new Point(110, 45),
+                Width = 150,
+                TickStyle = TickStyle.BottomRight,
+                Minimum = 1,
+                Maximum = 10,
+                Value = 2 // Default coarseness
+            };
+            controlPanel.Controls.Add(wireframeSlider);
+
+            // Color map mode selector
+            Label lblColorMap = new Label
+            {
+                Text = "Color Map:",
+                ForeColor = Color.White,
+                Location = new Point(270, 45),
+                Size = new Size(80, 20),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
             controlPanel.Controls.Add(lblColorMap);
 
-            _cmbColorMapMode = new ComboBox();
-            _cmbColorMapMode.Location = new Point(90, 8);
-            _cmbColorMapMode.Width = 150;
-            _cmbColorMapMode.DropDownStyle = ComboBoxStyle.DropDownList;
-            _cmbColorMapMode.Items.AddRange(new object[] { "Stress", "Strain", "Damage" });
-            _cmbColorMapMode.SelectedIndex = 0;
-            _cmbColorMapMode.SelectedIndexChanged += (s, e) =>
+            _cmbColorMapMode = new ComboBox
             {
-                _selectedColorMapMode = (ColorMapMode)_cmbColorMapMode.SelectedIndex;
-                _failurePointViewer.Invalidate();
+                Location = new Point(350, 45),
+                Width = 120,
+                DropDownStyle = ComboBoxStyle.DropDownList
             };
+            _cmbColorMapMode.Items.AddRange(new object[] { "Damage", "Stress", "Strain" });
+            _cmbColorMapMode.SelectedIndex = 0; // Default to Damage
             controlPanel.Controls.Add(_cmbColorMapMode);
 
+            // Show volume checkbox
+            _chkShowVolume = new CheckBox
+            {
+                Text = "Show Volume",
+                Checked = _showVolume,
+                ForeColor = Color.White,
+                Location = new Point(480, 45),
+                Size = new Size(120, 20)
+            };
+            _chkShowVolume.CheckedChanged += (s, e) => {
+                _showVolume = _chkShowVolume.Checked;
+                InvalidateFailurePointViewer();
+            };
+            controlPanel.Controls.Add(_chkShowVolume);
+
+            // Add panels to main container
+            mainPanel.Controls.Add(controlPanel, 0, 0);
+            mainPanel.Controls.Add(_failurePointViewer, 0, 1);
+
             // Add to tab
-            _failurePointTab.Controls.Add(_failurePointViewer);
-            _failurePointTab.Controls.Add(controlPanel);
+            _failurePointTab.Controls.Add(mainPanel);
+
+            // Get volume dimensions and initialize the visualizer
+            int volumeWidth = 0, volumeHeight = 0, volumeDepth = 0;
+            try
+            {
+                if (_parentForm != null && _parentForm.VolumeLabels != null)
+                {
+                    volumeWidth = _parentForm.VolumeLabels.Width;
+                    volumeHeight = _parentForm.VolumeLabels.Height;
+                    volumeDepth = _parentForm.VolumeLabels.Depth;
+
+                    // Update trackbar ranges
+                    sliceXControl.Minimum = 0;
+                    sliceXControl.Maximum = volumeWidth > 0 ? volumeWidth - 1 : 100;
+                    sliceXControl.Value = volumeWidth > 0 ? volumeWidth / 2 : 50;
+
+                    sliceYControl.Minimum = 0;
+                    sliceYControl.Maximum = volumeHeight > 0 ? volumeHeight - 1 : 100;
+                    sliceYControl.Value = volumeHeight > 0 ? volumeHeight / 2 : 50;
+
+                    sliceZControl.Minimum = 0;
+                    sliceZControl.Maximum = volumeDepth > 0 ? volumeDepth - 1 : 100;
+                    sliceZControl.Value = volumeDepth > 0 ? volumeDepth / 2 : 50;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[TriaxialResultsExtension] Error initializing slice controls: {ex.Message}");
+                // Use fallback values
+                sliceXControl.Minimum = 0;
+                sliceXControl.Maximum = 100;
+                sliceXControl.Value = 50;
+                sliceYControl.Minimum = 0;
+                sliceYControl.Maximum = 100;
+                sliceYControl.Value = 50;
+                sliceZControl.Minimum = 0;
+                sliceZControl.Maximum = 100;
+                sliceZControl.Value = 50;
+            }
+
+            // Get the material ID
+            byte materialId = GetSelectedMaterialID();
+
+            // Create and initialize the visualizer
+            _visualizer = new FailurePointVisualizer(
+                Math.Max(1, volumeWidth),
+                Math.Max(1, volumeHeight),
+                Math.Max(1, volumeDepth),
+                materialId);
+
+            // Initialize the visualizer with all controls
+            _visualizer.InitializeControls(sliceXControl, sliceYControl, sliceZControl, _cmbColorMapMode, _failurePointViewer);
+
+            // Set wireframe coarseness separately
+            _visualizer.SetWireframeCoarseness(wireframeSlider.Value);
+
+            // Connect wireframe slider to visualizer
+            wireframeSlider.ValueChanged += (s, e) => {
+                if (_visualizer != null)
+                {
+                    _visualizer.SetWireframeCoarseness(wireframeSlider.Value);
+                    InvalidateFailurePointViewer();
+                }
+            };
         }
+        private void InvalidateFailurePointViewer()
+        {
+            if (_failurePointCache != null)
+            {
+                _failurePointCache.Dispose();
+                _failurePointCache = null;
+            }
+            _failurePointViewer?.Invalidate();
+        }
+        private void InvalidateVisualization()
+        {
+            if (_failurePointCache != null)
+            {
+                _failurePointCache.Dispose();
+                _failurePointCache = null;
+            }
+            _failurePointViewer?.Invalidate();
+        }
+
+        private void FailurePointViewer_MouseDown(object sender, MouseEventArgs e)
+        {
+            _lastMousePosition = e.Location;
+            if (e.Button == MouseButtons.Left)
+            {
+                _isDragging = true;
+            }
+            else if (e.Button == MouseButtons.Right)
+            {
+                _isRightDragging = true;
+            }
+        }
+
+        private void FailurePointViewer_MouseMove(object sender, MouseEventArgs e)
+        {
+            if (_isDragging)
+            {
+                // Rotate the view
+                _rotationY += (e.X - _lastMousePosition.X) * 0.5f;
+                _rotationX += (e.Y - _lastMousePosition.Y) * 0.5f;
+
+                // Limit rotation
+                _rotationX = Math.Max(-90, Math.Min(90, _rotationX));
+
+                _lastMousePosition = e.Location;
+
+                // Force redraw but don't clear cached visualization yet for better responsiveness
+                _failurePointViewer.Invalidate();
+            }
+            else if (_isRightDragging)
+            {
+                // Pan the view
+                _pan.X += (e.X - _lastMousePosition.X) * 0.5f;
+                _pan.Y += (e.Y - _lastMousePosition.Y) * 0.5f;
+
+                _lastMousePosition = e.Location;
+
+                // Force redraw but don't clear cached visualization yet for better responsiveness
+                _failurePointViewer.Invalidate();
+            }
+        }
+
+        private void FailurePointViewer_MouseUp(object sender, MouseEventArgs e)
+        {
+            bool wasDragging = _isDragging || _isRightDragging;
+            _isDragging = false;
+            _isRightDragging = false;
+
+            // Only clear cache when interaction completes to force high-quality redraw
+            if (wasDragging)
+            {
+                InvalidateVisualization();
+            }
+        }
+
+        private void FailurePointViewer_MouseWheel(object sender, MouseEventArgs e)
+        {
+            // Zoom in/out
+            _zoom *= (e.Delta > 0) ? 1.1f : 0.9f;
+
+            // Limit zoom
+            _zoom = Math.Max(0.1f, Math.Min(5.0f, _zoom));
+
+            InvalidateVisualization();
+        }
+
 
         /// <summary>
         /// Initialize the Faulting Plane tab
@@ -377,8 +670,12 @@ namespace CTS
         /// <summary>
         /// Update visualization with simulation data
         /// </summary>
-        public void UpdateData(List<PointF> stressStrainData, double peakStress, double peakStrain,
-                              bool failureDetected, int failureStep, double[,,] damageData)
+        public void UpdateData(List<PointF> stressStrainData,
+                   double peakStress,
+                   double peakStrain,
+                   bool failureDetected,
+                   int failureStep,
+                   double[,,] damageData)
         {
             _stressStrainData = stressStrainData;
             _peakStress = peakStress;
@@ -386,22 +683,35 @@ namespace CTS
             _failureDetected = failureDetected;
             _failureStep = failureStep;
 
-            // Store or update damage data if provided
+            // Store the damage data reference
             if (damageData != null)
             {
-                // If there's no external damage data available, create a placeholder for visualization testing
-                if (_parentForm != null)
-                {
-                    // Find the failure point based on damage data
-                    var failurePoint = _parentForm.FindMaxDamagePoint();
+                Logger.Log($"[TriaxialResultsExtension] Received damage data: {damageData.GetLength(0)}x{damageData.GetLength(1)}x{damageData.GetLength(2)}");
 
-                    // Update visualization with failure point
-                    if (_failurePointCache != null)
+                // Update the visualizer with the new data if available
+                if (_visualizer != null && _parentForm != null && _parentForm.VolumeLabels != null)
+                {
+                    _visualizer.SetData(_parentForm.VolumeLabels, damageData);
+
+                    // Generate stress and strain data based on damage data and peak stress
+                    _visualizer.ComputeDerivedFields(peakStress);
+
+                    // Set failure point if detected
+                    if (failureDetected && _failureStep >= 0)
                     {
-                        _failurePointCache.Dispose();
-                        _failurePointCache = null;
+                        Point3D failurePoint = GetFailurePoint();
+                        _visualizer.SetFailurePoint(true, new FailurePointVisualizer.Point3D(
+                            (int)failurePoint.X, (int)failurePoint.Y, (int)failurePoint.Z));
+                    }
+                    else
+                    {
+                        _visualizer.SetFailurePoint(false, new FailurePointVisualizer.Point3D(-1, -1, -1));
                     }
                 }
+            }
+            else
+            {
+                Logger.Log("[TriaxialResultsExtension] Warning: Received null damage data");
             }
 
             if (_realtimeUpdatesEnabled)
@@ -409,12 +719,13 @@ namespace CTS
                 UpdateStressStrainChart();
                 UpdateMohrCoulombChart();
 
-                // For 3D visualizations, just invalidate and let the paint handlers regenerate the view
-                // This avoids expensive rendering operations during simulation
-                _failurePointViewer.Invalidate();
+                // Force redraw of failure point viewer
+                InvalidateFailurePointViewer();
+
                 _faultingPlaneViewer.Invalidate();
             }
         }
+
 
         /// <summary>
         /// Update the stress-strain chart with current data
@@ -663,35 +974,49 @@ namespace CTS
         }
         private ILabelVolumeData GetVolumeLabels()
         {
-            if (_parentForm != null)
+            if (_parentForm == null)
+                return null;
+
+            // Try to get volume labels directly using the property
+            try
             {
-                try
+                var volumeLabels = _parentForm.VolumeLabels;
+                if (volumeLabels != null)
                 {
-                    // Use reflection to access mainForm.volumeLabels
-                    var mainFormField = _parentForm.GetType().GetField("mainForm",
-                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                    if (mainFormField != null)
+                    return volumeLabels;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[TriaxialResultsExtension] Error using VolumeLabels property: {ex.Message}");
+            }
+
+            // Fallback to reflection only if needed
+            try
+            {
+                var mainFormField = _parentForm.GetType().GetField("mainForm",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                if (mainFormField != null)
+                {
+                    var mainForm = mainFormField.GetValue(_parentForm);
+                    if (mainForm != null)
                     {
-                        var mainForm = mainFormField.GetValue(_parentForm);
-                        if (mainForm != null)
+                        var volumeLabelsField = mainForm.GetType().GetProperty("volumeLabels");
+                        if (volumeLabelsField != null)
                         {
-                            var volumeLabelsField = mainForm.GetType().GetProperty("volumeLabels");
-                            if (volumeLabelsField != null)
-                            {
-                                return volumeLabelsField.GetValue(mainForm) as ILabelVolumeData;
-                            }
+                            return volumeLabelsField.GetValue(mainForm) as ILabelVolumeData;
                         }
                     }
                 }
-                catch (Exception ex)
-                {
-                    // Log error but continue
-                    Logger.Log($"[TriaxialResultsExtension] Error accessing volumeLabels: {ex.Message}");
-                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[TriaxialResultsExtension] Error accessing volumeLabels: {ex.Message}");
             }
 
             return null;
         }
+
         private byte GetSelectedMaterialID()
         {
             if (_parentForm != null)
@@ -714,6 +1039,7 @@ namespace CTS
 
             return 1; // Default to material ID 1 if not found
         }
+
         /// <summary>
         /// Draw Mohr circle for current stress state
         /// </summary>
@@ -731,12 +1057,22 @@ namespace CTS
             // Set chart area properties
             ChartArea ca = _mohrCoulombChart.ChartAreas[0];
 
-            // Calculate axis limits with proper margins
-            double margin = mohrCircle.Radius * 0.2;
-            double minX = 0; // Force X-axis to start at 0
-            double maxX = Math.Max(mohrCircle.Sigma1 + margin, minX + mohrCircle.Radius * 2);
+            // Make sure ALL text is white
+            ca.AxisX.LabelStyle.ForeColor = Color.White;
+            ca.AxisY.LabelStyle.ForeColor = Color.White;
+            ca.AxisX.TitleForeColor = Color.White;
+            ca.AxisY.TitleForeColor = Color.White;
 
-            // This is the key for fixing the egg shape problem
+            // Calculate axis limits with proper margins
+            // IMPORTANT: Add minimum radius to ensure circle is visible
+            double minRadius = 0.5; // Minimum 0.5 MPa radius to ensure visibility
+            double actualRadius = mohrCircle.Radius;
+            double displayRadius = Math.Max(minRadius, actualRadius);
+
+            double margin = displayRadius * 0.2;
+            double minX = 0; // Force X-axis to start at 0
+            double maxX = Math.Max(mohrCircle.Sigma1 + displayRadius + margin, minX + displayRadius * 2);
+
             // Make sure Y-axis maximum is proportional to X-axis range
             // to maintain equal scaling on both axes
             double maxY = maxX - minX;
@@ -747,12 +1083,20 @@ namespace CTS
             ca.AxisY.Minimum = 0; // Start at 0 to position X-axis at bottom
             ca.AxisY.Maximum = maxY;
 
-            // Draw the Mohr circle (only top half - positive shear)
+            // Set formatting to 2 decimal places
+            ca.AxisX.LabelStyle.Format = "F2";
+            ca.AxisY.LabelStyle.Format = "F2";
+
+            // Ensure nice intervals
+            ca.AxisX.Interval = Math.Round(maxX / 5, 1);
+            ca.AxisY.Interval = Math.Round(maxY / 5, 1);
+
+            // Draw the Mohr circle - use displayRadius instead of actual radius for small circles
             for (int i = 0; i <= 180; i++)
             {
                 double angle = i * Math.PI / 180.0;
-                double x = mohrCircle.Center + mohrCircle.Radius * Math.Cos(angle);
-                double y = mohrCircle.Radius * Math.Sin(angle);
+                double x = mohrCircle.Center + displayRadius * Math.Cos(angle);
+                double y = displayRadius * Math.Sin(angle);
 
                 // Only add points with positive y (upper half of circle)
                 if (y >= 0)
@@ -765,14 +1109,36 @@ namespace CTS
             _mohrCoulombChart.Series["Points"].Points.AddXY(mohrCircle.Sigma3, 0);
             _mohrCoulombChart.Series["Points"].Points.AddXY(mohrCircle.Sigma1, 0);
 
-            // Add labels for principal stresses
-            _mohrCoulombChart.Series["Points"].Points[0].Label = $"σ₃ ({mohrCircle.Sigma3:F1})";
-            _mohrCoulombChart.Series["Points"].Points[1].Label = $"σ₁ ({mohrCircle.Sigma1:F1})";
+            // Add white labels for principal stresses with 2 decimal places
+            var point0 = _mohrCoulombChart.Series["Points"].Points[0];
+            var point1 = _mohrCoulombChart.Series["Points"].Points[1];
+
+            point0.Label = $"σ₃ ({mohrCircle.Sigma3:F2})";
+            point1.Label = $"σ₁ ({mohrCircle.Sigma1:F2})";
+
+            point0.LabelForeColor = Color.White;
+            point1.LabelForeColor = Color.White;
+
+            // Add visual indicator that the circle is scaled (if scaling was applied)
+            if (displayRadius > actualRadius)
+            {
+                using (Font font = new Font("Arial", 8))
+                using (SolidBrush brush = new SolidBrush(Color.Yellow))
+                {
+                    string note = $"Note: Circle radius scaled to {displayRadius:F2} MPa for visibility (actual: {actualRadius:F2} MPa)";
+                    _mohrCoulombChart.Titles.Clear();
+                    _mohrCoulombChart.Titles.Add(note);
+                    _mohrCoulombChart.Titles[0].ForeColor = Color.Yellow;
+                }
+            }
+            else
+            {
+                _mohrCoulombChart.Titles.Clear();
+            }
 
             // Store the MohrCircle object for use in other methods
             _currentMohrCircle = mohrCircle;
         }
-
         private MohrCircle _currentMohrCircle;
 
         /// <summary>
@@ -836,226 +1202,255 @@ namespace CTS
 
         private void FailurePointViewer_Paint(object sender, PaintEventArgs e)
         {
-            if (!_realtimeUpdatesEnabled && _failurePointCache != null)
+            // Fast rendering, no background tasks
+            int width = _failurePointViewer.Width;
+            int height = _failurePointViewer.Height;
+
+            if (width <= 0 || height <= 0) return;
+
+            // If we're dragging, show a simplified preview instead of full rendering
+            if (_isDragging || _isRightDragging)
             {
-                e.Graphics.DrawImage(_failurePointCache, 0, 0, _failurePointViewer.Width, _failurePointViewer.Height);
+                using (Graphics g = e.Graphics)
+                {
+                    g.Clear(Color.FromArgb(25, 25, 35));
+
+                    // Draw a low-quality wireframe preview
+                    if (_visualizer != null)
+                    {
+                        _visualizer.SetViewParameters(_rotationX, _rotationY, _zoom, _pan);
+                        _visualizer.DrawPreview(g, new Rectangle(0, 0, width, height));
+                    }
+
+                    // Show "interactive preview" message
+                    using (Font font = new Font("Segoe UI", 9))
+                    using (SolidBrush brush = new SolidBrush(Color.White))
+                    using (StringFormat sf = new StringFormat() { Alignment = StringAlignment.Center })
+                    {
+                        g.DrawString("Interactive preview - release mouse to render",
+                                     font, brush, width / 2, height - 20, sf);
+                    }
+                }
                 return;
             }
 
-            // Create a new visualization or use the cached one
-            if (_failurePointCache == null || _realtimeUpdatesEnabled)
+            // Create high-quality visualization if needed
+            if (_failurePointCache == null)
             {
-                // Create a new visualization
+                try
+                {
+                    if (_visualizer != null && _parentForm != null && _parentForm.DamageData != null)
+                    {
+                        // Set visualization parameters
+                        _visualizer.SetViewParameters(_rotationX, _rotationY, _zoom, _pan);
+                        _visualizer.SetShowVolume(_showVolume);
+
+                        // Create visualization bitmap - use the visualizer's ColorMapMode enum
+                        _failurePointCache = _visualizer.CreateVisualization(width, height,
+                            (FailurePointVisualizer.ColorMapMode)_cmbColorMapMode.SelectedIndex);
+                    }
+                    else
+                    {
+                        // Create default message if no data
+                        _failurePointCache = new Bitmap(width, height);
+                        using (Graphics g = Graphics.FromImage(_failurePointCache))
+                        {
+                            g.Clear(Color.FromArgb(25, 25, 35));
+                            using (Font font = new Font("Segoe UI", 12))
+                            using (SolidBrush brush = new SolidBrush(Color.White))
+                            using (StringFormat sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                            {
+                                g.DrawString("Run a simulation to view failure points.", font, brush, width / 2, height / 2, sf);
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[TriaxialResultsExtension] Error creating visualization: {ex.Message}");
+
+                    // Create error message
+                    _failurePointCache = new Bitmap(width, height);
+                    using (Graphics g = Graphics.FromImage(_failurePointCache))
+                    {
+                        g.Clear(Color.FromArgb(25, 25, 35));
+                        using (Font font = new Font("Segoe UI", 10))
+                        using (SolidBrush brush = new SolidBrush(Color.Red))
+                        using (StringFormat sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                        {
+                            g.DrawString($"Error creating visualization: {ex.Message}", font, brush, width / 2, height / 2, sf);
+                        }
+                    }
+                }
+            }
+
+            // Draw current cache - whether blank or visualization
+            e.Graphics.DrawImage(_failurePointCache, 0, 0, width, height);
+        }
+
+        public void UpdateVisualization(bool runSimulation = false)
+        {
+            if (_failurePointViewer == null || !_failurePointViewer.IsHandleCreated)
+                return;
+
+            try
+            {
+                // Cleanup old cache
+                if (_failurePointCache != null)
+                {
+                    _failurePointCache.Dispose();
+                    _failurePointCache = null;
+                }
+
                 int width = _failurePointViewer.Width;
                 int height = _failurePointViewer.Height;
 
-                if (width <= 0 || height <= 0)
-                    return;
+                // No data, create default message
+                if (width <= 0 || height <= 0) return;
 
-                // Get volume dimensions
-                int volumeWidth = 0, volumeHeight = 0, volumeDepth = 0;
+                _failurePointCache = new Bitmap(width, height);
 
-                // Try to get volume dimensions through reflection
-                try
+                using (Graphics g = Graphics.FromImage(_failurePointCache))
                 {
-                    var mainFormField = _parentForm.GetType().GetField("mainForm",
-                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                    if (mainFormField != null)
+                    g.Clear(Color.FromArgb(25, 25, 35));
+
+                    // If run simulation flag, show action button
+                    if (runSimulation)
                     {
-                        var mainForm = mainFormField.GetValue(_parentForm);
-                        if (mainForm != null)
-                        {
-                            var getWidthMethod = mainForm.GetType().GetMethod("GetWidth");
-                            var getHeightMethod = mainForm.GetType().GetMethod("GetHeight");
-                            var getDepthMethod = mainForm.GetType().GetMethod("GetDepth");
-
-                            if (getWidthMethod != null && getHeightMethod != null && getDepthMethod != null)
-                            {
-                                volumeWidth = (int)getWidthMethod.Invoke(mainForm, null);
-                                volumeHeight = (int)getHeightMethod.Invoke(mainForm, null);
-                                volumeDepth = (int)getDepthMethod.Invoke(mainForm, null);
-                            }
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    // Use fallback values if reflection fails
-                    Logger.Log($"[TriaxialResultsExtension] Error getting volume dimensions: {ex.Message}");
-                    volumeWidth = 100;
-                    volumeHeight = 100;
-                    volumeDepth = 100;
-                }
-
-                // Create new bitmap for visualization
-                Bitmap bmp = new Bitmap(width, height);
-
-                // Try to create a visualization with the actual data
-                try
-                {
-                    // Get the damage data from parent form - DIRECT ACCESS TO PROPERTY
-                    double[,,] damageData = _parentForm.DamageData;
-
-                    // If direct property access didn't work, try reflection as fallback
-                    if (damageData == null)
-                    {
-                        var damageProperty = _parentForm.GetType().GetProperty("DamageData");
-                        if (damageProperty != null)
-                        {
-                            damageData = damageProperty.GetValue(_parentForm) as double[,,];
-                        }
-
-                        // If still null, try to get it via the method
-                        if (damageData == null)
-                        {
-                            try
-                            {
-                                var getDamageMethod = _parentForm.GetType().GetMethod("GetDamageData");
-                                if (getDamageMethod != null)
-                                {
-                                    damageData = getDamageMethod.Invoke(_parentForm, null) as double[,,];
-                                }
-                            }
-                            catch
-                            {
-                                // Continue with null damage data
-                            }
-                        }
-                    }
-
-                    // Get volume labels
-                    ILabelVolumeData volumeLabels = GetVolumeLabels();
-                    byte materialId = GetSelectedMaterialID();
-
-                    // Log which data is missing for debugging
-                    if (damageData == null)
-                        Logger.Log("[TriaxialResultsExtension] Missing damage data for visualization");
-                    if (volumeLabels == null)
-                        Logger.Log("[TriaxialResultsExtension] Missing volume labels for visualization");
-                    if (volumeWidth <= 0 || volumeHeight <= 0 || volumeDepth <= 0)
-                        Logger.Log($"[TriaxialResultsExtension] Invalid volume dimensions: {volumeWidth}x{volumeHeight}x{volumeDepth}");
-
-                    // Force a visualization even if some data is missing - use placeholders if needed
-                    if (damageData == null)
-                    {
-                        // Create a dummy damage array if needed
-                        damageData = new double[Math.Max(1, volumeWidth), Math.Max(1, volumeHeight), Math.Max(1, volumeDepth)];
-                        if (_failureDetected)
-                        {
-                            // Add a high damage value at the failure point to show something
-                            Point3D maxDamagePoint = _parentForm.FindMaxDamagePoint();
-
-                            // Check if this point is valid
-                            if (maxDamagePoint.X >= 0 && maxDamagePoint.X < damageData.GetLength(0) &&
-                                maxDamagePoint.Y >= 0 && maxDamagePoint.Y < damageData.GetLength(1) &&
-                                maxDamagePoint.Z >= 0 && maxDamagePoint.Z < damageData.GetLength(2))
-                            {
-                                damageData[(int)maxDamagePoint.X, (int)maxDamagePoint.Y, (int)maxDamagePoint.Z] = 1.0;
-                            }
-                        }
-                    }
-
-                    // Create a FailurePointVisualizer
-                    var visualizer = new FailurePointVisualizer(
-                        Math.Max(1, volumeWidth),
-                        Math.Max(1, volumeHeight),
-                        Math.Max(1, volumeDepth),
-                        materialId
-                    );
-
-                    // Set the data - even if labels are null, still try to create a visualization
-                    if (volumeLabels != null)
-                    {
-                        visualizer.SetData(volumeLabels, damageData);
-                    }
-                    else
-                    {
-                        // Create a wrapper for ILabelVolumeData
-                        var labelWrapper = new LabelVolumeDataArray(
-                            Math.Max(1, volumeWidth),
-                            Math.Max(1, volumeHeight),
-                            Math.Max(1, volumeDepth)
-                        );
-
-                        // If we have a material ID, set it for some voxels
-                        if (materialId > 0)
-                        {
-                            // Set the center region to have material
-                            int centerX = labelWrapper.Width / 2;
-                            int centerY = labelWrapper.Height / 2;
-                            int centerZ = labelWrapper.Depth / 2;
-                            int radius = Math.Min(Math.Min(labelWrapper.Width, labelWrapper.Height), labelWrapper.Depth) / 4;
-
-                            for (int z = Math.Max(0, centerZ - radius); z < Math.Min(labelWrapper.Depth, centerZ + radius); z++)
-                            {
-                                for (int y = Math.Max(0, centerY - radius); y < Math.Min(labelWrapper.Height, centerY + radius); y++)
-                                {
-                                    for (int x = Math.Max(0, centerX - radius); x < Math.Min(labelWrapper.Width, centerX + radius); x++)
-                                    {
-                                        labelWrapper[x, y, z] = materialId;
-                                    }
-                                }
-                            }
-                        }
-
-                        visualizer.SetData(labelWrapper, damageData);
-                    }
-
-                    visualizer.SetViewParameters(_rotationX, _rotationY, _zoom, _pan);
-
-                    // Create a Point3D from our Point3D struct
-                    FailurePointVisualizer.Point3D failurePoint;
-                    if (_failureDetected)
-                    {
-                        Point3D maxDamagePoint = _parentForm.FindMaxDamagePoint();
-                        failurePoint = new FailurePointVisualizer.Point3D(
-                            (int)maxDamagePoint.X, (int)maxDamagePoint.Y, (int)maxDamagePoint.Z
-                        );
-                    }
-                    else
-                    {
-                        failurePoint = new FailurePointVisualizer.Point3D(
-                            Math.Max(1, volumeWidth) / 2,
-                            Math.Max(1, volumeHeight) / 2,
-                            Math.Max(1, volumeDepth) / 2
-                        );
-                    }
-
-                    // Set the failure point in the visualizer
-                    visualizer.SetFailurePoint(_failureDetected, failurePoint);
-
-                    // Create visualization with the selected color mode
-                    var visualizerColorMode = (FailurePointVisualizer.ColorMapMode)((int)_selectedColorMapMode);
-                    bmp = visualizer.CreateVisualization(width, height, visualizerColorMode);
-
-                    Logger.Log("[TriaxialResultsExtension] Successfully created failure point visualization");
-                }
-                catch (Exception ex)
-                {
-                    // On error, create a message bitmap
-                    Logger.Log($"[TriaxialResultsExtension] Error creating visualization: {ex.Message}");
-                    using (Graphics g = Graphics.FromImage(bmp))
-                    {
-                        g.Clear(Color.FromArgb(20, 20, 20));
-                        using (Font font = new Font("Segoe UI", 10))
+                        // Draw simple message
+                        using (Font font = new Font("Segoe UI", 12))
                         using (SolidBrush brush = new SolidBrush(Color.White))
                         using (StringFormat sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
                         {
-                            g.DrawString($"Error creating visualization: {ex.Message}",
-                                         font, brush, width / 2, height / 2, sf);
+                            g.DrawString("Run a simulation to view failure points.", font, brush, width / 2, height / 2, sf);
+                        }
+
+                        // Draw a button-like rectangle for simulating a click target
+                        Rectangle buttonRect = new Rectangle(width / 2 - 100, height / 2 + 40, 200, 40);
+                        g.FillRectangle(new SolidBrush(Color.FromArgb(60, 100, 180)), buttonRect);
+                        g.DrawRectangle(new Pen(Color.White, 1), buttonRect);
+
+                        using (Font btnFont = new Font("Segoe UI", 10, FontStyle.Bold))
+                        using (SolidBrush btnBrush = new SolidBrush(Color.White))
+                        using (StringFormat btnSf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                        {
+                            g.DrawString("Run Simulation", btnFont, btnBrush, buttonRect, btnSf);
+                        }
+                    }
+                    else
+                    {
+                        g.DrawString("Loading visualization...", new Font("Segoe UI", 12), new SolidBrush(Color.White),
+                                    new PointF(width / 2 - 80, height / 2 - 10));
+                    }
+                }
+
+                // Update display
+                _failurePointViewer.Invalidate();
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[TriaxialResultsExtension] Error updating visualization: {ex.Message}");
+            }
+        }
+
+        // In TriaxialResultsExtension class - Replace the current GetFailurePoint method
+        private Point3D GetFailurePoint()
+        {
+            try
+            {
+                // First, try to get the failure point directly from the simulator
+                if (_parentForm != null)
+                {
+                    // Check if the parent has a cpuSim or gpuSim field
+                    var gpuSimField = _parentForm.GetType().GetField("gpuSim",
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+                    if (gpuSimField != null)
+                    {
+                        var gpuSim = gpuSimField.GetValue(_parentForm);
+                        if (gpuSim != null)
+                        {
+                            // Try to get the failure point from GPU simulator
+                            var method = gpuSim.GetType().GetMethod("GetFirstFailureVoxel");
+                            if (method != null)
+                            {
+                                var result = method.Invoke(gpuSim, null);
+                                if (result != null && result is ValueTuple<int, int, int>)
+                                {
+                                    var (x, y, z) = ((int, int, int))result;
+                                    Logger.Log($"[TriaxialResultsExtension] Got failure point from GPU: ({x},{y},{z})");
+                                    return new Point3D(x, y, z);
+                                }
+                            }
+                        }
+                    }
+
+                    // If GPU didn't work, try CPU simulator
+                    var cpuSimField = _parentForm.GetType().GetField("cpuSim",
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+                    if (cpuSimField != null)
+                    {
+                        var cpuSim = cpuSimField.GetValue(_parentForm);
+                        if (cpuSim != null)
+                        {
+                            // Try to get the failure voxel from TriaxialSimulator
+                            var failXField = cpuSim.GetType().GetField("failureX",
+                                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                            var failYField = cpuSim.GetType().GetField("failureY",
+                                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                            var failZField = cpuSim.GetType().GetField("failureZ",
+                                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+                            if (failXField != null && failYField != null && failZField != null)
+                            {
+                                int x = (int)failXField.GetValue(cpuSim);
+                                int y = (int)failYField.GetValue(cpuSim);
+                                int z = (int)failZField.GetValue(cpuSim);
+
+                                if (x > 0 || y > 0 || z > 0) // Ensure we got valid coordinates
+                                {
+                                    Logger.Log($"[TriaxialResultsExtension] Got failure point from CPU: ({x},{y},{z})");
+                                    return new Point3D(x, y, z);
+                                }
+                            }
                         }
                     }
                 }
 
-                // Store the visualization
-                _failurePointCache = bmp;
+                // Only if we couldn't get direct access, resort to scanning the damage array
+                double[,,] dmg = _parentForm?.DamageData;
+                ILabelVolumeData lbl = _parentForm?.VolumeLabels;
+                byte matId = GetSelectedMaterialID();
+
+                if (dmg == null || lbl == null) throw new InvalidOperationException("Missing arrays");
+
+                int w = dmg.GetLength(0), h = dmg.GetLength(1), d = dmg.GetLength(2);
+
+                double maxD = double.MinValue;
+                int fx = 0, fy = 0, fz = 0;
+
+                for (int z = 0; z < d; ++z)
+                    for (int y = 0; y < h; ++y)
+                        for (int x = 0; x < w; ++x)
+                        {
+                            if (lbl[x, y, z] != matId) continue;
+                            double v = dmg[x, y, z];
+                            if (v > maxD)
+                            {
+                                maxD = v; fx = x; fy = y; fz = z;
+                            }
+                        }
+
+                Logger.Log($"[TriaxialResultsExtension] Scanned for failure @ ({fx},{fy},{fz})  damage={maxD:F3}");
+                return new Point3D(fx, fy, fz);
             }
-
-            // Draw the visualization
-            e.Graphics.DrawImage(_failurePointCache, 0, 0, _failurePointViewer.Width, _failurePointViewer.Height);
+            catch (Exception ex)
+            {
+                Logger.Log($"[TriaxialResultsExtension] Failure-point scan failed – {ex.Message}");
+                return new Point3D(0, 0, 0);   // Return origin if all else fails
+            }
         }
-
-
         /// <summary>
         /// Paint handler for faulting plane visualization
         /// </summary>
@@ -2058,9 +2453,7 @@ namespace CTS
         /// <summary>
         /// Export a composite image with all visualizations
         /// </summary>
-        /// <summary>
-        /// Export a composite image with all visualizations
-        /// </summary>
+       
         private void BtnExportComposite_Click(object sender, EventArgs e)
         {
             try

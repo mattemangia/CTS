@@ -106,9 +106,25 @@ namespace CTS
         private bool failureDetected = false;
 
         // damage array
-        private double[,,] damage;
+        private double[,,] damage;                 
         public double[,,] DamageData => damage;
 
+        // Failure coordinates
+        public int failureX = -1;
+        public int failureY = -1;
+        public int failureZ = -1;
+
+        public ILabelVolumeData VolumeLabels
+        {
+            get
+            {
+                if (mainForm != null && mainForm.volumeLabels != null)
+                {
+                    return mainForm.volumeLabels;
+                }
+                return null;
+            }
+        }
         public TriaxialSimulationForm(MainForm mainForm)
         {
             this.mainForm = mainForm;
@@ -433,6 +449,8 @@ namespace CTS
         {
             try
             {
+                Logger.Log($"[TriaxialSimulationForm] Ensuring correct material - current ID: {selectedMaterialID}");
+
                 // If selected material is already valid, just make sure ID is stored
                 if (selectedMaterial != null && selectedMaterial.ID > 0)
                 {
@@ -444,6 +462,16 @@ namespace CTS
                 // Otherwise, try to find and select first valid material
                 if (comboMaterials.Items.Count > 0)
                 {
+                    // Log all available materials for debugging
+                    Logger.Log("[TriaxialSimulationForm] Available materials:");
+                    foreach (object item in comboMaterials.Items)
+                    {
+                        if (item is Material mat)
+                        {
+                            Logger.Log($"  - {mat.Name} (ID: {mat.ID})");
+                        }
+                    }
+
                     // Try all items in the combo box
                     foreach (object item in comboMaterials.Items)
                     {
@@ -480,6 +508,7 @@ namespace CTS
                 Logger.Log($"[TriaxialSimulationForm] Error ensuring material selection: {ex.Message}");
             }
         }
+
 
         // Update existing density volume with homogeneous density values
         private void UpdateHomogeneousDensityVolume()
@@ -1775,6 +1804,25 @@ namespace CTS
             // Initialize with current data
             InitializeTriaxialVisualization();
 
+            // Update the visualization with current parameters
+            if (triaxialVisualization != null)
+            {
+                // Set initial slice positions to the middle
+                int centerX = mainForm.GetWidth() / 2;
+                int centerY = mainForm.GetHeight() / 2;
+                int centerZ = mainForm.GetDepth() / 2;
+                triaxialVisualization.SetSlicePositions(centerX, centerY, centerZ);
+
+                // Get current simulation parameters
+                StressAxis axis = (StressAxis)cmbStressAxis.SelectedIndex;
+                double confP = (double)nudConfiningP.Value;
+                double axialP = (double)nudInitialP.Value;
+
+                // Update the visualization
+                triaxialVisualization.SetPressureParameters(confP, axialP, axis);
+                triaxialVisualization.SetViewTransformation(rotationX, rotationY, zoom, pan);
+            }
+
             // Update the simulation visualization
             if (!isInitializing)
                 pictureBoxSimulation.Invalidate();
@@ -2057,6 +2105,44 @@ namespace CTS
                 MessageBox.Show("No data loaded.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
+
+            // CRITICAL CHECK - Verify we have valid material ID before doing anything else
+            if (selectedMaterialID <= 0)
+            {
+                MessageBox.Show("Invalid material ID selected. Please select a valid material (not Exterior).",
+                              "Invalid Material", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            // Force-check the segmentation contains this material
+            bool materialExists = false;
+            int materialVoxelCount = 0;
+
+            Parallel.For(0, depth, z => {
+                int localCount = 0;
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        if (mainForm.volumeLabels[x, y, z] == selectedMaterialID)
+                        {
+                            materialExists = true;
+                            localCount++;
+                        }
+                    }
+                }
+                Interlocked.Add(ref materialVoxelCount, localCount);
+            });
+
+            if (!materialExists || materialVoxelCount == 0)
+            {
+                MessageBox.Show($"Material ID {selectedMaterialID} not found in volume! Please check segmentation.",
+                               "Material Not Found", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            Logger.Log($"[TriaxialSimulationForm] Found {materialVoxelCount} voxels with material ID {selectedMaterialID}");
+
             InitializeDamageArray();
             // Ensure we have a valid density volume
             if (densityVolume == null)
@@ -2083,6 +2169,31 @@ namespace CTS
 
             // Read UI parameters
             byte matID = selectedMaterialID;
+
+            // CRITICAL FIX: Ensure matID is not 0 (Exterior)
+            if (matID == 0)
+            {
+                // Get the first non-exterior material ID
+                foreach (Material mat in mainForm.Materials)
+                {
+                    if (mat.ID > 0)
+                    {
+                        matID = mat.ID;
+                        Logger.Log($"[TriaxialSimulationForm] Corrected material ID from 0 to {matID}");
+                        break;
+                    }
+                }
+
+                if (matID == 0)
+                {
+                    MessageBox.Show("Cannot run simulation on Exterior material. Please select a valid material.",
+                                  "Invalid Material", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+            }
+
+            Logger.Log($"[TriaxialSimulationForm] Running simulation on material ID: {matID}");
+
             StressAxis axis = (StressAxis)cmbStressAxis.SelectedIndex;
             double confP = (double)nudConfiningP.Value;
             double p0 = (double)nudInitialP.Value;
@@ -2139,8 +2250,10 @@ namespace CTS
             gpuSim = null;
 
             // Log density information for debugging
+            Logger.Log("[TriaxialSimulationForm] Material ID: " + matID);
             LogDensityStatistics(matID);
             bool debugMode = chkDebugMode.Checked;
+
             if (useGpu)
             {
                 // GPU simulation code
@@ -2148,10 +2261,26 @@ namespace CTS
 
                 // Create wrapped byte array for GPU simulator
                 byte[,,] labelArray = new byte[width, height, depth];
-                for (int z = 0; z < depth; z++)
+
+                // Copy the volumeLabels data to our GPU-bound array
+                Parallel.For(0, depth, z => {
                     for (int y = 0; y < height; y++)
                         for (int x = 0; x < width; x++)
                             labelArray[x, y, z] = mainForm.volumeLabels[x, y, z];
+                });
+
+                // Verify labeled array has the material
+                int idCount = 0;
+                Parallel.For(0, depth, z => {
+                    int localCount = 0;
+                    for (int y = 0; y < height; y++)
+                        for (int x = 0; x < width; x++)
+                            if (labelArray[x, y, z] == matID)
+                                localCount++;
+                    Interlocked.Add(ref idCount, localCount);
+                });
+
+                Logger.Log($"[TriaxialSimulationForm] Verified labelArray contains {idCount} voxels of ID {matID}");
 
                 gpuSim = new TriaxialSimulatorGPU(
                     width, height, depth,
@@ -2164,10 +2293,12 @@ namespace CTS
                     ts, phi, co, debugMode
                 );
 
+                // Register event handlers
                 gpuSim.ProgressUpdated += OnProgress;
                 gpuSim.FailureDetected += OnFailure;
                 gpuSim.SimulationCompleted += OnComplete;
 
+                // Start the simulation
                 gpuSim.StartSimulationAsync(
                     confP, p0, p1, pressureIncrements, axis, stepsPerIncrement, cts.Token
                 );
@@ -2200,6 +2331,7 @@ namespace CTS
             // Force redraw of simulation visualization
             pictureBoxSimulation.Invalidate();
         }
+
         private void LogDensityStatistics(byte matID)
         {
             if (hasDensityVariation)
@@ -2287,55 +2419,168 @@ namespace CTS
         {
             try
             {
-                // Handle CPU simulator
+                // ---------------------------- CPU ------------------------------------
                 if (cpuSim != null)
                 {
-                    // Use reflection to access the private damage field
-                    FieldInfo damageField = typeof(TriaxialSimulator).GetField("damage",
-                        BindingFlags.NonPublic | BindingFlags.Instance);
-
-                    if (damageField != null)
+                    FieldInfo fld = typeof(TriaxialSimulator).GetField("damage",
+                                   BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (fld != null)
                     {
-                        double[,,] simulatorDamage = (double[,,])damageField.GetValue(cpuSim);
-                        if (simulatorDamage != null)
+                        double[,,] src = (double[,,])fld.GetValue(cpuSim);
+                        if (src != null)
                         {
-                            // Copy the damage data
-                            Array.Copy(simulatorDamage, damage, damage.Length);
-                        }
-                    }
-                }
-                // Handle GPU simulator
-                else if (gpuSim != null)
-                {
-                    // Copy damage data from GPU simulator
-                    // We need to fetch it from device memory first
-                    MethodInfo copyToCPUMethod = gpuSim.GetType().GetMethod("CopyDamageToCPU",
-                        BindingFlags.NonPublic | BindingFlags.Instance);
+                            EnsureDamageArraySize(src);
 
-                    if (copyToCPUMethod != null)
-                    {
-                        copyToCPUMethod.Invoke(gpuSim, new object[] { damage });
-                    }
-                    else
-                    {
-                        // Alternative: access _damage field directly using reflection
-                        FieldInfo damageField = gpuSim.GetType().GetField("_damage",
-                            BindingFlags.NonPublic | BindingFlags.Instance);
+                            // Reset all damage to zero first
+                            for (int z = 0; z < damage.GetLength(2); z++)
+                                for (int y = 0; y < damage.GetLength(1); y++)
+                                    for (int x = 0; x < damage.GetLength(0); x++)
+                                        damage[x, y, z] = 0;
 
-                        if (damageField != null)
-                        {
-                            double[,,] gpuDamage = (double[,,])damageField.GetValue(gpuSim);
-                            if (gpuDamage != null)
+                            // Copy data but filter by material ID - ONLY copy for selected material
+                            for (int z = 0; z < src.GetLength(2); z++)
                             {
-                                Array.Copy(gpuDamage, damage, damage.Length);
+                                for (int y = 0; y < src.GetLength(1); y++)
+                                {
+                                    for (int x = 0; x < src.GetLength(0); x++)
+                                    {
+                                        // Only copy values for the selected material
+                                        if (mainForm.volumeLabels[x, y, z] == selectedMaterialID)
+                                            damage[x, y, z] = src[x, y, z];
+                                    }
+                                }
                             }
                         }
                     }
+                }
+                // ---------------------------- GPU ------------------------------------
+                else if (gpuSim != null)
+                {
+                    // preferred – private helper already exists in GPU class
+                    MethodInfo mi = gpuSim.GetType().GetMethod("CopyDamageToCPU",
+                                   BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (mi != null)
+                    {
+                        // First, create a temporary buffer with same dimensions
+                        double[,,] tempDamage = new double[damage.GetLength(0),
+                                                          damage.GetLength(1),
+                                                          damage.GetLength(2)];
+
+                        // Let GPU copy to this buffer
+                        mi.Invoke(gpuSim, new object[] { tempDamage });
+
+                        // Reset damage array
+                        for (int z = 0; z < damage.GetLength(2); z++)
+                            for (int y = 0; y < damage.GetLength(1); y++)
+                                for (int x = 0; x < damage.GetLength(0); x++)
+                                    damage[x, y, z] = 0;
+
+                        // Only copy for material voxels
+                        for (int z = 0; z < tempDamage.GetLength(2); z++)
+                        {
+                            for (int y = 0; y < tempDamage.GetLength(1); y++)
+                            {
+                                for (int x = 0; x < tempDamage.GetLength(0); x++)
+                                {
+                                    if (mainForm.volumeLabels[x, y, z] == selectedMaterialID)
+                                        damage[x, y, z] = tempDamage[x, y, z];
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // fall-back: grab the backing field directly
+                        FieldInfo fld = gpuSim.GetType().GetField("_damage",
+                                       BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (fld != null)
+                        {
+                            double[,,] src = (double[,,])fld.GetValue(gpuSim);
+                            if (src != null)
+                            {
+                                EnsureDamageArraySize(src);
+
+                                // Reset all damage to zero first
+                                for (int z = 0; z < damage.GetLength(2); z++)
+                                    for (int y = 0; y < damage.GetLength(1); y++)
+                                        for (int x = 0; x < damage.GetLength(0); x++)
+                                            damage[x, y, z] = 0;
+
+                                // Copy data but filter by material ID
+                                for (int z = 0; z < src.GetLength(2); z++)
+                                {
+                                    for (int y = 0; y < src.GetLength(1); y++)
+                                    {
+                                        for (int x = 0; x < src.GetLength(0); x++)
+                                        {
+                                            // Only copy values for the selected material
+                                            if (mainForm.volumeLabels[x, y, z] == selectedMaterialID)
+                                                damage[x, y, z] = src[x, y, z];
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Add diagnostic code to count voxels by material type
+                int exteriorCount = 0;
+                int materialCount = 0;
+                int otherCount = 0;
+                int nonZeroDamageCount = 0;
+
+                for (int z = 0; z < damage.GetLength(2); z++)
+                {
+                    for (int y = 0; y < damage.GetLength(1); y++)
+                    {
+                        for (int x = 0; x < damage.GetLength(0); x++)
+                        {
+                            byte label = mainForm.volumeLabels[x, y, z];
+                            if (label == 0) exteriorCount++;
+                            else if (label == selectedMaterialID)
+                            {
+                                materialCount++;
+                                if (damage[x, y, z] > 0) nonZeroDamageCount++;
+                            }
+                            else otherCount++;
+                        }
+                    }
+                }
+
+                Logger.Log($"[TriaxialSimulationForm] Volume composition: {materialCount} material voxels " +
+                         $"({nonZeroDamageCount} with damage), {exteriorCount} exterior voxels, {otherCount} other material voxels");
+
+                // If in debug mode, also dump current materialID information
+                if (chkDebugMode != null && chkDebugMode.Checked)
+                {
+                    Logger.Log($"[TriaxialSimulationForm] DEBUG: Selected Material = {selectedMaterial?.Name ?? "null"} (ID: {selectedMaterialID})");
+
+                    // Log material list
+                    string materialList = "Available materials: ";
+                    foreach (Material mat in mainForm.Materials)
+                    {
+                        materialList += $"{mat.Name}(ID:{mat.ID}), ";
+                    }
+                    Logger.Log(materialList);
                 }
             }
             catch (Exception ex)
             {
                 Logger.Log($"[TriaxialSimulationForm] Error updating damage data: {ex.Message}");
+            }
+        }
+
+        private void EnsureDamageArraySize(double[,,] src)
+        {
+            if (damage == null ||
+                damage.GetLength(0) != src.GetLength(0) ||
+                damage.GetLength(1) != src.GetLength(1) ||
+                damage.GetLength(2) != src.GetLength(2))
+            {
+                damage = new double[src.GetLength(0),
+                                    src.GetLength(1),
+                                    src.GetLength(2)];
             }
         }
         private void OnFailure(object sender, FailureDetectedEventArgs e)
@@ -2347,7 +2592,91 @@ namespace CTS
                 Invoke((Action)(() => OnFailure(sender, e)));
                 return;
             }
+
             UpdateDamageData();
+
+            // Record the failure point coordinates
+            if (sender is TriaxialSimulatorGPU gpuSim)
+            {
+                var (failX, failY, failZ) = gpuSim.GetFirstFailureVoxel();
+
+                // Store these values in class fields
+                failureX = failX;
+                failureY = failY;
+                failureZ = failZ;
+
+                // Update the visualization with the failure point 
+                if (triaxialVisualization != null)
+                {
+                    triaxialVisualization.SetFailurePoint(true, failX, failY, failZ);
+                    triaxialVisualization.SetSlicePositions(failX, failY, failZ);
+                    Logger.Log($"[TriaxialSimulationForm] Failure visualized at ({failX},{failY},{failZ})");
+                }
+            }
+            else if (cpuSim != null)
+            {
+                // Get failure coordinates from CPU simulator if possible
+                try
+                {
+                    var failXField = cpuSim.GetType().GetField("failureX",
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    var failYField = cpuSim.GetType().GetField("failureY",
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    var failZField = cpuSim.GetType().GetField("failureZ",
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+                    if (failXField != null && failYField != null && failZField != null)
+                    {
+                        int failX = (int)failXField.GetValue(cpuSim);
+                        int failY = (int)failYField.GetValue(cpuSim);
+                        int failZ = (int)failZField.GetValue(cpuSim);
+
+                        // Store these values
+                        failureX = failX;
+                        failureY = failY;
+                        failureZ = failZ;
+
+                        if (triaxialVisualization != null)
+                        {
+                            triaxialVisualization.SetFailurePoint(true, failX, failY, failZ);
+                            triaxialVisualization.SetSlicePositions(failX, failY, failZ);
+                            Logger.Log($"[TriaxialSimulationForm] CPU failure visualized at ({failX},{failY},{failZ})");
+                        }
+                    }
+                    else
+                    {
+                        // For CPU simulation without direct fields, use the FindMaxDamagePoint method
+                        var failurePoint = FindMaxDamagePoint();
+                        failureX = (int)failurePoint.X;
+                        failureY = (int)failurePoint.Y;
+                        failureZ = (int)failurePoint.Z;
+
+                        if (triaxialVisualization != null)
+                        {
+                            triaxialVisualization.SetFailurePoint(true, failureX, failureY, failureZ);
+                            triaxialVisualization.SetSlicePositions(failureX, failureY, failureZ);
+                            Logger.Log($"[TriaxialSimulationForm] CPU failure visualized at ({failureX},{failureY},{failureZ})");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[TriaxialSimulationForm] Error accessing CPU failure coordinates: {ex.Message}");
+                    // Fallback to FindMaxDamagePoint
+                    var failurePoint = FindMaxDamagePoint();
+                    failureX = (int)failurePoint.X;
+                    failureY = (int)failurePoint.Y;
+                    failureZ = (int)failurePoint.Z;
+
+                    if (triaxialVisualization != null)
+                    {
+                        triaxialVisualization.SetFailurePoint(true, failureX, failureY, failureZ);
+                        triaxialVisualization.SetSlicePositions(failureX, failureY, failureZ);
+                        Logger.Log($"[TriaxialSimulationForm] Fallback failure visualized at ({failureX},{failureY},{failureZ})");
+                    }
+                }
+            }
+
             btnPause.Enabled = false;
             btnContinue.Visible = true;
             lblStatus.Text = "Failure detected — click Continue or Cancel";
@@ -2383,33 +2712,33 @@ namespace CTS
                     MethodInfo updateDataMethod = extensionType.GetMethod("UpdateData");
                     if (updateDataMethod != null)
                     {
-                        updateDataMethod.Invoke(resultsExtension, new object[] {
-            stressStrainCurve,
-            peakStress,
-            e.CurrentStrain,
-            failureDetected,
-            failureStep,
-            damage
-        });
+                        updateDataMethod.Invoke(resultsExtension, new object[]
+                        {
+                    stressStrainCurve,
+                    peakStress,
+                    e.CurrentStrain,
+                    failureDetected,
+                    failureStep,
+                    damage
+                        });
                     }
 
                     // Then force direct drawing of the tangent line
-                    // FIXED: Make sure the method name matches exactly what's in TriaxialResultsExtension
                     MethodInfo drawTangentMethod = extensionType.GetMethod("DrawTangentOnMohrChart",
                         BindingFlags.NonPublic | BindingFlags.Instance);
 
                     if (drawTangentMethod != null)
                     {
-                        drawTangentMethod.Invoke(resultsExtension, new object[] {
-            confiningPressure,
-            failureStress,
-            frictionAngle,
-            cohesion
-        });
+                        drawTangentMethod.Invoke(resultsExtension, new object[]
+                        {
+                    confiningPressure,
+                    failureStress,
+                    frictionAngle,
+                    cohesion
+                        });
                     }
                     else
                     {
-                        // FIXED: Update error message to match the correct method name
                         Logger.Log("[TriaxialSimulationForm] DrawTangentOnMohrChart method not found");
                     }
                 }
@@ -2421,14 +2750,13 @@ namespace CTS
                     e.CurrentStrain,
                     failureDetected,
                     failureStep,
-                    damage // This is the damage field array from the simulator
+                    damage
                 );
             }
 
             // Update simulation visualization
             pictureBoxSimulation.Invalidate();
         }
-
         private void OnComplete(object sender, TriaxialSimulationCompleteEventArgs e)
         {
             Logger.Log("[TriaxialSimulationForm] Simulation complete");
@@ -2615,31 +2943,40 @@ namespace CTS
         }
         public Point3D FindMaxDamagePoint()
         {
-            if (damage == null)
-                return new Point3D(0, 0, 0);
-
-            double maxDamage = 0.0;
-            int maxX = 0, maxY = 0, maxZ = 0;
-            byte materialID = selectedMaterialID;
-
-            // Find the point with maximum damage
-            for (int z = 0; z < mainForm.GetDepth(); z++)
+            double[,,] dmg = DamageData;
+            if (dmg == null)
             {
-                for (int y = 0; y < mainForm.GetHeight(); y++)
-                {
-                    for (int x = 0; x < mainForm.GetWidth(); x++)
-                    {
-                        if (mainForm.volumeLabels[x, y, z] == materialID && damage[x, y, z] > maxDamage)
-                        {
-                            maxDamage = damage[x, y, z];
-                            maxX = x;
-                            maxY = y;
-                            maxZ = z;
-                        }
-                    }
-                }
+                Logger.Log("[TriaxialSimulationForm] Damage array is null – cannot locate failure point.");
+                return new Point3D(0, 0, 0);
             }
 
+            int nx = dmg.GetLength(0);
+            int ny = dmg.GetLength(1);
+            int nz = dmg.GetLength(2);
+
+            ILabelVolumeData labels = mainForm?.volumeLabels;
+            int maxX = 0, maxY = 0, maxZ = 0;
+            double maxD = 0.0;
+            int checkedVox = 0;
+
+            for (int z = 0; z < nz; z++)
+                for (int y = 0; y < ny; y++)
+                    for (int x = 0; x < nx; x++)
+                    {
+                        // material filter (when labels are present)
+                        if (labels != null && labels[x, y, z] != selectedMaterialID)
+                            continue;
+
+                        checkedVox++;
+                        double d = dmg[x, y, z];
+                        if (d > maxD)
+                        {
+                            maxD = d;
+                            maxX = x; maxY = y; maxZ = z;
+                        }
+                    }
+
+            Logger.Log($"[TriaxialSimulationForm] Max-damage {maxD:F3} @ ({maxX},{maxY},{maxZ}) – examined {checkedVox} voxels");
             return new Point3D(maxX, maxY, maxZ);
         }
         private Image CreateStartIcon()
@@ -2955,25 +3292,49 @@ namespace CTS
                 int height = mainForm.GetHeight();
                 int depth = mainForm.GetDepth();
 
-                // Create the damage array if not already created or if dimensions changed
+                // (Re-)allocate if missing or dimension mismatch
                 if (damage == null ||
                     damage.GetLength(0) != width ||
                     damage.GetLength(1) != height ||
                     damage.GetLength(2) != depth)
                 {
                     damage = new double[width, height, depth];
-                    Logger.Log($"[TriaxialSimulationForm] Initialized damage array with dimensions {width}x{height}x{depth}");
+                    Logger.Log($"[TriaxialSimulationForm] Damage array created – {width}×{height}×{depth}");
                 }
 
-                // Initialize all elements to zero
+                // Clear to zero
                 Array.Clear(damage, 0, damage.Length);
+
+                // Create a test pattern if in debug mode to verify visualizer works
+                if (chkDebugMode?.Checked == true)
+                {
+                    // IMPORTANT FIX: Only add debug pattern to material voxels, not exterior!
+                    int materialVoxelCount = 0;
+
+                    for (int z = 0; z < depth; z++)
+                    {
+                        for (int y = 0; y < height; y++)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                // Important fix - ONLY apply to selected material voxels!
+                                if (mainForm.volumeLabels[x, y, z] == selectedMaterialID)
+                                {
+                                    materialVoxelCount++;
+                                    damage[x, y, z] = 0.5 * Math.Sin((x + y + z) * 0.1) + 0.5; // Sample pattern
+                                }
+                            }
+                        }
+                    }
+
+                    Logger.Log($"[TriaxialSimulationForm] Added debug pattern to damage array with {materialVoxelCount} material voxels for ID {selectedMaterialID}");
+                }
             }
             catch (Exception ex)
             {
-                Logger.Log($"[TriaxialSimulationForm] Error initializing damage array: {ex.Message}");
+                Logger.Log($"[TriaxialSimulationForm] Error initialising damage array: {ex.Message}");
             }
         }
-
 
         private byte[,,] CreateLabelVolumeArray()
         {

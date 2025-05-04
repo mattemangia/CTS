@@ -94,6 +94,9 @@ namespace CTS
             _axialPressure = 0.0;
             _pressureAxis = StressAxis.Z;
         }
+        private bool _failureDetected = false;
+        private int _failureX, _failureY, _failureZ;
+        private int _sliceX, _sliceY, _sliceZ;
 
         /// <summary>
         /// Set the pressure parameters for visualization.
@@ -110,7 +113,65 @@ namespace CTS
                 _visualizationDirty = true;
             }
         }
+        /// <summary>
+        /// Sets the failure point for visualization
+        /// </summary>
+        public void SetFailurePoint(bool detected, int x, int y, int z)
+        {
+            _failureDetected = detected;
+            _failureX = x;
+            _failureY = y;
+            _failureZ = z;
+            _visualizationDirty = true;
+        }
+        private void DrawFailurePoint(Graphics g, Matrix3DProjection projector, int width, int height)
+        {
+            if (!_failureDetected) return;
 
+            // Project failure point to screen coordinates
+            PointF failurePoint = projector.Project(_failureX, _failureY, _failureZ, width, height);
+
+            // Draw an X marker at the failure point
+            const int markerSize = 8;
+            using (Pen failurePen = new Pen(Color.Red, 2.5f))
+            {
+                g.DrawLine(failurePen,
+                    failurePoint.X - markerSize, failurePoint.Y - markerSize,
+                    failurePoint.X + markerSize, failurePoint.Y + markerSize);
+                g.DrawLine(failurePen,
+                    failurePoint.X + markerSize, failurePoint.Y - markerSize,
+                    failurePoint.X - markerSize, failurePoint.Y + markerSize);
+            }
+
+            // Draw a circle around the marker
+            using (Pen circlePen = new Pen(Color.FromArgb(180, 255, 80, 80), 2f))
+            {
+                g.DrawEllipse(circlePen,
+                    failurePoint.X - markerSize - 4,
+                    failurePoint.Y - markerSize - 4,
+                    (markerSize + 4) * 2,
+                    (markerSize + 4) * 2);
+            }
+
+            // Add a label for the failure point
+            using (Font font = new Font("Segoe UI", 8, FontStyle.Bold))
+            using (SolidBrush brush = new SolidBrush(Color.Red))
+            {
+                g.DrawString("FAILURE POINT", font, brush,
+                    failurePoint.X + markerSize + 4,
+                    failurePoint.Y - 8);
+            }
+        }
+        /// <summary>
+        /// Sets the slice positions for cross-section visualization
+        /// </summary>
+        public void SetSlicePositions(int x, int y, int z)
+        {
+            _sliceX = x;
+            _sliceY = y;
+            _sliceZ = z;
+            _visualizationDirty = true;
+        }
         /// <summary>
         /// Set the view transformation parameters.
         /// </summary>
@@ -532,6 +593,7 @@ namespace CTS
                 g.DrawLine(boundingBoxPen, corners[2], corners[6]);
                 g.DrawLine(boundingBoxPen, corners[3], corners[7]);
             }
+            DrawFailurePoint(g, projector, width, height);
         }
 
         private void DrawVolumeWithConfiningPressure(Graphics g, Matrix3DProjection projector, int width, int height)
@@ -597,6 +659,7 @@ namespace CTS
                 DrawPressureVectorsOnFace(g, projector, width, height, minX, minY, minZ, maxX, maxY, maxZ,
                     vectorSample, vectorSample, 1, 0, 0, vectorScale, vectorPen, true);
             }
+            DrawFailurePoint(g, projector, width, height);
         }
 
         private void DrawVolumeWithPressureGradient(Graphics g, Matrix3DProjection projector, int width, int height)
@@ -718,7 +781,7 @@ namespace CTS
                     }
                     break;
             }
-
+            DrawFailurePoint(g, projector, width, height);
             gradientPen.Dispose();
         }
 

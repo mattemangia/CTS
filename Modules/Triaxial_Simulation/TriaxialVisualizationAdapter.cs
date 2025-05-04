@@ -24,8 +24,8 @@ namespace CTS
         /// <param name="densityVolume">Density volume data</param>
         /// <param name="materialID">Material ID to visualize</param>
         public TriaxialVisualizationAdapter(
-            int width, int height, int depth, float pixelSize,
-            ILabelVolumeData labelVolume, float[,,] densityVolume, byte materialID)
+     int width, int height, int depth, float pixelSize,
+     ILabelVolumeData labelVolume, float[,,] densityVolume, byte materialID)
         {
             try
             {
@@ -41,7 +41,7 @@ namespace CTS
 
                 _labelVolumeArray = new byte[visWidth, visHeight, visDepth];
 
-                // Copy data from the ILabelVolumeData to our array
+                // Copy data from the ILabelVolumeData to our array - do this in a fast way
                 CopyVolumeData(labelVolume, width, height, depth, downsample);
 
                 // Create a downsampled density volume if needed
@@ -59,6 +59,12 @@ namespace CTS
                     useDensityVolume, // Use downsampled density volume if needed
                     materialID);
 
+                // Set initial slice positions at the center of the volume
+                int centerX = visWidth / 2;
+                int centerY = visHeight / 2;
+                int centerZ = visDepth / 2;
+                SetSlicePositions(centerX, centerY, centerZ);
+
                 Logger.Log($"[TriaxialVisualizationAdapter] Successfully initialized visualization");
             }
             catch (Exception ex)
@@ -67,7 +73,21 @@ namespace CTS
                 throw;
             }
         }
+        /// <summary>
+        /// Set the failure point for visualization
+        /// </summary>
+        public void SetFailurePoint(bool detected, int x, int y, int z)
+        {
+            _visualizer?.SetFailurePoint(detected, x, y, z);
+        }
 
+        /// <summary>
+        /// Set the slice positions for visualization
+        /// </summary>
+        public void SetSlicePositions(int x, int y, int z)
+        {
+            _visualizer?.SetSlicePositions(x, y, z);
+        }
         /// <summary>
         /// Calculate an appropriate downsample factor based on volume size
         /// </summary>

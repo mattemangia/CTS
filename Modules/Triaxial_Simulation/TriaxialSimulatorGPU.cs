@@ -12,6 +12,7 @@ using ILGPU.Runtime.Cuda;
 using ILGPU.Runtime.OpenCL;
 using Microsoft.Office.Interop.Word;
 using Task = System.Threading.Tasks.Task;
+using System.Windows.Media.Media3D;
 
 namespace CTS
 {
@@ -33,6 +34,19 @@ namespace CTS
         public int StressAxis; // 0=X, 1=Y, 2=Z
         public byte DebugMode;
         public float RefDensity;
+        public override string ToString()
+        {
+            return
+                $"MaterialID={MaterialID}, " +
+                $"Size={Width}×{Height}×{Depth}, " +
+                $"PixelSize={PixelSize:F4}, " +
+                $"TimeStep={TimeStep:F4}, " +
+                $"FailureThreshold={FailureThreshold:F4}, " +
+                $"Damping={Damping:F4}, " +
+                $"StressAxis={StressAxis}, " +
+                $"DebugMode={DebugMode}, " +
+                $"RefDensity={RefDensity:F4}";
+        }
     }
 
     public class TriaxialSimulatorGPU : IDisposable
@@ -99,6 +113,7 @@ namespace CTS
         private Action<Index3D, Kernels.DisplacementArgs> _dispKernel;
         private Action<Index3D, Kernels.BoundaryArgs> _boundaryKernel;
         private Action<Index3D, Kernels.InitializeArgs> _initKernel;
+        private (int x, int y, int z) _firstFailureVoxel;
 
         // Events to match CPU simulator API
         public event EventHandler<TriaxialSimulationProgressEventArgs> ProgressUpdated;
@@ -112,15 +127,15 @@ namespace CTS
 
         #region Constructor and Initialization
         public TriaxialSimulatorGPU(
-            int width, int height, int depth,
-            float pixelSize,
-            byte[,,] labels,
-            float[,,] density,
-            byte materialID,
-            double youngsModulusMPa,
-            double poissonRatio,
-            bool useElastic, bool usePlastic, bool useBrittle,
-            double tensileMPa, double frictionAngleDeg, double cohesionMPa, bool debugMode = false)
+    int width, int height, int depth,
+    float pixelSize,
+    byte[,,] labels,
+    float[,,] density,
+    byte materialID,
+    double youngsModulusMPa,
+    double poissonRatio,
+    bool useElastic, bool usePlastic, bool useBrittle,
+    double tensileMPa, double frictionAngleDeg, double cohesionMPa, bool debugMode = false)
         {
             Logger.Log("[GPUTriaxialSimulator] Constructor start");
             _width = width;
@@ -130,6 +145,13 @@ namespace CTS
             _labels = labels;
             _density = density;
             _matID = materialID;
+
+            // CRITICAL CHECK: Verify material ID is valid (not 0)
+            if (materialID == 0)
+            {
+                Logger.Log("[GPUTriaxialSimulator] WARNING: Material ID is 0 (exterior)! This will likely cause issues.");
+            }
+
             // Initialize host arrays for damage checking
             int totalSize = width * height * depth;
             _damageHost = new float[totalSize];
@@ -138,9 +160,29 @@ namespace CTS
 
             // Store material ID specifically for failure check
             _selectedMaterialID = materialID;
+            Logger.Log("[GPUTriaxialSimulator] Host arrays initialized, Simulation requested on material: " + _selectedMaterialID);
+
+            // Count material voxels in the volume
+            int materialVoxelCount = 0;
+            Parallel.For(0, depth, z => {
+                int localCount = 0;
+                for (int y = 0; y < height; y++)
+                    for (int x = 0; x < width; x++)
+                        if (labels[x, y, z] == materialID)
+                            localCount++;
+                Interlocked.Add(ref materialVoxelCount, localCount);
+            });
+
+            Logger.Log($"[GPUTriaxialSimulator] Found {materialVoxelCount} voxels with material ID {materialID} in the volume");
+
+            if (materialVoxelCount == 0)
+            {
+                Logger.Log("[GPUTriaxialSimulator] ERROR: No voxels found with specified material ID! This will cause the simulation to fail.");
+            }
 
             // Calculate reference density
             _refRho = CalculateReferenceRho(labels, density, materialID);
+
             // Pre-alloc host arrays
             _vx = new double[_width, _height, _depth];
             _vy = new double[_width, _height, _depth];
@@ -422,7 +464,7 @@ namespace CTS
                         ApplyConfiningPressure(confiningPa, StressAxis.X, minX, maxX);
                         ApplyConfiningPressure(confiningPa, StressAxis.Z, minZ, maxZ);
                     }
-                    else // Z axis
+                    else /* Z */
                     {
                         ApplyConfiningPressure(confiningPa, StressAxis.X, minX, maxX);
                         ApplyConfiningPressure(confiningPa, StressAxis.Y, minY, maxY);
@@ -456,7 +498,9 @@ namespace CTS
                             Syz = _dSyz,
                             Damage = _dDamage,
                             MatParams = _matParams,
-                            SimParams = _simParams
+                            SimParams = _simParams,
+                            UsePlastic = (byte)((_matParams.UseModelFlags & 2) != 0 ? 1 : 0),
+                            UseBrittle = (byte)((_matParams.UseModelFlags & 4) != 0 ? 1 : 0)
                         };
                         _stressKernel(new Index3D(_width, _height, _depth), stressArgs);
 
@@ -516,8 +560,11 @@ namespace CTS
 
                         // Check for failure more frequently in debug mode
                         int checkInterval = _debugMode ? 2 : 5;
+                        if (step % checkInterval == 0)
+                            UpdateHostArraysFromDevice();
                         if (step % checkInterval == 0 && !_failureDetected)
                         {
+                            
                             if (CheckForFailure())
                             {
                                 _failureDetected = true;
@@ -586,7 +633,7 @@ namespace CTS
                 StressAxis = (int)_pressureAxis,
                 RefDensity = _refRho  
             };
-
+            Logger.Log($"[GPUTriaxialSimulator] Simulation parameters: {_simParams}");
             // Initialize fields via kernel
             var initArgs = new Kernels.InitializeArgs
             {
@@ -801,7 +848,7 @@ namespace CTS
             // Apply force to ALL material voxels to help propagate pressure - simplest solution
             ApplyForceToAllMaterialVoxels(targetPressurePa, _confiningPressure * 1e6);
         }
-        
+
         private void ApplyConfiningPressure(double pressurePa, StressAxis axis, int minBound, int maxBound)
         {
             var boundaryArgs = new Kernels.BoundaryArgs
@@ -812,7 +859,7 @@ namespace CTS
                 Szz = _dSzz,
                 MaterialID = _matID,
                 ConfiningPressure = pressurePa,
-                AxialPressure = pressurePa, // Use same value for both
+                AxialPressure = pressurePa, // Use same value for both in confining case
                 StressAxis = (int)axis,
                 MinBoundary = minBound,
                 MaxBoundary = maxBound
@@ -884,128 +931,187 @@ namespace CTS
         }
 
         // -----------------------------------------------------------------------------
-        //  CheckForFailure  (GPU version)
-        //  host routine called every few kernel steps after copying the three buffers
-        //  back from the device.  Density-weighted threshold:
-        //      Dcrit = 0.75 × ρ/ρ₀
+        //  CheckForFailure  – GPU version (host-side)
+        //  * soglia Dcrit = 0.75 × ρ/ρ₀  (0.50 in debug mode)
+        //  * restituisce true appena trova il primo voxel critico
         // -----------------------------------------------------------------------------
         private bool CheckForFailure()
         {
-            // First update the host arrays
-            UpdateHostArraysFromDevice();
+            // Synchronize and copy device buffers to host
+            _accelerator.Synchronize();
+            _dDamage.CopyToCPU(_damage);
+            _dDensity.CopyToCPU(_density);
+            _dLabels.CopyToCPU(_labels);
 
-            // Use lower threshold in debug mode
+            double baseCrit = _debugMode ? 0.15 : 0.75;
+            float rho0 = _refRho > 0 ? _refRho : 2500.0f;
 
-            double baseCrit = _debugMode ? 0.5 : 0.75;
+            double maxDamage = 0.0;
+            double maxRatio = 0.0;
+            int maxX = -1, maxY = -1, maxZ = -1;
+            int maxRatioX = -1, maxRatioY = -1, maxRatioZ = -1;
 
-            // Add null safety check and logging
-            if (_damageHost == null || _labelsHost == null || _densityHost == null)
+            // CRITICAL FIX: Add counters to verify calculations are happening in the right material
+            int materialVoxelCount = 0;
+            int materialDamagedCount = 0;
+            int exteriorDamagedCount = 0;
+
+            // Use parallel processing to speed up the check
+            object lockObj = new object();
+            Parallel.For(0, _depth, z =>
             {
-                Logger.Log("[GPUTriaxialSimulator] ERROR: Host arrays are null in failure check!");
-                return false;
-            }
+                double localMaxDamage = 0.0;
+                double localMaxRatio = 0.0;
+                int localMaxX = -1, localMaxY = -1, localMaxZ = -1;
+                int localMaxRatioX = -1, localMaxRatioY = -1, localMaxRatioZ = -1;
+                bool localFailureFound = false;
+                (int x, int y, int z) localFailureVoxel = (-1, -1, -1);
 
-            float rho0 = _refRho > 0 ? _refRho : 2500.0f; // Safety check
-            int voxelN = _damageHost.Length;
+                int localMatVoxCount = 0;
+                int localMatDamagedCount = 0;
+                int localExtDamagedCount = 0;
 
-            // Track statistics for logging
-            float maxDamage = 0.0f;
-            float maxRatio = 0.0f;
-            int criticalVoxels = 0;
-            float avgDensity = 0.0f;
-            int materialVoxels = 0;
-
-            // Find the maximum damage voxel and the voxel with max damage/threshold ratio
-            int maxDamageX = -1, maxDamageY = -1, maxDamageZ = -1;
-
-            // Convert flat index to 3D for tracking
-            for (int i = 0; i < voxelN; i++)
-            {
-                if (_labelsHost[i] != _selectedMaterialID) continue;
-
-                materialVoxels++;
-                float rho = Math.Max(100.0f, _densityHost[i]);
-                avgDensity += rho;
-
-                float crit = (float)(baseCrit * (rho / rho0));
-                float damage = _damageHost[i];
-                float ratio = damage / crit;
-
-                if (damage > maxDamage)
+                for (int y = 0; y < _height; y++)
                 {
-                    maxDamage = damage;
+                    for (int x = 0; x < _width; x++)
+                    {
+                        byte materialID = _labels[x, y, z];
 
-                    // Convert linear index to 3D coordinates
-                    int z = i / (_width * _height);
-                    int remainder = i % (_width * _height);
-                    int y = remainder / _width;
-                    int x = remainder % _width;
+                        // Count material statistics
+                        if (materialID == _selectedMaterialID)
+                        {
+                            localMatVoxCount++;
+                            if (_damage[x, y, z] > 0)
+                                localMatDamagedCount++;
+                        }
+                        else if (materialID == 0 && _damage[x, y, z] > 0)
+                        {
+                            localExtDamagedCount++;
+                        }
 
-                    maxDamageX = x;
-                    maxDamageY = y;
-                    maxDamageZ = z;
+                        // ONLY check material voxels for failure
+                        if (materialID != _selectedMaterialID) continue;
+
+                        float rho = Math.Max(100f, _density[x, y, z]);
+                        double crit = baseCrit * (rho / rho0);
+                        double dmg = _damage[x, y, z];
+                        double ratio = dmg / crit;
+
+                        if (dmg > localMaxDamage)
+                        {
+                            localMaxDamage = dmg;
+                            localMaxX = x;
+                            localMaxY = y;
+                            localMaxZ = z;
+                        }
+
+                        if (ratio > localMaxRatio)
+                        {
+                            localMaxRatio = ratio;
+                            localMaxRatioX = x;
+                            localMaxRatioY = y;
+                            localMaxRatioZ = z;
+                        }
+
+                        // Check for failure - compare ratio to 1.0 instead of damage to crit
+                        if (ratio >= 1.0 && !localFailureFound)
+                        {
+                            localFailureFound = true;
+                            localFailureVoxel = (x, y, z);
+                        }
+                    }
                 }
 
-                if (ratio > maxRatio)
+                // Thread-safe update of global results
+                lock (lockObj)
                 {
-                    maxRatio = ratio;
+                    materialVoxelCount += localMatVoxCount;
+                    materialDamagedCount += localMatDamagedCount;
+                    exteriorDamagedCount += localExtDamagedCount;
+
+                    if (localMaxDamage > maxDamage)
+                    {
+                        maxDamage = localMaxDamage;
+                        maxX = localMaxX;
+                        maxY = localMaxY;
+                        maxZ = localMaxZ;
+                    }
+
+                    if (localMaxRatio > maxRatio)
+                    {
+                        maxRatio = localMaxRatio;
+                        maxRatioX = localMaxRatioX;
+                        maxRatioY = localMaxRatioY;
+                        maxRatioZ = localMaxRatioZ;
+                    }
+
+                    if (localFailureFound)
+                    {
+                        _firstFailureVoxel = localFailureVoxel;
+
+                        Logger.Log($"[GPUTriaxialSimulator] FAILURE voxel=({_firstFailureVoxel.x},{_firstFailureVoxel.y},{_firstFailureVoxel.z})  " +
+                                 $"D={_damage[_firstFailureVoxel.x, _firstFailureVoxel.y, _firstFailureVoxel.z]:F3}  " +
+                                 $"crit={baseCrit * (_density[_firstFailureVoxel.x, _firstFailureVoxel.y, _firstFailureVoxel.z] / rho0):F3}  " +
+                                 $"ratio={_damage[_firstFailureVoxel.x, _firstFailureVoxel.y, _firstFailureVoxel.z] / (baseCrit * (_density[_firstFailureVoxel.x, _firstFailureVoxel.y, _firstFailureVoxel.z] / rho0)):F3}  " +
+                                 $"density={_density[_firstFailureVoxel.x, _firstFailureVoxel.y, _firstFailureVoxel.z]:F0}");
+                    }
                 }
+            });
 
-                if (damage > crit)
-                {
-                    criticalVoxels++;
+            string modeLabel = _debugMode ? "DEBUG MODE" : "Normal mode";
+            Logger.Log($"[GPUTriaxialSimulator] {modeLabel} Material stats: {materialVoxelCount} material voxels, " +
+                     $"{materialDamagedCount} damaged in material, {exteriorDamagedCount} damaged in exterior");
 
-                    Logger.Log($"[GPUTriaxialSimulator] {(_debugMode ? "DEBUG MODE" : "Normal mode")} " +
-                              $"Failure detected at voxel {i}! Damage={damage:F3}, Density={rho:F0}, Threshold={crit:F3}, Ratio={ratio:F3}");
-                    return true;
-                }
-            }
+            Logger.Log($"[GPUTriaxialSimulator] {modeLabel} No failure – max D={maxDamage:F3} at ({maxX},{maxY},{maxZ}), " +
+                     $"max ratio={maxRatio:F3} at ({maxRatioX},{maxRatioY},{maxRatioZ})");
 
-            // Calculate average density of material voxels
-            if (materialVoxels > 0)
+            if (exteriorDamagedCount > 0)
             {
-                avgDensity /= materialVoxels;
+                Logger.Log("[GPUTriaxialSimulator] WARNING: Exterior voxels have damage values! This indicates the simulation may be running on the wrong material.");
             }
 
-            // Detailed logging to help debug issues
-            Logger.Log($"[GPUTriaxialSimulator] {(_debugMode ? "DEBUG MODE" : "Normal mode")} " +
-                      $"No failure yet. Max damage={maxDamage:F3} at ({maxDamageX},{maxDamageY},{maxDamageZ}), " +
-                      $"Max ratio={maxRatio:F3}, Material voxels={materialVoxels}, " +
-                      $"Avg density={avgDensity:F0} kg/m³, Ref density={rho0:F0} kg/m³");
+            return maxRatio >= 1.0;
+        }
 
-            return false;
+        /// <summary>
+        /// Gets the coordinates of the first detected failure voxel
+        /// </summary>
+        /// <returns>Tuple containing the (x,y,z) coordinates of the first failure voxel</returns>
+        public (int x, int y, int z) GetFirstFailureVoxel()
+        {
+            return _firstFailureVoxel;
         }
         private void UpdateHostArraysFromDevice()
         {
             try
             {
-                // Copy damage array from GPU to CPU
-                _dDamage.CopyToCPU(_damage);
+                /* 1 ─── assicurati che tutti i kernel pendenti siano completati */
+                _accelerator.Synchronize();
 
-                // Convert 3D arrays to 1D arrays for the failure check
-                int index = 0;
+                /* 2 ─── copia i tre buffer 3-D dal device */
+                _dDamage.CopyToCPU(_damage);          // double[,,]  → damage vol.
+                _dLabels.CopyToCPU(_labels);          // byte  [,,]  → label  vol.
+                _dDensity.CopyToCPU(_density);        // float [,,]  → rho    vol.
+
+                /* 3 ─── flattens: 3-D ➜ 1-D  (x-major, poi y, poi z)          */
+                int idx = 0;
                 for (int z = 0; z < _depth; z++)
-                {
                     for (int y = 0; y < _height; y++)
-                    {
-                        for (int x = 0; x < _width; x++)
+                        for (int x = 0; x < _width; x++, idx++)
                         {
-                            if (index < _damageHost.Length)
-                            {
-                                _damageHost[index] = (float)_damage[x, y, z];
-                                _labelsHost[index] = _labels[x, y, z];
-                                _densityHost[index] = _density[x, y, z];
-                                index++;
-                            }
+                            _damageHost[idx] = (float)_damage[x, y, z]; // double→float
+                            _labelsHost[idx] = _labels[x, y, z];
+                            _densityHost[idx] = _density[x, y, z];
                         }
-                    }
-                }
 
-                Logger.Log($"[GPUTriaxialSimulator] Updated host arrays: max damage = {_damageHost.Max()}");
+                if (_debugMode)
+                    Logger.Log($"[GPUTriaxialSimulator] Host arrays updated; "
+                             + $"max D = {_damageHost.Max():F3} "
+                             + $"@ idx = {Array.IndexOf(_damageHost, _damageHost.Max())}");
             }
             catch (Exception ex)
             {
-                Logger.Log($"[GPUTriaxialSimulator] Error updating host arrays: {ex.Message}");
+                Logger.Log($"[GPUTriaxialSimulator] ERROR updating host arrays: {ex.Message}");
             }
         }
         /// <summary>
@@ -1014,10 +1120,7 @@ namespace CTS
         /// between the *first* and *last* material-bearing slices; stress is the
         /// mean normal stress on those same two faces.
         /// </summary>
-        /// <summary>
-        /// Copy displacement & stress fields back from the GPU, then compute
-        /// axial and two orthogonal radial strains and stresses, finally logging them.
-        /// </summary>
+      
         private void UpdateCurrentStrainAndStress(double targetPressureMPa)
         {
             /* ─── bring GPU fields back to the host ─────────────────────────── */
@@ -1175,12 +1278,44 @@ namespace CTS
                 throw new ArgumentException("Destination array has incorrect dimensions");
             }
 
+            // First, synchronize the accelerator to ensure all kernels have completed
+            _accelerator.Synchronize();
+
             // Copy damage data from device to host
             _dDamage.CopyToCPU(_damage);
 
-            // Copy from internal array to the provided destination array
-            Array.Copy(_damage, destinationArray, _damage.Length);
+            // Also copy labels to filter by material ID
+            _dLabels.CopyToCPU(_labels);
+
+            // Clear destination array first
+            Array.Clear(destinationArray, 0, destinationArray.Length);
+
+            // Copy from internal array to the provided destination array, filtering by material ID
+            int matVoxCount = 0;
+            int nonZeroDamageCount = 0;
+
+            for (int z = 0; z < _depth; z++)
+            {
+                for (int y = 0; y < _height; y++)
+                {
+                    for (int x = 0; x < _width; x++)
+                    {
+                        // ONLY copy damage for material voxels, zero everything else
+                        if (_labels[x, y, z] == _selectedMaterialID)
+                        {
+                            destinationArray[x, y, z] = _damage[x, y, z];
+                            matVoxCount++;
+                            if (_damage[x, y, z] > 0) nonZeroDamageCount++;
+                        }
+                    }
+                }
+            }
+
+            Logger.Log($"[GPUTriaxialSimulator] Copied damage data to CPU with material ID filter: {_selectedMaterialID}. " +
+                      $"Found {matVoxCount} material voxels, {nonZeroDamageCount} with non-zero damage.");
         }
+
+
         /// <summary>
         /// Find the point with maximum damage
         /// </summary>
@@ -1350,6 +1485,7 @@ namespace CTS
                 if (x >= sp.Width - 1 || y >= sp.Height - 1 || z >= sp.Depth - 1)
                     return;
 
+                // CRITICAL FIX: Make absolutely sure we're ONLY processing the selected material
                 if (a.Labels[x, y, z] != sp.MaterialID)
                     return;
 
@@ -1414,16 +1550,17 @@ namespace CTS
 
                     SxxN = dxx + mean; SyyN = dyy + mean; SzzN = dzz + mean;
 
-                    // ===== **new** shear-damage coupling
+                    // ===== **corrected** shear-damage coupling
                     if ((mp.UseModelFlags & 4) != 0)
                     {
-                        float dD = XMath.Min(fac * 0.02f, 0.005f);    // faster in debug mode
+                        // Scale by density ratio like in CPU version
+                        float dD = XMath.Min(fac * 0.02f / rhoFact, 0.005f);
                         if (sp.DebugMode != 0) dD *= 4f;
                         Dnew = XMath.Min(Dprev + dD, 0.99f);
                     }
                 }
 
-                // ───── tensile damage (unchanged) ───────────────────────────────────────
+                // ───── tensile damage (with CPU-matching algorithm) ────────────────────
                 if ((mp.UseModelFlags & 4) != 0)
                 {
                     float σmax = XMath.Max(SxxN, XMath.Max(SyyN, SzzN));   // +tension
@@ -1431,16 +1568,42 @@ namespace CTS
 
                     if (σmax > σT && Dnew < 0.99f)
                     {
-                        float over = (σmax - σT) / σT;
-                        float dD = (sp.DebugMode != 0) ? XMath.Min(over * 0.5f, 0.05f)
-                                                         : XMath.Min(over * 0.01f, 0.002f);
+                        // Match CPU formula: over = (sigMax - tensileVoxel) / (tensileVoxel + 1.0)
+                        float over = (σmax - σT) / (σT + 1.0f);
+
+                        float dD;
+                        if (sp.DebugMode != 0)
+                        {
+                            // Debug mode: faster damage like CPU version
+                            dD = XMath.Min(over * 0.5f / rhoFact, 0.05f);
+                        }
+                        else
+                        {
+                            // Normal mode: match CPU implementation
+                            dD = XMath.Min(over * 0.05f / rhoFact, 0.005f);
+
+                            // Add damage boost near threshold like CPU version
+                            if (Dnew > 0.65f && Dnew < 0.75f)
+                            {
+                                dD *= 1.5f;
+                            }
+                        }
 
                         Dnew = XMath.Min(Dnew + dD, 0.99f);
                     }
                 }
 
-                // ───── damage softening applied once, using *incremental* dD ────────────
-                float soften = (Dnew > Dprev) ? (1f - (Dnew - Dprev)) : 1f;
+                // ───── damage softening based on material density like CPU ──────────────
+                float soften;
+                if (Dnew > Dprev)
+                {
+                    // Match CPU version: soften = 1 - (dD * r0)
+                    soften = 1.0f - ((Dnew - Dprev) * rhoFact);
+                }
+                else
+                {
+                    soften = 1.0f;
+                }
 
                 SxxN *= soften; SyyN *= soften; SzzN *= soften;
                 SxyN *= soften; SxzN *= soften; SyzN *= soften;
@@ -1450,7 +1613,6 @@ namespace CTS
                 a.Sxy[x, y, z] = SxyN; a.Sxz[x, y, z] = SxzN; a.Syz[x, y, z] = SyzN;
                 a.Damage[x, y, z] = Dnew;
             }
-
             public static void UpdateVelocity(Index3D idx, VelocityArgs a)
             {
                 int x = idx.X, y = idx.Y, z = idx.Z;
@@ -1458,6 +1620,8 @@ namespace CTS
                 if (x <= 0 || x >= sp.Width - 1 ||
                     y <= 0 || y >= sp.Height - 1 ||
                     z <= 0 || z >= sp.Depth - 1) return;
+
+                // CRITICAL FIX: ONLY process for the selected material
                 if (a.Labels[x, y, z] != sp.MaterialID) return;
 
                 double dx = sp.PixelSize;
@@ -1493,9 +1657,7 @@ namespace CTS
             {
                 int x = idx.X, y = idx.Y, z = idx.Z;
 
-                /* Update **every** voxel that belongs to the specimen.
-                   We do NOT exclude the boundary slices: whether a cell may move is
-                   decided purely by its material label, not by its index position.   */
+                // CRITICAL FIX: ONLY update displacement for material voxels
                 if (a.Labels[x, y, z] != a.SimParams.MaterialID)
                     return;
 
@@ -1511,7 +1673,7 @@ namespace CTS
             {
                 int x = idx.X, y = idx.Y, z = idx.Z;
 
-                // Skip non-material voxels
+                // CRITICAL FIX: Skip non-material voxels
                 if (a.Labels[x, y, z] != a.MaterialID)
                     return;
 
@@ -1519,36 +1681,30 @@ namespace CTS
                 switch (a.StressAxis)
                 {
                     case 0: // X-axis
-                        if (x == a.MaxBoundary || x == a.MinBoundary)
+                        if (x == a.MinBoundary || x == a.MaxBoundary)
                         {
                             a.Sxx[x, y, z] = -a.AxialPressure;
-                        }
-                        else
-                        {
-                            a.Sxx[x, y, z] = -a.ConfiningPressure;
+                            a.Syy[x, y, z] = -a.ConfiningPressure;
+                            a.Szz[x, y, z] = -a.ConfiningPressure;
                         }
                         break;
 
                     case 1: // Y-axis
-                        if (y == a.MaxBoundary || y == a.MinBoundary)
+                        if (y == a.MinBoundary || y == a.MaxBoundary)
                         {
+                            a.Sxx[x, y, z] = -a.ConfiningPressure;
                             a.Syy[x, y, z] = -a.AxialPressure;
-                        }
-                        else
-                        {
-                            a.Syy[x, y, z] = -a.ConfiningPressure;
+                            a.Szz[x, y, z] = -a.ConfiningPressure;
                         }
                         break;
 
                     case 2: // Z-axis (default)
                     default:
-                        if (z == a.MaxBoundary || z == a.MinBoundary)
+                        if (z == a.MinBoundary || z == a.MaxBoundary)
                         {
+                            a.Sxx[x, y, z] = -a.ConfiningPressure;
+                            a.Syy[x, y, z] = -a.ConfiningPressure;
                             a.Szz[x, y, z] = -a.AxialPressure;
-                        }
-                        else
-                        {
-                            a.Szz[x, y, z] = -a.ConfiningPressure;
                         }
                         break;
                 }
@@ -1579,7 +1735,7 @@ namespace CTS
                 return new Point3D(maxX, maxY, maxZ);
             }
 
-            
+
             public static void InitializeFields(Index3D idx, InitializeArgs a)
             {
                 int x = idx.X, y = idx.Y, z = idx.Z;
@@ -1591,8 +1747,9 @@ namespace CTS
                 a.DispX[x, y, z] = 0.0;
                 a.DispY[x, y, z] = 0.0;
                 a.DispZ[x, y, z] = 0.0;
+                a.Damage[x, y, z] = 0.0; // Always zero out initial damage
 
-                // Initialize stresses for material voxels
+                // CRITICAL FIX: Initialize stresses ONLY for the selected material
                 if (a.Labels[x, y, z] == a.SimParams.MaterialID)
                 {
                     double confP = a.MatParams.ConfiningPressure;
@@ -1602,17 +1759,16 @@ namespace CTS
                     a.Sxy[x, y, z] = 0.0;
                     a.Sxz[x, y, z] = 0.0;
                     a.Syz[x, y, z] = 0.0;
-                    a.Damage[x, y, z] = 0.0;
                 }
                 else
                 {
+                    // Zero out all stress for non-material voxels
                     a.Sxx[x, y, z] = 0.0;
                     a.Syy[x, y, z] = 0.0;
                     a.Szz[x, y, z] = 0.0;
                     a.Sxy[x, y, z] = 0.0;
                     a.Sxz[x, y, z] = 0.0;
                     a.Syz[x, y, z] = 0.0;
-                    a.Damage[x, y, z] = 0.0;
                 }
             }
         }

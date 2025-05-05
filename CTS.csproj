@@ -119,6 +119,7 @@
     </Compile>
     <Compile Include="Misc\FastBitmap.cs" />
     <Compile Include="Misc\MaterialDensityLibrary.cs" />
+    <Compile Include="Misc\MaterialSubVolume.cs" />
     <Compile Include="Misc\Matrix3DProjection.cs" />
     <Compile Include="Misc\MeshGenerator.cs" />
     <Compile Include="Misc\MiscUtils.cs" />
@@ -173,20 +174,9 @@
     </Compile>
     <Compile Include="Modules\StressAnalysis\StressAnalysisFormExtension.cs" />
     <Compile Include="Modules\StressAnalysis\TriaxialSimulation.cs" />
-    <Compile Include="Modules\Triaxial_Simulation\FailurePointVisualizer.cs" />
-    <Compile Include="Modules\Triaxial_Simulation\FaultingPlaneVisualizer.cs" />
-    <Compile Include="Modules\Triaxial_Simulation\MohrCircle.cs" />
-    <Compile Include="Modules\Triaxial_Simulation\MohrCoulombVisualization.cs" />
-    <Compile Include="Modules\Triaxial_Simulation\TriaxialResultExtension.cs" />
     <Compile Include="Modules\Triaxial_Simulation\TriaxialSimulationForm.cs">
       <SubType>Form</SubType>
     </Compile>
-    <Compile Include="Modules\Triaxial_Simulation\TriaxialSimulator.cs" />
-    <Compile Include="Modules\Triaxial_Simulation\TriaxialSimulatorExtension.cs" />
-    <Compile Include="Modules\Triaxial_Simulation\TriaxialSimulatorGPU.cs" />
-    <Compile Include="Modules\Triaxial_Simulation\TriaxialVisualizationAdapter.cs" />
-    <Compile Include="Modules\Triaxial_Simulation\TriaxialVisualizationExtension.cs" />
-    <Compile Include="Modules\Triaxial_Simulation\VolumeVisualizationAdapter.cs" />
     <Compile Include="UI\CancellableProgressForm.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -378,6 +368,8 @@
     <PackageReference Include="Microsoft.ML.OnnxTransformer">
       <Version>4.0.2</Version>
     </PackageReference>
+    <PackageReference Include="OpenTK" Version="3.3.3" />
+    <PackageReference Include="OpenTK.GLControl" Version="3.3.3" />
     <PackageReference Include="SharpDX">
       <Version>4.2.0</Version>
     </PackageReference>

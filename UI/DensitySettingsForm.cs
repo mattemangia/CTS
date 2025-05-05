@@ -448,7 +448,7 @@ namespace CTS
                 {
                     Region = $"Region {calibrationPoints.Count + 1}",
                     Material = material.Name,
-                    Density = material.Density,
+                    Density = (float)material.Density,
                     AvgGrayValue = 128 // Default value
                 };
 
@@ -491,7 +491,7 @@ namespace CTS
                                 {
                                     Region = $"Region {calibrationPoints.Count + 1} [{region.X},{region.Y},{region.Width},{region.Height}]",
                                     Material = material.Name,
-                                    Density = material.Density,
+                                    Density = (float)material.Density,
                                     AvgGrayValue = avgGrayValue
                                 };
 

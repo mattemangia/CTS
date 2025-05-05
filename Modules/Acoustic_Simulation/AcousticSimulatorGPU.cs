@@ -97,7 +97,7 @@ namespace CTS
         private CancellationTokenSource cts = new CancellationTokenSource();
         #endregion
 
-        
+
 
         #region Events (same as CPU version)
         public event EventHandler<AcousticSimulationProgressEventArgs> ProgressUpdated;

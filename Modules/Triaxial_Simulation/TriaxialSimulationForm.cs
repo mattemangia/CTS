@@ -21,6 +21,7 @@ using System.Collections.Concurrent;
 using Rectangle = System.Drawing.Rectangle;
 using System.IO;
 using static CTS.MeshGenerator;
+using Task = System.Threading.Tasks.Task;
 
 
 namespace CTS
@@ -49,6 +50,15 @@ namespace CTS
         private float maxDensity = float.MinValue;
         private bool glControlInitialized = false;
         private Panel colorLegendPanel;
+        private DirectTriaxialCompute computeEngine;
+        private bool useDirectCompute = true;
+        private bool showFailedElements = true; // Default to showing failed elements
+        private KryptonCheckBox chkShowFailedElements;
+        private KryptonButton btnContinueSimulation;
+        private float volumetricStrain = 0.0f;
+        private float elasticEnergy = 0.0f;
+        private float plasticEnergy = 0.0f;
+        private bool failureState = false;
 
         // Density calibration data
         private List<CalibrationPoint> calibrationPoints = new List<CalibrationPoint>();
@@ -75,6 +85,11 @@ namespace CTS
         private List<System.Drawing.Point> stressStrainCurve = new List<Point>();
         private List<Vector3> deformedVertices = new List<Vector3>();
         private System.Windows.Forms.Timer simulationTimer;
+        private bool vboInitialized = false;
+        private int vertexVBO = 0;
+        private int normalVBO = 0;
+        private int indexVBO = 0;
+
 
         // Petrophysical parameters
         private float cohesion = 50.0f; // MPa
@@ -138,15 +153,274 @@ namespace CTS
         private int indexBufferId = 0;
         private bool buffersInitialized = false;
         private System.Windows.Forms.Timer rotationTimer;
-        private bool hardwareAccelerated = false;
+        private bool hardwareAccelerated = true;
         private TriaxialDiagramsForm diagramsForm;
         private int fontTextureId = 0;
         private bool fontTextureInitialized = false;
         private Bitmap fontTexture = null;
         private readonly Dictionary<char, Rectangle> characterRects = new Dictionary<char, Rectangle>();
+        private KryptonCheckBox chkUseDirectCompute;
+        private bool enableTransparency = false;
+        private KryptonCheckBox chkEnableTransparency;
+        private float transparencyLevel = 0.7f; // 0.0 = fully transparent, 1.0 = fully opaque
 
         // Implement IMaterialDensityProvider interface
         public Material SelectedMaterial => selectedMaterial;
+        private void InitializeDirectCompute()
+        {
+            try
+            {
+                // Create the DirectCompute engine
+                if (computeEngine != null)
+                {
+                    // Properly dispose existing instance before creating a new one
+                    computeEngine.ProgressUpdated -= ComputeEngine_ProgressUpdated;
+                    computeEngine.SimulationCompleted -= ComputeEngine_SimulationCompleted;
+                    computeEngine.Dispose();
+                }
+
+                computeEngine = new DirectTriaxialCompute();
+
+                // Hook up events with explicit delegate references to prevent memory leaks
+                computeEngine.ProgressUpdated += new EventHandler<DirectComputeProgressEventArgs>(ComputeEngine_ProgressUpdated);
+                computeEngine.SimulationCompleted += new EventHandler<DirectComputeCompletedEventArgs>(ComputeEngine_SimulationCompleted);
+
+                // Enable direct compute by default if available
+                useDirectCompute = true;
+
+                // Update UI to reflect hardware acceleration status
+                if (chkUseDirectCompute != null && !chkUseDirectCompute.IsDisposed)
+                {
+                    chkUseDirectCompute.Checked = useDirectCompute;
+                }
+
+                // Log success
+                Logger.Log("[TriaxialSimulationForm] Direct compute engine initialized successfully");
+            }
+            catch (Exception ex)
+            {
+                useDirectCompute = false;
+
+                // Update UI to reflect hardware acceleration status
+                if (chkUseDirectCompute != null && !chkUseDirectCompute.IsDisposed)
+                {
+                    chkUseDirectCompute.Checked = false;
+                }
+
+                Logger.Log($"[TriaxialSimulationForm] Error initializing direct compute: {ex.Message}");
+                Logger.Log("[TriaxialSimulationForm] Will use standard computation method");
+
+                if (ex.InnerException != null)
+                {
+                    Logger.Log($"[TriaxialSimulationForm] Inner exception: {ex.InnerException.Message}");
+                }
+            }
+        }
+        private void AddVisualizationControls(Panel controlsContent)
+        {
+            // Visualization Settings Label
+            Label lblVisualizationSettings = new Label
+            {
+                Text = "Visualization Settings",
+                ForeColor = Color.White,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                AutoSize = true,
+                Location = new Point(10, 700)
+            };
+            controlsContent.Controls.Add(lblVisualizationSettings);
+
+            // Wireframe mode
+            chkWireframe = new KryptonCheckBox
+            {
+                Text = "Wireframe Mode",
+                Location = new Point(140, 730),
+                Checked = true,
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            };
+            chkWireframe.CheckedChanged += ChkWireframe_CheckedChanged;
+            controlsContent.Controls.Add(chkWireframe);
+
+            // Show density checkbox
+            chkShowDensity = new KryptonCheckBox
+            {
+                Text = "Show Density Map",
+                Location = new Point(10, 760),
+                Checked = true,
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            };
+            chkShowDensity.CheckedChanged += ChkShowDensity_CheckedChanged;
+            controlsContent.Controls.Add(chkShowDensity);
+
+            // Failed elements visualization
+            chkShowFailedElements = new KryptonCheckBox
+            {
+                Text = "Highlight Failed Elements",
+                Location = new Point(10, 790),
+                Checked = true,
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            };
+            chkShowFailedElements.CheckedChanged += (s, e) => {
+                showFailedElements = chkShowFailedElements.Checked;
+                glControl.Invalidate();
+            };
+            controlsContent.Controls.Add(chkShowFailedElements);
+
+            // Transparency controls
+            chkEnableTransparency = new KryptonCheckBox
+            {
+                Text = "Enable Transparency",
+                Location = new Point(10, 820),
+                Checked = false,
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            };
+            chkEnableTransparency.CheckedChanged += (s, e) => {
+                enableTransparency = chkEnableTransparency.Checked;
+                glControl.Invalidate();
+            };
+            controlsContent.Controls.Add(chkEnableTransparency);
+
+            // Transparency level slider
+            Label lblTransparency = new Label
+            {
+                Text = "Transparency Level:",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, 850)
+            };
+            controlsContent.Controls.Add(lblTransparency);
+
+            KryptonTrackBar trackTransparency = new KryptonTrackBar
+            {
+                Location = new Point(140, 850),
+                Width = 180,
+                Minimum = 0,
+                Maximum = 100,
+                Value = 70, // Default to 70% opacity (30% transparency)
+                TickFrequency = 10,
+                StateCommon = {
+            Track = { Color1 = Color.FromArgb(80, 80, 80) },
+            Tick = { Color1 = Color.Silver }
+        },
+                Enabled = enableTransparency
+            };
+            trackTransparency.ValueChanged += (s, e) => {
+                transparencyLevel = trackTransparency.Value / 100.0f;
+                glControl.Invalidate();
+            };
+            controlsContent.Controls.Add(trackTransparency);
+
+            // Fast simulation mode checkbox
+            chkFastSimulation = new KryptonCheckBox
+            {
+                Text = "Fast Simulation Mode (Render only final result)",
+                Location = new Point(10, 880),
+                Checked = false,
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            };
+            chkFastSimulation.CheckedChanged += (s, e) => {
+                fastSimulationMode = chkFastSimulation.Checked;
+            };
+            controlsContent.Controls.Add(chkFastSimulation);
+
+            // Hardware acceleration checkbox
+            chkUseDirectCompute = new KryptonCheckBox
+            {
+                Text = "Use Hardware Acceleration",
+                Location = new Point(10, 910),
+                Checked = true,
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            };
+            chkUseDirectCompute.CheckedChanged += (s, e) => {
+                useDirectCompute = chkUseDirectCompute.Checked;
+            };
+            controlsContent.Controls.Add(chkUseDirectCompute);
+        }
+        private void AddTransparencyControls()
+        {
+            // Add checkbox for transparency
+            chkEnableTransparency = new KryptonCheckBox
+            {
+                Text = "Enable Transparency",
+                Location = new Point(140, 780), // Adjust position as needed
+                Checked = false,
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            };
+            chkEnableTransparency.CheckedChanged += (s, e) => {
+                enableTransparency = chkEnableTransparency.Checked;
+                glControl.Invalidate();
+            };
+
+            // Add to the same panel as other controls
+            foreach (Control control in this.Controls)
+            {
+                if (control is TableLayoutPanel mainLayout)
+                {
+                    foreach (Control panelControl in mainLayout.Controls)
+                    {
+                        if (panelControl is Panel panel)
+                        {
+                            foreach (Control c in panel.Controls)
+                            {
+                                if (c is Panel scrollablePanel && scrollablePanel.AutoScroll)
+                                {
+                                    foreach (Control sc in scrollablePanel.Controls)
+                                    {
+                                        if (sc is Panel content && content.Height > 800)
+                                        {
+                                            content.Controls.Add(chkEnableTransparency);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        private void AddFailedElementsVisualization()
+        {
+            // Add checkbox for failed elements visualization
+            chkShowFailedElements = new KryptonCheckBox
+            {
+                Text = "Highlight Failed Elements",
+                Location = new Point(140, 750), // Adjust position as needed
+                Checked = true,
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            };
+            chkShowFailedElements.CheckedChanged += (s, e) => {
+                showFailedElements = chkShowFailedElements.Checked;
+                glControl.Invalidate();
+            };
+
+            // Find the controls content panel to add the checkbox
+            foreach (Control control in this.Controls)
+            {
+                if (control is TableLayoutPanel mainLayout)
+                {
+                    foreach (Control panelControl in mainLayout.Controls)
+                    {
+                        if (panelControl is Panel panel)
+                        {
+                            foreach (Control c in panel.Controls)
+                            {
+                                if (c is Panel scrollablePanel && scrollablePanel.AutoScroll)
+                                {
+                                    foreach (Control sc in scrollablePanel.Controls)
+                                    {
+                                        if (sc is Panel content && content.Height > 800)
+                                        {
+                                            content.Controls.Add(chkShowFailedElements);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         private void InitializeDiagramsForm()
         {
             diagramsForm = new TriaxialDiagramsForm();
@@ -222,6 +496,447 @@ namespace CTS
                 controlPanel.Controls.Add(btnShowDiagrams);
             }
         }
+        private void InitializeVBOs()
+        {
+            if (vboInitialized || deformedVertices.Count == 0)
+                return;
+
+            // Generate buffer IDs
+            GL.GenBuffers(1, out vertexVBO);
+            GL.GenBuffers(1, out normalVBO);
+            GL.GenBuffers(1, out indexVBO);
+
+            // Upload vertex data
+            float[] vertexData = new float[deformedVertices.Count * 3];
+            for (int i = 0; i < deformedVertices.Count; i++)
+            {
+                vertexData[i * 3] = deformedVertices[i].X;
+                vertexData[i * 3 + 1] = deformedVertices[i].Y;
+                vertexData[i * 3 + 2] = deformedVertices[i].Z;
+            }
+
+            GL.BindBuffer(BufferTarget.ArrayBuffer, vertexVBO);
+            GL.BufferData(BufferTarget.ArrayBuffer,
+                         (IntPtr)(vertexData.Length * sizeof(float)),
+                         vertexData, BufferUsageHint.StaticDraw);
+
+            // Upload normal data
+            float[] normalData = new float[normals.Count * 3];
+            for (int i = 0; i < normals.Count; i++)
+            {
+                normalData[i * 3] = normals[i].X;
+                normalData[i * 3 + 1] = normals[i].Y;
+                normalData[i * 3 + 2] = normals[i].Z;
+            }
+
+            GL.BindBuffer(BufferTarget.ArrayBuffer, normalVBO);
+            GL.BufferData(BufferTarget.ArrayBuffer,
+                         (IntPtr)(normalData.Length * sizeof(float)),
+                         normalData, BufferUsageHint.StaticDraw);
+
+            // Upload indices
+            GL.BindBuffer(BufferTarget.ElementArrayBuffer, indexVBO);
+            GL.BufferData(BufferTarget.ElementArrayBuffer,
+                         (IntPtr)(indices.Count * sizeof(int)),
+                         indices.ToArray(), BufferUsageHint.StaticDraw);
+
+            // Unbind buffers
+            GL.BindBuffer(BufferTarget.ArrayBuffer, 0);
+            GL.BindBuffer(BufferTarget.ElementArrayBuffer, 0);
+
+            vboInitialized = true;
+        }
+        private void ReleaseVBOs()
+        {
+            if (!vboInitialized)
+                return;
+
+            GL.DeleteBuffers(1, ref vertexVBO);
+            GL.DeleteBuffers(1, ref normalVBO);
+            GL.DeleteBuffers(1, ref indexVBO);
+
+            vboInitialized = false;
+        }
+        private int highDetailList = 0;
+        private int lowDetailList = 0;
+
+        private void BuildDisplayLists()
+        {
+            // Delete old lists if they exist
+            if (highDetailList != 0)
+            {
+                GL.DeleteLists(highDetailList, 1);
+                GL.DeleteLists(lowDetailList, 1);
+            }
+
+            // Create high detail display list
+            highDetailList = GL.GenLists(1);
+            GL.NewList(highDetailList, ListMode.Compile);
+            RenderFullMesh(false);
+            GL.EndList();
+
+            // Create low detail display list (for rotation)
+            lowDetailList = GL.GenLists(1);
+            GL.NewList(lowDetailList, ListMode.Compile);
+            RenderLowDetailMesh();
+            GL.EndList();
+        }
+        private void RenderFullMesh(bool useVBO)
+        {
+            bool showDensity = chkShowDensity.Checked;
+
+            // Apply transparency if enabled
+            if (enableTransparency)
+            {
+                GL.Enable(EnableCap.Blend);
+                GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+            }
+            else
+            {
+                GL.Disable(EnableCap.Blend);
+            }
+
+            if (useVBO && vboInitialized)
+            {
+                // Render using VBOs
+                GL.EnableClientState(ArrayCap.VertexArray);
+                GL.EnableClientState(ArrayCap.NormalArray);
+
+                GL.BindBuffer(BufferTarget.ArrayBuffer, vertexVBO);
+                GL.VertexPointer(3, VertexPointerType.Float, 0, IntPtr.Zero);
+
+                GL.BindBuffer(BufferTarget.ArrayBuffer, normalVBO);
+                GL.NormalPointer(NormalPointerType.Float, 0, IntPtr.Zero);
+
+                GL.BindBuffer(BufferTarget.ElementArrayBuffer, indexVBO);
+
+                // If highlighting failed elements, render in two passes
+                if (showFailedElements && elementStresses.Count > 0)
+                {
+                    // First pass: render all elements
+                    for (int i = 0; i < indices.Count; i += 3)
+                    {
+                        int elementIndex = i / 3;
+                        bool isFailed = elementStresses.TryGetValue(elementIndex, out float stress) && stress < 0;
+
+                        if (!isFailed)
+                        {
+                            // Regular elements - set color based on density or default white
+                            if (showDensity)
+                            {
+                                int vertexIndex = indices[i];
+                                if (vertexIndex < densityValues.Count)
+                                {
+                                    float density = densityValues[vertexIndex];
+                                    float normalizedDensity = (density - minDensity) / (maxDensity - minDensity);
+                                    normalizedDensity = Math.Max(0.0f, Math.Min(1.0f, normalizedDensity));
+                                    float[] color = GetColorComponents(normalizedDensity);
+
+                                    if (enableTransparency)
+                                        GL.Color4(color[0], color[1], color[2], transparencyLevel);
+                                    else
+                                        GL.Color3(color[0], color[1], color[2]);
+                                }
+                                else
+                                {
+                                    if (enableTransparency)
+                                        GL.Color4(1.0f, 1.0f, 1.0f, transparencyLevel);
+                                    else
+                                        GL.Color3(1.0f, 1.0f, 1.0f);
+                                }
+                            }
+                            else
+                            {
+                                if (enableTransparency)
+                                    GL.Color4(1.0f, 1.0f, 1.0f, transparencyLevel);
+                                else
+                                    GL.Color3(1.0f, 1.0f, 1.0f);
+                            }
+
+                            // Draw this triangle
+                            GL.DrawElements(PrimitiveType.Triangles, 3, DrawElementsType.UnsignedInt, new IntPtr(i * sizeof(int)));
+                        }
+                    }
+
+                    // Second pass: render failed elements with highlight color
+                    for (int i = 0; i < indices.Count; i += 3)
+                    {
+                        int elementIndex = i / 3;
+                        bool isFailed = elementStresses.TryGetValue(elementIndex, out float stress) && stress < 0;
+
+                        if (isFailed)
+                        {
+                            // Failed elements - use red with higher opacity
+                            if (enableTransparency)
+                                GL.Color4(1.0f, 0.0f, 0.0f, Math.Min(1.0f, transparencyLevel + 0.3f));
+                            else
+                                GL.Color3(1.0f, 0.0f, 0.0f);
+
+                            // Draw this triangle
+                            GL.DrawElements(PrimitiveType.Triangles, 3, DrawElementsType.UnsignedInt, new IntPtr(i * sizeof(int)));
+                        }
+                    }
+                }
+                else
+                {
+                    // Regular rendering (no failed elements highlight)
+                    if (showDensity)
+                    {
+                        // Render triangles one by one with appropriate colors
+                        for (int i = 0; i < indices.Count; i += 3)
+                        {
+                            int vertexIndex = indices[i];
+                            if (vertexIndex < densityValues.Count)
+                            {
+                                float density = densityValues[vertexIndex];
+                                float normalizedDensity = (density - minDensity) / (maxDensity - minDensity);
+                                normalizedDensity = Math.Max(0.0f, Math.Min(1.0f, normalizedDensity));
+                                float[] color = GetColorComponents(normalizedDensity);
+
+                                if (enableTransparency)
+                                    GL.Color4(color[0], color[1], color[2], transparencyLevel);
+                                else
+                                    GL.Color3(color[0], color[1], color[2]);
+                            }
+                            else
+                            {
+                                if (enableTransparency)
+                                    GL.Color4(1.0f, 1.0f, 1.0f, transparencyLevel);
+                                else
+                                    GL.Color3(1.0f, 1.0f, 1.0f);
+                            }
+
+                            // Draw this triangle
+                            GL.DrawElements(PrimitiveType.Triangles, 3, DrawElementsType.UnsignedInt, new IntPtr(i * sizeof(int)));
+                        }
+                    }
+                    else
+                    {
+                        // Solid color
+                        if (enableTransparency)
+                            GL.Color4(1.0f, 1.0f, 1.0f, transparencyLevel);
+                        else
+                            GL.Color3(1.0f, 1.0f, 1.0f);
+
+                        // Draw all triangles at once
+                        GL.DrawElements(PrimitiveType.Triangles, indices.Count, DrawElementsType.UnsignedInt, IntPtr.Zero);
+                    }
+                }
+
+                GL.BindBuffer(BufferTarget.ArrayBuffer, 0);
+                GL.BindBuffer(BufferTarget.ElementArrayBuffer, 0);
+                GL.DisableClientState(ArrayCap.VertexArray);
+                GL.DisableClientState(ArrayCap.NormalArray);
+            }
+            else
+            {
+                // Render using immediate mode as fallback
+                GL.Begin(PrimitiveType.Triangles);
+
+                for (int i = 0; i < indices.Count; i += 3)
+                {
+                    int i1 = indices[i];
+                    int i2 = indices[i + 1];
+                    int i3 = indices[i + 2];
+
+                    if (i1 < deformedVertices.Count && i2 < deformedVertices.Count && i3 < deformedVertices.Count)
+                    {
+                        // Check if this triangle belongs to a failed element
+                        int elementIndex = i / 3;
+                        bool isFailed = showFailedElements &&
+                                        elementStresses.TryGetValue(elementIndex, out float stress) &&
+                                        stress < 0;
+
+                        if (showDensity && !isFailed && i1 < densityValues.Count)
+                        {
+                            float density = densityValues[i1];
+                            float normalizedDensity = (density - minDensity) / (maxDensity - minDensity);
+                            normalizedDensity = Math.Max(0.0f, Math.Min(1.0f, normalizedDensity));
+                            float[] color = GetColorComponents(normalizedDensity);
+
+                            if (enableTransparency)
+                                GL.Color4(color[0], color[1], color[2], transparencyLevel);
+                            else
+                                GL.Color3(color[0], color[1], color[2]);
+                        }
+                        else if (isFailed)
+                        {
+                            // Failed element - red color
+                            if (enableTransparency)
+                                GL.Color4(1.0f, 0.0f, 0.0f, Math.Min(1.0f, transparencyLevel + 0.3f));
+                            else
+                                GL.Color3(1.0f, 0.0f, 0.0f);
+                        }
+                        else
+                        {
+                            // Default white
+                            if (enableTransparency)
+                                GL.Color4(1.0f, 1.0f, 1.0f, transparencyLevel);
+                            else
+                                GL.Color3(1.0f, 1.0f, 1.0f);
+                        }
+
+                        if (i1 < normals.Count) GL.Normal3(normals[i1]);
+                        GL.Vertex3(deformedVertices[i1]);
+
+                        if (i2 < normals.Count) GL.Normal3(normals[i2]);
+                        GL.Vertex3(deformedVertices[i2]);
+
+                        if (i3 < normals.Count) GL.Normal3(normals[i3]);
+                        GL.Vertex3(deformedVertices[i3]);
+                    }
+                }
+
+                GL.End();
+            }
+
+            // Disable blending after rendering if we enabled it
+            if (enableTransparency)
+            {
+                GL.Disable(EnableCap.Blend);
+            }
+        }
+        private void RenderMeshWithDepthSorting()
+        {
+            // Create a list of triangles with distance to camera
+            List<TriangleDepth> triangles = new List<TriangleDepth>();
+
+            // Calculate camera position (inverse of the view matrix)
+            float[] viewMatrix = new float[16];
+            GL.GetFloat(GetPName.ModelviewMatrix, viewMatrix);
+
+            // Camera position in world space
+            Vector3 cameraPos = new Vector3(-viewMatrix[12], -viewMatrix[13], -viewMatrix[14]);
+
+            // Process all triangles
+            for (int i = 0; i < indices.Count; i += 3)
+            {
+                int i1 = indices[i];
+                int i2 = indices[i + 1];
+                int i3 = indices[i + 2];
+
+                if (i1 >= deformedVertices.Count || i2 >= deformedVertices.Count || i3 >= deformedVertices.Count)
+                    continue;
+
+                // Calculate triangle centroid for depth sorting
+                Vector3 centroid = (deformedVertices[i1] + deformedVertices[i2] + deformedVertices[i3]) / 3.0f;
+
+                // Calculate distance to camera
+                float distance = (centroid - cameraPos).LengthSquared;
+
+                // Store triangle with distance
+                triangles.Add(new TriangleDepth
+                {
+                    Index1 = i1,
+                    Index2 = i2,
+                    Index3 = i3,
+                    Distance = distance,
+                    ElementIndex = i / 3
+                });
+            }
+
+            // Sort triangles back-to-front for correct transparency
+            triangles.Sort((a, b) => b.Distance.CompareTo(a.Distance));
+
+            // Render sorted triangles
+            GL.Begin(PrimitiveType.Triangles);
+
+            foreach (var triangle in triangles)
+            {
+                int i1 = triangle.Index1;
+                int i2 = triangle.Index2;
+                int i3 = triangle.Index3;
+
+                // Check if this triangle belongs to a failed element
+                bool isFailed = showFailedElements &&
+                                elementStresses.TryGetValue(triangle.ElementIndex, out float stress) &&
+                                stress < 0;
+
+                if (chkShowDensity.Checked && !isFailed && i1 < densityValues.Count)
+                {
+                    float density = densityValues[i1];
+                    float normalizedDensity = (density - minDensity) / (maxDensity - minDensity);
+                    normalizedDensity = Math.Max(0.0f, Math.Min(1.0f, normalizedDensity));
+                    float[] color = GetColorComponents(normalizedDensity);
+
+                    GL.Color4(color[0], color[1], color[2], transparencyLevel);
+                }
+                else if (isFailed)
+                {
+                    // Failed element - red color with higher opacity
+                    GL.Color4(1.0f, 0.0f, 0.0f, Math.Min(1.0f, transparencyLevel + 0.3f));
+                }
+                else
+                {
+                    // Default white
+                    GL.Color4(1.0f, 1.0f, 1.0f, transparencyLevel);
+                }
+
+                // Render triangle
+                if (i1 < normals.Count) GL.Normal3(normals[i1]);
+                GL.Vertex3(deformedVertices[i1]);
+
+                if (i2 < normals.Count) GL.Normal3(normals[i2]);
+                GL.Vertex3(deformedVertices[i2]);
+
+                if (i3 < normals.Count) GL.Normal3(normals[i3]);
+                GL.Vertex3(deformedVertices[i3]);
+            }
+
+            GL.End();
+        }
+        private struct TriangleDepth
+        {
+            public int Index1;
+            public int Index2;
+            public int Index3;
+            public float Distance;
+            public int ElementIndex;
+        }
+        private void RenderLowDetailMesh()
+        {
+            // Calculate adaptive stride based on mesh size
+            int stride = GetAdaptiveStride();
+
+            GL.Color3(1.0f, 1.0f, 1.0f); // Simple white in low detail mode
+            GL.Begin(PrimitiveType.Triangles);
+
+            for (int i = 0; i < indices.Count; i += 3 * stride)
+            {
+                if (i + 2 >= indices.Count) break;
+
+                int i1 = indices[i];
+                int i2 = indices[i + 1];
+                int i3 = indices[i + 2];
+
+                if (i1 < deformedVertices.Count && i2 < deformedVertices.Count && i3 < deformedVertices.Count)
+                {
+                    if (i1 < normals.Count) GL.Normal3(normals[i1]);
+                    GL.Vertex3(deformedVertices[i1]);
+
+                    if (i2 < normals.Count) GL.Normal3(normals[i2]);
+                    GL.Vertex3(deformedVertices[i2]);
+
+                    if (i3 < normals.Count) GL.Normal3(normals[i3]);
+                    GL.Vertex3(deformedVertices[i3]);
+                }
+            }
+
+            GL.End();
+        }
+
+        private int GetAdaptiveStride()
+        {
+            // Calculate appropriate stride based on model complexity
+            int triangleCount = indices.Count / 3;
+
+            if (triangleCount > 10000000) return 200;      // 10M+ triangles: extremely aggressive reduction
+            else if (triangleCount > 5000000) return 100;  // 5-10M triangles: very aggressive reduction
+            else if (triangleCount > 1000000) return 50;   // 1-5M triangles: aggressive reduction
+            else if (triangleCount > 500000) return 25;    // 500K-1M triangles: moderate reduction
+            else if (triangleCount > 100000) return 10;    // 100-500K triangles: light reduction
+            else return 5;                                 // <100K triangles: minimal reduction
+        }
         private void AddColorLegendPanel()
         {
             // Create a panel for the color legend
@@ -274,83 +989,232 @@ namespace CTS
             glControl.MouseUp += GlControl_MouseUp;
             glControl.MouseWheel += GlControl_MouseWheel;
         }
-        private void SetupRotationTimer()
-        {
-            rotationTimer = new System.Windows.Forms.Timer();
-            rotationTimer.Interval = 16; // ~60 FPS
-            rotationTimer.Tick += (s, e) => glControl.Invalidate();
-        }
+        
         public double CalculateTotalVolume()
         {
-            return materialVolume;
-        }
-
-        public void SetMaterialDensity(double density)
-        {
-            // Store the original density value
-            bulkDensity = (float)density;
-            isDensityCalibrated = false;
-
-            // Update material properties based on density
-            UpdateMaterialPropertiesFromDensity();
-
-            // Ensure the bulk density control is updated within its range
             try
             {
-                decimal clampedValue = Math.Min((decimal)bulkDensity, numBulkDensity.Maximum);
-                clampedValue = Math.Max(clampedValue, numBulkDensity.Minimum);
-                numBulkDensity.Value = clampedValue;
+                // Calculate material volume if needed
+                if (materialVolume <= 0)
+                {
+                    CalculateMaterialVolume();
+                }
+
+                // Double-check we have a valid volume
+                if (materialVolume <= 0)
+                {
+                    // Use a safe default value
+                    materialVolume = 0.0001; // 100 cm³
+                    Logger.Log("[TriaxialSimulationForm] Warning: Using default volume");
+                }
+
+                return materialVolume;
             }
             catch (Exception ex)
             {
-                // Log the error but don't disrupt the UI
-                Logger.Log($"[TriaxialSimulationForm] Error in SetMaterialDensity: {ex.Message}");
+                Logger.Log($"[TriaxialSimulationForm] Error in CalculateTotalVolume: {ex.Message}");
+                return 0.0001; // Return a non-zero default
+            }
+        }
+        public void SetMaterialDensity(double density)
+        {
+            try
+            {
+                Logger.Log($"[TriaxialSimulationForm] SetMaterialDensity called with value: {density} kg/m³");
 
-                // Set a safe default value
-                bulkDensity = 2500.0f;
-                try
+                // Store the original bulk density value
+                float originalBulkDensity = bulkDensity;
+                bulkDensity = (float)density;
+
+                // We're now calibrated to show actual density values
+                isDensityCalibrated = true;
+
+                // IMPORTANT: Preserve the relative density variations
+                if (densityValues != null && densityValues.Count > 0)
                 {
-                    numBulkDensity.Value = (decimal)bulkDensity;
+                    // Save original min/max before scaling
+                    float origMin = minDensity;
+                    float origMax = maxDensity;
+                    float origRange = origMax - origMin;
+
+                    // If the original range is too small, we need to create variation
+                    if (origRange < 0.01f)
+                    {
+                        // Use default variation of 30% around the mean
+                        origMin = 0.85f;
+                        origMax = 1.15f;
+                        origRange = 0.3f;
+                    }
+
+                    // Calculate target density range (±25% of the bulk density)
+                    float targetMin = (float)(density * 0.75);
+                    float targetMax = (float)(density * 1.25);
+                    float targetRange = targetMax - targetMin;
+
+                    // Apply scaling to maintain relative density differences
+                    for (int i = 0; i < densityValues.Count; i++)
+                    {
+                        // Convert from old range to 0-1 normalized value
+                        float normalizedValue = (densityValues[i] - origMin) / origRange;
+                        // Clamp to 0-1 range to handle outliers
+                        normalizedValue = Math.Max(0.0f, Math.Min(1.0f, normalizedValue));
+
+                        // Map to new target range
+                        densityValues[i] = targetMin + (normalizedValue * targetRange);
+                    }
+
+                    // Recalculate min/max after transformation
+                    minDensity = float.MaxValue;
+                    maxDensity = float.MinValue;
+
+                    foreach (float d in densityValues)
+                    {
+                        minDensity = Math.Min(minDensity, d);
+                        maxDensity = Math.Max(maxDensity, d);
+                    }
+
+                    Logger.Log($"[TriaxialSimulationForm] Updated density range: {minDensity} - {maxDensity} kg/m³");
                 }
-                catch
+                else
                 {
-                    // Last resort if UI update still fails
+                    // If no density values are available, use reasonable defaults
+                    minDensity = (float)(density * 0.75);
+                    maxDensity = (float)(density * 1.25);
+                }
+
+                // Rest of the method remains unchanged
+                UpdateMaterialPropertiesNoUI();
+
+                // Update UI controls
+                SafeUpdateControl(numBulkDensity, (decimal)bulkDensity);
+                SafeUpdateControl(numYoungModulus, (decimal)youngModulus);
+                SafeUpdateControl(numPorosity, (decimal)porosity);
+                SafeUpdateControl(numBulkModulus, (decimal)bulkModulus);
+                SafeUpdateControl(numYieldStrength, (decimal)yieldStrength);
+                SafeUpdateControl(numBrittleStrength, (decimal)brittleStrength);
+                SafeUpdateControl(numFrictionAngle, (decimal)frictionAngle);
+                SafeUpdateControl(numPermeability, (decimal)permeability);
+
+                // Refresh visuals
+                if (colorLegendPanel != null && !colorLegendPanel.IsDisposed)
+                {
+                    colorLegendPanel.Invalidate();
+                }
+
+                if (glControl != null && !glControl.IsDisposed && glControl.IsHandleCreated)
+                {
+                    glControl.Invalidate();
                 }
             }
-
-            // Refresh the legend to update the display
-            if (colorLegendPanel != null)
+            catch (Exception ex)
             {
-                colorLegendPanel.Invalidate();
+                Logger.Log($"[TriaxialSimulationForm] Error in SetMaterialDensity: {ex.Message}");
             }
         }
 
+
+        private void SafeUpdateControl(KryptonNumericUpDown ctrl, decimal value)
+        {
+            if (ctrl == null || ctrl.IsDisposed) return;
+
+            try
+            {
+                // Try to get the min/max with defaults if properties are null
+                decimal min, max;
+                try { min = ctrl.Minimum; } catch { min = 0.0001m; }
+                try { max = ctrl.Maximum; } catch { max = 100000m; }
+
+                // Try to get decimal places with default if property is null
+                int decimalPlaces;
+                try { decimalPlaces = ctrl.DecimalPlaces; } catch { decimalPlaces = 1; }
+
+                // Apply limits and rounding
+                decimal v = Math.Max(min, Math.Min(max, value));
+                v = Math.Round(v, decimalPlaces);
+
+                // Set value
+                ctrl.Value = v;
+            }
+            catch
+            {
+                // Completely ignore any errors
+            }
+        }
+        private void UpdateMaterialPropertiesNoUI()
+        {
+            // Calculate based on bulk density
+            const float grainDensity = 2650f;
+            const float a = 0.1f, b = 3.0f;
+
+            float ρ = bulkDensity;
+            float ρ_g_cm3 = ρ / 1000f;
+
+            youngModulus = a * (float)Math.Pow(ρ_g_cm3, b) * 10_000f;
+            porosity = 1f - ρ / grainDensity;
+            porosity = Math.Max(0.01f, Math.Min(0.50f, porosity));
+
+            if (poissonRatio <= 0 || poissonRatio >= 0.5)
+            {
+                poissonRatio = 0.3f; // Set a default if invalid
+            }
+
+            // Safe calculation of bulk modulus
+            float denominator = 3f * (1f - 2f * poissonRatio);
+            if (denominator < 0.01f) denominator = 0.01f; // Prevent division by zero
+            bulkModulus = youngModulus / denominator;
+
+            yieldStrength = youngModulus * 0.05f;
+            brittleStrength = youngModulus * 0.08f;
+            cohesion = yieldStrength * 0.10f;
+            frictionAngle = 25f + (ρ / grainDensity) * 20f;
+
+            float porTerm = (float)Math.Pow(porosity, 3) / (float)Math.Pow(1f - porosity, 2);
+            permeability = Math.Max(0.0001f, 0.1f * porTerm * 1_000f);
+        }
         public void ApplyDensityCalibration(List<CalibrationPoint> points)
         {
-            calibrationPoints = new List<CalibrationPoint>(points);
-
-            if (calibrationPoints.Count >= 2)
+            try
             {
-                // Calculate linear regression for grayscale to density conversion
+                if (points == null || points.Count < 2)
+                    return;
+
+                // Make a protective copy of the points
+                calibrationPoints = new List<CalibrationPoint>();
+                foreach (var point in points)
+                {
+                    if (point != null)
+                        calibrationPoints.Add(point);
+                }
+
+                if (calibrationPoints.Count < 2)
+                    return;
+
+                // Calculate calibration parameters
                 double sumX = 0, sumY = 0, sumXX = 0, sumXY = 0;
                 int n = calibrationPoints.Count;
 
-                foreach (var point in calibrationPoints)
+                foreach (var pt in calibrationPoints)
                 {
-                    sumX += point.AvgGrayValue;
-                    sumY += point.Density;
-                    sumXX += point.AvgGrayValue * point.AvgGrayValue;
-                    sumXY += point.AvgGrayValue * point.Density;
+                    sumX += pt.AvgGrayValue;
+                    sumY += pt.Density;
+                    sumXX += pt.AvgGrayValue * pt.AvgGrayValue;
+                    sumXY += pt.AvgGrayValue * pt.Density;
                 }
 
-                // Calculate slope and intercept
-                densityCalibrationSlope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
-                densityCalibrationIntercept = (sumY - densityCalibrationSlope * sumX) / n;
+                // Avoid division by zero
+                double denominator = (n * sumXX - sumX * sumX);
+                if (Math.Abs(denominator) < 0.0001)
+                {
+                    Logger.Log("[TriaxialSimulationForm] Warning: Cannot calculate density calibration (division by zero)");
+                    return;
+                }
 
+                densityCalibrationSlope = (n * sumXY - sumX * sumY) / denominator;
+                densityCalibrationIntercept = (sumY - densityCalibrationSlope * sumX) / n;
                 isDensityCalibrated = true;
 
-                // Recalculate density values for all vertices
-                if (densityValues.Count > 0)
+                // Recalculate density values if we have them
+                if (densityValues != null && densityValues.Count > 0)
                 {
                     RecalibrateDensityValues();
                 }
@@ -358,17 +1222,91 @@ namespace CTS
                 // Calculate average bulk density
                 CalculateAverageBulkDensity();
 
-                // Update UI
-                numBulkDensity.Value = (decimal)bulkDensity;
-
-                // Update material properties based on new density
-                UpdateMaterialPropertiesFromDensity();
-
-                // Refresh the legend panel to show the new density range
-                if (colorLegendPanel != null)
+                // Update UI on the correct thread
+                if (InvokeRequired)
                 {
-                    colorLegendPanel.Invalidate();
+                    try
+                    {
+                        Invoke(new Action(() => UpdateUIWithDensity(bulkDensity)));
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[TriaxialSimulationForm] Error during Invoke in calibration: {ex.Message}");
+                    }
                 }
+                else
+                {
+                    UpdateUIWithDensity(bulkDensity);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[TriaxialSimulationForm] Error in ApplyDensityCalibration: {ex.Message}");
+            }
+        }
+        private void UpdateUIWithDensity(double density)
+        {
+            try
+            {
+                // First, verify density is in reasonable range (kg/m³)
+                if (density <= 0 || double.IsNaN(density) || double.IsInfinity(density))
+                {
+                    Logger.Log($"[TriaxialSimulationForm] Warning: Invalid density value {density}, using default");
+                    density = 2500.0; // Use a default density value
+                }
+
+                // Update the bulkDensity field
+                bulkDensity = (float)density;
+
+                // Update UI controls - only if they exist and are properly initialized
+                bool uiInitialized = numBulkDensity != null && !numBulkDensity.IsDisposed;
+
+                if (uiInitialized)
+                {
+                    try
+                    {
+                        // Update bulk density control with proper clamping
+                        decimal minAllowed = numBulkDensity.Minimum;
+                        decimal maxAllowed = numBulkDensity.Maximum;
+                        decimal clampedValue = Math.Min(Math.Max((decimal)bulkDensity, minAllowed), maxAllowed);
+                        numBulkDensity.Value = clampedValue;
+
+                        // Now also update all related material properties based on the new density
+                        UpdateMaterialPropertiesFromDensity();
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[TriaxialSimulationForm] Error updating numeric controls: {ex.Message}");
+                        // Continue execution
+                    }
+                }
+
+                // Update visual elements that display density
+                try
+                {
+                    // Refresh density legend if it exists
+                    if (colorLegendPanel != null && !colorLegendPanel.IsDisposed)
+                    {
+                        colorLegendPanel.Invalidate();
+                    }
+
+                    // Refresh OpenGL viewport if it exists
+                    if (glControl != null && !glControl.IsDisposed)
+                    {
+                        if (glControl.IsHandleCreated)
+                        {
+                            glControl.Invalidate();
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[TriaxialSimulationForm] Error refreshing visual elements: {ex.Message}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[TriaxialSimulationForm] Error in UpdateUIWithDensity: {ex.Message}");
             }
         }
         private void CalculateAverageBulkDensity()
@@ -387,27 +1325,29 @@ namespace CTS
 
         private void RecalibrateDensityValues()
         {
+            if (densityValues == null || densityValues.Count == 0)
+                return;
+
             for (int i = 0; i < densityValues.Count; i++)
             {
-                // Convert from normalized [0-1] to grayscale [0-255]
                 float grayValue = densityValues[i] * 255f;
-
-                // Apply calibration
                 float calibratedDensity = (float)(grayValue * densityCalibrationSlope + densityCalibrationIntercept);
-
-                // Store calibrated density
                 densityValues[i] = calibratedDensity;
             }
 
-            // Update min/max density
-            minDensity = densityValues.Min();
-            maxDensity = densityValues.Max();
-
-            // Refresh the legend panel
-            if (colorLegendPanel != null)
+            // Check if there are values to compute min/max
+            if (densityValues.Count > 0)
             {
-                colorLegendPanel.Invalidate();
+                minDensity = densityValues.Min();
+                maxDensity = densityValues.Max();
             }
+            else
+            {
+                minDensity = 0f;
+                maxDensity = 0f;
+            }
+
+            colorLegendPanel?.Invalidate();
         }
         /// <summary>
         /// Compute the center and radius of the mesh’s bounding sphere.
@@ -500,79 +1440,222 @@ namespace CTS
         }
         private void UpdateMaterialPropertiesFromDensity()
         {
-            // 1. Young's modulus relationship with density (empirical relationship for rocks)
-            // E = a * ρ^b, where a and b are empirical constants (typical values: a=0.1, b=3)
-            float a = 0.1f;
-            float b = 3.0f;
-            float scaledDensity = bulkDensity / 1000.0f; // Convert to g/cm³
-            youngModulus = a * (float)Math.Pow(scaledDensity, b) * 10000.0f; // Scale to reasonable MPa value
-
-            // 2. Update porosity based on density (assuming grain density of ~2650 kg/m³ for typical rocks)
-            float grainDensity = 2650.0f; // kg/m³ (typical for quartz/feldspar)
-            porosity = 1.0f - (bulkDensity / grainDensity);
-            porosity = Math.Max(0.01f, Math.Min(0.5f, porosity)); // Clamp to reasonable range
-
-            // 3. Bulk modulus from porosity and Young's modulus (Gassmann's equation simplified)
-            bulkModulus = youngModulus / (3 * (1 - 2 * poissonRatio));
-
-            // 4. Strength parameters based on density
-            yieldStrength = youngModulus * 0.05f; // Typical yield at ~5% of Young's modulus
-            brittleStrength = youngModulus * 0.08f; // Typical brittle failure at ~8% of Young's modulus
-
-            // 5. Cohesion and friction angle (based on typical relationships for geomaterials)
-            cohesion = yieldStrength * 0.1f; // Cohesion typically ~10% of yield strength
-            frictionAngle = 25.0f + (bulkDensity / 2650.0f) * 20.0f; // Range from 25° to 45° based on density
-
-            // 6. Permeability from porosity using Kozeny-Carman equation (simplified)
-            // IMPORTANT CHANGE: Convert permeability from Darcy to milliDarcy (mD)
-            float porosityTerm = (float)Math.Pow(porosity, 3) / (float)Math.Pow(1 - porosity, 2);
-            float permDarcy = 0.1f * porosityTerm;
-            permeability = permDarcy * 1000.0f; // Convert from Darcy to milliDarcy
-
-            // Apply minimum bound to prevent errors (assuming 0.0001 mD is the control's minimum)
-            permeability = Math.Max(0.1f, permeability);
-
-            // Ensure all values are within the control limits before updating UI
-            if (youngModulus > (float)numYoungModulus.Maximum)
-                youngModulus = (float)numYoungModulus.Maximum;
-
-            if (bulkModulus > (float)numBulkModulus.Maximum)
-                bulkModulus = (float)numBulkModulus.Maximum;
-
-            if (yieldStrength > (float)numYieldStrength.Maximum)
-                yieldStrength = (float)numYieldStrength.Maximum;
-
-            if (brittleStrength > (float)numBrittleStrength.Maximum)
-                brittleStrength = (float)numBrittleStrength.Maximum;
-
-            // 7. Update UI controls - CONVERTING UNITS AS NEEDED
             try
             {
-                numYoungModulus.Value = (decimal)youngModulus;
-                numPorosity.Value = (decimal)porosity;
-                numBulkModulus.Value = (decimal)bulkModulus;
-                numYieldStrength.Value = (decimal)yieldStrength;
-                numBrittleStrength.Value = (decimal)brittleStrength;
-                numCohesion.Value = (decimal)cohesion;
-                numFrictionAngle.Value = (decimal)frictionAngle;
-                numPermeability.Value = (decimal)permeability; // Now in milliDarcy
+                // Ensure default values for critical properties if they're not set
+                if (poissonRatio <= 0 || poissonRatio >= 0.5) poissonRatio = 0.3f;
+
+                // Constants
+                const float grainDensity = 2650f;      // kg/m³ - quartzo-feldspathic grains
+                const float a = 0.1f, b = 3.0f;        // E = a·ρᵇ
+
+                // Get bulk density and convert properly
+                float ρ = Math.Max(500f, bulkDensity); // Ensure minimum reasonable density
+                float ρ_g_cm3 = ρ / 1000f;             // Convert kg/m³ to g/cm³
+
+                // Calculate material properties using empirical relationships
+                youngModulus = a * (float)Math.Pow(ρ_g_cm3, b) * 10_000f;  // MPa
+
+                // Calculate porosity with bounds checking
+                porosity = 1f - ρ / grainDensity;
+                porosity = Math.Max(0.01f, Math.Min(0.50f, porosity));
+
+                // Safely calculate bulk modulus
+                bulkModulus = youngModulus / (3f * Math.Max(0.01f, 1f - 2f * poissonRatio));
+
+                // Calculate strength parameters
+                yieldStrength = youngModulus * 0.05f;
+                brittleStrength = youngModulus * 0.08f;
+                cohesion = yieldStrength * 0.10f;
+                frictionAngle = 25f + (ρ / grainDensity) * 20f;  // Range: 25° → 45°
+
+                // Kozeny-Carman permeability (Darcy → mD)
+                float porTerm = (float)Math.Pow(porosity, 3) / (float)Math.Pow(Math.Max(0.01f, 1f - porosity), 2);
+                permeability = Math.Max(0.0001f, 0.1f * porTerm * 1_000f);  // mD
+
+                // Adjust parameters based on UI limits - CtrlMax already handles null controls
+                youngModulus = Math.Min(youngModulus, CtrlMax(numYoungModulus));
+                bulkModulus = Math.Min(bulkModulus, CtrlMax(numBulkModulus));
+                yieldStrength = Math.Min(yieldStrength, CtrlMax(numYieldStrength));
+                brittleStrength = Math.Min(brittleStrength, CtrlMax(numBrittleStrength));
+                cohesion = Math.Min(cohesion, CtrlMax(numCohesion));
+                frictionAngle = Math.Min(frictionAngle, CtrlMax(numFrictionAngle));
+                permeability = Math.Min(permeability, CtrlMax(numPermeability));
             }
             catch (Exception ex)
             {
-                // Log error or show message without interrupting the process
-                Logger.Log("[TriaxialSimulationForm] Error updating UI controls: "+ex.Message);
-                if (numPermeability.Value < numPermeability.Minimum)
-                    numPermeability.Value = numPermeability.Minimum;
+                Logger.Log($"[TriaxialSimulationForm] Error in UpdateMaterialPropertiesFromDensity details: {ex.Message}");
+                // Continue execution without rethrowing
+            }
 
-                if (numPorosity.Value < numPorosity.Minimum)
-                    numPorosity.Value = numPorosity.Minimum;
-
-                // Ensure other controls have valid values
-                if (numYoungModulus.Value < numYoungModulus.Minimum)
-                    numYoungModulus.Value = numYoungModulus.Minimum;
+            try
+            {
+                // Update UI controls with calculated values - in a separate try/catch block
+                SafeSetNumericValue(numYoungModulus, (decimal)youngModulus);
+                SafeSetNumericValue(numPorosity, (decimal)porosity);
+                SafeSetNumericValue(numBulkModulus, (decimal)bulkModulus);
+                SafeSetNumericValue(numYieldStrength, (decimal)yieldStrength);
+                SafeSetNumericValue(numBrittleStrength, (decimal)brittleStrength);
+                SafeSetNumericValue(numCohesion, (decimal)cohesion);
+                SafeSetNumericValue(numFrictionAngle, (decimal)frictionAngle);
+                SafeSetNumericValue(numPermeability, (decimal)permeability);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[TriaxialSimulationForm] Error updating UI controls: {ex.Message}");
+                // Continue execution without rethrowing
             }
         }
+        private void UpdateMaterialPropertiesFromDensityWithLogging()
+        {
+            Logger.Log("[DEBUG] Entering UpdateMaterialPropertiesFromDensityWithLogging");
 
+            /* ---------- 1.  empirical relationships ---------- */
+            Logger.Log($"[DEBUG] Current bulkDensity: {bulkDensity}");
+            Logger.Log($"[DEBUG] poissonRatio is {(poissonRatio <= 0 ? "INVALID" : "valid")}: {poissonRatio}");
+
+            const float grainDensity = 2650f;      // kg/m³   – quartzo-feldspathic grains
+            const float a = 0.1f, b = 3.0f;        // E = a·ρᵇ
+
+            float ρ = bulkDensity;         // kg/m³
+            float ρ_g_cm3 = ρ / 1000f;     // g/cm³
+
+            // Log values for debugging
+            Logger.Log($"[DEBUG] ρ = {ρ}, ρ_g_cm3 = {ρ_g_cm3}");
+
+            youngModulus = a * (float)Math.Pow(ρ_g_cm3, b) * 10_000f;      // MPa
+            Logger.Log($"[DEBUG] Calculated youngModulus = {youngModulus}");
+
+            porosity = 1f - ρ / grainDensity;
+            porosity = Math.Max(0.01f, Math.Min(0.50f, porosity));
+            Logger.Log($"[DEBUG] Calculated porosity = {porosity}");
+
+            try
+            {
+                // This could be a division by zero issue if poissonRatio is too close to 0.5
+                float denominator = 3f * (1f - 2f * poissonRatio);
+                Logger.Log($"[DEBUG] Bulk modulus denominator = {denominator}");
+                bulkModulus = youngModulus / denominator;
+                Logger.Log($"[DEBUG] Calculated bulkModulus = {bulkModulus}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[DEBUG] Error calculating bulkModulus: {ex.Message}");
+                bulkModulus = youngModulus * 0.6f; // Fallback value
+            }
+
+            yieldStrength = youngModulus * 0.05f;
+            brittleStrength = youngModulus * 0.08f;
+            cohesion = yieldStrength * 0.10f;
+            frictionAngle = 25f + (ρ / grainDensity) * 20f;                 // 25° → 45°
+
+            /* Kozeny-Carman (Darcy ► mD) */
+            float porTerm = (float)Math.Pow(porosity, 3) / (float)Math.Pow(1f - porosity, 2);
+            permeability = Math.Max(0.0001f, 0.1f * porTerm * 1_000f);     // mD
+
+            Logger.Log("[DEBUG] All calculations completed successfully");
+
+            /* ---------- 2.  check UI controls ---------- */
+            Logger.Log($"[DEBUG] numYoungModulus is {(numYoungModulus == null ? "NULL" : "not null")}");
+            Logger.Log($"[DEBUG] numPorosity is {(numPorosity == null ? "NULL" : "not null")}");
+            Logger.Log($"[DEBUG] numBulkModulus is {(numBulkModulus == null ? "NULL" : "not null")}");
+            Logger.Log($"[DEBUG] numYieldStrength is {(numYieldStrength == null ? "NULL" : "not null")}");
+            Logger.Log($"[DEBUG] numBrittleStrength is {(numBrittleStrength == null ? "NULL" : "not null")}");
+            Logger.Log($"[DEBUG] numCohesion is {(numCohesion == null ? "NULL" : "not null")}");
+            Logger.Log($"[DEBUG] numFrictionAngle is {(numFrictionAngle == null ? "NULL" : "not null")}");
+            Logger.Log($"[DEBUG] numPermeability is {(numPermeability == null ? "NULL" : "not null")}");
+
+            /* ---------- 3.  push values to UI safely ---------- */
+            try
+            {
+                Logger.Log("[DEBUG] About to update numYoungModulus");
+                SafeSetNumericValue(numYoungModulus, (decimal)youngModulus);
+                Logger.Log("[DEBUG] Successfully updated numYoungModulus");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[DEBUG] Error updating numYoungModulus: {ex.Message}");
+            }
+
+            try
+            {
+                Logger.Log("[DEBUG] About to update numPorosity");
+                SafeSetNumericValue(numPorosity, (decimal)porosity);
+                Logger.Log("[DEBUG] Successfully updated numPorosity");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[DEBUG] Error updating numPorosity: {ex.Message}");
+            }
+
+            try
+            {
+                Logger.Log("[DEBUG] About to update numBulkModulus");
+                SafeSetNumericValue(numBulkModulus, (decimal)bulkModulus);
+                Logger.Log("[DEBUG] Successfully updated numBulkModulus");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[DEBUG] Error updating numBulkModulus: {ex.Message}");
+            }
+
+            try
+            {
+                Logger.Log("[DEBUG] About to update numYieldStrength");
+                SafeSetNumericValue(numYieldStrength, (decimal)yieldStrength);
+                Logger.Log("[DEBUG] Successfully updated numYieldStrength");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[DEBUG] Error updating numYieldStrength: {ex.Message}");
+            }
+
+            try
+            {
+                Logger.Log("[DEBUG] About to update numBrittleStrength");
+                SafeSetNumericValue(numBrittleStrength, (decimal)brittleStrength);
+                Logger.Log("[DEBUG] Successfully updated numBrittleStrength");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[DEBUG] Error updating numBrittleStrength: {ex.Message}");
+            }
+
+            try
+            {
+                Logger.Log("[DEBUG] About to update numCohesion");
+                SafeSetNumericValue(numCohesion, (decimal)cohesion);
+                Logger.Log("[DEBUG] Successfully updated numCohesion");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[DEBUG] Error updating numCohesion: {ex.Message}");
+            }
+
+            try
+            {
+                Logger.Log("[DEBUG] About to update numFrictionAngle");
+                SafeSetNumericValue(numFrictionAngle, (decimal)frictionAngle);
+                Logger.Log("[DEBUG] Successfully updated numFrictionAngle");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[DEBUG] Error updating numFrictionAngle: {ex.Message}");
+            }
+
+            try
+            {
+                Logger.Log("[DEBUG] About to update numPermeability");
+                SafeSetNumericValue(numPermeability, (decimal)permeability);
+                Logger.Log("[DEBUG] Successfully updated numPermeability");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[DEBUG] Error updating numPermeability: {ex.Message}");
+            }
+
+            Logger.Log("[DEBUG] Finished UpdateMaterialPropertiesFromDensityWithLogging");
+        }
         public TriaxialSimulationForm(MainForm mainForm)
         {
             Logger.Log("[TriaxialSimulationForm] Constructor Called");
@@ -588,6 +1671,7 @@ namespace CTS
             LoadMaterialsFromMainForm();
             InitializeDiagramsForm();
             AddDiagramsButton();
+            InitializeDirectCompute();
             Logger.Log("[TriaxialSimulationForm] Constructor Ended");
         }
         private void CheckHardwareAcceleration()
@@ -626,7 +1710,10 @@ namespace CTS
 
         private void InitializeComponent()
         {
+            // Set up rotation timer
             SetupRotationTimer();
+
+            // Form properties
             this.Text = "Triaxial Simulation";
             this.Size = new Size(1200, 800);
             this.StartPosition = FormStartPosition.CenterParent;
@@ -672,7 +1759,6 @@ namespace CTS
             };
 
             rightLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F)); // Controls area
-          
 
             // Create scrollable panel for controls
             Panel scrollablePanel = new Panel
@@ -682,18 +1768,16 @@ namespace CTS
                 BackColor = Color.FromArgb(42, 42, 42)
             };
 
-            
-
             // Add to right layout
             rightLayout.Controls.Add(scrollablePanel, 0, 0);
-            
+
             rightPanel.Controls.Add(rightLayout);
 
             // Create controls for the scrollable panel
             Panel controlsContent = new Panel
             {
                 Width = 330,
-                Height = 900, // Make this taller to accommodate petrophysical parameters
+                Height = 1200, // Increased height to accommodate all controls
                 BackColor = Color.FromArgb(42, 42, 42),
                 AutoSize = false,
                 Dock = DockStyle.Top
@@ -702,594 +1786,26 @@ namespace CTS
             scrollablePanel.Controls.Add(controlsContent);
 
             // ================= CONTROLS CONTENT =================
+            // Add control sections in a clear, organized layout
 
-            // Simulation Settings Label
-            Label lblSimSettings = new Label
-            {
-                Text = "Simulation Settings",
-                ForeColor = Color.White,
-                Font = new Font("Segoe UI", 9, FontStyle.Bold),
-                AutoSize = true,
-                Location = new Point(10, 10)
-            };
-            controlsContent.Controls.Add(lblSimSettings);
+            // 1. SIMULATION SETTINGS SECTION
+            AddSimulationSettingsControls(controlsContent, 10);
 
-            // Material selection
-            Label lblMaterial = new Label
-            {
-                Text = "Material:",
-                ForeColor = Color.White,
-                AutoSize = true,
-                Location = new Point(10, 40)
-            };
-            controlsContent.Controls.Add(lblMaterial);
+            // 2. MATERIAL PROPERTIES SECTION
+            AddMaterialPropertiesControls(controlsContent, 230);
 
-            comboMaterials = new KryptonComboBox
-            {
-                Location = new Point(140, 40),
-                Width = 180,
-                DropDownWidth = 180,
-                StateCommon = {
-                    ComboBox = { Back = { Color1 = Color.FromArgb(60, 60, 60) } },
-                    Item = { Content = { ShortText = { Color1 = Color.White } } }
-                }
-            };
-            comboMaterials.StateActive.ComboBox.Content.Color1 = Color.White;
-            comboMaterials.StateNormal.ComboBox.Content.Color1 = Color.White;
-            controlsContent.Controls.Add(comboMaterials);
+            // 3. PETROPHYSICAL PROPERTIES SECTION
+            AddPetrophysicalPropertiesControls(controlsContent, 450);
 
-            // Density settings button
-            btnDensitySettings = new KryptonButton
-            {
-                Text = "Density Settings",
-                Location = new Point(140, 70),
-                Width = 180
-            };
-            btnDensitySettings.Click += BtnDensitySettings_Click;
-            controlsContent.Controls.Add(btnDensitySettings);
+            // 4. VISUALIZATION SETTINGS SECTION
+            AddVisualizationControls(controlsContent, 690);
 
-            // Show density checkbox
-            chkShowDensity = new KryptonCheckBox
-            {
-                Text = "Show Density Map",
-                Location = new Point(140, 100),
-                Checked = true,
-                StateCommon = { ShortText = { Color1 = Color.White } }
-            };
-            chkShowDensity.CheckedChanged += ChkShowDensity_CheckedChanged;
-            controlsContent.Controls.Add(chkShowDensity);
+            // 5. PROGRESS SECTION
+            AddProgressControls(controlsContent, 900);
 
-            // Sampling rate
-            Label lblSampling = new Label
-            {
-                Text = "Quality (Sampling Rate):",
-                ForeColor = Color.White,
-                AutoSize = true,
-                Location = new Point(10, 130)
-            };
-            controlsContent.Controls.Add(lblSampling);
+            // 6. ACTION BUTTONS SECTION
+            AddActionButtonsControls(controlsContent, 970);
 
-            trackSamplingRate = new KryptonTrackBar
-            {
-                Location = new Point(140, 130),
-                Width = 180,
-                Minimum = 1,
-                Maximum = 5,
-                Value = 2,
-                TickFrequency = 1,
-                StateCommon = {
-                    Track = { Color1 = Color.FromArgb(80, 80, 80) },
-                    Tick = { Color1 = Color.Silver }
-                }
-            };
-            controlsContent.Controls.Add(trackSamplingRate);
-
-            // Direction selection
-            Label lblDirection = new Label
-            {
-                Text = "Test Direction:",
-                ForeColor = Color.White,
-                AutoSize = true,
-                Location = new Point(10, 160)
-            };
-            controlsContent.Controls.Add(lblDirection);
-
-            comboDirection = new KryptonComboBox
-            {
-                Location = new Point(140, 160),
-                Width = 180,
-                StateCommon = {
-                    ComboBox = { Back = { Color1 = Color.FromArgb(60, 60, 60) } },
-                    Item = { Content = { ShortText = { Color1 = Color.White } } }
-                }
-            };
-            comboDirection.StateActive.ComboBox.Content.Color1 = Color.White;
-            comboDirection.StateNormal.ComboBox.Content.Color1 = Color.White;
-            comboDirection.Items.AddRange(new object[] { "X", "Y", "Z" });
-            comboDirection.SelectedIndex = 2; // Default to Z
-            controlsContent.Controls.Add(comboDirection);
-
-            // Material behavior
-            Label lblBehavior = new Label
-            {
-                Text = "Material Behavior:",
-                ForeColor = Color.White,
-                AutoSize = true,
-                Location = new Point(10, 190)
-            };
-            controlsContent.Controls.Add(lblBehavior);
-
-            // Elastic checkbox
-            chkElastic = new KryptonCheckBox
-            {
-                Text = "Elastic",
-                Checked = true,
-                Location = new Point(140, 190),
-                StateCommon = { ShortText = { Color1 = Color.White } }
-            };
-            controlsContent.Controls.Add(chkElastic);
-
-            // Plastic checkbox
-            chkPlastic = new KryptonCheckBox
-            {
-                Text = "Plastic",
-                Checked = false,
-                Location = new Point(200, 190),
-                StateCommon = { ShortText = { Color1 = Color.White } }
-            };
-            controlsContent.Controls.Add(chkPlastic);
-
-            // Brittle checkbox
-            chkBrittle = new KryptonCheckBox
-            {
-                Text = "Brittle",
-                Checked = false,
-                Location = new Point(260, 190),
-                StateCommon = { ShortText = { Color1 = Color.White } }
-            };
-            controlsContent.Controls.Add(chkBrittle);
-
-            // Material Properties Label
-            Label lblMatProperties = new Label
-            {
-                Text = "Material Properties",
-                ForeColor = Color.White,
-                Font = new Font("Segoe UI", 9, FontStyle.Bold),
-                AutoSize = true,
-                Location = new Point(10, 230)
-            };
-            controlsContent.Controls.Add(lblMatProperties);
-
-            // Min pressure
-            Label lblMinPressure = new Label
-            {
-                Text = "Min Pressure (kPa):",
-                ForeColor = Color.White,
-                AutoSize = true,
-                Location = new Point(10, 260)
-            };
-            controlsContent.Controls.Add(lblMinPressure);
-
-            numMinPressure = new KryptonNumericUpDown
-            {
-                Location = new Point(140, 260),
-                Width = 180,
-                Minimum = 0,
-                Maximum = 10000,
-                Value = 0,
-                DecimalPlaces = 1,
-                StateCommon = {
-                    Content = { Color1 = Color.White },
-                    Back = { Color1 = Color.FromArgb(60, 60, 60) }
-                }
-            };
-            controlsContent.Controls.Add(numMinPressure);
-
-            // Max pressure
-            Label lblMaxPressure = new Label
-            {
-                Text = "Max Pressure (kPa):",
-                ForeColor = Color.White,
-                AutoSize = true,
-                Location = new Point(10, 290)
-            };
-            controlsContent.Controls.Add(lblMaxPressure);
-
-            numMaxPressure = new KryptonNumericUpDown
-            {
-                Location = new Point(140, 290),
-                Width = 180,
-                Minimum = 1,
-                Maximum = 10000,
-                Value = 1000,
-                DecimalPlaces = 1,
-                StateCommon = {
-                    Content = { Color1 = Color.White },
-                    Back = { Color1 = Color.FromArgb(60, 60, 60) }
-                }
-            };
-            controlsContent.Controls.Add(numMaxPressure);
-
-            // Young's modulus
-            Label lblYoungModulus = new Label
-            {
-                Text = "Young's Modulus (MPa):",
-                ForeColor = Color.White,
-                AutoSize = true,
-                Location = new Point(10, 320)
-            };
-            controlsContent.Controls.Add(lblYoungModulus);
-
-            numYoungModulus = new KryptonNumericUpDown
-            {
-                Location = new Point(140, 320),
-                Width = 180,
-                Minimum = 100,
-                Maximum = 100000,
-                Value = 10000,
-                DecimalPlaces = 1,
-                StateCommon = {
-                    Content = { Color1 = Color.White },
-                    Back = { Color1 = Color.FromArgb(60, 60, 60) }
-                }
-            };
-            numYoungModulus.ValueChanged += MaterialProperty_ValueChanged;
-            controlsContent.Controls.Add(numYoungModulus);
-
-            // Poisson's ratio
-            Label lblPoissonRatio = new Label
-            {
-                Text = "Poisson's Ratio:",
-                ForeColor = Color.White,
-                AutoSize = true,
-                Location = new Point(10, 350)
-            };
-            controlsContent.Controls.Add(lblPoissonRatio);
-
-            numPoissonRatio = new KryptonNumericUpDown
-            {
-                Location = new Point(140, 350),
-                Width = 180,
-                Minimum = 0.01m,
-                Maximum = 0.49m,
-                Value = 0.3m,
-                DecimalPlaces = 2,
-                StateCommon = {
-                    Content = { Color1 = Color.White },
-                    Back = { Color1 = Color.FromArgb(60, 60, 60) }
-                }
-            };
-            numPoissonRatio.ValueChanged += MaterialProperty_ValueChanged;
-            controlsContent.Controls.Add(numPoissonRatio);
-
-            // Yield strength
-            Label lblYieldStrength = new Label
-            {
-                Text = "Yield Strength (MPa):",
-                ForeColor = Color.White,
-                AutoSize = true,
-                Location = new Point(10, 380)
-            };
-            controlsContent.Controls.Add(lblYieldStrength);
-
-            numYieldStrength = new KryptonNumericUpDown
-            {
-                Location = new Point(140, 380),
-                Width = 180,
-                Minimum = 10,
-                Maximum = 10000,
-                Value = 500,
-                DecimalPlaces = 1,
-                StateCommon = {
-                    Content = { Color1 = Color.White },
-                    Back = { Color1 = Color.FromArgb(60, 60, 60) }
-                }
-            };
-            controlsContent.Controls.Add(numYieldStrength);
-
-            // Brittle strength
-            Label lblBrittleStrength = new Label
-            {
-                Text = "Brittle Strength (MPa):",
-                ForeColor = Color.White,
-                AutoSize = true,
-                Location = new Point(10, 410)
-            };
-            controlsContent.Controls.Add(lblBrittleStrength);
-
-            numBrittleStrength = new KryptonNumericUpDown
-            {
-                Location = new Point(140, 410),
-                Width = 180,
-                Minimum = 10,
-                Maximum = 10000,
-                Value = 800,
-                DecimalPlaces = 1,
-                StateCommon = {
-                    Content = { Color1 = Color.White },
-                    Back = { Color1 = Color.FromArgb(60, 60, 60) }
-                }
-            };
-            controlsContent.Controls.Add(numBrittleStrength);
-
-            // Petrophysical Properties Label
-            Label lblPetroProperties = new Label
-            {
-                Text = "Petrophysical Properties",
-                ForeColor = Color.White,
-                Font = new Font("Segoe UI", 9, FontStyle.Bold),
-                AutoSize = true,
-                Location = new Point(10, 450)
-            };
-            controlsContent.Controls.Add(lblPetroProperties);
-
-            // Bulk Density
-            Label lblBulkDensity = new Label
-            {
-                Text = "Bulk Density (kg/m³):",
-                ForeColor = Color.White,
-                AutoSize = true,
-                Location = new Point(10, 480)
-            };
-            controlsContent.Controls.Add(lblBulkDensity);
-
-            numBulkDensity = new KryptonNumericUpDown
-            {
-                Location = new Point(140, 480),
-                Width = 180,
-                Minimum = 500,
-                Maximum = 5000,
-                Value = 2500,
-                DecimalPlaces = 1,
-                StateCommon = {
-                    Content = { Color1 = Color.White },
-                    Back = { Color1 = Color.FromArgb(60, 60, 60) }
-                }
-            };
-            numBulkDensity.ValueChanged += MaterialProperty_ValueChanged;
-            controlsContent.Controls.Add(numBulkDensity);
-
-            // Porosity
-            Label lblPorosity = new Label
-            {
-                Text = "Porosity (fraction):",
-                ForeColor = Color.White,
-                AutoSize = true,
-                Location = new Point(10, 510)
-            };
-            controlsContent.Controls.Add(lblPorosity);
-
-            numPorosity = new KryptonNumericUpDown
-            {
-                Location = new Point(140, 510),
-                Width = 180,
-                Minimum = 0.01m,
-                Maximum = 0.5m,
-                Value = 0.2m,
-                DecimalPlaces = 2,
-                StateCommon = {
-                    Content = { Color1 = Color.White },
-                    Back = { Color1 = Color.FromArgb(60, 60, 60) }
-                }
-            };
-            numPorosity.ValueChanged += MaterialProperty_ValueChanged;
-            controlsContent.Controls.Add(numPorosity);
-
-            // Bulk Modulus
-            Label lblBulkModulus = new Label
-            {
-                Text = "Bulk Modulus (MPa):",
-                ForeColor = Color.White,
-                AutoSize = true,
-                Location = new Point(10, 540)
-            };
-            controlsContent.Controls.Add(lblBulkModulus);
-
-            numBulkModulus = new KryptonNumericUpDown
-            {
-                Location = new Point(140, 540),
-                Width = 180,
-                Minimum = 100,
-                Maximum = 100000,
-                Value = 10000,
-                DecimalPlaces = 1,
-                StateCommon = {
-                    Content = { Color1 = Color.White },
-                    Back = { Color1 = Color.FromArgb(60, 60, 60) }
-                }
-            };
-            controlsContent.Controls.Add(numBulkModulus);
-
-            // Permeability
-            Label lblPermeability = new Label
-            {
-                Text = "Permeability (mDarcy):",
-                ForeColor = Color.White,
-                AutoSize = true,
-                Location = new Point(10, 570)
-            };
-            controlsContent.Controls.Add(lblPermeability);
-
-            numPermeability = new KryptonNumericUpDown
-            {
-                Location = new Point(140, 570),
-                Width = 180,
-                Minimum = 0.0001m,
-                Maximum = 10m,
-                Value = 0.01m,
-                DecimalPlaces = 4,
-                StateCommon = {
-                    Content = { Color1 = Color.White },
-                    Back = { Color1 = Color.FromArgb(60, 60, 60) }
-                }
-            };
-            controlsContent.Controls.Add(numPermeability);
-
-            // Cohesion
-            Label lblCohesion = new Label
-            {
-                Text = "Cohesion (MPa):",
-                ForeColor = Color.White,
-                AutoSize = true,
-                Location = new Point(10, 600)
-            };
-            controlsContent.Controls.Add(lblCohesion);
-
-            numCohesion = new KryptonNumericUpDown
-            {
-                Location = new Point(140, 600),
-                Width = 180,
-                Minimum = 0,
-                Maximum = 1000,
-                Value = 50,
-                DecimalPlaces = 1,
-                StateCommon = {
-                    Content = { Color1 = Color.White },
-                    Back = { Color1 = Color.FromArgb(60, 60, 60) }
-                }
-            };
-            controlsContent.Controls.Add(numCohesion);
-
-            // Friction angle
-            Label lblFrictionAngle = new Label
-            {
-                Text = "Friction Angle (°):",
-                ForeColor = Color.White,
-                AutoSize = true,
-                Location = new Point(10, 630)
-            };
-            controlsContent.Controls.Add(lblFrictionAngle);
-
-            numFrictionAngle = new KryptonNumericUpDown
-            {
-                Location = new Point(140, 630),
-                Width = 180,
-                Minimum = 0,
-                Maximum = 90,
-                Value = 30,
-                DecimalPlaces = 1,
-                StateCommon = {
-                    Content = { Color1 = Color.White },
-                    Back = { Color1 = Color.FromArgb(60, 60, 60) }
-                }
-            };
-            controlsContent.Controls.Add(numFrictionAngle);
-
-            // Wireframe mode
-            Label lblWireframe = new Label
-            {
-                Text = "Wireframe Mode:",
-                ForeColor = Color.White,
-                AutoSize = true,
-                Location = new Point(10, 660)
-            };
-            controlsContent.Controls.Add(lblWireframe);
-
-            chkWireframe = new KryptonCheckBox
-            {
-                Location = new Point(140, 660),
-                Checked = true,
-                StateCommon = { ShortText = { Color1 = Color.White } }
-            };
-            controlsContent.Controls.Add(chkWireframe);
-
-            // Progress bar
-            Label lblProgress = new Label
-            {
-                Text = "Progress:",
-                ForeColor = Color.White,
-                AutoSize = true,
-                Location = new Point(10, 690)
-            };
-            controlsContent.Controls.Add(lblProgress);
-
-            progressBar = new ProgressBar
-            {
-                Location = new Point(140, 690),
-                Width = 180,
-                Height = 20,
-                Style = ProgressBarStyle.Continuous,
-                BackColor = Color.FromArgb(64, 64, 64),
-                ForeColor = Color.LightSkyBlue
-            };
-            controlsContent.Controls.Add(progressBar);
-            chkFastSimulation = new KryptonCheckBox
-            {
-                Text = "Fast Simulation Mode (Render only final result)",
-                Location = new Point(140, 720),  
-                Checked = false,
-                StateCommon = { ShortText = { Color1 = Color.White } }
-            };
-            chkFastSimulation.CheckedChanged += (s, e) => {
-                fastSimulationMode = chkFastSimulation.Checked;
-            };
-            controlsContent.Controls.Add(chkFastSimulation);
-            // Progress label
-            progressLabel = new Label
-            {
-                Text = "Ready",
-                ForeColor = Color.White,
-                TextAlign = ContentAlignment.MiddleCenter,
-                Location = new Point(140, 750),
-                Width = 180,
-                Height = 20
-            };
-            controlsContent.Controls.Add(progressLabel);
-
-            // Generate Mesh Button
-            btnGenerateMesh = new KryptonButton
-            {
-                Text = "Generate Mesh",
-                Location = new Point(10, 790),
-                Width = 310,
-                Height = 30,
-                StateCommon = {
-        Back = { Color1 = Color.FromArgb(80, 80, 120) },
-        Content = { ShortText = { Color1 = Color.White } }
-    }
-            };
-            btnGenerateMesh.Click += BtnGenerateMesh_Click;
-            controlsContent.Controls.Add(btnGenerateMesh);
-
-            // Start simulation button
-            btnStartSimulation = new KryptonButton
-            {
-                Text = "Start Simulation",
-                Location = new Point(10, 830),
-                Width = 310,
-                Height = 30,
-                Enabled = false,
-                StateCommon = {
-                    Back = { Color1 = Color.FromArgb(0, 100, 0) },
-                    Content = { ShortText = { Color1 = Color.White } }
-                },
-                StateDisabled = {
-                    Back = { Color1 = Color.FromArgb(60, 60, 60) },
-                    Content = { ShortText = { Color1 = Color.Silver } }
-                }
-            };
-            btnStartSimulation.Click += BtnStartSimulation_Click;
-            controlsContent.Controls.Add(btnStartSimulation);
-
-            // Stop simulation button
-            btnStopSimulation = new KryptonButton
-            {
-                Text = "Stop Simulation",
-                Location = new Point(10, 870),
-                Width = 310,
-                Height = 30,
-                Enabled = false,
-                StateCommon = {
-                    Back = { Color1 = Color.FromArgb(120, 0, 0) },
-                    Content = { ShortText = { Color1 = Color.White } }
-                },
-                StateDisabled = {
-                    Back = { Color1 = Color.FromArgb(60, 60, 60) },
-                    Content = { ShortText = { Color1 = Color.Silver } }
-                }
-            };
-            btnStopSimulation.Click += BtnStopSimulation_Click;
-            controlsContent.Controls.Add(btnStopSimulation);
             // Initialize OpenGL Control FIRST
             CreateGLControl();
 
@@ -1304,16 +1820,6 @@ namespace CTS
             // Add GLControl to render panel
             renderPanel.Controls.Add(glControl);
             AddColorLegendPanel();
-            // Set up event handlers for controls
-            comboMaterials.SelectedIndexChanged += ComboMaterials_SelectedIndexChanged;
-            comboDirection.SelectedIndexChanged += ComboDirection_SelectedIndexChanged;
-            chkElastic.CheckedChanged += MaterialBehavior_CheckedChanged;
-            chkPlastic.CheckedChanged += MaterialBehavior_CheckedChanged;
-            chkBrittle.CheckedChanged += MaterialBehavior_CheckedChanged;
-            chkWireframe.CheckedChanged += ChkWireframe_CheckedChanged;
-            trackSamplingRate.ValueChanged += TrackSamplingRate_ValueChanged;
-            numCohesion.ValueChanged += MohrCoulombParameters_Changed;
-            numFrictionAngle.ValueChanged += MohrCoulombParameters_Changed;
 
             // Create simulation timer
             simulationTimer = new System.Windows.Forms.Timer
@@ -1321,10 +1827,799 @@ namespace CTS
                 Interval = 50
             };
             simulationTimer.Tick += SimulationTimer_Tick;
+
+            // Add save image button
             AddSaveImageButton();
+
             // Add main layout to form
             this.Controls.Add(mainLayout);
         }
+        private void AddSimulationSettingsControls(Panel controlsContent, int startY)
+        {
+            // Simulation Settings Label
+            Label lblSimSettings = new Label
+            {
+                Text = "Simulation Settings",
+                ForeColor = Color.White,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                AutoSize = true,
+                Location = new Point(10, startY)
+            };
+            controlsContent.Controls.Add(lblSimSettings);
+
+            int yPos = startY + 30;
+
+            // Material selection
+            Label lblMaterial = new Label
+            {
+                Text = "Material:",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, yPos)
+            };
+            controlsContent.Controls.Add(lblMaterial);
+
+            comboMaterials = new KryptonComboBox
+            {
+                Location = new Point(140, yPos),
+                Width = 180,
+                DropDownWidth = 180,
+                StateCommon = {
+            ComboBox = { Back = { Color1 = Color.FromArgb(60, 60, 60) } },
+            Item = { Content = { ShortText = { Color1 = Color.White } } }
+        }
+            };
+            comboMaterials.StateActive.ComboBox.Content.Color1 = Color.White;
+            comboMaterials.StateNormal.ComboBox.Content.Color1 = Color.White;
+            comboMaterials.SelectedIndexChanged += ComboMaterials_SelectedIndexChanged;
+            controlsContent.Controls.Add(comboMaterials);
+
+            yPos += 30;
+
+            // Density settings button
+            btnDensitySettings = new KryptonButton
+            {
+                Text = "Density Settings",
+                Location = new Point(140, yPos),
+                Width = 180
+            };
+            btnDensitySettings.Click += BtnDensitySettings_Click;
+            controlsContent.Controls.Add(btnDensitySettings);
+
+            yPos += 30;
+
+            // Show density checkbox
+            chkShowDensity = new KryptonCheckBox
+            {
+                Text = "Show Density Map",
+                Location = new Point(140, yPos),
+                Checked = true,
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            };
+            chkShowDensity.CheckedChanged += ChkShowDensity_CheckedChanged;
+            controlsContent.Controls.Add(chkShowDensity);
+
+            yPos += 30;
+
+            // Sampling rate
+            Label lblSampling = new Label
+            {
+                Text = "Quality (Sampling Rate):",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, yPos)
+            };
+            controlsContent.Controls.Add(lblSampling);
+
+            trackSamplingRate = new KryptonTrackBar
+            {
+                Location = new Point(140, yPos),
+                Width = 180,
+                Minimum = 1,
+                Maximum = 5,
+                Value = 2,
+                TickFrequency = 1,
+                StateCommon = {
+            Track = { Color1 = Color.FromArgb(80, 80, 80) },
+            Tick = { Color1 = Color.Silver }
+        }
+            };
+            trackSamplingRate.ValueChanged += TrackSamplingRate_ValueChanged;
+            controlsContent.Controls.Add(trackSamplingRate);
+
+            yPos += 30;
+
+            // Direction selection
+            Label lblDirection = new Label
+            {
+                Text = "Test Direction:",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, yPos)
+            };
+            controlsContent.Controls.Add(lblDirection);
+
+            comboDirection = new KryptonComboBox
+            {
+                Location = new Point(140, yPos),
+                Width = 180,
+                StateCommon = {
+            ComboBox = { Back = { Color1 = Color.FromArgb(60, 60, 60) } },
+            Item = { Content = { ShortText = { Color1 = Color.White } } }
+        }
+            };
+            comboDirection.StateActive.ComboBox.Content.Color1 = Color.White;
+            comboDirection.StateNormal.ComboBox.Content.Color1 = Color.White;
+            comboDirection.Items.AddRange(new object[] { "X", "Y", "Z" });
+            comboDirection.SelectedIndex = 2; // Default to Z
+            comboDirection.SelectedIndexChanged += ComboDirection_SelectedIndexChanged;
+            controlsContent.Controls.Add(comboDirection);
+
+            yPos += 30;
+
+            // Material behavior
+            Label lblBehavior = new Label
+            {
+                Text = "Material Behavior:",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, yPos)
+            };
+            controlsContent.Controls.Add(lblBehavior);
+
+            // Elastic checkbox
+            chkElastic = new KryptonCheckBox
+            {
+                Text = "Elastic",
+                Checked = true,
+                Location = new Point(140, yPos),
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            };
+            chkElastic.CheckedChanged += MaterialBehavior_CheckedChanged;
+            controlsContent.Controls.Add(chkElastic);
+
+            // Plastic checkbox
+            chkPlastic = new KryptonCheckBox
+            {
+                Text = "Plastic",
+                Checked = false,
+                Location = new Point(200, yPos),
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            };
+            chkPlastic.CheckedChanged += MaterialBehavior_CheckedChanged;
+            controlsContent.Controls.Add(chkPlastic);
+
+            // Brittle checkbox
+            chkBrittle = new KryptonCheckBox
+            {
+                Text = "Brittle",
+                Checked = false,
+                Location = new Point(260, yPos),
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            };
+            chkBrittle.CheckedChanged += MaterialBehavior_CheckedChanged;
+            controlsContent.Controls.Add(chkBrittle);
+        }
+        private void AddMaterialPropertiesControls(Panel controlsContent, int startY)
+        {
+            // Material Properties Label
+            Label lblMatProperties = new Label
+            {
+                Text = "Material Properties",
+                ForeColor = Color.White,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                AutoSize = true,
+                Location = new Point(10, startY)
+            };
+            controlsContent.Controls.Add(lblMatProperties);
+
+            int yPos = startY + 30;
+
+            // Min pressure
+            Label lblMinPressure = new Label
+            {
+                Text = "Min Pressure (kPa):",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, yPos)
+            };
+            controlsContent.Controls.Add(lblMinPressure);
+
+            numMinPressure = new KryptonNumericUpDown
+            {
+                Location = new Point(140, yPos),
+                Width = 180,
+                Minimum = 0,
+                Maximum = 10000,
+                Value = 0,
+                DecimalPlaces = 1,
+                StateCommon = {
+            Content = { Color1 = Color.White },
+            Back = { Color1 = Color.FromArgb(60, 60, 60) }
+        }
+            };
+            controlsContent.Controls.Add(numMinPressure);
+
+            yPos += 30;
+
+            // Max pressure
+            Label lblMaxPressure = new Label
+            {
+                Text = "Max Pressure (kPa):",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, yPos)
+            };
+            controlsContent.Controls.Add(lblMaxPressure);
+
+            numMaxPressure = new KryptonNumericUpDown
+            {
+                Location = new Point(140, yPos),
+                Width = 180,
+                Minimum = 1,
+                Maximum = 10000,
+                Value = 1000,
+                DecimalPlaces = 1,
+                StateCommon = {
+            Content = { Color1 = Color.White },
+            Back = { Color1 = Color.FromArgb(60, 60, 60) }
+        }
+            };
+            controlsContent.Controls.Add(numMaxPressure);
+
+            yPos += 30;
+
+            // Young's modulus
+            Label lblYoungModulus = new Label
+            {
+                Text = "Young's Modulus (MPa):",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, yPos)
+            };
+            controlsContent.Controls.Add(lblYoungModulus);
+
+            numYoungModulus = new KryptonNumericUpDown
+            {
+                Location = new Point(140, yPos),
+                Width = 180,
+                Minimum = 100,
+                Maximum = 100000,
+                Value = 10000,
+                DecimalPlaces = 1,
+                StateCommon = {
+            Content = { Color1 = Color.White },
+            Back = { Color1 = Color.FromArgb(60, 60, 60) }
+        }
+            };
+            numYoungModulus.ValueChanged += MaterialProperty_ValueChanged;
+            controlsContent.Controls.Add(numYoungModulus);
+
+            yPos += 30;
+
+            // Poisson's ratio
+            Label lblPoissonRatio = new Label
+            {
+                Text = "Poisson's Ratio:",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, yPos)
+            };
+            controlsContent.Controls.Add(lblPoissonRatio);
+
+            numPoissonRatio = new KryptonNumericUpDown
+            {
+                Location = new Point(140, yPos),
+                Width = 180,
+                Minimum = 0.01m,
+                Maximum = 0.49m,
+                Value = 0.3m,
+                DecimalPlaces = 2,
+                StateCommon = {
+            Content = { Color1 = Color.White },
+            Back = { Color1 = Color.FromArgb(60, 60, 60) }
+        }
+            };
+            numPoissonRatio.ValueChanged += MaterialProperty_ValueChanged;
+            controlsContent.Controls.Add(numPoissonRatio);
+
+            yPos += 30;
+
+            // Yield strength
+            Label lblYieldStrength = new Label
+            {
+                Text = "Yield Strength (MPa):",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, yPos)
+            };
+            controlsContent.Controls.Add(lblYieldStrength);
+
+            numYieldStrength = new KryptonNumericUpDown
+            {
+                Location = new Point(140, yPos),
+                Width = 180,
+                Minimum = 10,
+                Maximum = 10000,
+                Value = 500,
+                DecimalPlaces = 1,
+                StateCommon = {
+            Content = { Color1 = Color.White },
+            Back = { Color1 = Color.FromArgb(60, 60, 60) }
+        }
+            };
+            controlsContent.Controls.Add(numYieldStrength);
+
+            yPos += 30;
+
+            // Brittle strength
+            Label lblBrittleStrength = new Label
+            {
+                Text = "Brittle Strength (MPa):",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, yPos)
+            };
+            controlsContent.Controls.Add(lblBrittleStrength);
+
+            numBrittleStrength = new KryptonNumericUpDown
+            {
+                Location = new Point(140, yPos),
+                Width = 180,
+                Minimum = 10,
+                Maximum = 10000,
+                Value = 800,
+                DecimalPlaces = 1,
+                StateCommon = {
+            Content = { Color1 = Color.White },
+            Back = { Color1 = Color.FromArgb(60, 60, 60) }
+        }
+            };
+            controlsContent.Controls.Add(numBrittleStrength);
+        }
+        private void AddPetrophysicalPropertiesControls(Panel controlsContent, int startY)
+        {
+            // Petrophysical Properties Label
+            Label lblPetroProperties = new Label
+            {
+                Text = "Petrophysical Properties",
+                ForeColor = Color.White,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                AutoSize = true,
+                Location = new Point(10, startY)
+            };
+            controlsContent.Controls.Add(lblPetroProperties);
+
+            int yPos = startY + 30;
+
+            // Bulk Density
+            Label lblBulkDensity = new Label
+            {
+                Text = "Bulk Density (kg/m³):",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, yPos)
+            };
+            controlsContent.Controls.Add(lblBulkDensity);
+
+            numBulkDensity = new KryptonNumericUpDown
+            {
+                Location = new Point(140, yPos),
+                Width = 180,
+                Minimum = 500,
+                Maximum = 5000,
+                Value = 2500,
+                DecimalPlaces = 1,
+                StateCommon = {
+            Content = { Color1 = Color.White },
+            Back = { Color1 = Color.FromArgb(60, 60, 60) }
+        }
+            };
+            numBulkDensity.ValueChanged += MaterialProperty_ValueChanged;
+            controlsContent.Controls.Add(numBulkDensity);
+
+            yPos += 30;
+
+            // Porosity
+            Label lblPorosity = new Label
+            {
+                Text = "Porosity (fraction):",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, yPos)
+            };
+            controlsContent.Controls.Add(lblPorosity);
+
+            numPorosity = new KryptonNumericUpDown
+            {
+                Location = new Point(140, yPos),
+                Width = 180,
+                Minimum = 0.01m,
+                Maximum = 0.5m,
+                Value = 0.2m,
+                DecimalPlaces = 2,
+                StateCommon = {
+            Content = { Color1 = Color.White },
+            Back = { Color1 = Color.FromArgb(60, 60, 60) }
+        }
+            };
+            numPorosity.ValueChanged += MaterialProperty_ValueChanged;
+            controlsContent.Controls.Add(numPorosity);
+
+            yPos += 30;
+
+            // Bulk Modulus
+            Label lblBulkModulus = new Label
+            {
+                Text = "Bulk Modulus (MPa):",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, yPos)
+            };
+            controlsContent.Controls.Add(lblBulkModulus);
+
+            numBulkModulus = new KryptonNumericUpDown
+            {
+                Location = new Point(140, yPos),
+                Width = 180,
+                Minimum = 100,
+                Maximum = 100000,
+                Value = 10000,
+                DecimalPlaces = 1,
+                StateCommon = {
+            Content = { Color1 = Color.White },
+            Back = { Color1 = Color.FromArgb(60, 60, 60) }
+        }
+            };
+            controlsContent.Controls.Add(numBulkModulus);
+
+            yPos += 30;
+
+            // Permeability
+            Label lblPermeability = new Label
+            {
+                Text = "Permeability (mDarcy):",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, yPos)
+            };
+            controlsContent.Controls.Add(lblPermeability);
+
+            numPermeability = new KryptonNumericUpDown
+            {
+                Location = new Point(140, yPos),
+                Width = 180,
+                Minimum = 0.0001m,
+                Maximum = 10m,
+                Value = 0.01m,
+                DecimalPlaces = 4,
+                StateCommon = {
+            Content = { Color1 = Color.White },
+            Back = { Color1 = Color.FromArgb(60, 60, 60) }
+        }
+            };
+            controlsContent.Controls.Add(numPermeability);
+
+            yPos += 30;
+
+            // Cohesion
+            Label lblCohesion = new Label
+            {
+                Text = "Cohesion (MPa):",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, yPos)
+            };
+            controlsContent.Controls.Add(lblCohesion);
+
+            numCohesion = new KryptonNumericUpDown
+            {
+                Location = new Point(140, yPos),
+                Width = 180,
+                Minimum = 0,
+                Maximum = 1000,
+                Value = 50,
+                DecimalPlaces = 1,
+                StateCommon = {
+            Content = { Color1 = Color.White },
+            Back = { Color1 = Color.FromArgb(60, 60, 60) }
+        }
+            };
+            numCohesion.ValueChanged += MohrCoulombParameters_Changed;
+            controlsContent.Controls.Add(numCohesion);
+
+            yPos += 30;
+
+            // Friction angle
+            Label lblFrictionAngle = new Label
+            {
+                Text = "Friction Angle (°):",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, yPos)
+            };
+            controlsContent.Controls.Add(lblFrictionAngle);
+
+            numFrictionAngle = new KryptonNumericUpDown
+            {
+                Location = new Point(140, yPos),
+                Width = 180,
+                Minimum = 0,
+                Maximum = 90,
+                Value = 30,
+                DecimalPlaces = 1,
+                StateCommon = {
+            Content = { Color1 = Color.White },
+            Back = { Color1 = Color.FromArgb(60, 60, 60) }
+        }
+            };
+            numFrictionAngle.ValueChanged += MohrCoulombParameters_Changed;
+            controlsContent.Controls.Add(numFrictionAngle);
+        }
+        private void AddVisualizationControls(Panel controlsContent, int startY)
+        {
+            // Visualization Settings Label
+            Label lblVisualizationSettings = new Label
+            {
+                Text = "Visualization Settings",
+                ForeColor = Color.White,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                AutoSize = true,
+                Location = new Point(10, startY)
+            };
+            controlsContent.Controls.Add(lblVisualizationSettings);
+
+            int yPos = startY + 30;
+
+            // Wireframe mode
+            chkWireframe = new KryptonCheckBox
+            {
+                Text = "Wireframe Mode",
+                Location = new Point(10, yPos),
+                Checked = true,
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            };
+            chkWireframe.CheckedChanged += ChkWireframe_CheckedChanged;
+            controlsContent.Controls.Add(chkWireframe);
+
+            yPos += 30;
+
+            // Failed elements visualization
+            chkShowFailedElements = new KryptonCheckBox
+            {
+                Text = "Highlight Failed Elements",
+                Location = new Point(10, yPos),
+                Checked = true,
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            };
+            chkShowFailedElements.CheckedChanged += (s, e) => {
+                showFailedElements = chkShowFailedElements.Checked;
+                glControl.Invalidate();
+            };
+            controlsContent.Controls.Add(chkShowFailedElements);
+
+            yPos += 30;
+
+            // Transparency controls
+            chkEnableTransparency = new KryptonCheckBox
+            {
+                Text = "Enable Transparency",
+                Location = new Point(10, yPos),
+                Checked = false,
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            };
+            controlsContent.Controls.Add(chkEnableTransparency);
+
+            yPos += 30;
+
+            // Transparency level slider
+            Label lblTransparency = new Label
+            {
+                Text = "Transparency Level:",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, yPos)
+            };
+            controlsContent.Controls.Add(lblTransparency);
+
+            KryptonTrackBar trackTransparency = new KryptonTrackBar
+            {
+                Name = "trackTransparency",
+                Location = new Point(140, yPos),
+                Width = 180,
+                Minimum = 0,
+                Maximum = 100,
+                Value = 70, // Default to 70% opacity (30% transparency)
+                TickFrequency = 10,
+                StateCommon = {
+            Track = { Color1 = Color.FromArgb(80, 80, 80) },
+            Tick = { Color1 = Color.Silver }
+        },
+                Enabled = false // Initially disabled until transparency is enabled
+            };
+            controlsContent.Controls.Add(trackTransparency);
+
+            // Wire up events for transparency controls
+            chkEnableTransparency.CheckedChanged += (s, e) => {
+                enableTransparency = chkEnableTransparency.Checked;
+                trackTransparency.Enabled = enableTransparency;
+                transparencyLevel = trackTransparency.Value / 100.0f;
+                glControl.Invalidate();
+            };
+
+            trackTransparency.ValueChanged += (s, e) => {
+                transparencyLevel = trackTransparency.Value / 100.0f;
+                glControl.Invalidate();
+            };
+
+            yPos += 30;
+
+            // Fast simulation mode
+            chkFastSimulation = new KryptonCheckBox
+            {
+                Text = "Fast Simulation Mode",
+                Location = new Point(10, yPos),
+                Checked = false,
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            };
+            chkFastSimulation.CheckedChanged += (s, e) => {
+                fastSimulationMode = chkFastSimulation.Checked;
+            };
+            controlsContent.Controls.Add(chkFastSimulation);
+
+            yPos += 30;
+
+            // Hardware acceleration
+            chkUseDirectCompute = new KryptonCheckBox
+            {
+                Text = "Use Hardware Acceleration",
+                Location = new Point(10, yPos),
+                Checked = true,
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            };
+            chkUseDirectCompute.CheckedChanged += (s, e) => {
+                useDirectCompute = chkUseDirectCompute.Checked;
+            };
+            controlsContent.Controls.Add(chkUseDirectCompute);
+        }
+        private void AddProgressControls(Panel controlsContent, int startY)
+        {
+            // Progress bar
+            Label lblProgress = new Label
+            {
+                Text = "Progress:",
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, startY)
+            };
+            controlsContent.Controls.Add(lblProgress);
+
+            progressBar = new ProgressBar
+            {
+                Location = new Point(140, startY),
+                Width = 180,
+                Height = 20,
+                Style = ProgressBarStyle.Continuous,
+                BackColor = Color.FromArgb(64, 64, 64),
+                ForeColor = Color.LightSkyBlue
+            };
+            controlsContent.Controls.Add(progressBar);
+
+            int yPos = startY + 30;
+
+            // Progress label
+            progressLabel = new Label
+            {
+                Text = "Ready",
+                ForeColor = Color.White,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Location = new Point(140, yPos),
+                Width = 180,
+                Height = 20
+            };
+            controlsContent.Controls.Add(progressLabel);
+        }
+        private void AddActionButtonsControls(Panel controlsContent, int startY)
+        {
+            // Generate Mesh Button
+            btnGenerateMesh = new KryptonButton
+            {
+                Text = "Generate Mesh",
+                Location = new Point(10, startY),
+                Width = 310,
+                Height = 30,
+                StateCommon = {
+            Back = { Color1 = Color.FromArgb(80, 80, 120) },
+            Content = { ShortText = { Color1 = Color.White } }
+        }
+            };
+            btnGenerateMesh.Click += BtnGenerateMesh_Click;
+            controlsContent.Controls.Add(btnGenerateMesh);
+
+            int yPos = startY + 40;
+
+            // Start simulation button
+            btnStartSimulation = new KryptonButton
+            {
+                Text = "Start Simulation",
+                Location = new Point(10, yPos),
+                Width = 310,
+                Height = 30,
+                Enabled = false,
+                StateCommon = {
+            Back = { Color1 = Color.FromArgb(0, 100, 0) },
+            Content = { ShortText = { Color1 = Color.White } }
+        },
+                StateDisabled = {
+            Back = { Color1 = Color.FromArgb(60, 60, 60) },
+            Content = { ShortText = { Color1 = Color.Silver } }
+        }
+            };
+            btnStartSimulation.Click += BtnStartSimulation_Click;
+            controlsContent.Controls.Add(btnStartSimulation);
+
+            yPos += 40;
+
+            // Stop simulation button
+            btnStopSimulation = new KryptonButton
+            {
+                Text = "Stop Simulation",
+                Location = new Point(10, yPos),
+                Width = 310,
+                Height = 30,
+                Enabled = false,
+                StateCommon = {
+            Back = { Color1 = Color.FromArgb(120, 0, 0) },
+            Content = { ShortText = { Color1 = Color.White } }
+        },
+                StateDisabled = {
+            Back = { Color1 = Color.FromArgb(60, 60, 60) },
+            Content = { ShortText = { Color1 = Color.Silver } }
+        }
+            };
+            btnStopSimulation.Click += BtnStopSimulation_Click;
+            controlsContent.Controls.Add(btnStopSimulation);
+
+            yPos += 40;
+
+            // NEW: Continue after failure button
+            btnContinueSimulation = new KryptonButton
+            {
+                Text = "Continue After Failure",
+                Location = new Point(10, yPos),
+                Width = 310,
+                Height = 30,
+                Enabled = false,
+                StateCommon = {
+            Back = { Color1 = Color.FromArgb(180, 120, 0) }, // Orange color to indicate caution
+            Content = { ShortText = { Color1 = Color.White } }
+        },
+                StateDisabled = {
+            Back = { Color1 = Color.FromArgb(60, 60, 60) },
+            Content = { ShortText = { Color1 = Color.Silver } }
+        }
+            };
+            btnContinueSimulation.Click += BtnContinueSimulation_Click;
+            controlsContent.Controls.Add(btnContinueSimulation);
+
+            yPos += 40;
+
+            // Save Image Button
+            KryptonButton btnSaveImage = new KryptonButton
+            {
+                Text = "Save Image",
+                Location = new Point(10, yPos),
+                Width = 310,
+                Height = 30,
+                StateCommon = {
+            Back = { Color1 = Color.FromArgb(60, 60, 120) },
+            Content = { ShortText = { Color1 = Color.White } }
+        }
+            };
+            btnSaveImage.Click += BtnSaveImage_Click;
+            controlsContent.Controls.Add(btnSaveImage);
+        }
+
         private void ColorLegendPanel_Paint(object sender, PaintEventArgs e)
         {
             Graphics g = e.Graphics;
@@ -1420,35 +2715,37 @@ namespace CTS
         }
         private void MaterialProperty_ValueChanged(object sender, EventArgs e)
         {
-            // Update properties when numeric controls change
-            if (sender == numBulkDensity)
+            if (sender == numBulkDensity)        // user edited density manually
             {
                 bulkDensity = (float)numBulkDensity.Value;
                 UpdateMaterialPropertiesFromDensity();
             }
-            else if (sender == numPorosity)
+            else if (sender == numPorosity)      // update permeability from porosity
             {
                 porosity = (float)numPorosity.Value;
-                // Update permeability based on porosity (Kozeny-Carman)
-                permeability = 0.1f * (float)Math.Pow(porosity, 3) / (float)Math.Pow(1 - porosity, 2);
-                numPermeability.Value = (decimal)permeability;
+
+                // Kozeny-Carman – convert to mD, then clamp
+                float porTerm = (float)Math.Pow(porosity, 3) / (float)Math.Pow(1 - porosity, 2);
+                float perm = 0.1f * porTerm * 1000.0f;                // D → mD
+                perm = Math.Max(0.0001f, perm);                       // fit control range
+                perm = Math.Min(perm, (float)numPermeability.Maximum);
+
+                permeability = perm;
+                SafeSetNumericValue(numPermeability, (decimal)permeability);
             }
-            else if (sender == numYoungModulus)
+            else if (sender == numYoungModulus)  // recalc bulk modulus
             {
                 youngModulus = (float)numYoungModulus.Value;
-                // Update related mechanical properties
                 bulkModulus = youngModulus / (3 * (1 - 2 * poissonRatio));
-                numBulkModulus.Value = (decimal)bulkModulus;
+                SafeSetNumericValue(numBulkModulus, (decimal)bulkModulus);
             }
-            else if (sender == numPoissonRatio)
+            else if (sender == numPoissonRatio)  // recalc bulk modulus
             {
                 poissonRatio = (float)numPoissonRatio.Value;
-                // Update bulk modulus
                 bulkModulus = youngModulus / (3 * (1 - 2 * poissonRatio));
-                numBulkModulus.Value = (decimal)bulkModulus;
+                SafeSetNumericValue(numBulkModulus, (decimal)bulkModulus);
             }
         }
-
         private void ChkShowDensity_CheckedChanged(object sender, EventArgs e)
         {
             // Redraw the mesh with/without density coloring
@@ -1457,90 +2754,126 @@ namespace CTS
 
         private void BtnDensitySettings_Click(object sender, EventArgs e)
         {
-            // Calculate material volume in m³
-            CalculateMaterialVolume();
-
-            // Open density settings dialog
-            using (DensitySettingsForm densityForm = new DensitySettingsForm(this, mainForm))
+            try
             {
-                if (densityForm.ShowDialog() == DialogResult.OK)
+                // Before opening the form, ensure materialVolume is calculated
+                CalculateMaterialVolume();
+
+                // Now open the density settings dialog
+                using (DensitySettingsForm densityForm = new DensitySettingsForm(this, mainForm))
                 {
-                    // Density settings have been updated via the IMaterialDensityProvider interface
-                    // The form will call SetMaterialDensity or ApplyDensityCalibration
-                    glControl.Invalidate();
+                    if (densityForm.ShowDialog() == DialogResult.OK)
+                    {
+                        // The form will call SetMaterialDensity or ApplyDensityCalibration
+                        glControl.Invalidate();
+                    }
                 }
             }
+            catch (Exception ex)
+            {
+                Logger.Log($"[TriaxialSimulationForm] Error opening DensitySettingsForm: {ex.Message}");
+                MessageBox.Show($"Error opening density settings: {ex.Message}", "Error",
+                                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
-
         private void CalculateMaterialVolume()
         {
             // Calculate the volume of the material in m³
-            if (vertices.Count == 0)
+            try
             {
-                // Estimate from the material voxels in the volume
-                int materialVoxelCount = 0;
-
-                if (densityVolume != null)
+                if (vertices.Count == 0)
                 {
-                    for (int z = 0; z < depth; z++)
+                    // Estimate from the material voxels in the volume
+                    int materialVoxelCount = 0;
+
+                    if (densityVolume != null)
                     {
-                        for (int y = 0; y < height; y++)
+                        for (int z = 0; z < depth; z++)
                         {
-                            for (int x = 0; x < width; x++)
+                            for (int y = 0; y < height; y++)
                             {
-                                if (densityVolume[x, y, z] > 0)
+                                for (int x = 0; x < width; x++)
                                 {
-                                    materialVoxelCount++;
+                                    if (densityVolume[x, y, z] > 0)
+                                    {
+                                        materialVoxelCount++;
+                                    }
                                 }
                             }
                         }
                     }
+
+                    // Calculate volume based on voxel count and pixel size
+                    materialVolume = materialVoxelCount * pixelSize * pixelSize * pixelSize;
+                }
+                else
+                {
+                    // More accurate volume calculation using tetrahedra
+                    materialVolume = CalculateTetrahedralVolume();
                 }
 
-                // Calculate volume based on voxel count and pixel size
-                materialVolume = materialVoxelCount * pixelSize * pixelSize * pixelSize;
+                // Ensure we have a valid volume
+                if (materialVolume <= 0)
+                {
+                    materialVolume = 0.000001; // 1 cm³ in m³
+                    Logger.Log("[TriaxialSimulationForm] Warning: Material volume is zero, using small default.");
+                }
             }
-            else
+            catch (Exception ex)
             {
-                // More accurate volume calculation using tetrahedra
-                materialVolume = CalculateTetrahedralVolume();
+                materialVolume = 0.000001; // 1 cm³ in m³
+                Logger.Log($"[TriaxialSimulationForm] Error calculating material volume: {ex.Message}");
             }
         }
-
         private double CalculateTetrahedralVolume()
         {
-            // Calculate volume using tetrahedra
-            double totalVolume = 0.0;
-
-            foreach (var tetra in tetrahedralElements)
+            try
             {
-                int[] vIndices = tetra.Vertices;
+                // Calculate volume using tetrahedra
+                double totalVolume = 0.0;
 
-                if (vIndices.Length == 4 &&
-                    vIndices[0] < vertices.Count &&
-                    vIndices[1] < vertices.Count &&
-                    vIndices[2] < vertices.Count &&
-                    vIndices[3] < vertices.Count)
+                foreach (var tetra in tetrahedralElements)
                 {
-                    Vector3 v0 = vertices[vIndices[0]];
-                    Vector3 v1 = vertices[vIndices[1]];
-                    Vector3 v2 = vertices[vIndices[2]];
-                    Vector3 v3 = vertices[vIndices[3]];
+                    int[] vIndices = tetra.Vertices;
 
-                    // Calculate tetrahedron volume
-                    Vector3 v01 = v1 - v0;
-                    Vector3 v02 = v2 - v0;
-                    Vector3 v03 = v3 - v0;
+                    if (vIndices.Length == 4 &&
+                        vIndices[0] < vertices.Count &&
+                        vIndices[1] < vertices.Count &&
+                        vIndices[2] < vertices.Count &&
+                        vIndices[3] < vertices.Count)
+                    {
+                        Vector3 v0 = vertices[vIndices[0]];
+                        Vector3 v1 = vertices[vIndices[1]];
+                        Vector3 v2 = vertices[vIndices[2]];
+                        Vector3 v3 = vertices[vIndices[3]];
 
-                    double vol = Math.Abs(Vector3.Dot(Vector3.Cross(v01, v02), v03)) / 6.0;
-                    totalVolume += vol;
+                        // Calculate tetrahedron volume
+                        Vector3 v01 = v1 - v0;
+                        Vector3 v02 = v2 - v0;
+                        Vector3 v03 = v3 - v0;
+
+                        double vol = Math.Abs(Vector3.Dot(Vector3.Cross(v01, v02), v03)) / 6.0;
+                        totalVolume += vol;
+                    }
                 }
+
+                // Convert from model units (mm³) to m³
+                totalVolume = totalVolume * 1.0e-9;
+
+                // Ensure a minimum volume
+                if (totalVolume <= 0)
+                {
+                    totalVolume = 0.000001; // 1 cm³ in m³
+                }
+
+                return totalVolume;
             }
-
-            // Convert from model units (mm³) to m³
-            return totalVolume * 1.0e-9;
+            catch (Exception ex)
+            {
+                Logger.Log($"[TriaxialSimulationForm] Error in CalculateTetrahedralVolume: {ex.Message}");
+                return 0.000001; // Return a small default volume
+            }
         }
-
         private void MaterialBehavior_CheckedChanged(object sender, EventArgs e)
         {
             isElasticEnabled = chkElastic.Checked;
@@ -2176,59 +3509,222 @@ namespace CTS
                 return;
             }
 
-            // Get simulation parameters from UI
-            minPressure = (float)numMinPressure.Value;
-            maxPressure = (float)numMaxPressure.Value;
-            youngModulus = (float)numYoungModulus.Value;
-            poissonRatio = (float)numPoissonRatio.Value;
-            yieldStrength = (float)numYieldStrength.Value;
-            brittleStrength = (float)numBrittleStrength.Value;
-            cohesion = (float)numCohesion.Value;
-            frictionAngle = (float)numFrictionAngle.Value;
-            bulkDensity = (float)numBulkDensity.Value;
-            porosity = (float)numPorosity.Value;
-            bulkModulus = (float)numBulkModulus.Value;
-            permeability = (float)numPermeability.Value;
-
-            // Reset simulation state
-            stressStrainCurve.Clear();
-            currentStrain = 0.0f;
-            deformedVertices = new List<Vector3>(vertices);
-            elementStresses.Clear();
-
-            // Enable/disable buttons
-            btnStartSimulation.Enabled = false;
-            btnStopSimulation.Enabled = true;
-            comboMaterials.Enabled = false;
-            comboDirection.Enabled = false;
-
-            // Start simulation
-            simulationRunning = true;
-            if (fastSimulationMode)
-            {
-                progressLabel.Text = "Fast simulation started - 3D view will update at completion";
-            }
-            simulationTimer.Start();
             try
             {
-                if (diagramsForm == null || diagramsForm.IsDisposed)
+                // Get simulation parameters from UI
+                minPressure = (float)numMinPressure.Value;
+                maxPressure = (float)numMaxPressure.Value;
+                youngModulus = (float)numYoungModulus.Value;
+                poissonRatio = (float)numPoissonRatio.Value;
+                yieldStrength = (float)numYieldStrength.Value;
+                brittleStrength = (float)numBrittleStrength.Value;
+                cohesion = (float)numCohesion.Value;
+                frictionAngle = (float)numFrictionAngle.Value;
+                bulkDensity = (float)numBulkDensity.Value;
+                porosity = (float)numPorosity.Value;
+                bulkModulus = (float)numBulkModulus.Value;
+                permeability = (float)numPermeability.Value;
+
+                // Get behavior flags
+                isElasticEnabled = chkElastic.Checked;
+                isPlasticEnabled = chkPlastic.Checked;
+                isBrittleEnabled = chkBrittle.Checked;
+
+                // Reset simulation state
+                stressStrainCurve.Clear();
+                currentStrain = 0.0f;
+
+                // Create a new deformed vertices list to ensure proper sizing
+                deformedVertices = new List<Vector3>(vertices.Count);
+                for (int i = 0; i < vertices.Count; i++)
                 {
-                    InitializeDiagramsForm();
+                    deformedVertices.Add(vertices[i]);
                 }
 
-                if (diagramsForm != null)
+                elementStresses.Clear();
+
+                // Update UI state
+                btnStartSimulation.Enabled = false;
+                btnStopSimulation.Enabled = true;
+                comboMaterials.Enabled = false;
+                comboDirection.Enabled = false;
+                progressBar.Value = 0;  // Reset progress bar
+
+                // Start simulation
+                simulationRunning = true;
+
+                // Show diagrams form
+                try
                 {
-                    diagramsForm.Show();
-                    UpdateDiagramsForm();
+                    if (diagramsForm == null || diagramsForm.IsDisposed)
+                    {
+                        InitializeDiagramsForm();
+                    }
+
+                    if (diagramsForm != null)
+                    {
+                        diagramsForm.Show();
+                        UpdateDiagramsForm();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[TriaxialSimulationForm] Error initializing DiagramsForm: {ex.Message}");
+                }
+
+                // Choose computation method
+                bool useDirectComputeForThisRun = useDirectCompute && chkUseDirectCompute.Checked;
+
+                if (useDirectComputeForThisRun)
+                {
+                    // Log the start of accelerated computation
+                    progressLabel.Text = fastSimulationMode ?
+                        "Hardware accelerated simulation started (updating at completion)" :
+                        "Hardware accelerated simulation started";
+
+                    Logger.Log("[TriaxialSimulationForm] Starting simulation with hardware acceleration");
+
+                    // Initialize DirectCompute if needed
+                    if (computeEngine == null)
+                    {
+                        InitializeDirectCompute();
+                    }
+
+                    if (computeEngine != null)
+                    {
+                        Task.Run(async () => {
+                            try
+                            {
+                                // Make deep copies of collections to prevent threading issues
+                                var verticesCopy = new List<Vector3>(vertices);
+                                var normalsCopy = new List<Vector3>(normals);
+                                var indicesCopy = new List<int>(indices);
+                                var densityValuesCopy = new List<float>(densityValues);
+                                var tetrahedralElementsCopy = new List<TetrahedralElement>(tetrahedralElements);
+
+                                // Initialize compute engine with copied mesh data
+                                computeEngine.InitializeFromMesh(
+                                    verticesCopy,
+                                    normalsCopy,
+                                    indicesCopy,
+                                    densityValuesCopy,
+                                    tetrahedralElementsCopy);
+
+                                // Set material properties
+                                computeEngine.SetMaterialProperties(
+                                    bulkDensity,
+                                    youngModulus,
+                                    poissonRatio,
+                                    yieldStrength,
+                                    brittleStrength,
+                                    cohesion,
+                                    frictionAngle,
+                                    porosity,
+                                    bulkModulus,
+                                    permeability,
+                                    minPressure,
+                                    maxPressure,
+                                    isElasticEnabled,
+                                    isPlasticEnabled,
+                                    isBrittleEnabled);
+
+                                // Run the simulation
+                                SimulationDirection direction = (SimulationDirection)comboDirection.SelectedIndex;
+                                await computeEngine.RunFullSimulationAsync(maxStrain, 0.001f, (CTS.SimulationDirection)direction);
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Log($"[TriaxialSimulationForm] Error in accelerated simulation: {ex.Message}");
+
+                                if (ex.InnerException != null)
+                                {
+                                    Logger.Log($"[TriaxialSimulationForm] Inner exception: {ex.InnerException.Message}");
+                                }
+
+                                Logger.Log($"[TriaxialSimulationForm] Stack trace: {ex.StackTrace}");
+
+                                // Fall back to original method if direct compute fails
+                                if (InvokeRequired)
+                                {
+                                    BeginInvoke(new Action(() => {
+                                        progressLabel.Text = "Falling back to standard simulation";
+                                        simulationTimer.Start();
+                                    }));
+                                }
+                                else
+                                {
+                                    progressLabel.Text = "Falling back to standard simulation";
+                                    simulationTimer.Start();
+                                }
+                            }
+                        });
+                    }
+                    else
+                    {
+                        // Could not initialize DirectCompute, fall back to CPU
+                        progressLabel.Text = "Hardware acceleration unavailable, using standard simulation";
+                        simulationTimer.Start();
+                    }
+                }
+                else
+                {
+                    // Use original timer-based method
+                    progressLabel.Text = fastSimulationMode ?
+                        "Standard simulation started (updating at completion)" :
+                        "Standard simulation started";
+
+                    Logger.Log("[TriaxialSimulationForm] Starting simulation with standard method");
+                    simulationTimer.Start();
                 }
             }
             catch (Exception ex)
             {
-                Logger.Log($"[TriaxialSimulationForm] Error initializing DiagramsForm: {ex.Message}");
-                // Continue simulation even if diagrams fail
+                Logger.Log($"[TriaxialSimulationForm] Error starting simulation: {ex.Message}");
+
+                if (ex.InnerException != null)
+                {
+                    Logger.Log($"[TriaxialSimulationForm] Inner exception: {ex.InnerException.Message}");
+                }
+
+                MessageBox.Show($"Error starting simulation: {ex.Message}", "Error",
+                                 MessageBoxButtons.OK, MessageBoxIcon.Error);
+
+                // Reset UI state
+                ResetUIAfterSimulation();
             }
         }
+        private void ResetUIAfterSimulation()
+        {
+            // Reset UI state
+            btnStartSimulation.Enabled = true;
+            btnStopSimulation.Enabled = false;
+            btnContinueSimulation.Enabled = failureState && currentStrain < maxStrain;
+            comboMaterials.Enabled = true;
+            comboDirection.Enabled = true;
+            chkElastic.Enabled = true;
+            chkPlastic.Enabled = true;
+            chkBrittle.Enabled = true;
+            numMinPressure.Enabled = true;
+            numMaxPressure.Enabled = true;
+            numYoungModulus.Enabled = true;
+            numPoissonRatio.Enabled = true;
+            numYieldStrength.Enabled = true;
+            numBrittleStrength.Enabled = true;
+            numCohesion.Enabled = true;
+            numFrictionAngle.Enabled = true;
+            numBulkDensity.Enabled = true;
+            numPorosity.Enabled = true;
+            numBulkModulus.Enabled = true;
+            numPermeability.Enabled = true;
 
+            // Reset simulation state
+            simulationRunning = false;
+
+            // Reset progress
+            progressBar.Value = 0;
+            progressLabel.Text = "Ready";
+            progressLabel.ForeColor = SystemColors.ControlText;
+        }
         private void BtnStopSimulation_Click(object sender, EventArgs e)
         {
             StopSimulation();
@@ -2238,6 +3734,24 @@ namespace CTS
         {
             simulationRunning = false;
             simulationTimer.Stop();
+
+            // Also cancel the direct compute simulation if running
+            if (computeEngine != null)
+            {
+                try
+                {
+                    // The Dispose method will cancel any running simulation
+                    computeEngine.Dispose();
+                    computeEngine = null;
+
+                    // Create a new instance for next time
+                    InitializeDirectCompute();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[TriaxialSimulationForm] Error stopping direct compute: {ex.Message}");
+                }
+            }
 
             // Enable/disable buttons
             btnStartSimulation.Enabled = true;
@@ -2250,8 +3764,14 @@ namespace CTS
             if (!simulationRunning)
                 return;
 
-            // Increment strain
-            currentStrain += 0.001f; // 0.1% strain increment
+            // Increment strain (scaled by test conditions)
+            float strainRate = 0.001f; // Base rate 0.1% strain per tick
+
+            // Strain rate affected by confining pressure - higher pressure = slower deformation
+            float normalizedPressure = minPressure / 1000.0f; // Convert to MPa
+            strainRate *= Math.Max(0.5f, 1.0f - normalizedPressure * 0.02f);
+
+            currentStrain += strainRate;
 
             if (currentStrain >= maxStrain)
             {
@@ -2262,8 +3782,14 @@ namespace CTS
             // Calculate current stress based on strain and material model
             float averageStress = CalculateStress(currentStrain);
 
+            // Convert stress to chart units (MPa to display units)
+            int stressForChart = (int)(averageStress * 10.0f);
+
+            // Update Mohr-Coulomb parameters
+            UpdateMohrCoulombParameters();
+
             // Add to stress-strain curve
-            stressStrainCurve.Add(new Point((int)(currentStrain * 1000), (int)averageStress));
+            stressStrainCurve.Add(new Point((int)(currentStrain * 1000), stressForChart));
 
             // Update mesh deformation based on original vertex positions
             UpdateDeformation(currentStrain, averageStress);
@@ -2271,6 +3797,11 @@ namespace CTS
             // Only redraw UI if not in fast simulation mode
             if (!fastSimulationMode || currentStrain >= maxStrain - 0.001f)
             {
+                // Update progress display
+                float completionPercent = currentStrain / maxStrain * 100f;
+                progressBar.Value = (int)Math.Min(100, completionPercent);
+                progressLabel.Text = $"Progress: {completionPercent:F1}% (Strain: {currentStrain * 100:F2}%)";
+
                 // Redraw charts
                 if (stressStrainGraph != null)
                     stressStrainGraph.Invalidate();
@@ -2287,7 +3818,6 @@ namespace CTS
                     }
                     catch (Exception ex)
                     {
-                        // Log but don't crash
                         Logger.Log($"[TriaxialSimulationForm] Error updating diagrams: {ex.Message}");
                     }
                 }
@@ -2296,164 +3826,407 @@ namespace CTS
                 glControl.Invalidate();
             }
         }
-        private void UpdateDiagramsForm()
+        private void UpdateMohrCoulombParameters()
         {
-            if (diagramsForm != null && !diagramsForm.IsDisposed)
+            if (stressStrainCurve.Count == 0)
+                return;
+
+            // Get current stress values in MPa
+            float currentStress = stressStrainCurve.Last().Y / 10.0f;
+            float confiningPressure = minPressure / 1000.0f; // kPa to MPa
+
+            // For a triaxial test, major principal stress increases during loading
+            float sigma1 = confiningPressure + currentStress;
+            float sigma3 = confiningPressure;
+
+            // Calculate Mohr circle parameters for display
+            normalStress = (sigma1 + sigma3) / 2.0f; // Center of Mohr circle
+            shearStress = (sigma1 - sigma3) / 2.0f;  // Radius of Mohr circle
+
+            // Calculate failure envelope parameters
+            float phi = frictionAngle * (float)Math.PI / 180.0f;
+            float tanPhi = (float)Math.Tan(phi);
+
+            // Calculate distance from stress state to failure envelope
+            float maxShear = cohesion + normalStress * tanPhi;
+            float failureRatio = shearStress / maxShear;
+
+            // Update UI when approaching failure
+            if (failureRatio > 0.9f && !fastSimulationMode)
             {
-                diagramsForm.UpdateData(
-                    stressStrainCurve,
-                    currentStrain,
-                    stressStrainCurve.Count > 0 ? stressStrainCurve.Last().Y / 10.0f : 0,
-                    cohesion,
-                    frictionAngle,
-                    normalStress,
-                    shearStress,
-                    bulkDensity,
-                    porosity,
-                    minPressure,
-                    maxPressure,
-                    yieldStrength,
-                    brittleStrength,
-                    isElasticEnabled,
-                    isPlasticEnabled,
-                    isBrittleEnabled,
-                    simulationRunning
-                );
+                try
+                {
+                    if (InvokeRequired)
+                    {
+                        BeginInvoke(new Action(() => {
+                            progressLabel.Text = $"WARNING: Approaching failure ({failureRatio:P0})";
+                            progressLabel.ForeColor = Color.Red;
+                        }));
+                    }
+                    else
+                    {
+                        progressLabel.Text = $"WARNING: Approaching failure ({failureRatio:P0})";
+                        progressLabel.ForeColor = Color.Red;
+                    }
+                }
+                catch { /* Ignore UI update errors */ }
             }
         }
+        private void UpdateDiagramsForm()
+{
+    if (diagramsForm == null || diagramsForm.IsDisposed)
+        return;
 
+    // Current stress in MPa
+    float currentStressMPa = stressStrainCurve.Count > 0 ? stressStrainCurve.Last().Y / 10.0f : 0;
+
+    // Get confining pressures
+    float confiningPressureMPa = minPressure / 1000.0f; // kPa to MPa
+    float maxPressureMPa = maxPressure / 1000.0f; // kPa to MPa
+
+    // Calculate pore pressure
+    float porePressureMPa = CalculatePorePressure(currentStrain);
+
+    // Calculate principal stresses for triaxial state
+    float sigma3 = confiningPressureMPa;
+    float sigma1 = sigma3 + currentStressMPa;
+
+    // Calculate effective stresses accounting for pore pressure
+    float biotCoeff = Biot(porosity);
+    float effSigma3 = sigma3 - porePressureMPa * biotCoeff;
+    float effSigma1 = sigma1 - porePressureMPa * biotCoeff;
+
+    // Calculate volumetric strain
+    float volStrain = currentStrain * (1.0f - 2.0f * poissonRatio);
+
+    // Calculate permeability change ratio
+    float initialPerm = 0.01f; // Default initial permeability
+    float permRatio = permeability / initialPerm;
+
+    // Calculate elastic energy stored
+    float elasticEnergyVal = elasticEnergy > 0 ? elasticEnergy : 0.5f * currentStressMPa * currentStrain;
+
+    // Calculate plastic energy dissipated
+    float plasticEnergyVal = plasticEnergy;
+
+    // Determine if failure occurred
+    bool failureOccurred = elementStresses.Any(kv => kv.Value < 0) || 
+                          (stressStrainCurve.Count > 10 && 
+                           stressStrainCurve.Last().Y < stressStrainCurve.Max(p => p.Y) * 0.9);
+
+    // Get peak stress information
+    float peakStress = 0;
+    float strainAtPeak = 0;
+    
+    if (stressStrainCurve.Count > 0) {
+        // Find peak stress
+        int maxY = stressStrainCurve.Max(p => p.Y);
+        int peakIndex = stressStrainCurve.FindIndex(p => p.Y == maxY);
+        
+        if (peakIndex >= 0) {
+            peakStress = stressStrainCurve[peakIndex].Y / 10.0f;
+            strainAtPeak = stressStrainCurve[peakIndex].X / 10.0f;
+        }
+    }
+
+    // Call the enhanced data update method with all parameters
+    diagramsForm.UpdateEnhancedData(
+        stressStrainCurve,         // Stress-strain curve
+        currentStrain,             // Current strain value
+        currentStressMPa,          // Current stress in MPa
+        cohesion,                  // Cohesion
+        frictionAngle,             // Friction angle
+        normalStress,              // Normal stress (center of Mohr circle)
+        shearStress,               // Shear stress (radius of Mohr circle)
+        bulkDensity,               // Bulk density
+        porosity,                  // Current porosity
+        minPressure / 1000.0f,     // Confining pressure in MPa
+        maxPressure / 1000.0f,     // Max pressure in MPa
+        yieldStrength,             // Yield strength
+        brittleStrength,           // Brittle strength
+        isElasticEnabled,          // Elastic behavior enabled
+        isPlasticEnabled,          // Plastic behavior enabled
+        isBrittleEnabled,          // Brittle behavior enabled
+        simulationRunning,         // Simulation running status
+        porePressureMPa,           // Pore pressure in MPa
+        effSigma1,                 // Effective major principal stress
+        effSigma3,                 // Effective minor principal stress
+        permeability,              // Current permeability
+        permRatio,                 // Permeability change ratio
+        volStrain,                 // Volumetric strain
+        elasticEnergyVal,          // Elastic energy stored
+        plasticEnergyVal,          // Plastic energy dissipated
+        failureOccurred,           // Failure state
+        failureOccurred ? 100.0f : 0.0f,  // Percent of failure criterion
+        peakStress,                // Peak stress reached
+        strainAtPeak               // Strain at peak stress
+    );
+}
+        /// <summary>
+        /// Sets <paramref name="control"/>'s <see cref="KryptonNumericUpDown.Value"/>
+        /// while automatically clamping the input to the control’s <c>Minimum</c> /
+        /// <c>Maximum</c> range and rounding to the declared <c>DecimalPlaces</c>.
+        /// </summary>
+
+        private void SafeSetNumericValue(KryptonNumericUpDown ctrl, decimal value)
+        {
+            if (ctrl == null) return;                               // UI not ready yet
+
+            decimal v = value;
+            v = Math.Max(ctrl.Minimum, Math.Min(ctrl.Maximum, v));  // clamp
+            v = Math.Round(v, ctrl.DecimalPlaces, MidpointRounding.AwayFromZero);
+
+            if (ctrl.Value != v) ctrl.Value = v;
+        }
+        /// <summary>Return ctrl.Maximum or a huge number when the control is still null.</summary>
+        private float CtrlMax(KryptonNumericUpDown ctrl) =>
+            ctrl != null ? (float)ctrl.Maximum : float.MaxValue;
         private float CalculateStress(float strain)
         {
             // Initialize thread-safe collections for parallel processing
             ConcurrentDictionary<int, float> concurrentElementStresses = new ConcurrentDictionary<int, float>();
+            ConcurrentDictionary<int, Vector3> concurrentElementStrains = new ConcurrentDictionary<int, Vector3>();
 
             // Use thread-safe counter for total stress accumulation
             double totalStressSum = 0;
+            double totalVolumetricStrain = 0;
 
-            // Physical constants
-            float yieldStrain = yieldStrength / youngModulus;
-            float brittleStrain = brittleStrength / youngModulus;
+            // Get confining pressures in MPa
+            float confiningPressure = minPressure / 1000f; // kPa to MPa
+            float axialPressure = maxPressure / 1000f; // kPa to MPa
+
+            // Current pore pressure based on permeability and deformation
+            float porePressure = CalculatePorePressure(strain);
 
             // Process all tetrahedral elements in parallel
             Parallel.For(0, tetrahedralElements.Count,
-                // Initialize local thread state (local sum accumulator)
-                () => 0.0f,
+                // Initialize local thread state
+                () => new { LocalStressSum = 0.0f, LocalVolStrain = 0.0f },
                 // Process each element and update local state
-                (i, loop, localSum) => {
-                    // Calculate average density for this element
-                    float elementDensity = GetElementDensity(tetrahedralElements[i]);
+                (i, loop, local) => {
+                    TetrahedralElement element = tetrahedralElements[i];
 
-                    // Adjust material properties based on density
-                    // Higher density materials are typically stiffer and stronger
-                    float densityRatio = isDensityCalibrated && elementDensity > 0 ?
-                        elementDensity / bulkDensity : 1.0f;
+                    // Calculate average density and properties for this element
+                    float elementDensity = GetElementDensity(element);
+                    float densityRatio = isDensityCalibrated && elementDensity > 0
+                        ? elementDensity / bulkDensity
+                        : 1.0f;
 
                     // Scale modulus using an empirical power law relationship (realistic for rocks)
                     // E ∝ ρ^n where n~2-3 for most rocks
                     float elementYoungModulus = youngModulus * (float)Math.Pow(densityRatio, 2.5);
+                    float elementPoissonRatio = Math.Min(poissonRatio * (float)Math.Pow(densityRatio, -0.2), 0.49f);
 
-                    // Update yield and brittle thresholds based on adjusted modulus
-                    // Maintaining constant strain thresholds for the material
+                    // Calculate element-specific strength parameters
                     float elementYieldStrength = yieldStrength * (float)Math.Pow(densityRatio, 1.5);
                     float elementBrittleStrength = brittleStrength * (float)Math.Pow(densityRatio, 1.2);
+                    float elementCohesion = cohesion * (float)Math.Pow(densityRatio, 1.3);
+                    float elementFrictionAngle = frictionAngle * (float)Math.Min(1.2f, Math.Max(0.8f, densityRatio));
+
+                    // Strain thresholds
                     float elementYieldStrain = elementYieldStrength / elementYoungModulus;
                     float elementBrittleStrain = elementBrittleStrength / elementYoungModulus;
 
-                    // Initialize element stress
-                    float elementStress = 0;
+                    // Calculate element bulk modulus
+                    float elementBulkModulus = elementYoungModulus / (3f * (1f - 2f * elementPoissonRatio));
 
-                    // Calculate stress based on material behavior models
-                    // 1. Elastic behavior (linear up to yield point)
+                    // Calculate element porosity
+                    float elementPorosity = Math.Max(0.01f, Math.Min(0.5f, porosity * (2f - densityRatio)));
+
+                    // Calculate effective stress (accounting for pore pressure)
+                    float effectiveConfining = Math.Max(0.01f, confiningPressure - porePressure * Biot(elementPorosity));
+
+                    // Principal stresses array (σ1, σ2, σ3)
+                    Vector3 principalStresses = new Vector3();
+                    Vector3 principalStrains = new Vector3();
+
+                    // Set initial stress state based on confining pressure
+                    principalStresses.X = effectiveConfining; // σ3
+                    principalStresses.Y = effectiveConfining; // σ2
+                    principalStresses.Z = effectiveConfining; // σ1
+
+                    // Apply strain along the loading direction
+                    switch (selectedDirection)
+                    {
+                        case SimulationDirection.X:
+                            principalStrains.X = strain;
+                            principalStrains.Y = -strain * elementPoissonRatio;
+                            principalStrains.Z = -strain * elementPoissonRatio;
+                            break;
+                        case SimulationDirection.Y:
+                            principalStrains.X = -strain * elementPoissonRatio;
+                            principalStrains.Y = strain;
+                            principalStrains.Z = -strain * elementPoissonRatio;
+                            break;
+                        default: // Z
+                            principalStrains.X = -strain * elementPoissonRatio;
+                            principalStrains.Y = -strain * elementPoissonRatio;
+                            principalStrains.Z = strain;
+                            break;
+                    }
+
+                    // Calculate volumetric strain
+                    float volumetricStrain = principalStrains.X + principalStrains.Y + principalStrains.Z;
+
+                    // Calculate stress increment based on material behavior models
+                    float stressIncrement = 0;
+                    bool elementFailure = false;
+
+                    // Elastic behavior
                     if (isElasticEnabled)
                     {
-                        // Linear elastic relationship: σ = E·ε
                         if (strain <= elementYieldStrain || !isPlasticEnabled)
                         {
-                            elementStress = elementYoungModulus * strain;
+                            // Linear elastic relationship
+                            stressIncrement = elementYoungModulus * strain;
                         }
                         else
                         {
-                            // Elastic contribution limited to yield strength
-                            elementStress = elementYieldStrength;
+                            // Elastic contribution up to yield
+                            stressIncrement = elementYieldStrength;
                         }
                     }
 
-                    // 2. Plastic behavior (post-yield hardening or perfect plasticity)
+                    // Plastic behavior
                     if (isPlasticEnabled && strain > elementYieldStrain)
                     {
-                        // Calculate plastic strain
                         float plasticStrain = strain - elementYieldStrain;
 
-                        // Density-dependent hardening modulus (typically 1-10% of Young's modulus)
-                        // Higher density materials usually show more strain hardening
-                        float hardeningModulus = elementYoungModulus * 0.05f * densityRatio;
+                        // Hardening based on Ramberg-Osgood model
+                        float hardeningExponent = 0.1f + 0.2f * densityRatio;
+                        float plasticModulus = elementYoungModulus * 0.05f * densityRatio;
 
-                        // Add plastic hardening component: σp = σy + H·εp
-                        float plasticComponent = hardeningModulus * plasticStrain;
+                        float plasticComponent = plasticModulus * (float)Math.Pow(plasticStrain, hardeningExponent);
 
                         // Combine with elastic component if enabled
                         if (isElasticEnabled)
                         {
-                            elementStress += plasticComponent;
+                            stressIncrement += plasticComponent;
                         }
                         else
                         {
-                            elementStress = elementYieldStrength + plasticComponent;
+                            stressIncrement = elementYieldStrength + plasticComponent;
                         }
                     }
 
-                    // 3. Brittle behavior (stress drop after failure)
+                    // Brittle behavior
                     if (isBrittleEnabled && strain > elementBrittleStrain)
                     {
-                        float residualFactor = 0.2f + 0.3f / densityRatio;
-                        residualFactor = Math.Max(0.05f, Math.Min(0.5f, residualFactor));
-
-                        
+                        // Calculate post-failure residual strength
+                        float residualFactor = Math.Max(0.05f, 0.2f + 0.3f / densityRatio);
                         float postFailureStrain = strain - elementBrittleStrain;
-                        float decayRate = 20.0f; // Controls how quickly strength is lost
+                        float decayRate = 20.0f + 10.0f * (1.0f - densityRatio); // Denser materials fracture more abruptly
                         float decayFactor = (float)Math.Exp(-decayRate * postFailureStrain);
 
-                        // Transition from peak to residual strength
                         float residualStrength = elementBrittleStrength * residualFactor;
                         float brittleStress = residualStrength + (elementBrittleStrength - residualStrength) * decayFactor;
 
-                        // If no other behaviors are enabled, use brittle stress directly
+                        // Mark as failed for stress redistribution
+                        elementFailure = true;
+
+                        // Apply brittle stress limit
                         if (!isElasticEnabled && !isPlasticEnabled)
                         {
-                            elementStress = brittleStress;
+                            stressIncrement = brittleStress;
                         }
                         else
                         {
-                            // Otherwise, take the minimum of calculated stress and brittle stress
-                            // This ensures stress can't exceed the brittle failure envelope
-                            elementStress = Math.Min(elementStress, brittleStress);
+                            stressIncrement = Math.Min(stressIncrement, brittleStress);
                         }
                     }
 
-                    // Store element stress in thread-safe dictionary
-                    concurrentElementStresses[i] = elementStress;
+                    // Update principal stress based on loading direction
+                    switch (selectedDirection)
+                    {
+                        case SimulationDirection.X:
+                            principalStresses.X = effectiveConfining + stressIncrement;
+                            break;
+                        case SimulationDirection.Y:
+                            principalStresses.Y = effectiveConfining + stressIncrement;
+                            break;
+                        default: // Z
+                            principalStresses.Z = effectiveConfining + stressIncrement;
+                            break;
+                    }
 
-                    // Add to thread-local sum
-                    return localSum + elementStress;
+                    // Check Mohr-Coulomb failure criterion
+                    if (!elementFailure && CheckMohrCoulombFailure(principalStresses, elementCohesion, elementFrictionAngle))
+                    {
+                        elementFailure = true;
+
+                        // Calculate post-failure stress based on residual strength
+                        float frictionRad = elementFrictionAngle * (float)Math.PI / 180.0f;
+                        float sinPhi = (float)Math.Sin(frictionRad);
+                        float residualRatio = (1.0f - sinPhi) / (1.0f + sinPhi);
+
+                        // Apply residual strength ratio to differential stress
+                        float sigma3 = Math.Min(principalStresses.X, Math.Min(principalStresses.Y, principalStresses.Z));
+                        float sigmaMax = Math.Max(principalStresses.X, Math.Max(principalStresses.Y, principalStresses.Z));
+                        float differentialStress = sigmaMax - sigma3;
+                        float residualDifferential = differentialStress * residualRatio;
+
+                        // Replace the maximum principal stress
+                        switch (selectedDirection)
+                        {
+                            case SimulationDirection.X:
+                                principalStresses.X = sigma3 + residualDifferential;
+                                break;
+                            case SimulationDirection.Y:
+                                principalStresses.Y = sigma3 + residualDifferential;
+                                break;
+                            default: // Z
+                                principalStresses.Z = sigma3 + residualDifferential;
+                                break;
+                        }
+
+                        // Recalculate stress increment
+                        switch (selectedDirection)
+                        {
+                            case SimulationDirection.X:
+                                stressIncrement = principalStresses.X - effectiveConfining;
+                                break;
+                            case SimulationDirection.Y:
+                                stressIncrement = principalStresses.Y - effectiveConfining;
+                                break;
+                            default: // Z
+                                stressIncrement = principalStresses.Z - effectiveConfining;
+                                break;
+                        }
+                    }
+
+                    // Store element data in concurrent collections
+                    concurrentElementStresses[i] = stressIncrement;
+                    concurrentElementStrains[i] = principalStrains;
+
+                    // Update local sums
+                    return new
+                    {
+                        LocalStressSum = local.LocalStressSum + stressIncrement,
+                        LocalVolStrain = local.LocalVolStrain + volumetricStrain
+                    };
                 },
-                // Combine all local sums using a thread-safe addition
-                (localSum) => {
-                    // Use Interlocked.Add for thread-safe addition to shared counter
-                    double currentSum = localSum;
-                    Interlocked.Exchange(ref totalStressSum, totalStressSum + currentSum);
+                // Combine all local results
+                (local) => {
+                    Interlocked.Exchange(ref totalStressSum, totalStressSum + local.LocalStressSum);
+                    Interlocked.Exchange(ref totalVolumetricStrain, totalVolumetricStrain + local.LocalVolStrain);
                 }
             );
 
-            // Copy concurrent dictionary to regular dictionary for compatibility with existing code
+            // Update instance fields with calculated values
             elementStresses.Clear();
             foreach (var pair in concurrentElementStresses)
             {
                 elementStresses[pair.Key] = pair.Value;
             }
 
+            // Calculate average volumetric strain for permeability updates
+            float avgVolumetricStrain = (float)(totalVolumetricStrain / tetrahedralElements.Count);
+            UpdatePermeabilityFromStrain(avgVolumetricStrain);
+
             // Calculate average stress
-            float averageStress = tetrahedralElements.Count > 0 ?
-                (float)(totalStressSum / tetrahedralElements.Count) : 0;
+            float averageStress = tetrahedralElements.Count > 0
+                ? (float)(totalStressSum / tetrahedralElements.Count)
+                : 0;
 
             return averageStress;
         }
@@ -2477,16 +4250,141 @@ namespace CTS
 
             return validVertices > 0 ? sumDensity / validVertices : bulkDensity;
         }
+        private bool CheckMohrCoulombFailure(Vector3 principalStresses, float elCohesion, float elFrictionAngle)
+        {
+            // Find minimum and maximum principal stresses
+            float sigma1 = Math.Max(principalStresses.X, Math.Max(principalStresses.Y, principalStresses.Z));
+            float sigma3 = Math.Min(principalStresses.X, Math.Min(principalStresses.Y, principalStresses.Z));
 
+            // Convert friction angle to radians
+            float frictionRad = elFrictionAngle * (float)Math.PI / 180.0f;
+            float sinPhi = (float)Math.Sin(frictionRad);
+            float cosPhi = (float)Math.Cos(frictionRad);
+
+            // Calculate Mohr-Coulomb criterion
+            // Failure when: (σ1 - σ3) ≥ 2c·cos(φ) + (σ1 + σ3)·sin(φ)
+            float leftSide = sigma1 - sigma3;
+            float rightSide = 2.0f * elCohesion * cosPhi + (sigma1 + sigma3) * sinPhi;
+
+            // Tensile cutoff check
+            float tensileStrength = elCohesion / (float)Math.Tan(frictionRad);
+            bool tensileFailure = sigma3 < -tensileStrength;
+
+            // Return true if failure criterion is met
+            return leftSide >= rightSide || tensileFailure;
+        }
+        private float Biot(float poro)
+        {
+            // Biot coefficient: α = 1 - K/Ks
+            // where K is bulk modulus, Ks is solid grain bulk modulus
+            float grainBulkModulus = 36000.0f; // Typical for quartz, MPa
+            return 1.0f - (bulkModulus / grainBulkModulus);
+        }
+        private float CalculatePorePressure(float strain)
+        {
+            // Initial pore pressure (could be from user input)
+            float initialPorePressure = 0.1f; // MPa
+
+            // Modify based on volumetric strain
+            float avgPorosity = porosity;
+            float compressibility = 1.0f / (bulkModulus * 10.0f); // Convert to MPa⁻¹
+
+            // Estimate volumetric strain - simplified approach
+            float volumetricStrain = strain * (1.0f - 2.0f * poissonRatio);
+
+            // Skempton's B parameter - relates mean stress to pore pressure
+            float skemptonB = CalculateSkemptonB(avgPorosity);
+
+            // Pore pressure buildup due to undrained conditions inversely related to permeability
+            float drainageFactor = Math.Max(0.01f, Math.Min(1.0f, permeability * 10.0f));
+            float undrained = (1.0f - drainageFactor);
+
+            // Calculate pore pressure buildup
+            float porePressureChange = -volumetricStrain * bulkModulus * skemptonB * undrained;
+
+            // Return total pore pressure
+            return initialPorePressure + porePressureChange;
+        }
+        private float CalculateSkemptonB(float poro)
+        {
+            // Skempton's B parameter calculation
+            // B = 1 / (1 + n·Kf/K), where:
+            // n is porosity, Kf is fluid bulk modulus, K is rock bulk modulus
+            float fluidBulkModulus = 2200.0f; // Water, MPa
+            float skemptonB = 1.0f / (1.0f + poro * fluidBulkModulus / bulkModulus);
+
+            // Clamp to physical range
+            return Math.Max(0.01f, Math.Min(0.99f, skemptonB));
+        }
+        private void UpdatePermeabilityFromStrain(float volumetricStrain)
+        {
+            // Kozeny-Carman permeability change with porosity
+            // New porosity from volumetric strain
+            float newPorosity = porosity * (1.0f - volumetricStrain);
+            newPorosity = Math.Max(0.01f, Math.Min(0.5f, newPorosity));
+
+            // Update the porosity value
+            porosity = newPorosity;
+
+            // Update permeability using Kozeny-Carman relationship
+            // k ∝ φ³/(1-φ)²
+            float oldPermeabilityFactor = (float)(Math.Pow(porosity, 3.0) / Math.Pow(1.0 - porosity, 2.0));
+            float newPermeabilityFactor = (float)(Math.Pow(newPorosity, 3.0) / Math.Pow(1.0 - newPorosity, 2.0));
+
+            // Relative change
+            float permeabilityRatio = newPermeabilityFactor / oldPermeabilityFactor;
+
+            // Apply change to permeability
+            permeability *= permeabilityRatio;
+            permeability = Math.Max(0.0001f, Math.Min(1000.0f, permeability));
+
+            // Update UI if we're on the UI thread
+            if (!fastSimulationMode)
+            {
+                try
+                {
+                    if (InvokeRequired)
+                    {
+                        BeginInvoke(new Action(() => {
+                            if (numPorosity != null && !numPorosity.IsDisposed)
+                                numPorosity.Value = (decimal)Math.Max(numPorosity.Minimum,
+                                                    Math.Min(numPorosity.Maximum, (decimal)porosity));
+
+                            if (numPermeability != null && !numPermeability.IsDisposed)
+                                numPermeability.Value = (decimal)Math.Max(numPermeability.Minimum,
+                                                      Math.Min(numPermeability.Maximum, (decimal)permeability));
+                        }));
+                    }
+                    else
+                    {
+                        if (numPorosity != null && !numPorosity.IsDisposed)
+                            numPorosity.Value = (decimal)Math.Max(numPorosity.Minimum,
+                                                Math.Min(numPorosity.Maximum, (decimal)porosity));
+
+                        if (numPermeability != null && !numPermeability.IsDisposed)
+                            numPermeability.Value = (decimal)Math.Max(numPermeability.Minimum,
+                                                  Math.Min(numPermeability.Maximum, (decimal)permeability));
+                    }
+                }
+                catch { /* Ignore UI update errors */ }
+            }
+        }
         private void UpdateDeformation(float strain, float stress)
         {
-            // Start with fresh copy of scaled vertices if needed
+            // Create a copy of vertices if needed
             if (deformedVertices == null || deformedVertices.Count != vertices.Count)
             {
                 ScaleMeshForDisplay();
             }
 
-            // Create thread-local storage array for vertex positions
+            // Get current pore pressure
+            float porePressure = CalculatePorePressure(strain);
+            float confiningPressure = minPressure / 1000f; // kPa to MPa
+
+            // Calculate effective stresses
+            float effectiveConfining = Math.Max(0.01f, confiningPressure - porePressure * Biot(porosity));
+
+            // Create thread-local storage for vertex positions
             Vector3[] newPositions = new Vector3[vertices.Count];
 
             // Copy initial vertex positions
@@ -2503,72 +4401,148 @@ namespace CTS
 
                 // Get vertex density for property scaling
                 float vertexDensity = (i < densityValues.Count) ? densityValues[i] : bulkDensity;
+                float densityRatio = isDensityCalibrated && vertexDensity > 0
+                                    ? vertexDensity / bulkDensity
+                                    : 1.0f;
 
-               
+                // Calculate effective Poisson's ratio based on porosity and density
                 float grainDensity = 2650.0f; // kg/m³ (typical for quartz/feldspar)
-                float vertexPorosity = 1.0f - (vertexDensity / grainDensity);
-                vertexPorosity = Math.Max(0.01f, Math.Min(0.5f, vertexPorosity));
+                float vertexPorosity = Math.Max(0.01f, Math.Min(0.5f, 1.0f - (vertexDensity / grainDensity)));
 
-                // Calculate effective Poisson's ratio based on porosity
-                // Higher porosity typically means higher Poisson's ratio up to ~0.5 limit
+                // Density-dependent Poisson ratio (higher porosity = higher Poisson's ratio)
                 float effectivePoissonRatio = Math.Min(
                     poissonRatio * (1.0f + 0.3f * vertexPorosity),
                     0.49f
                 );
 
-                // Apply deformation based on selected loading direction
-                // Using Hooke's Law for anisotropic deformation
+                // Enhanced Young's modulus relation with density
+                float effectiveYoungModulus = youngModulus * (float)Math.Pow(densityRatio, 2.5);
+
+                // Calculate anisotropic strain tensor
+                float axialStrain = strain;
+                float lateralStrain = -strain * effectivePoissonRatio;
+
+                // Coordinate transformations for different loading directions
+                Vector3 strainVector = new Vector3();
                 switch (selectedDirection)
                 {
                     case SimulationDirection.X:
-                        // Apply axial strain in X direction
-                        vertex.X *= (1 + strain);
-                        // Apply lateral contraction in Y and Z (Poisson effect)
-                        vertex.Y *= (1 - strain * effectivePoissonRatio);
-                        vertex.Z *= (1 - strain * effectivePoissonRatio);
+                        strainVector.X = axialStrain;
+                        strainVector.Y = lateralStrain;
+                        strainVector.Z = lateralStrain;
                         break;
-
                     case SimulationDirection.Y:
-                        vertex.Y *= (1 + strain);
-                        vertex.X *= (1 - strain * effectivePoissonRatio);
-                        vertex.Z *= (1 - strain * effectivePoissonRatio);
+                        strainVector.X = lateralStrain;
+                        strainVector.Y = axialStrain;
+                        strainVector.Z = lateralStrain;
                         break;
-
-                    case SimulationDirection.Z:
-                        vertex.Z *= (1 + strain);
-                        vertex.X *= (1 - strain * effectivePoissonRatio);
-                        vertex.Y *= (1 - strain * effectivePoissonRatio);
+                    default: // Z
+                        strainVector.X = lateralStrain;
+                        strainVector.Y = lateralStrain;
+                        strainVector.Z = axialStrain;
                         break;
                 }
+
+                // Apply deformation based on strain tensor
+                Vector3 origPos = vertices[i];
+                Vector3 deformedPos = new Vector3(
+                    origPos.X * (1f + strainVector.X),
+                    origPos.Y * (1f + strainVector.Y),
+                    origPos.Z * (1f + strainVector.Z)
+                );
 
                 // Apply heterogeneous deformation based on local material properties
                 if (isDensityCalibrated && i < densityValues.Count)
                 {
-                    // Calculate deformation influence factor based on porosity
-                    // Higher porosity (lower density) materials deform more
+                    // Calculate stiffness ratio - softer materials deform more
                     float stiffnessRatio = (bulkDensity / vertexDensity);
                     stiffnessRatio = Math.Max(0.5f, Math.Min(2.0f, stiffnessRatio));
 
-                    // Calculate original position
-                    Vector3 originalPos = vertices[i];
-
-                    // Calculate elastic deformation vector
-                    Vector3 deformationVector = vertex - originalPos;
-
-                    // Scale deformation based on local stiffness
-                    // Less stiff (more porous) material deforms more
+                    // Apply differential deformation
+                    Vector3 deformationVector = deformedPos - origPos;
                     Vector3 scaledDeformation = deformationVector * stiffnessRatio;
-
-                    // Calculate new position with adjusted deformation
-                    vertex = originalPos + scaledDeformation;
+                    deformedPos = origPos + scaledDeformation;
                 }
 
-                // Save the updated position to the thread-local array
-                newPositions[i] = vertex;
+                // Apply brittle fracturing effects if applicable
+                if (isBrittleEnabled && strain > brittleStrength / youngModulus)
+                {
+                    // Check if this vertex belongs to failed elements
+                    bool inFailedElement = false;
+                    float maxStressFactor = 0.0f;
+
+                    // Find elements containing this vertex
+                    foreach (var tetra in tetrahedralElements)
+                    {
+                        if (Array.IndexOf(tetra.Vertices, i) >= 0)
+                        {
+                            int tetraIndex = tetrahedralElements.IndexOf(tetra);
+                            if (elementStresses.TryGetValue(tetraIndex, out float elementStress))
+                            {
+                                // Check if element exceeds brittle strength
+                                float stressFactor = elementStress / brittleStrength;
+                                if (stressFactor > 0.95f)
+                                {
+                                    inFailedElement = true;
+                                    maxStressFactor = Math.Max(maxStressFactor, stressFactor);
+                                }
+                            }
+                        }
+                    }
+
+                    // Add randomized fracture displacement to failed elements
+                    if (inFailedElement)
+                    {
+                        // Use a deterministic seed for reproducibility
+                        int seed = (int)(currentStrain * 10000) + i;
+                        Random rand = new Random(seed);
+
+                        // Displacement magnitude increases with stress and strain beyond failure
+                        float excessStrain = strain - (brittleStrength / youngModulus);
+                        float displacementMagnitude = 0.05f * maxStressFactor * excessStrain;
+
+                        // Create displacement with preferential direction based on loading
+                        Vector3 fracDisplacement = new Vector3(
+                            (float)(rand.NextDouble() - 0.5) * displacementMagnitude,
+                            (float)(rand.NextDouble() - 0.5) * displacementMagnitude,
+                            (float)(rand.NextDouble() - 0.5) * displacementMagnitude
+                        );
+
+                        // Bias displacement to open perpendicular to maximum stress direction
+                        switch (selectedDirection)
+                        {
+                            case SimulationDirection.X:
+                                fracDisplacement.X *= 0.1f; // Less displacement in loading direction
+                                break;
+                            case SimulationDirection.Y:
+                                fracDisplacement.Y *= 0.1f;
+                                break;
+                            default: // Z
+                                fracDisplacement.Z *= 0.1f;
+                                break;
+                        }
+
+                        // Apply fracture displacement
+                        deformedPos += fracDisplacement;
+                    }
+                }
+
+                // Apply pore pressure effects if permeability is low
+                if (permeability < 0.1f && porePressure > 0.5f)
+                {
+                    float swellingFactor = Math.Max(0.0f, porePressure - effectiveConfining) * 0.001f;
+
+                    // Isotropic expansion proportional to pore pressure
+                    deformedPos.X *= (1f + swellingFactor);
+                    deformedPos.Y *= (1f + swellingFactor);
+                    deformedPos.Z *= (1f + swellingFactor);
+                }
+
+                // Save updated position
+                newPositions[i] = deformedPos;
             });
 
-            // Now transfer the results to the deformed vertices list
-            // This avoids thread contention during the parallel loop
+            // Update the deformed vertices list
             lock (deformedVertices)
             {
                 deformedVertices.Clear();
@@ -2578,115 +4552,29 @@ namespace CTS
                 }
             }
 
-            // Apply brittle fracturing effects
-            if (isBrittleEnabled && strain > brittleStrength / youngModulus)
-            {
-                // Create a fixed seed for reproducible randomness
-                int seed = (int)(currentStrain * 10000);
-                Random globalRand = new Random(seed);
-
-                // Create an array to store displacements
-                Vector3[] displacements = new Vector3[deformedVertices.Count];
-
-                // Calculate vertex stress factors in parallel
-                float[] vertexStressFactors = new float[deformedVertices.Count];
-
-                Parallel.For(0, deformedVertices.Count, i =>
-                {
-                    // Initialize stress factor for this vertex
-                    float maxStressFactor = 0.0f;
-
-                    // Find elements containing this vertex and get their stress states
-                    foreach (var tetra in tetrahedralElements)
-                    {
-                        if (Array.IndexOf(tetra.Vertices, i) >= 0)
-                        {
-                            // This vertex is part of this tetrahedron
-                            int tetraIndex = tetrahedralElements.IndexOf(tetra);
-                            if (elementStresses.TryGetValue(tetraIndex, out float elementStress))
-                            {
-                                // Normalize stress by brittle strength to get a stress factor
-                                float stressFactor = elementStress / brittleStrength;
-                                maxStressFactor = Math.Max(maxStressFactor, stressFactor);
-                            }
-                        }
-                    }
-
-                    vertexStressFactors[i] = maxStressFactor;
-                });
-
-                // Now apply fracture displacements based on stress factors
-                Parallel.For(0, deformedVertices.Count, i =>
-                {
-                    float stressFactor = vertexStressFactors[i];
-
-                    // Only create fractures where stress exceeds threshold
-                    if (stressFactor > 0.8f)
-                    {
-                        // Create a thread-local random generator with a fixed seed
-                        // based on the global seed and vertex index
-                        Random localRand = new Random(seed + i);
-
-                        // Scale displacement with stress factor - higher stress, more displacement
-                        float displacementMagnitude = 0.05f * stressFactor * stressFactor;
-
-                        // Generate random displacement vector
-                        Vector3 displacement = new Vector3(
-                            (float)(localRand.NextDouble() - 0.5) * displacementMagnitude,
-                            (float)(localRand.NextDouble() - 0.5) * displacementMagnitude,
-                            (float)(localRand.NextDouble() - 0.5) * displacementMagnitude
-                        );
-
-                        // Store displacement in array
-                        displacements[i] = displacement;
-                    }
-                    else
-                    {
-                        displacements[i] = Vector3.Zero;
-                    }
-                });
-
-                // Apply all displacements at once
-                lock (deformedVertices)
-                {
-                    for (int i = 0; i < deformedVertices.Count; i++)
-                    {
-                        deformedVertices[i] += displacements[i];
-                    }
-                }
-            }
-
-            // Update OpenGL buffers if initialized
-            if (buffersInitialized)
-            {
-                // Upload new vertex positions to GPU
-                float[] vertexData = new float[deformedVertices.Count * 3];
-
-                lock (deformedVertices)
-                {
-                    for (int i = 0; i < deformedVertices.Count; i++)
-                    {
-                        vertexData[i * 3] = deformedVertices[i].X;
-                        vertexData[i * 3 + 1] = deformedVertices[i].Y;
-                        vertexData[i * 3 + 2] = deformedVertices[i].Z;
-                    }
-                }
-
-                GL.BindBuffer(BufferTarget.ArrayBuffer, vertexBufferId);
-                GL.BufferData(BufferTarget.ArrayBuffer, (IntPtr)(vertexData.Length * sizeof(float)),
-                                vertexData, BufferUsageHint.StaticDraw);
-                GL.BindBuffer(BufferTarget.ArrayBuffer, 0);
-            }
-
-            // Force display list recreation
-            if (meshDisplayList != 0)
-            {
-                GL.DeleteLists(meshDisplayList, 1);
-                meshDisplayList = 0;
-            }
-
             // Recalculate normals for proper lighting
             RecalculateNormals();
+
+            // Update OpenGL display
+            if (buffersInitialized)
+            {
+                if (highDetailList != 0)
+                {
+                    GL.DeleteLists(highDetailList, 1);
+                    GL.DeleteLists(lowDetailList, 1);
+                    highDetailList = 0;
+                    lowDetailList = 0;
+                }
+
+                ReleaseVBOs();
+
+                // Force display list recreation
+                if (meshDisplayList != 0)
+                {
+                    GL.DeleteLists(meshDisplayList, 1);
+                    meshDisplayList = 0;
+                }
+            }
         }
         private void RecalculateNormals()
         {
@@ -3056,15 +4944,28 @@ namespace CTS
             }
             worker.ReportProgress(100, "Mesh generation finished");
         }
+        private void SetupRotationTimer()
+        {
+            rotationTimer = new System.Windows.Forms.Timer();
+            rotationTimer.Interval = 16; // ~60 FPS
+            rotationTimer.Tick += (s, e) => glControl.Invalidate();
+        }
+
         private void GlControl_MouseDown(object sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left)
             {
                 lastMousePos = e.Location;
                 isDragging = true;
-                rotationTimer.Start(); // Start continuous rendering during drag
+
+                // Apply immediate optimizations
+                GL.Disable(EnableCap.Lighting);
+                GL.Disable(EnableCap.LineSmooth);
+
+                glControl.Invalidate();
             }
         }
+
         private void GlControl_MouseMove(object sender, MouseEventArgs e)
         {
             if (isDragging)
@@ -3072,11 +4973,17 @@ namespace CTS
                 int deltaX = e.X - lastMousePos.X;
                 int deltaY = e.Y - lastMousePos.Y;
 
-                rotationY += deltaX * 0.5f;
-                rotationX += deltaY * 0.5f;
+                // Scale rotation amount based on mesh complexity for smooth experience
+                float rotationScale = 0.5f;
+                if (indices.Count > 5000000) rotationScale = 0.2f;
+
+                rotationY += deltaX * rotationScale;
+                rotationX += deltaY * rotationScale;
+
                 lastMousePos = e.Location;
 
-                // No need to invalidate here, the timer does it
+                // Request a redraw
+                glControl.Invalidate();
             }
         }
         private void StressStrainGraph_Paint(object sender, PaintEventArgs e)
@@ -3379,7 +5286,36 @@ namespace CTS
                 return;
             }
 
-            // Set up camera
+            // Ultra-large mesh handling
+            bool useUltraSimplification = isDragging && indices.Count > 15000000;
+            if (useUltraSimplification)
+            {
+                // Set up camera matrices
+                SetupCamera();
+                DrawExtremeFallback();
+                glControl.SwapBuffers();
+                return;
+            }
+
+            // Normal rendering pipeline
+            SetupCamera();
+
+            // Draw mesh
+            DrawMesh();
+
+            // Draw color legend if enabled and not dragging
+            if (chkShowDensity.Checked && !isDragging)
+            {
+                DrawColorLegendGL();
+            }
+
+            // Present
+            glControl.SwapBuffers();
+        }
+
+        private void SetupCamera()
+        {
+            // Set up projection matrix
             GL.MatrixMode(MatrixMode.Projection);
             GL.LoadIdentity();
             float aspect = glControl.Width / (float)glControl.Height;
@@ -3400,7 +5336,7 @@ namespace CTS
             GL.Rotate(rotationY, 0.0f, 1.0f, 0.0f);
 
             // Set up basic lighting
-            if (!wireframeMode && !isRotating)
+            if (!wireframeMode && !isDragging)
             {
                 GL.Enable(EnableCap.Lighting);
                 GL.Enable(EnableCap.Light0);
@@ -3413,22 +5349,6 @@ namespace CTS
                 GL.Light(LightName.Light0, LightParameter.Ambient, lightAmbient);
                 GL.Light(LightName.Light0, LightParameter.Diffuse, lightDiffuse);
             }
-            else
-            {
-                GL.Disable(EnableCap.Lighting);
-            }
-
-            // Draw mesh
-            DrawMesh();
-
-            // Draw color legend if enabled
-            if (chkShowDensity.Checked)
-            {
-                //DrawColorLegend();
-            }
-
-            // Present
-            glControl.SwapBuffers();
         }
         private void DisposeDisplayList()
         {
@@ -3438,81 +5358,124 @@ namespace CTS
                 meshDisplayList = 0;
             }
         }
-       
         private void DrawMesh()
         {
-            // Only do color mapping when not rotating for better performance
-            bool showDensity = chkShowDensity.Checked && !isRotating;
+            if (deformedVertices == null || deformedVertices.Count == 0)
+                return;
 
+            // Set rendering mode
             if (wireframeMode)
             {
                 GL.Disable(EnableCap.Lighting);
-                if (!showDensity)
-                {
-                    GL.Color3(1.0f, 1.0f, 1.0f);
-                }
                 GL.PolygonMode(MaterialFace.FrontAndBack, PolygonMode.Line);
             }
             else
             {
-                GL.Enable(EnableCap.Lighting);
+                if (!isDragging) GL.Enable(EnableCap.Lighting);
                 GL.PolygonMode(MaterialFace.FrontAndBack, PolygonMode.Fill);
             }
 
-            // Draw the mesh as direct triangles - most efficient approach
-            GL.Begin(PrimitiveType.Triangles);
-
-            // Draw every Nth triangle when rotating for better performance
-            // This is a brutal optimization but will make rotation smooth
-            int stride = isRotating ? 10 : 1;
-
-            for (int i = 0; i < indices.Count; i += 3 * stride)
+            // Apply additional optimizations during rotation
+            if (isDragging)
             {
-                if (i + 2 >= indices.Count) break;
+                // Disable these features during rotation for better performance
+                GL.Disable(EnableCap.Lighting);
+                GL.Disable(EnableCap.LineSmooth);
+                GL.ShadeModel(ShadingModel.Flat);
 
-                int i1 = indices[i];
-                int i2 = indices[i + 1];
-                int i3 = indices[i + 2];
+                // Disable transparency during rotation for performance
+                enableTransparency = false;
+            }
 
-                // Safety check
-                if (i1 < deformedVertices.Count && i2 < deformedVertices.Count && i3 < deformedVertices.Count)
+            // Set up blending if transparency is enabled
+            if (enableTransparency)
+            {
+                GL.Enable(EnableCap.Blend);
+                GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+
+                // Sort triangles back-to-front for correct transparency
+                if (!isDragging && !wireframeMode)
                 {
-                    // Apply density-based color if showing density
-                    if (showDensity && i1 < densityValues.Count && i2 < densityValues.Count && i3 < densityValues.Count)
-                    {
-                        float density = densityValues[i1];
-                        float normalizedDensity = 0.0f;
-                        if (maxDensity > minDensity)
-                        {
-                            normalizedDensity = (density - minDensity) / (maxDensity - minDensity);
-                            normalizedDensity = Math.Max(0.0f, Math.Min(1.0f, normalizedDensity));
-                            SetColorForValue(normalizedDensity);
-                        }
-                    }
+                    RenderMeshWithDepthSorting();
 
-                    if (i1 < normals.Count) GL.Normal3(normals[i1]);
-                    GL.Vertex3(deformedVertices[i1]);
-
-                    if (i2 < normals.Count) GL.Normal3(normals[i2]);
-                    GL.Vertex3(deformedVertices[i2]);
-
-                    if (i3 < normals.Count) GL.Normal3(normals[i3]);
-                    GL.Vertex3(deformedVertices[i3]);
+                    // Reset polygon mode and disable blending
+                    GL.PolygonMode(MaterialFace.FrontAndBack, PolygonMode.Fill);
+                    GL.Disable(EnableCap.Blend);
+                    return;
                 }
             }
 
-            GL.End();
+            // Try to build display lists if they don't exist yet
+            if (highDetailList == 0 && deformedVertices.Count > 0)
+            {
+                InitializeVBOs(); // Initialize VBOs first
+                BuildDisplayLists();
+            }
 
-            // Reset state
+            // Use the appropriate display list based on rotation state
+            if (highDetailList != 0 && !enableTransparency && !showFailedElements)
+            {
+                // Only use display lists when not using transparency or failed elements highlight
+                // (those features require per-triangle rendering)
+                if (isDragging)
+                    GL.CallList(lowDetailList);
+                else
+                    GL.CallList(highDetailList);
+            }
+            else
+            {
+                // Fallback to direct rendering
+                if (isDragging && !enableTransparency && !showFailedElements)
+                    RenderLowDetailMesh();
+                else
+                    RenderFullMesh(true);
+            }
+
+            // Reset polygon mode
             GL.PolygonMode(MaterialFace.FrontAndBack, PolygonMode.Fill);
 
-            // Draw density legend
-            if (showDensity)
+            // Disable blending after rendering if we enabled it
+            if (enableTransparency)
             {
-                //DrawSimpleColorLegend();
+                GL.Disable(EnableCap.Blend);
             }
         }
+        private float[] GetColorComponents(float normalizedValue)
+        {
+            float[] color = new float[3];
 
+            // Blue to red color spectrum
+            if (normalizedValue < 0.25f)
+            {
+                // Blue to Cyan
+                color[0] = 0.0f;
+                color[1] = normalizedValue * 4.0f;
+                color[2] = 1.0f;
+            }
+            else if (normalizedValue < 0.5f)
+            {
+                // Cyan to Green
+                color[0] = 0.0f;
+                color[1] = 1.0f;
+                color[2] = 1.0f - (normalizedValue - 0.25f) * 4.0f;
+            }
+            else if (normalizedValue < 0.75f)
+            {
+                // Green to Yellow
+                color[0] = (normalizedValue - 0.5f) * 4.0f;
+                color[1] = 1.0f;
+                color[2] = 0.0f;
+            }
+            else
+            {
+                // Yellow to Red
+                color[0] = 1.0f;
+                color[1] = 1.0f - (normalizedValue - 0.75f) * 4.0f;
+                color[2] = 0.0f;
+            }
+
+            return color;
+        }
         private Bitmap CaptureGLControl()
         {
             if (!glControl.IsHandleCreated)
@@ -3859,6 +5822,9 @@ namespace CTS
 
             glControl.MakeCurrent();
 
+            // Check hardware acceleration
+            CheckHardwareAcceleration();
+
             // Set up OpenGL state
             GL.ClearColor(0.2f, 0.2f, 0.2f, 1.0f);
             GL.Enable(EnableCap.DepthTest);
@@ -3877,9 +5843,6 @@ namespace CTS
             // Set up viewport
             GL.Viewport(0, 0, glControl.Width, glControl.Height);
 
-            // Check hardware acceleration
-            CheckHardwareAcceleration();
-
             glControlInitialized = true;
         }
         private void GlControl_MouseUp(object sender, MouseEventArgs e)
@@ -3887,10 +5850,16 @@ namespace CTS
             if (e.Button == MouseButtons.Left)
             {
                 isDragging = false;
-                rotationTimer.Stop(); // Stop continuous rendering
-                glControl.Invalidate(); // Final redraw
+
+                // Restore high-quality rendering
+                if (!wireframeMode) GL.Enable(EnableCap.Lighting);
+                GL.ShadeModel(ShadingModel.Smooth);
+
+                // Ensure a final high-quality render
+                glControl.Invalidate();
             }
         }
+
         private void GlControl_MouseWheel(object sender, MouseEventArgs e)
         {
             zoom *= (float)Math.Pow(1.1, e.Delta / 120.0);
@@ -3915,6 +5884,253 @@ namespace CTS
             // Force redraw
             glControl.Invalidate();
         }
+        private void DrawExtremeFallback()
+        {
+            // For massive meshes, draw a bounding box during rotation
+            Vector3 min = new Vector3(float.MaxValue);
+            Vector3 max = new Vector3(float.MinValue);
+
+            // Sample vertices to find bounds
+            int step = Math.Max(1, deformedVertices.Count / 1000);
+            for (int i = 0; i < deformedVertices.Count; i += step)
+            {
+                Vector3 v = deformedVertices[i];
+                min.X = Math.Min(min.X, v.X);
+                min.Y = Math.Min(min.Y, v.Y);
+                min.Z = Math.Min(min.Z, v.Z);
+
+                max.X = Math.Max(max.X, v.X);
+                max.Y = Math.Max(max.Y, v.Y);
+                max.Z = Math.Max(max.Z, v.Z);
+            }
+
+            // Draw bounding box as wireframe
+            GL.Color3(1.0f, 1.0f, 1.0f);
+            GL.Begin(PrimitiveType.LineLoop);
+            GL.Vertex3(min.X, min.Y, min.Z);
+            GL.Vertex3(max.X, min.Y, min.Z);
+            GL.Vertex3(max.X, max.Y, min.Z);
+            GL.Vertex3(min.X, max.Y, min.Z);
+            GL.End();
+
+            GL.Begin(PrimitiveType.LineLoop);
+            GL.Vertex3(min.X, min.Y, max.Z);
+            GL.Vertex3(max.X, min.Y, max.Z);
+            GL.Vertex3(max.X, max.Y, max.Z);
+            GL.Vertex3(min.X, max.Y, max.Z);
+            GL.End();
+
+            GL.Begin(PrimitiveType.Lines);
+            GL.Vertex3(min.X, min.Y, min.Z); GL.Vertex3(min.X, min.Y, max.Z);
+            GL.Vertex3(max.X, min.Y, min.Z); GL.Vertex3(max.X, min.Y, max.Z);
+            GL.Vertex3(max.X, max.Y, min.Z); GL.Vertex3(max.X, max.Y, max.Z);
+            GL.Vertex3(min.X, max.Y, min.Z); GL.Vertex3(min.X, max.Y, max.Z);
+            GL.End();
+
+            // Draw message
+            GL.MatrixMode(MatrixMode.Projection);
+            GL.PushMatrix();
+            GL.LoadIdentity();
+            GL.Ortho(0, glControl.Width, 0, glControl.Height, -1, 1);
+
+            GL.MatrixMode(MatrixMode.Modelview);
+            GL.PushMatrix();
+            GL.LoadIdentity();
+
+            // Draw message about simplified view
+            GL.Enable(EnableCap.Blend);
+            GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+
+            // Text will be rendered with the font texture system
+            // Display "Ultra-simplified view during rotation - release mouse for details"
+
+            GL.MatrixMode(MatrixMode.Projection);
+            GL.PopMatrix();
+            GL.MatrixMode(MatrixMode.Modelview);
+            GL.PopMatrix();
+        }
+        private void BtnContinueSimulation_Click(object sender, EventArgs e)
+        {
+            if (!meshGenerationComplete || tetrahedralElements.Count == 0)
+            {
+                MessageBox.Show("No mesh available. Please generate a mesh first.", "Error",
+                               MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            try
+            {
+                // Initialize parameters similar to BtnStartSimulation_Click
+                // but we'll continue from current strain
+                float startingStrain = currentStrain;
+
+                // Update UI state
+                btnStartSimulation.Enabled = false;
+                btnStopSimulation.Enabled = true;
+                btnContinueSimulation.Enabled = false;
+                comboMaterials.Enabled = false;
+                comboDirection.Enabled = false;
+                progressBar.Value = (int)(startingStrain / maxStrain * 100);  // Set progress to current position
+
+                // Start simulation
+                simulationRunning = true;
+
+                // Update diagrams form if available
+                try
+                {
+                    if (diagramsForm == null || diagramsForm.IsDisposed)
+                    {
+                        InitializeDiagramsForm();
+                    }
+
+                    if (diagramsForm != null)
+                    {
+                        diagramsForm.Show();
+                        UpdateDiagramsForm();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[TriaxialSimulationForm] Error initializing DiagramsForm: {ex.Message}");
+                }
+
+                // Choose computation method
+                bool useDirectComputeForThisRun = useDirectCompute && chkUseDirectCompute.Checked;
+
+                if (useDirectComputeForThisRun)
+                {
+                    // Initialize DirectCompute if needed
+                    if (computeEngine == null)
+                    {
+                        InitializeDirectCompute();
+                    }
+
+                    if (computeEngine != null)
+                    {
+                        progressLabel.Text = fastSimulationMode ?
+                            "Continuing simulation after failure (updating at completion)" :
+                            "Continuing simulation after failure";
+
+                        Logger.Log("[TriaxialSimulationForm] Continuing simulation after failure with hardware acceleration");
+
+                        // Execute the simulation in a background task
+                        Task.Run(async () => {
+                            try
+                            {
+                                // Make deep copies of collections to prevent threading issues
+                                var verticesCopy = new List<Vector3>(vertices);
+                                var normalsCopy = new List<Vector3>(normals);
+                                var indicesCopy = new List<int>(indices);
+                                var densityValuesCopy = new List<float>(densityValues);
+                                var tetrahedralElementsCopy = new List<TetrahedralElement>(tetrahedralElements);
+
+                                // Initialize compute engine with copied mesh data if not already done
+                                if (!computeEngine.IsInitialized)
+                                {
+                                    computeEngine.InitializeFromMesh(
+                                        verticesCopy,
+                                        normalsCopy,
+                                        indicesCopy,
+                                        densityValuesCopy,
+                                        tetrahedralElementsCopy);
+
+                                    // Set material properties
+                                    computeEngine.SetMaterialProperties(
+                                        bulkDensity,
+                                        youngModulus,
+                                        poissonRatio,
+                                        yieldStrength,
+                                        brittleStrength,
+                                        cohesion,
+                                        frictionAngle,
+                                        porosity,
+                                        bulkModulus,
+                                        permeability,
+                                        minPressure,
+                                        maxPressure,
+                                        isElasticEnabled,
+                                        isPlasticEnabled,
+                                        isBrittleEnabled);
+                                }
+
+                                // Set the ignore failure flag to continue after failure
+                                computeEngine.SetIgnoreFailure(true);
+
+                                // Run the simulation from current strain to maxStrain
+                                SimulationDirection direction = (SimulationDirection)comboDirection.SelectedIndex;
+                                await computeEngine.ContinueSimulationAsync(startingStrain, maxStrain, 0.001f, (CTS.SimulationDirection)direction);
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Log($"[TriaxialSimulationForm] Error in accelerated simulation: {ex.Message}");
+
+                                if (ex.InnerException != null)
+                                {
+                                    Logger.Log($"[TriaxialSimulationForm] Inner exception: {ex.InnerException.Message}");
+                                }
+
+                                Logger.Log($"[TriaxialSimulationForm] Stack trace: {ex.StackTrace}");
+
+                                // Fall back to standard method
+                                if (InvokeRequired)
+                                {
+                                    BeginInvoke(new Action(() => {
+                                        progressLabel.Text = "Falling back to standard simulation after failure";
+                                        ContinueWithStandardSimulation(startingStrain);
+                                    }));
+                                }
+                                else
+                                {
+                                    progressLabel.Text = "Falling back to standard simulation after failure";
+                                    ContinueWithStandardSimulation(startingStrain);
+                                }
+                            }
+                        });
+                    }
+                    else
+                    {
+                        // Could not initialize DirectCompute, fall back to CPU
+                        progressLabel.Text = "Hardware acceleration unavailable, using standard simulation";
+                        ContinueWithStandardSimulation(startingStrain);
+                    }
+                }
+                else
+                {
+                    // Use original timer-based method
+                    progressLabel.Text = fastSimulationMode ?
+                        "Continuing simulation after failure (updating at completion)" :
+                        "Continuing simulation after failure";
+
+                    Logger.Log("[TriaxialSimulationForm] Continuing simulation after failure with standard method");
+                    ContinueWithStandardSimulation(startingStrain);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[TriaxialSimulationForm] Error continuing simulation: {ex.Message}");
+
+                if (ex.InnerException != null)
+                {
+                    Logger.Log($"[TriaxialSimulationForm] Inner exception: {ex.InnerException.Message}");
+                }
+
+                MessageBox.Show($"Error continuing simulation: {ex.Message}", "Error",
+                                MessageBoxButtons.OK, MessageBoxIcon.Error);
+
+                // Reset UI state
+                ResetUIAfterSimulation();
+            }
+        }
+
+        private void ContinueWithStandardSimulation(float startingStrain)
+        {
+            // Setup state for continuation
+            currentStrain = startingStrain;
+
+            // Start the simulation timer
+            simulationTimer.Start();
+        }
+
         private void BtnSaveImage_Click(object sender, EventArgs e)
         {
             try
@@ -4245,6 +6461,361 @@ namespace CTS
                 Logger.Log($"[TriaxialSimulationForm] Error drawing legend text: {ex.Message}");
             }
         }
+        private void ComputeEngine_ProgressUpdated(object sender, DirectComputeProgressEventArgs e)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => HandleComputeProgress(e)));
+            }
+            else
+            {
+                HandleComputeProgress(e);
+            }
+        }
+        
+        private void ComputeEngine_SimulationCompleted(object sender, DirectComputeCompletedEventArgs e)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => HandleComputeCompleted(e)));
+            }
+            else
+            {
+                HandleComputeCompleted(e);
+            }
+        }
+        private void HandleComputeCompleted(DirectComputeCompletedEventArgs e)
+        {
+            try
+            {
+                // Update the stress-strain curve with thread-safety
+                lock (stressStrainCurve)
+                {
+                    stressStrainCurve.Clear();
+                    stressStrainCurve.AddRange(e.StressStrainCurve);
+                }
+
+                // Update deformed vertices
+                if (deformedVertices == null || deformedVertices.Count != e.DeformedVertices.Length)
+                {
+                    deformedVertices = new List<Vector3>(e.DeformedVertices.Length);
+                    for (int i = 0; i < e.DeformedVertices.Length; i++)
+                    {
+                        deformedVertices.Add(Vector3.Zero);
+                    }
+                }
+
+                // Copy vertex data
+                for (int i = 0; i < e.DeformedVertices.Length; i++)
+                {
+                    if (i < deformedVertices.Count)
+                        deformedVertices[i] = e.DeformedVertices[i];
+                }
+
+                // Update element stress data
+                elementStresses.Clear();
+                for (int i = 0; i < e.ElementStresses.Length; i++)
+                {
+                    elementStresses[i] = e.ElementStresses[i];
+                }
+
+                // Update volumetric strain and energy values for diagrams
+                volumetricStrain = e.VolumetricStrain;
+                elasticEnergy = e.ElasticEnergy;
+                plasticEnergy = e.PlasticEnergy;
+
+                // Update permeability
+                permeability = e.Permeability;
+
+                // Update UI controls with simulated values
+                try
+                {
+                    SafeSetNumericValue(numPorosity, (decimal)Math.Max(0.01, Math.Min(0.5, porosity)));
+                    SafeSetNumericValue(numPermeability, (decimal)Math.Max(0.0001f, Math.Min(10, permeability)));
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[TriaxialSimulationForm] Error updating UI controls: {ex.Message}");
+                }
+
+                // Update UI state
+                simulationRunning = false;
+                btnStartSimulation.Enabled = true;
+                btnStopSimulation.Enabled = false;
+                comboMaterials.Enabled = true;
+                comboDirection.Enabled = true;
+
+                // Enable continue button if failure was detected and we haven't reached max strain
+                btnContinueSimulation.Enabled = e.HasFailed && currentStrain < maxStrain;
+
+                // Update progress
+                progressBar.Value = 100;
+
+                // CRITICAL FIX: Properly report failure
+                if (e.HasFailed)
+                {
+                    progressLabel.Text = "Simulation completed - Material failed";
+                    progressLabel.ForeColor = Color.Red;
+                }
+                else
+                {
+                    progressLabel.Text = "Simulation completed";
+                    progressLabel.ForeColor = SystemColors.ControlText;
+                }
+
+                // Force normals recalculation with the updated vertex positions
+                RecalculateNormals();
+
+                // Release and rebuild OpenGL resources
+                ReleaseVBOs();
+
+                if (highDetailList != 0)
+                {
+                    GL.DeleteLists(highDetailList, 1);
+                    GL.DeleteLists(lowDetailList, 1);
+                    highDetailList = 0;
+                    lowDetailList = 0;
+                }
+
+                if (meshDisplayList != 0)
+                {
+                    GL.DeleteLists(meshDisplayList, 1);
+                    meshDisplayList = 0;
+                }
+
+                // Redraw everything
+                glControl.Invalidate();
+                if (stressStrainGraph != null && stressStrainGraph.IsHandleCreated)
+                    stressStrainGraph.Invalidate();
+                if (mohrCoulombGraph != null && mohrCoulombGraph.IsHandleCreated)
+                    mohrCoulombGraph.Invalidate();
+
+                // Update diagrams form
+                UpdateDiagramsForm();
+
+                // Log results with more details
+                Logger.Log($"[TriaxialSimulationForm] Simulation completed. Max stress: {stressStrainCurve.Max(p => p.Y / 10.0f):F2} MPa");
+
+                if (e.PeakStress > 0)
+                {
+                    Logger.Log($"[TriaxialSimulationForm] Peak stress: {e.PeakStress:F2} MPa at strain {e.StrainAtPeak:P2}");
+                }
+
+                if (e.HasFailed)
+                {
+                    Logger.Log("[TriaxialSimulationForm] Sample failed during simulation");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[TriaxialSimulationForm] Error processing simulation results: {ex.Message}");
+
+                // Ensure UI state is reset even if processing fails
+                simulationRunning = false;
+                btnStartSimulation.Enabled = true;
+                btnStopSimulation.Enabled = false;
+                btnContinueSimulation.Enabled = false;
+                comboMaterials.Enabled = true;
+                comboDirection.Enabled = true;
+            }
+        }
+        private void HandleComputeProgress(DirectComputeProgressEventArgs e)
+        {
+            try
+            {
+                // Update progress bar
+                progressBar.Value = (int)Math.Min(100, e.ProgressPercent);
+                progressLabel.Text = $"Progress: {e.ProgressPercent:F1}%";
+
+                // Update current stats
+                currentStrain = e.ProgressPercent / 100f * maxStrain;
+                normalStress = e.CurrentStress;
+
+                // Create or update stress-strain point for current step
+                int stressPoint = (int)(e.CurrentStress * 10);  // Match the scaling used in CPU sim
+                int strainPoint = (int)(currentStrain * 1000);  // Convert to 0.1% units
+
+                // Update or add point to stress-strain curve with thread safety
+                lock (stressStrainCurve)
+                {
+                    bool pointUpdated = false;
+                    for (int i = 0; i < stressStrainCurve.Count; i++)
+                    {
+                        if (stressStrainCurve[i].X == strainPoint)
+                        {
+                            stressStrainCurve[i] = new Point(strainPoint, stressPoint);
+                            pointUpdated = true;
+                            break;
+                        }
+                    }
+
+                    if (!pointUpdated)
+                    {
+                        stressStrainCurve.Add(new Point(strainPoint, stressPoint));
+                    }
+                }
+
+                // Update volumetric strain and energy values
+                volumetricStrain = e.VolumetricStrain;
+
+                // Store values for the diagrams
+                shearStress = e.CurrentStress / 2.0f;  // Approximate for progress updates
+                normalStress = e.CurrentStress / 2.0f + (float)minPressure / 1000f;
+
+                // Update porosity consistently with the calculation in DirectTriaxialCompute
+                float newPorosity = porosity * (1.0f - e.VolumetricStrain);
+                porosity = Math.Max(0.01f, Math.Min(0.5f, newPorosity));
+
+                // Update permeability
+                permeability = e.Permeability;
+
+                // Update UI controls with simulation values (only if not in fast mode)
+                if (!fastSimulationMode)
+                {
+                    try
+                    {
+                        SafeSetNumericValue(numPorosity, (decimal)Math.Max(0.01, Math.Min(0.5, porosity)));
+                        SafeSetNumericValue(numPermeability, (decimal)Math.Max(0.0001f, Math.Min(10, permeability)));
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[TriaxialSimulationForm] Error updating UI controls: {ex.Message}");
+                    }
+                }
+
+                // Display warning for approaching failure
+                if (e.FailurePercentage > 90)
+                {
+                    progressLabel.Text = $"WARNING: Approaching failure ({e.FailurePercentage:F0}%)";
+                    progressLabel.ForeColor = Color.Red;
+                }
+
+                // Only update UI in non-fast mode
+                if (!fastSimulationMode)
+                {
+                    // Unlike the completed event, the progress event doesn't provide the deformed vertices
+                    // So we don't update the mesh during progress updates
+
+                    // Force UI updates
+                    glControl.Invalidate();
+
+                    if (stressStrainGraph != null && stressStrainGraph.IsHandleCreated)
+                        stressStrainGraph.Invalidate();
+
+                    if (mohrCoulombGraph != null && mohrCoulombGraph.IsHandleCreated)
+                        mohrCoulombGraph.Invalidate();
+
+                    // Update diagrams form with current data
+                    if (diagramsForm != null && !diagramsForm.IsDisposed)
+                    {
+                        UpdateDiagramsWithAcceleratedData(e);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[TriaxialSimulationForm] Error handling progress update: {ex.Message}");
+            }
+        }
+        private void UpdateDiagramsWithAcceleratedData(DirectComputeProgressEventArgs e)
+        {
+            try
+            {
+                // Make a copy of the current stress-strain data to avoid threading issues
+                List<Point> currentData = new List<Point>(stressStrainCurve);
+
+                // Call the standard update method in diagram form
+                diagramsForm.UpdateData(
+                    currentData,                   // Current stress-strain curve
+                    currentStrain,                 // Current strain
+                    e.CurrentStress,               // Current stress
+                    cohesion,                      // Cohesion
+                    frictionAngle,                 // Friction angle
+                    normalStress,                  // Normal stress
+                    shearStress,                   // Shear stress
+                    bulkDensity,                   // Bulk density
+                    porosity,                      // Porosity (updated based on volumetric strain)
+                    minPressure,                   // Min pressure
+                    maxPressure,                   // Max pressure
+                    yieldStrength,                 // Yield strength
+                    brittleStrength,               // Brittle strength
+                    isElasticEnabled,              // Elastic enabled
+                    isPlasticEnabled,              // Plastic enabled
+                    isBrittleEnabled,              // Brittle enabled
+                    true                           // Simulation is running
+                );
+
+                // If using the enhanced diagrams form, update with additional data
+                if (diagramsForm is TriaxialDiagramsForm diagForm)
+                {
+                    try
+                    {
+                        // Calculate peak stress and strain at peak if available
+                        float peakStress = 0;
+                        float strainAtPeak = 0;
+
+                        if (currentData.Count > 0)
+                        {
+                            // Find maximum stress point
+                            int maxY = currentData.Max(p => p.Y);
+                            int peakIndex = currentData.FindIndex(p => p.Y == maxY);
+
+                            if (peakIndex >= 0)
+                            {
+                                peakStress = maxY / 10.0f; // Convert back to MPa
+                                strainAtPeak = currentData[peakIndex].X / 10.0f; // Convert to percentage
+                            }
+                        }
+
+                        float porePressure = e.PorePressure;
+                        float effSigma1 = e.CurrentStress + (minPressure / 1000f) - porePressure;
+                        float effSigma3 = minPressure / 1000f - porePressure;
+
+                        // Directly call the method with all required parameters
+                        diagForm.UpdateEnhancedData(
+                            currentData,
+                            currentStrain,
+                            e.CurrentStress,
+                            cohesion,
+                            frictionAngle,
+                            normalStress,
+                            shearStress,
+                            bulkDensity,
+                            porosity,
+                            minPressure / 1000f, // Convert to MPa
+                            maxPressure / 1000f, // Convert to MPa
+                            yieldStrength,
+                            brittleStrength,
+                            isElasticEnabled,
+                            isPlasticEnabled,
+                            isBrittleEnabled,
+                            true,               // Simulation running
+                            porePressure,       // Pore pressure
+                            effSigma1,          // Effective major principal stress
+                            effSigma3,          // Effective minor principal stress
+                            e.Permeability,     // Current permeability
+                            e.Permeability / permeability, // Permeability ratio
+                            e.VolumetricStrain, // Volumetric strain
+                            elasticEnergy,      // Elastic energy (estimate)
+                            plasticEnergy,      // Plastic energy (estimate)
+                            e.HasFailed,        // Failure occurred
+                            e.FailurePercentage, // Percent of failure criterion
+                            peakStress,         // Peak stress - MISSING PARAMETER
+                            strainAtPeak        // Strain at peak - MISSING PARAMETER
+                        );
+                    }
+                    catch (Exception ex)
+                    {
+                        // Log the error but don't rethrow - fall back to standard update
+                        Logger.Log($"[TriaxialSimulationForm] Enhanced diagram update failed: {ex.Message}. Using standard update.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[TriaxialSimulationForm] Error updating diagrams: {ex.Message}");
+            }
+        }
         private void DrawColorLegendGL()
         {
             // Save OpenGL state
@@ -4421,6 +6992,13 @@ namespace CTS
         {
             if (disposing)
             {
+                // Dispose DirectCompute engine
+                if (computeEngine != null)
+                {
+                    computeEngine.Dispose();
+                    computeEngine = null;
+                }
+
                 // Dispose OpenGL resources
                 DisposeDisplayList();
                 if (meshDisplayList != 0)
@@ -4433,12 +7011,22 @@ namespace CTS
                     GL.DeleteTextures(1, ref fontTextureId);
                     fontTextureId = 0;
                 }
+                if (highDetailList != 0)
+                {
+                    GL.DeleteLists(highDetailList, 1);
+                    GL.DeleteLists(lowDetailList, 1);
+                    highDetailList = 0;
+                    lowDetailList = 0;
+                }
+
+                ReleaseVBOs();
 
                 if (fontTexture != null)
                 {
                     fontTexture.Dispose();
                     fontTexture = null;
                 }
+
                 // Delete VBOs
                 if (buffersInitialized)
                 {
@@ -4448,12 +7036,14 @@ namespace CTS
                     GL.DeleteBuffers(1, ref indexBufferId);
                     buffersInitialized = false;
                 }
+
                 if (rotationTimer != null)
                 {
                     rotationTimer.Stop();
                     rotationTimer.Dispose();
                     rotationTimer = null;
                 }
+
                 // Dispose other managed resources if needed
                 if (meshWorker != null)
                 {
@@ -4470,6 +7060,7 @@ namespace CTS
                 {
                     glControl.Dispose();
                 }
+
                 if (diagramsForm != null && !diagramsForm.IsDisposed)
                 {
                     diagramsForm.Dispose();

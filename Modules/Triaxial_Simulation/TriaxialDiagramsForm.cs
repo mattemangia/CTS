@@ -31,6 +31,19 @@ namespace CTS
         private bool isPlasticEnabled = false;
         private bool isBrittleEnabled = false;
         private bool simulationRunning = false;
+        private float porePressure = 0.0f;
+        private float effectiveSigma1 = 0.0f;
+        private float effectiveSigma3 = 0.0f;
+        private float permeability = 0.01f;
+        private float permeabilityRatio = 1.0f;
+        private float volumetricStrain = 0.0f;
+        private float elasticEnergy = 0.0f;
+        private float plasticEnergy = 0.0f;
+        private bool failureState = false;
+        private float failurePercentage = 0.0f;
+        private float peakStress = 0.0f;
+        private float strainAtPeak = 0.0f;
+        private bool hasPeakData = false;
 
         // UI Elements
         private PictureBox stressStrainGraph;
@@ -133,8 +146,10 @@ namespace CTS
                 Text = "Save Image",
                 Location = new Point(10, 0),
                 Size = new Size(120, 15),
+                ForeColor=Color.White,
+                BackColor=Color.Black,
                 StateCommon = {
-                    Back = { Color1 = Color.FromArgb(80, 80, 120) },
+                    
                     Content = { ShortText = { Color1 = Color.White } }
                 }
             };
@@ -346,10 +361,14 @@ namespace CTS
                 }
             }
 
-            // Draw title with material properties
+            // Draw title with enhanced material properties
             using (Font titleFont = new Font("Arial", 9, FontStyle.Bold))
             {
                 string densityInfo = $"Material: Test | Density: {bulkDensity:F0} kg/m³ | Porosity: {porosity:P1}";
+                if (permeability > 0)
+                {
+                    densityInfo += $" | Perm: {permeability:F3} mD";
+                }
                 g.DrawString(densityInfo, titleFont, Brushes.Cyan, padding, 10);
             }
 
@@ -392,6 +411,49 @@ namespace CTS
                 }
             }
 
+            // Draw volumetric strain path if we have data
+            if (stressStrainCurve.Count >= 2 && volumetricStrain != 0)
+            {
+                using (Pen volStrainPen = new Pen(Color.Gold, 1) { DashStyle = DashStyle.Dot })
+                {
+                    // Calculate max stress for scaling
+                    float maxStressValue = Math.Max(1000, Math.Max(yieldStrength, brittleStrength) * 1.2f);
+                    if (stressStrainCurve.Count > 0)
+                    {
+                        float maxCurrentStress = stressStrainCurve.Max(p => p.Y) / 10.0f;
+                        maxStressValue = Math.Max(maxStressValue, maxCurrentStress * 1.2f);
+                    }
+                    maxStressValue = (float)Math.Ceiling(maxStressValue / 100) * 100;
+
+                    // Scale points to fit in the graph
+                    int maxStrain = 200; // 20% strain
+                    int maxStress = (int)(maxStressValue * 10); // Convert to graph units
+
+                    // Create a path showing volumetric strain relationship to axial strain
+                    List<Point> volStrainPoints = new List<Point>();
+                    float volStrainScale = 5.0f; // Scale factor to make volumetric strain visible
+
+                    for (int i = 0; i < stressStrainCurve.Count; i += Math.Max(1, stressStrainCurve.Count / 20))
+                    {
+                        // Use current strain point but modify height to show volumetric strain
+                        float axialStrain = stressStrainCurve[i].X / 10.0f; // % value
+                                                                            // Scale volumetric strain to be visible on the same scale
+                        float scaledVolStrain = volumetricStrain * (axialStrain / currentStrain) * volStrainScale;
+
+                        int x = padding + (int)(stressStrainCurve[i].X * width / maxStrain);
+                        int y = stressStrainGraph.Height - padding - (int)(Math.Abs(scaledVolStrain) * height / 20);
+                        volStrainPoints.Add(new Point(x, y));
+                    }
+
+                    if (volStrainPoints.Count >= 2)
+                    {
+                        g.DrawLines(volStrainPen, volStrainPoints.ToArray());
+                        g.DrawString("Volumetric Strain Path (scaled)", new Font("Arial", 8), Brushes.Gold,
+                                    stressStrainGraph.Width - padding - 200, padding + 10);
+                    }
+                }
+            }
+
             // Draw stress-strain curve
             if (stressStrainCurve.Count >= 2)
             {
@@ -430,7 +492,7 @@ namespace CTS
                             g.FillEllipse(pointBrush, lastPoint.X - 5, lastPoint.Y - 5, 10, 10);
                         }
 
-                        // Display current values
+                        // Display enhanced test parameters
                         using (Font valueFont = new Font("Arial", 10, FontStyle.Bold))
                         {
                             float currentStressVal = stressStrainCurve.Last().Y / 10.0f; // Convert to MPa
@@ -439,27 +501,359 @@ namespace CTS
                             string stressStr = $"{currentStressVal:F1} MPa";
                             string strainStr = $"{currentStrainVal:F1}%";
 
+                            // Enhanced info panel
+                            int infoWidth = 220;
+                            int infoHeight = 280;
                             // Background for readability
-                            using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(80, 0, 0, 0)))
+                            using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(120, 0, 0, 0)))
                             {
-                                g.FillRectangle(bgBrush, padding + 5, padding + 5, 200, 80);
+                                g.FillRectangle(bgBrush, padding + 5, padding + 5, infoWidth, infoHeight);
                             }
 
-                            g.DrawString("Strain: " + strainStr, valueFont, Brushes.White, padding + 10, padding + 10);
-                            g.DrawString("Stress: " + stressStr, valueFont, Brushes.White, padding + 10, padding + 35);
+                            // Draw border
+                            using (Pen borderPen = new Pen(Color.FromArgb(150, 150, 150), 1))
+                            {
+                                g.DrawRectangle(borderPen, padding + 5, padding + 5, infoWidth, infoHeight);
+                            }
+
+                            // Values section
+                            float textY = padding + 10;
+                            g.DrawString("Strain: " + strainStr, valueFont, Brushes.White, padding + 10, textY);
+                            textY += 25;
+                            g.DrawString("Stress: " + stressStr, valueFont, Brushes.White, padding + 10, textY);
+                            textY += 25;
 
                             // Show active behaviors
                             string behaviors = "Behaviors: ";
                             if (isElasticEnabled) behaviors += "Elastic ";
                             if (isPlasticEnabled) behaviors += "Plastic ";
                             if (isBrittleEnabled) behaviors += "Brittle";
-                            g.DrawString(behaviors, valueFont, Brushes.Cyan, padding + 10, padding + 60);
+                            g.DrawString(behaviors, valueFont, Brushes.Cyan, padding + 10, textY);
+                            textY += 25;
+
+                            // Enhanced parameters
+
+                            // Volumetric strain
+                            string volStrainText = $"Vol. Strain: {volumetricStrain * 100:F2}%";
+                            Brush volStrainBrush = volumetricStrain < 0 ? Brushes.LightGreen : Brushes.Yellow;
+                            g.DrawString(volStrainText, valueFont, volStrainBrush, padding + 10, textY);
+                            textY += 25;
+
+                            // Energy calculations
+                            string elasticText = $"Elastic Energy: {elasticEnergy:F2} MJ/m³";
+                            g.DrawString(elasticText, valueFont, Brushes.LightGreen, padding + 10, textY);
+                            textY += 25;
+
+                            if (plasticEnergy > 0)
+                            {
+                                string plasticText = $"Plastic Energy: {plasticEnergy:F2} MJ/m³";
+                                g.DrawString(plasticText, valueFont, Brushes.Orange, padding + 10, textY);
+                                textY += 25;
+                            }
+
+                            // Pore pressure
+                            if (porePressure > 0.01f)
+                            {
+                                string poreText = $"Pore Pressure: {porePressure:F2} MPa";
+                                g.DrawString(poreText, valueFont, Brushes.Magenta, padding + 10, textY);
+                                textY += 25;
+                            }
+
+                            // Permeability changes
+                            if (permeabilityRatio != 1.0f)
+                            {
+                                string permText = permeabilityRatio > 1.0f ?
+                                    $"Perm: ↑ {permeabilityRatio:F2}x" :
+                                    $"Perm: ↓ {1 / permeabilityRatio:F2}x";
+                                g.DrawString(permText, valueFont, Brushes.Cyan, padding + 10, textY);
+                                textY += 25;
+                            }
+
+                            // Failure state
+                            if (failurePercentage > 70 || failureState)
+                            {
+                                string failText = failureState ?
+                                    "FAILURE OCCURRED" :
+                                    $"Approaching Failure: {failurePercentage:F0}%";
+
+                                // Flash warning if close to failure or failed
+                                Brush failureBrush;
+                                if (failureState)
+                                {
+                                    // Red for failure
+                                    failureBrush = Brushes.Red;
+                                }
+                                else if (failurePercentage > 90)
+                                {
+                                    // Flashing for imminent failure
+                                    int flashMod = (int)(DateTime.Now.Millisecond / 250) % 2;
+                                    failureBrush = flashMod == 0 ? Brushes.Red : Brushes.Orange;
+                                }
+                                else
+                                {
+                                    // Orange for warning
+                                    failureBrush = Brushes.Orange;
+                                }
+
+                                // Draw with slightly larger font for emphasis
+                                using (Font warningFont = new Font("Arial", 11, FontStyle.Bold))
+                                {
+                                    g.DrawString(failText, warningFont, failureBrush, padding + 10, textY);
+                                }
+                                textY += 25;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // If simulation not running but we have data, show key results
+            if (!simulationRunning && stressStrainCurve.Count > 0)
+            {
+                using (Font summaryFont = new Font("Arial", 10, FontStyle.Bold))
+                {
+                    // Use stored peak stress if available, otherwise calculate it
+                    float displayPeakStress;
+                    float displayStrainAtPeak;
+
+                    // Calculate peak stress from curve data
+                    if (stressStrainCurve.Count > 0)
+                    {
+                        displayPeakStress = stressStrainCurve.Max(p => p.Y) / 10.0f; // Convert to MPa
+
+                        // Find strain at peak stress
+                        int peakIndex = 0;
+                        float maxY = stressStrainCurve.Max(p => p.Y);
+                        for (int i = 0; i < stressStrainCurve.Count; i++)
+                        {
+                            if (stressStrainCurve[i].Y >= maxY)
+                            {
+                                peakIndex = i;
+                                break;
+                            }
+                        }
+
+                        displayStrainAtPeak = stressStrainCurve[peakIndex].X / 10.0f; // %
+                    }
+                    else
+                    {
+                        displayPeakStress = 0;
+                        displayStrainAtPeak = 0;
+                    }
+
+                    // Draw summary box
+                    int boxWidth = 250;
+                    int boxHeight = 120;
+                    int boxX = stressStrainGraph.Width - boxWidth - padding;
+                    int boxY = padding + 10;
+
+                    using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(100, 0, 0, 0)))
+                    {
+                        g.FillRectangle(bgBrush, boxX, boxY, boxWidth, boxHeight);
+                    }
+
+                    // Add results
+                    g.DrawString("TEST RESULTS", summaryFont, Brushes.White, boxX + 10, boxY + 10);
+                    g.DrawString($"Peak Stress: {displayPeakStress:F1} MPa", summaryFont, Brushes.Cyan, boxX + 10, boxY + 35);
+                    g.DrawString($"Strain at Peak: {displayStrainAtPeak:F2}%", summaryFont, Brushes.Cyan, boxX + 10, boxY + 60);
+
+                    // Show failure status
+                    if (failureState)
+                    {
+                        g.DrawString("SAMPLE FAILED", summaryFont, Brushes.Red, boxX + 10, boxY + 85);
+                    }
+                    else
+                    {
+                        g.DrawString("Test Completed (No Failure)", summaryFont, Brushes.Green, boxX + 10, boxY + 85);
+                    }
+                }
+            }
+
+            // Draw energy areas if we have significant elastic or plastic energy
+            if (elasticEnergy > 0 || plasticEnergy > 0)
+            {
+                // Calculate max stress for scaling (reusing the values)
+                float maxStressValue = Math.Max(1000, Math.Max(yieldStrength, brittleStrength) * 1.2f);
+                if (stressStrainCurve.Count > 0)
+                {
+                    float maxCurrentStress = stressStrainCurve.Max(p => p.Y) / 10.0f;
+                    maxStressValue = Math.Max(maxStressValue, maxCurrentStress * 1.2f);
+                }
+                maxStressValue = (float)Math.Ceiling(maxStressValue / 100) * 100;
+
+                int maxStrain = 200; // 20% strain
+                int maxStress = (int)(maxStressValue * 10); // Convert to graph units
+
+                // Create filled regions for energy visualization
+                if (stressStrainCurve.Count > 10 && elasticEnergy > 0)
+                {
+                    // Find yield point index
+                    int yieldIndex = stressStrainCurve.Count - 1;
+                    if (isPlasticEnabled && yieldStrength > 0)
+                    {
+                        for (int i = 0; i < stressStrainCurve.Count; i++)
+                        {
+                            if (stressStrainCurve[i].Y / 10.0f >= yieldStrength)
+                            {
+                                yieldIndex = i;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Create polygon points for elastic energy region
+                    List<Point> elasticRegion = new List<Point>();
+                    // Start at origin
+                    elasticRegion.Add(new Point(padding, stressStrainGraph.Height - padding));
+
+                    // Add points up to yield or end of curve
+                    int limitIndex = Math.Min(yieldIndex, stressStrainCurve.Count - 1);
+                    for (int i = 0; i <= limitIndex; i++)
+                    {
+                        int x = padding + (int)(stressStrainCurve[i].X * width / maxStrain);
+                        int y = stressStrainGraph.Height - padding - (int)(stressStrainCurve[i].Y * height / maxStress);
+                        elasticRegion.Add(new Point(x, y));
+                    }
+
+                    // Close polygon back to x-axis
+                    elasticRegion.Add(new Point(
+                        padding + (int)(stressStrainCurve[limitIndex].X * width / maxStrain),
+                        stressStrainGraph.Height - padding));
+
+                    // Draw elastic energy region with semi-transparent fill
+                    using (SolidBrush elasticBrush = new SolidBrush(Color.FromArgb(50, 0, 255, 0)))
+                    {
+                        g.FillPolygon(elasticBrush, elasticRegion.ToArray());
+                    }
+                }
+
+                // Draw plastic energy region if we have plastic deformation
+                if (stressStrainCurve.Count > 10 && plasticEnergy > 0 && isPlasticEnabled)
+                {
+                    // Find yield point index
+                    int yieldIndex = 0;
+                    for (int i = 0; i < stressStrainCurve.Count; i++)
+                    {
+                        if (stressStrainCurve[i].Y / 10.0f >= yieldStrength)
+                        {
+                            yieldIndex = i;
+                            break;
+                        }
+                    }
+
+                    // Create polygon for plastic region
+                    if (yieldIndex > 0 && yieldIndex < stressStrainCurve.Count - 1)
+                    {
+                        List<Point> plasticRegion = new List<Point>();
+
+                        // Start at yield point on x-axis
+                        int yieldX = padding + (int)(stressStrainCurve[yieldIndex].X * width / maxStrain);
+                        plasticRegion.Add(new Point(yieldX, stressStrainGraph.Height - padding));
+
+                        // Add yield point on curve
+                        int yieldY = stressStrainGraph.Height - padding - (int)(stressStrainCurve[yieldIndex].Y * height / maxStress);
+                        plasticRegion.Add(new Point(yieldX, yieldY));
+
+                        // Add points after yield
+                        for (int i = yieldIndex + 1; i < stressStrainCurve.Count; i++)
+                        {
+                            int x = padding + (int)(stressStrainCurve[i].X * width / maxStrain);
+                            int y = stressStrainGraph.Height - padding - (int)(stressStrainCurve[i].Y * height / maxStress);
+                            plasticRegion.Add(new Point(x, y));
+                        }
+
+                        // Close polygon back to x-axis
+                        plasticRegion.Add(new Point(
+                            padding + (int)(stressStrainCurve[stressStrainCurve.Count - 1].X * width / maxStrain),
+                            stressStrainGraph.Height - padding));
+
+                        // Draw plastic energy region
+                        using (SolidBrush plasticBrush = new SolidBrush(Color.FromArgb(60, 255, 128, 0)))
+                        {
+                            g.FillPolygon(plasticBrush, plasticRegion.ToArray());
                         }
                     }
                 }
             }
         }
+        /// <summary>
+        /// Enhanced method to update form data with advanced simulation parameters
+        /// </summary>
+        public void UpdateEnhancedData(
+            List<Point> stressStrainData,
+            float strain,
+            float stress,
+            float coh,
+            float frAngle,
+            float normStress,
+            float shrStress,
+            float density,
+            float por,
+            float minP,
+            float maxP,
+            float yieldS,
+            float brittleS,
+            bool elastic,
+            bool plastic,
+            bool brittle,
+            bool running,
+            float porePressureMPa,
+            float effSigma1,
+            float effSigma3,
+            float perm,
+            float permRatio,
+            float volStrain,
+            float elasticEng,
+            float plasticEng,
+            bool failureOccurred,
+            float failurePercent,
+            float peakStress = 0,    // Add these new parameters
+            float strainAtPeak = 0)  // with default values
+        {
+            // Update standard parameters using existing method for compatibility
+            UpdateData(
+                stressStrainData,
+                strain,
+                stress,
+                coh,
+                frAngle,
+                normStress,
+                shrStress,
+                density,
+                por,
+                minP,
+                maxP,
+                yieldS,
+                brittleS,
+                elastic,
+                plastic,
+                brittle,
+                running);
 
+            // Store enhanced parameters
+            porePressure = porePressureMPa;
+            effectiveSigma1 = effSigma1;
+            effectiveSigma3 = effSigma3;
+            permeability = perm;
+            permeabilityRatio = permRatio;
+            volumetricStrain = volStrain;
+            elasticEnergy = elasticEng;
+            plasticEnergy = plasticEng;
+            failureState = failureOccurred;
+            failurePercentage = failurePercent;
+
+            // Store peak stress information if provided
+            if (peakStress > 0)
+            {
+                this.peakStress = peakStress;
+                this.strainAtPeak = strainAtPeak;
+                this.hasPeakData = true;
+            }
+
+            // Redraw diagrams to show enhanced data
+            stressStrainGraph.Invalidate();
+            mohrCoulombGraph.Invalidate();
+        }
         private void MohrCoulombGraph_Paint(object sender, PaintEventArgs e)
         {
             Graphics g = e.Graphics;

@@ -6,7 +6,7 @@
     <OutputType>WinExe</OutputType>
     <NoStandardLibraries>false</NoStandardLibraries>
     <AssemblyName>CTS</AssemblyName>
-    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <TargetFrameworkVersion>v4.8.1</TargetFrameworkVersion>
     <TargetFrameworkProfile>
     </TargetFrameworkProfile>
     <FileAlignment>512</FileAlignment>
@@ -183,6 +183,7 @@
     </Compile>
     <Compile Include="Modules\StressAnalysis\StressAnalysisFormExtension.cs" />
     <Compile Include="Modules\StressAnalysis\TriaxialSimulation.cs" />
+    <Compile Include="Modules\Triaxial_Simulation\DirectTriaxialComputing.cs" />
     <Compile Include="Modules\Triaxial_Simulation\TriaxialDiagramsForm.cs">
       <SubType>Form</SubType>
     </Compile>

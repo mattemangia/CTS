@@ -1,4 +1,4 @@
-﻿using Krypton.Toolkit;
+using Krypton.Toolkit;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -447,8 +447,7 @@ namespace CTS.Modules.BugSubmission
         /// </summary>
         private async Task<bool> SubmitViaEmailAsync()
         {
-            // If SmtpClient is used in the application, use that configuration
-            // This implementation uses a simplified approach with a mailto link
+            
 
             try
             {
@@ -500,7 +499,7 @@ namespace CTS.Modules.BugSubmission
                     attachmentPaths.Add(screenshotPath);
                 }
 
-                // If we have a way to send emails programmatically, use it here
+                
                 // Otherwise, open the default email client
 
                 string mailtoUrl = $"mailto:{BugReportEmail}?subject={Uri.EscapeDataString(subject)}&body={Uri.EscapeDataString(emailBody.ToString())}";

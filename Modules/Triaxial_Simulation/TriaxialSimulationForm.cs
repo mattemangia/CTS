@@ -1,5 +1,7 @@
 ﻿using CTS;
 using Krypton.Toolkit;
+using Microsoft.Office.Interop.Word;
+using Microsoft.Vbe.Interop;
 using OpenTK;
 using OpenTK.Graphics.OpenGL;
 using System;
@@ -8,9 +10,18 @@ using System.ComponentModel;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using static MaterialDensityLibrary;
+using Font = System.Drawing.Font;
+using Point = System.Drawing.Point;
+using System.Collections.Concurrent;
+using Rectangle = System.Drawing.Rectangle;
+using System.IO;
+using static CTS.MeshGenerator;
+
 
 namespace CTS
 {
@@ -18,7 +29,7 @@ namespace CTS
     {
         private MainForm mainForm;
         private Material selectedMaterial;
-
+        private KryptonButton btnGenerateMesh;
         private object labelVolume;
         private byte[,,] densityVolume;
         private double pixelSize;
@@ -28,7 +39,7 @@ namespace CTS
         private List<int> indices = new List<int>();
         private List<float> densityValues = new List<float>();
         private List<TetrahedralElement> tetrahedralElements = new List<TetrahedralElement>();
-
+        private KryptonButton btnSaveImage;
         private GLControl glControl;
         private float rotationX = 0.0f;
         private float rotationY = 0.0f;
@@ -37,6 +48,7 @@ namespace CTS
         private float minDensity = float.MaxValue;
         private float maxDensity = float.MinValue;
         private bool glControlInitialized = false;
+        private Panel colorLegendPanel;
 
         // Density calibration data
         private List<CalibrationPoint> calibrationPoints = new List<CalibrationPoint>();
@@ -60,7 +72,7 @@ namespace CTS
         private float currentStrain = 0.0f;
         private float maxStrain = 0.2f; // 20% strain
         private bool simulationRunning = false;
-        private List<Point> stressStrainCurve = new List<Point>();
+        private List<System.Drawing.Point> stressStrainCurve = new List<Point>();
         private List<Vector3> deformedVertices = new List<Vector3>();
         private System.Windows.Forms.Timer simulationTimer;
 
@@ -75,12 +87,16 @@ namespace CTS
         private float permeability = 0.01f; // Darcy
         private Dictionary<int, float> elementStresses = new Dictionary<int, float>();
         private PictureBox mohrCoulombGraph;
-
+        private bool isRotating = false;
+        private System.Diagnostics.Stopwatch dragTimer = new System.Diagnostics.Stopwatch();
+        private const int REDRAW_INTERVAL_MS = 16;
         // Progress tracking
         private ProgressBar progressBar;
         private Label progressLabel;
         private BackgroundWorker meshWorker;
         private bool meshGenerationComplete = false;
+        private bool fastSimulationMode = false;
+        private KryptonCheckBox chkFastSimulation;
 
         // Sampling parameters for mesh generation - to improve performance
         private int samplingRate = 2; // Sample every Nth voxel 
@@ -116,10 +132,154 @@ namespace CTS
         private KryptonGroupBox petrophysicalGroup;
         private Point lastMousePos;
         private bool isDragging = false;
+        private int vertexBufferId = 0;
+        private int normalBufferId = 0;
+        private int colorBufferId = 0;
+        private int indexBufferId = 0;
+        private bool buffersInitialized = false;
+        private System.Windows.Forms.Timer rotationTimer;
+        private bool hardwareAccelerated = false;
+        private DiagramsForm diagramsForm;
+        private int fontTextureId = 0;
+        private bool fontTextureInitialized = false;
+        private Bitmap fontTexture = null;
+        private readonly Dictionary<char, Rectangle> characterRects = new Dictionary<char, Rectangle>();
 
         // Implement IMaterialDensityProvider interface
         public Material SelectedMaterial => selectedMaterial;
+        private void InitializeDiagramsForm()
+        {
+            diagramsForm = new DiagramsForm();
+        }
+        private void AddDiagramsButton()
+        {
+            // Create the button
+            KryptonButton btnShowDiagrams = new KryptonButton
+            {
+                Text = "Show Diagrams",
+                Width = 310,
+                Height = 30,
+                StateCommon = {
+            Back = { Color1 = Color.FromArgb(80, 80, 120) },
+            Content = { ShortText = { Color1 = Color.White } }
+        }
+            };
 
+            // Add the button click event
+            btnShowDiagrams.Click += (s, e) => {
+                if (diagramsForm == null || diagramsForm.IsDisposed)
+                {
+                    InitializeDiagramsForm();
+                }
+                diagramsForm.Show();
+                UpdateDiagramsForm();
+            };
+
+            // Find a suitable container for the button
+            // Option 1: Add to the form directly with absolute positioning
+            btnShowDiagrams.Location = new Point(10, this.ClientSize.Height - 50);
+            this.Controls.Add(btnShowDiagrams);
+
+            // Or Option 2: Find an existing container panel if available
+            // Find the last panel in the form that might be our controls panel
+            Panel controlPanel = null;
+            foreach (Control control in this.Controls)
+            {
+                if (control is TableLayoutPanel mainLayout)
+                {
+                    foreach (Control panelControl in mainLayout.Controls)
+                    {
+                        if (panelControl is Panel panel &&
+                            (panel.Name.Contains("control") || panel.Name.Contains("Control") ||
+                             panel.Tag?.ToString() == "controls"))
+                        {
+                            controlPanel = panel;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // If we found a control panel, use that instead
+            if (controlPanel != null)
+            {
+                // Remove from form
+                this.Controls.Remove(btnShowDiagrams);
+
+                // Find the right position - find the last button and position after it
+                int maxY = 10;
+                foreach (Control c in controlPanel.Controls)
+                {
+                    if (c is Button || c is KryptonButton)
+                    {
+                        int bottom = c.Location.Y + c.Height;
+                        if (bottom > maxY)
+                            maxY = bottom;
+                    }
+                }
+
+                btnShowDiagrams.Location = new Point(10, maxY + 10);
+                controlPanel.Controls.Add(btnShowDiagrams);
+            }
+        }
+        private void AddColorLegendPanel()
+        {
+            // Create a panel for the color legend
+            colorLegendPanel = new Panel
+            {
+                BackColor = Color.FromArgb(40, 40, 40),
+                Size = new Size(100, 300),
+                Location = new Point(glControl.Width - 105, 10),
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                Visible = chkShowDensity.Checked
+            };
+
+            // Paint handler for the legend
+            colorLegendPanel.Paint += ColorLegendPanel_Paint;
+
+            // Add the panel to the render panel (alongside the GLControl)
+            renderPanel.Controls.Add(colorLegendPanel);
+
+            // Make sure panel is on top
+            colorLegendPanel.BringToFront();
+
+            // Update the checkbox event to toggle visibility
+            chkShowDensity.CheckedChanged -= ChkShowDensity_CheckedChanged;
+            chkShowDensity.CheckedChanged += (s, e) => {
+                colorLegendPanel.Visible = chkShowDensity.Checked;
+                glControl.Invalidate();
+            };
+        }
+
+        private void CreateGLControl()
+        {
+            // Create a hardware-accelerated graphics mode with anti-aliasing
+            var graphicsMode = new OpenTK.Graphics.GraphicsMode(
+                new OpenTK.Graphics.ColorFormat(8, 8, 8, 8),
+                24, // Depth bits
+                8,  // Stencil bits
+                4   // Anti-aliasing samples
+            );
+
+            // Create GLControl with hardware acceleration
+            glControl = new GLControl(graphicsMode);
+            glControl.VSync = true;
+
+            glControl.Dock = DockStyle.Fill;
+            glControl.Load += GlControl_Load;
+            glControl.Paint += GlControl_Paint;
+            glControl.Resize += GlControl_Resize;
+            glControl.MouseDown += GlControl_MouseDown;
+            glControl.MouseMove += GlControl_MouseMove;
+            glControl.MouseUp += GlControl_MouseUp;
+            glControl.MouseWheel += GlControl_MouseWheel;
+        }
+        private void SetupRotationTimer()
+        {
+            rotationTimer = new System.Windows.Forms.Timer();
+            rotationTimer.Interval = 16; // ~60 FPS
+            rotationTimer.Tick += (s, e) => glControl.Invalidate();
+        }
         public double CalculateTotalVolume()
         {
             return materialVolume;
@@ -157,7 +317,14 @@ namespace CTS
                     // Last resort if UI update still fails
                 }
             }
+
+            // Refresh the legend to update the display
+            if (colorLegendPanel != null)
+            {
+                colorLegendPanel.Invalidate();
+            }
         }
+
         public void ApplyDensityCalibration(List<CalibrationPoint> points)
         {
             calibrationPoints = new List<CalibrationPoint>(points);
@@ -196,9 +363,14 @@ namespace CTS
 
                 // Update material properties based on new density
                 UpdateMaterialPropertiesFromDensity();
+
+                // Refresh the legend panel to show the new density range
+                if (colorLegendPanel != null)
+                {
+                    colorLegendPanel.Invalidate();
+                }
             }
         }
-
         private void CalculateAverageBulkDensity()
         {
             if (densityValues.Count == 0)
@@ -230,8 +402,102 @@ namespace CTS
             // Update min/max density
             minDensity = densityValues.Min();
             maxDensity = densityValues.Max();
+
+            // Refresh the legend panel
+            if (colorLegendPanel != null)
+            {
+                colorLegendPanel.Invalidate();
+            }
+        }
+        /// <summary>
+        /// Compute the center and radius of the mesh’s bounding sphere.
+        /// </summary>
+        private Vector3 ComputeBoundingSphere(out float radius)
+        {
+            if (deformedVertices == null || deformedVertices.Count == 0)
+            {
+                radius = 10.0f;
+                return Vector3.Zero;
+            }
+
+            // Find the mesh center by averaging vertex positions
+            Vector3 meshCenter = Vector3.Zero;
+            foreach (var v in deformedVertices)
+                meshCenter += v;
+            meshCenter /= deformedVertices.Count;
+
+            // Find maximum distance from center with outlier detection
+            float maxDist2 = 0f;
+            List<float> distances = new List<float>();
+
+            foreach (var v in deformedVertices)
+            {
+                float d2 = (v - meshCenter).LengthSquared;
+                distances.Add(d2);
+                if (d2 > maxDist2) maxDist2 = d2;
+            }
+
+            // Sort distances and check for outliers
+            distances.Sort();
+            float medianDist2 = distances[distances.Count / 2];
+
+            // If max distance is more than 100x the median, we likely have outliers
+            if (maxDist2 > medianDist2 * 100 && distances.Count > 10)
+            {
+                // Use 95th percentile instead of maximum to avoid outliers
+                int idx95 = (int)(distances.Count * 0.95);
+                maxDist2 = distances[idx95];
+                Logger.Log($"[TriaxialSimulationForm] Outliers detected! Using 95th percentile for radius.");
+            }
+
+            // Compute radius and set a reasonable minimum value
+            radius = (float)Math.Sqrt(maxDist2);
+            if (radius < 1.0f)
+            {
+                Logger.Log($"[TriaxialSimulationForm] Mesh is too small (r={radius}). Scaling to visible size.");
+                radius = 1.0f;
+            }
+
+            //Logger.Log($"[TriaxialSimulationForm] Mesh center: {meshCenter}, radius: {radius}");
+            return meshCenter;
         }
 
+        /// <summary>
+        /// Given a sphere radius and a vertical FOV, returns the distance
+        /// so that the sphere just fits in view (with 10% margin).
+        /// </summary>
+        private float ComputeCameraDistance(float radius, float fovRadians)
+        {
+            // Calculate distance so sphere fills most of view (with some margin)
+            float distance = radius / (float)Math.Sin(fovRadians * 0.5f) * 1.5f;
+
+            // Ensure a minimum distance
+            distance = Math.Max(distance, radius * 3.0f);
+
+            // Log for debugging
+            //Logger.Log($"[TriaxialSimulationForm] Camera distance: {distance}");
+
+            return distance;
+        }
+        /// <summary>
+        /// Rebuilds the projection matrix based on current control size,
+        /// FOV, and the sphere’s extent.
+        /// </summary>
+        private void UpdateProjection(int width, int height, float fovRadians, float camDistance, float sphereRadius)
+        {
+            float aspect = width / (float)height;
+            float near = Math.Max(0.01f, camDistance - sphereRadius);
+            float far = camDistance + sphereRadius;
+
+            GL.MatrixMode(MatrixMode.Projection);
+            GL.LoadIdentity();
+
+            Matrix4 proj = Matrix4.CreatePerspectiveFieldOfView(
+                fovRadians, aspect, near, far);
+            GL.LoadMatrix(ref proj);
+
+            GL.MatrixMode(MatrixMode.Modelview);
+        }
         private void UpdateMaterialPropertiesFromDensity()
         {
             // 1. Young's modulus relationship with density (empirical relationship for rocks)
@@ -314,13 +580,53 @@ namespace CTS
             this.pixelSize = mainForm.GetPixelSize();
 
             InitializeComponent();
+
+            // Check if we got hardware acceleration
+            CheckHardwareAcceleration();
+
             InitializeBackgroundWorker();
             LoadMaterialsFromMainForm();
+            InitializeDiagramsForm();
+            AddDiagramsButton();
             Logger.Log("[TriaxialSimulationForm] Constructor Ended");
+        }
+        private void CheckHardwareAcceleration()
+        {
+            if (glControl != null && glControl.IsHandleCreated)
+            {
+                // Force current context
+                glControl.MakeCurrent();
+
+                // Check if hardware acceleration is working
+                string renderer = GL.GetString(StringName.Renderer);
+                string vendor = GL.GetString(StringName.Vendor);
+
+                // Software renderers usually contain these strings
+                hardwareAccelerated = !(
+                    renderer.Contains("Software") ||
+                    renderer.Contains("software") ||
+                    renderer.Contains("Mesa") ||
+                    vendor.Contains("Microsoft")
+                );
+
+                // Show warning if we're in software mode
+                if (!hardwareAccelerated)
+                {
+                    MessageBox.Show(
+                        "WARNING: OpenGL is running in software mode which will be extremely slow.\n\n" +
+                        "Renderer: " + renderer + "\n" +
+                        "Vendor: " + vendor + "\n\n" +
+                        "Please ensure you have up-to-date graphics drivers installed.",
+                        "Hardware Acceleration Not Available",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }
+            }
         }
 
         private void InitializeComponent()
         {
+            SetupRotationTimer();
             this.Text = "Triaxial Simulation";
             this.Size = new Size(1200, 800);
             this.StartPosition = FormStartPosition.CenterParent;
@@ -360,13 +666,13 @@ namespace CTS
             TableLayoutPanel rightLayout = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                RowCount = 2,
+                RowCount = 1,
                 ColumnCount = 1,
                 BackColor = Color.FromArgb(42, 42, 42)
             };
 
-            rightLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 60F)); // Controls area
-            rightLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 40F)); // Results graphs area
+            rightLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F)); // Controls area
+          
 
             // Create scrollable panel for controls
             Panel scrollablePanel = new Panel
@@ -376,28 +682,18 @@ namespace CTS
                 BackColor = Color.FromArgb(42, 42, 42)
             };
 
-            // Create results panel
-            TableLayoutPanel resultsPanel = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                RowCount = 2,
-                ColumnCount = 1,
-                BackColor = Color.FromArgb(42, 42, 42)
-            };
-
-            resultsPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
-            resultsPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+            
 
             // Add to right layout
             rightLayout.Controls.Add(scrollablePanel, 0, 0);
-            rightLayout.Controls.Add(resultsPanel, 0, 1);
+            
             rightPanel.Controls.Add(rightLayout);
 
             // Create controls for the scrollable panel
             Panel controlsContent = new Panel
             {
                 Width = 330,
-                Height = 850, // Make this taller to accommodate petrophysical parameters
+                Height = 900, // Make this taller to accommodate petrophysical parameters
                 BackColor = Color.FromArgb(42, 42, 42),
                 AutoSize = false,
                 Dock = DockStyle.Top
@@ -917,30 +1213,40 @@ namespace CTS
                 ForeColor = Color.LightSkyBlue
             };
             controlsContent.Controls.Add(progressBar);
-
+            chkFastSimulation = new KryptonCheckBox
+            {
+                Text = "Fast Simulation Mode (Render only final result)",
+                Location = new Point(140, 720),  
+                Checked = false,
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            };
+            chkFastSimulation.CheckedChanged += (s, e) => {
+                fastSimulationMode = chkFastSimulation.Checked;
+            };
+            controlsContent.Controls.Add(chkFastSimulation);
             // Progress label
             progressLabel = new Label
             {
                 Text = "Ready",
                 ForeColor = Color.White,
                 TextAlign = ContentAlignment.MiddleCenter,
-                Location = new Point(140, 720),
+                Location = new Point(140, 750),
                 Width = 180,
                 Height = 20
             };
             controlsContent.Controls.Add(progressLabel);
 
             // Generate Mesh Button
-            KryptonButton btnGenerateMesh = new KryptonButton
+            btnGenerateMesh = new KryptonButton
             {
                 Text = "Generate Mesh",
-                Location = new Point(10, 750),
+                Location = new Point(10, 790),
                 Width = 310,
                 Height = 30,
                 StateCommon = {
-                    Back = { Color1 = Color.FromArgb(80, 80, 120) },
-                    Content = { ShortText = { Color1 = Color.White } }
-                }
+        Back = { Color1 = Color.FromArgb(80, 80, 120) },
+        Content = { ShortText = { Color1 = Color.White } }
+    }
             };
             btnGenerateMesh.Click += BtnGenerateMesh_Click;
             controlsContent.Controls.Add(btnGenerateMesh);
@@ -949,7 +1255,7 @@ namespace CTS
             btnStartSimulation = new KryptonButton
             {
                 Text = "Start Simulation",
-                Location = new Point(10, 790),
+                Location = new Point(10, 830),
                 Width = 310,
                 Height = 30,
                 Enabled = false,
@@ -969,7 +1275,7 @@ namespace CTS
             btnStopSimulation = new KryptonButton
             {
                 Text = "Stop Simulation",
-                Location = new Point(10, 830),
+                Location = new Point(10, 870),
                 Width = 310,
                 Height = 30,
                 Enabled = false,
@@ -984,75 +1290,8 @@ namespace CTS
             };
             btnStopSimulation.Click += BtnStopSimulation_Click;
             controlsContent.Controls.Add(btnStopSimulation);
-
-            // ================= RESULTS PANELS =================
-
-            // Stress-strain graph panel
-            Panel stressStrainPanel = new Panel
-            {
-                Dock = DockStyle.Fill,
-                Margin = new Padding(5),
-                BackColor = Color.FromArgb(32, 32, 32)
-            };
-
-            Label lblStressStrain = new Label
-            {
-                Text = "Stress-Strain Curve",
-                Dock = DockStyle.Top,
-                ForeColor = Color.White,
-                Font = new Font("Segoe UI", 9, FontStyle.Bold),
-                TextAlign = ContentAlignment.MiddleLeft,
-                Height = 20
-            };
-            stressStrainPanel.Controls.Add(lblStressStrain);
-
-            stressStrainGraph = new PictureBox
-            {
-                Dock = DockStyle.Fill,
-                BackColor = Color.White,
-                BorderStyle = BorderStyle.FixedSingle,
-                Margin = new Padding(0, 20, 0, 0)
-            };
-            stressStrainGraph.Paint += StressStrainGraph_Paint;
-            stressStrainPanel.Controls.Add(stressStrainGraph);
-
-            // Mohr-Coulomb graph panel
-            Panel mohrCoulombPanel = new Panel
-            {
-                Dock = DockStyle.Fill,
-                Margin = new Padding(5),
-                BackColor = Color.FromArgb(32, 32, 32)
-            };
-
-            Label lblMohrCoulomb = new Label
-            {
-                Text = "Mohr-Coulomb Diagram",
-                Dock = DockStyle.Top,
-                ForeColor = Color.White,
-                Font = new Font("Segoe UI", 9, FontStyle.Bold),
-                TextAlign = ContentAlignment.MiddleLeft,
-                Height = 20
-            };
-            mohrCoulombPanel.Controls.Add(lblMohrCoulomb);
-
-            mohrCoulombGraph = new PictureBox
-            {
-                Dock = DockStyle.Fill,
-                BackColor = Color.White,
-                BorderStyle = BorderStyle.FixedSingle,
-                Margin = new Padding(0, 20, 0, 0)
-            };
-            mohrCoulombGraph.Paint += MohrCoulombGraph_Paint;
-            mohrCoulombPanel.Controls.Add(mohrCoulombGraph);
-
-            // Add graphs to results panel
-            resultsPanel.Controls.Add(stressStrainPanel, 0, 0);
-            resultsPanel.Controls.Add(mohrCoulombPanel, 0, 1);
-
             // Initialize OpenGL Control FIRST
-            glControl = new GLControl(new OpenTK.Graphics.GraphicsMode(32, 24, 0, 8));
-            glControl.Dock = DockStyle.Fill;
-            glControl.VSync = true;
+            CreateGLControl();
 
             glControl.Load += GlControl_Load;
             glControl.Paint += GlControl_Paint;
@@ -1064,7 +1303,7 @@ namespace CTS
 
             // Add GLControl to render panel
             renderPanel.Controls.Add(glControl);
-
+            AddColorLegendPanel();
             // Set up event handlers for controls
             comboMaterials.SelectedIndexChanged += ComboMaterials_SelectedIndexChanged;
             comboDirection.SelectedIndexChanged += ComboDirection_SelectedIndexChanged;
@@ -1082,11 +1321,103 @@ namespace CTS
                 Interval = 50
             };
             simulationTimer.Tick += SimulationTimer_Tick;
-
+            AddSaveImageButton();
             // Add main layout to form
             this.Controls.Add(mainLayout);
         }
+        private void ColorLegendPanel_Paint(object sender, PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
 
+            // Enable high quality rendering
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+            Rectangle panelRect = colorLegendPanel.ClientRectangle;
+
+            // Legend parameters
+            int barWidth = 25;
+            int barHeight = 200;
+            int barX = 60;
+            int barY = 40;
+
+            // Draw title
+            using (Font titleFont = new Font("Arial", 10, FontStyle.Bold))
+            {
+                g.DrawString("Density", titleFont, Brushes.White, 10, 10);
+
+                // Draw unit
+                string unitText = isDensityCalibrated ? "kg/m³" : "(normalized)";
+                g.DrawString(unitText, titleFont, Brushes.LightGray, 10, 25);
+            }
+
+            // Check for valid density range
+            float displayMinDensity = minDensity;
+            float displayMaxDensity = maxDensity;
+
+            // If min and max are the same or invalid, set reasonable defaults
+            if (float.IsNaN(displayMinDensity) || float.IsNaN(displayMaxDensity) ||
+                displayMinDensity >= displayMaxDensity)
+            {
+                if (isDensityCalibrated)
+                {
+                    displayMinDensity = 1000f;
+                    displayMaxDensity = 3000f;
+                }
+                else
+                {
+                    displayMinDensity = 0f;
+                    displayMaxDensity = 1f;
+                }
+            }
+
+            // Draw color gradient
+            for (int i = 0; i < barHeight; i++)
+            {
+                float normalizedValue = 1.0f - (i / (float)barHeight);
+                using (Brush brush = new SolidBrush(GetColorForValue(normalizedValue)))
+                {
+                    g.FillRectangle(brush, barX, barY + i, barWidth, 1);
+                }
+            }
+
+            // Draw border
+            g.DrawRectangle(Pens.White, barX, barY, barWidth, barHeight);
+
+            // Draw tick marks and labels
+            using (Font labelFont = new Font("Arial", 8))
+            {
+                int numTicks = 6;
+                for (int i = 0; i < numTicks; i++)
+                {
+                    float normalizedValue = 1.0f - (i / (float)(numTicks - 1));
+                    float value = displayMinDensity + (displayMaxDensity - displayMinDensity) * normalizedValue;
+                    int y = barY + (int)(i * barHeight / (float)(numTicks - 1));
+
+                    // Draw tick mark
+                    g.DrawLine(Pens.White, barX - 5, y, barX, y);
+
+                    // Format value
+                    string valueText = isDensityCalibrated
+                        ? $"{value:F0}"
+                        : $"{normalizedValue:F1}";
+
+                    // Draw value label
+                    g.DrawString(valueText, labelFont, Brushes.White, barX - 45, y - 6);
+                }
+
+                // Draw min/max labels if calibrated
+                if (isDensityCalibrated)
+                {
+                    g.DrawString("MAX", labelFont, Brushes.White, barX - 25, barY - 15);
+                    g.DrawString("MIN", labelFont, Brushes.White, barX - 25, barY + barHeight + 5);
+
+                    // Debug info to verify values
+                    g.DrawString($"Range: {displayMinDensity:F0} - {displayMaxDensity:F0}",
+                                 labelFont, Brushes.Yellow, 5, barHeight + barY + 20);
+                }
+            }
+        }
         private void MaterialProperty_ValueChanged(object sender, EventArgs e)
         {
             // Update properties when numeric controls change
@@ -1430,20 +1761,78 @@ namespace CTS
             progressBar.Value = e.ProgressPercentage;
             progressLabel.Text = e.UserState.ToString();
         }
+        private void ScaleMeshForDisplay()
+        {
+            if (deformedVertices == null || deformedVertices.Count == 0 || vertices == null || vertices.Count == 0)
+            {
+                return;
+            }
 
+            // Calculate the true mesh bounds without any artificial minimum
+            Vector3 min = new Vector3(float.MaxValue);
+            Vector3 max = new Vector3(float.MinValue);
+
+            foreach (var v in vertices)
+            {
+                min.X = Math.Min(min.X, v.X);
+                min.Y = Math.Min(min.Y, v.Y);
+                min.Z = Math.Min(min.Z, v.Z);
+
+                max.X = Math.Max(max.X, v.X);
+                max.Y = Math.Max(max.Y, v.Y);
+                max.Z = Math.Max(max.Z, v.Z);
+            }
+
+            Vector3 center = (min + max) * 0.5f;
+            Vector3 size = max - min;
+            float maxDim = Math.Max(Math.Max(size.X, size.Y), size.Z);
+
+            // Target bounding box size
+            float targetSize = 10.0f;
+
+            // Determine if we need to scale the mesh (too small or too large)
+            bool needsScaling = (maxDim < 1.0f || maxDim > 100.0f);
+
+            if (needsScaling)
+            {
+                // Calculate scale factor
+                float scaleFactor = targetSize / maxDim;
+
+                // Create a scaled copy for display purposes only
+                deformedVertices = new List<Vector3>(vertices.Count);
+
+                foreach (var v in vertices)
+                {
+                    // Center then scale
+                    Vector3 centered = v - center;
+                    Vector3 scaled = centered * scaleFactor;
+                    deformedVertices.Add(scaled);
+                }
+            }
+            else
+            {
+                // No scaling needed, just copy the vertices
+                deformedVertices = new List<Vector3>(vertices);
+            }
+        }
         private void MeshWorker_RunWorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
         {
+            Logger.Log("[TriaxialSimulationForm] MeshWorker_RunWorkerCompleted() - Start");
+
             if (e.Error != null)
             {
                 MessageBox.Show($"Error generating mesh: {e.Error.Message}", "Error",
                                MessageBoxButtons.OK, MessageBoxIcon.Error);
                 progressLabel.Text = "Mesh generation failed";
                 progressBar.Value = 0;
+                Logger.Log($"[TriaxialSimulationForm] Mesh generation failed with error: {e.Error.Message}");
+                Logger.Log($"[TriaxialSimulationForm] Error stack trace: {e.Error.StackTrace}");
             }
             else if (e.Cancelled)
             {
                 progressLabel.Text = "Mesh generation cancelled";
                 progressBar.Value = 0;
+                Logger.Log("[TriaxialSimulationForm] Mesh generation was cancelled by user");
             }
             else
             {
@@ -1451,6 +1840,81 @@ namespace CTS
                 if (success)
                 {
                     meshGenerationComplete = true;
+
+                    Logger.Log($"[TriaxialSimulationForm] Mesh generation successful: {vertices.Count} vertices, {indices.Count / 3} triangles");
+
+                    // Log original mesh scale
+                    if (vertices.Count > 0)
+                    {
+                        Vector3 min = new Vector3(float.MaxValue);
+                        Vector3 max = new Vector3(float.MinValue);
+
+                        foreach (var v in vertices)
+                        {
+                            min.X = Math.Min(min.X, v.X);
+                            min.Y = Math.Min(min.Y, v.Y);
+                            min.Z = Math.Min(min.Z, v.Z);
+
+                            max.X = Math.Max(max.X, v.X);
+                            max.Y = Math.Max(max.Y, v.Y);
+                            max.Z = Math.Max(max.Z, v.Z);
+                        }
+
+                        Vector3 size = max - min;
+                        float maxDim = Math.Max(Math.Max(size.X, size.Y), size.Z);
+
+                        Logger.Log($"[TriaxialSimulationForm] Original mesh bounds: min={min}, max={max}, size={size}, maxDim={maxDim}");
+
+                        // Log a few sample vertices
+                        for (int i = 0; i < Math.Min(5, vertices.Count); i++)
+                        {
+                            Logger.Log($"[TriaxialSimulationForm] Original vertex {i}: {vertices[i]}");
+                        }
+                    }
+
+                    // First calculate the material volume from original vertices (before scaling)
+                    // This ensures volume calculations are accurate
+                    materialVolume = CalculateTetrahedralVolume();
+                    Logger.Log($"[TriaxialSimulationForm] Calculated material volume: {materialVolume} m³");
+
+                    // Fix mesh scaling for display purposes
+                    Logger.Log("[TriaxialSimulationForm] Calling FixMeshScale() to adjust mesh size");
+                    FixMeshScale();
+
+                    // Create deformed vertices by copying current vertices
+                    Logger.Log("[TriaxialSimulationForm] Creating deformed vertices for display");
+                    deformedVertices = new List<Vector3>(vertices);
+
+                    // Log deformed vertices scale
+                    if (deformedVertices.Count > 0)
+                    {
+                        Vector3 min = new Vector3(float.MaxValue);
+                        Vector3 max = new Vector3(float.MinValue);
+
+                        foreach (var v in deformedVertices)
+                        {
+                            min.X = Math.Min(min.X, v.X);
+                            min.Y = Math.Min(min.Y, v.Y);
+                            min.Z = Math.Min(min.Z, v.Z);
+
+                            max.X = Math.Max(max.X, v.X);
+                            max.Y = Math.Max(max.Y, v.Y);
+                            max.Z = Math.Max(max.Z, v.Z);
+                        }
+
+                        Vector3 size = max - min;
+                        float maxDim = Math.Max(Math.Max(size.X, size.Y), size.Z);
+
+                        Logger.Log($"[TriaxialSimulationForm] Deformed vertices bounds: min={min}, max={max}, size={size}, maxDim={maxDim}");
+
+                        // Log a few sample deformed vertices
+                        for (int i = 0; i < Math.Min(5, deformedVertices.Count); i++)
+                        {
+                            Logger.Log($"[TriaxialSimulationForm] Deformed vertex {i}: {deformedVertices[i]}");
+                        }
+                    }
+
+                    // Update UI
                     btnStartSimulation.Enabled = true;
                     progressLabel.Text = $"Mesh generated: {vertices.Count} vertices, {indices.Count / 3} triangles";
                     progressBar.Value = 100;
@@ -1458,23 +1922,47 @@ namespace CTS
                     // Set bulk density based on average grayscale value if calibrated
                     if (isDensityCalibrated)
                     {
+                        Logger.Log("[TriaxialSimulationForm] Applying density calibration");
                         CalculateAverageBulkDensity();
-                        numBulkDensity.Value = (decimal)bulkDensity;
+
+                        try
+                        {
+                            numBulkDensity.Value = (decimal)Math.Min(Math.Max((decimal)bulkDensity, numBulkDensity.Minimum), numBulkDensity.Maximum);
+                            Logger.Log($"[TriaxialSimulationForm] Set bulk density to {bulkDensity} kg/m³");
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[TriaxialSimulationForm] Error setting bulk density UI: {ex.Message}");
+                        }
+
                         UpdateMaterialPropertiesFromDensity();
                     }
 
-                    // Initialize deformed vertices
-                    deformedVertices = new List<Vector3>(vertices);
+                    // Enable/reenable UI controls
+                    comboMaterials.Enabled = true;
+                    trackSamplingRate.Enabled = true;
+
+                    // Force update of 3D view
+                    Logger.Log("[TriaxialSimulationForm] Invalidating GL control to update display");
                     glControl.Invalidate();
                 }
                 else
                 {
                     progressLabel.Text = "No voxels found for selected material";
                     progressBar.Value = 0;
+                    Logger.Log("[TriaxialSimulationForm] No voxels found for selected material - mesh generation failed");
+
+                    // Enable/reenable UI controls
+                    comboMaterials.Enabled = true;
+                    trackSamplingRate.Enabled = true;
                 }
             }
-        }
+            comboMaterials.Enabled = true;
+            trackSamplingRate.Enabled = true;
 
+            btnGenerateMesh.Enabled = true;
+            Logger.Log("[TriaxialSimulationForm] MeshWorker_RunWorkerCompleted() - End");
+        }
         private void LoadMaterialsFromMainForm()
         {
             comboMaterials.Items.Clear();
@@ -1499,6 +1987,8 @@ namespace CTS
 
         private void BtnGenerateMesh_Click(object sender, EventArgs e)
         {
+            Logger.Log("[TriaxialSimulationForm] BtnGenerateMesh_Click() - Start");
+
             if (comboMaterials.SelectedItem is Material material)
             {
                 selectedMaterial = material;
@@ -1512,6 +2002,7 @@ namespace CTS
                 comboMaterials.Enabled = false;
                 trackSamplingRate.Enabled = false;
                 btnStartSimulation.Enabled = false;
+                btnGenerateMesh.Enabled = false;  // Disable the Generate Mesh button
 
                 // Clear old mesh data
                 vertices.Clear();
@@ -1519,6 +2010,8 @@ namespace CTS
                 normals.Clear();
                 densityValues.Clear();
                 tetrahedralElements.Clear();
+
+                Logger.Log($"[TriaxialSimulationForm] Starting mesh generation for material: {material.Name}, samplingRate: {samplingRate}");
 
                 // Start mesh generation in background
                 MeshGenerationParameters parameters = new MeshGenerationParameters
@@ -1529,8 +2022,104 @@ namespace CTS
 
                 meshWorker.RunWorkerAsync(parameters);
             }
-        }
 
+            Logger.Log("[TriaxialSimulationForm] BtnGenerateMesh_Click() - End");
+        }
+        private void FixMeshScale()
+        {
+            Logger.Log("[TriaxialSimulationForm] FixMeshScale() - Start");
+
+            if (vertices == null || vertices.Count == 0)
+            {
+                Logger.Log("[TriaxialSimulationForm] No vertices to fix - returning");
+                return;
+            }
+
+            // Find the current mesh scale
+            Vector3 min = new Vector3(float.MaxValue);
+            Vector3 max = new Vector3(float.MinValue);
+
+            foreach (var v in vertices)
+            {
+                min.X = Math.Min(min.X, v.X);
+                min.Y = Math.Min(min.Y, v.Y);
+                min.Z = Math.Min(min.Z, v.Z);
+
+                max.X = Math.Max(max.X, v.X);
+                max.Y = Math.Max(max.Y, v.Y);
+                max.Z = Math.Max(max.Z, v.Z);
+            }
+
+            Vector3 center = (min + max) * 0.5f;
+            Vector3 size = max - min;
+            float maxDim = Math.Max(Math.Max(size.X, size.Y), size.Z);
+
+            Logger.Log($"[TriaxialSimulationForm] Original mesh bounds: min={min}, max={max}, center={center}, size={size}, maxDim={maxDim}");
+
+            // Target bounding box size - make it a reasonable size for visualization
+            float targetSize = 10.0f;
+
+            // Determine if we need to scale the mesh (too small or too large)
+            bool needsRescaling = (maxDim < 1.0f || maxDim > 100.0f);
+
+            if (needsRescaling)
+            {
+                float scaleFactor = targetSize / maxDim;
+
+                Logger.Log($"[TriaxialSimulationForm] Rescaling mesh: scaleFactor={scaleFactor}, targetSize={targetSize}");
+
+                // Create a backup copy of the original vertices for volume calculations
+                List<Vector3> originalVertices = new List<Vector3>(vertices);
+
+                // Save the scale factor for future reference
+                float originalScale = maxDim;
+                Logger.Log($"[TriaxialSimulationForm] Saving originalScale={originalScale} for volume calculations");
+
+                // Scale all vertex positions relative to center
+                for (int i = 0; i < vertices.Count; i++)
+                {
+                    // Store original position
+                    Vector3 original = vertices[i];
+
+                    // Center, scale, and replace
+                    Vector3 centered = original - center;
+                    vertices[i] = center + (centered * scaleFactor);
+
+                    // Log a few vertices for debugging
+                    if (i < 5)
+                    {
+                        Logger.Log($"[TriaxialSimulationForm] Vertex {i}: Original={original}, Centered={centered}, Scaled={vertices[i]}");
+                    }
+                }
+
+                // Check the new scale
+                min = new Vector3(float.MaxValue);
+                max = new Vector3(float.MinValue);
+
+                foreach (var v in vertices)
+                {
+                    min.X = Math.Min(min.X, v.X);
+                    min.Y = Math.Min(min.Y, v.Y);
+                    min.Z = Math.Min(min.Z, v.Z);
+
+                    max.X = Math.Max(max.X, v.X);
+                    max.Y = Math.Max(max.Y, v.Y);
+                    max.Z = Math.Max(max.Z, v.Z);
+                }
+
+                Vector3 newCenter = (min + max) * 0.5f;
+                Vector3 newSize = max - min;
+                float newMaxDim = Math.Max(Math.Max(newSize.X, newSize.Y), newSize.Z);
+
+                Logger.Log($"[TriaxialSimulationForm] Rescaled mesh bounds: min={min}, max={max}, center={newCenter}, size={newSize}, maxDim={newMaxDim}");
+            }
+            else
+            {
+                Logger.Log("[TriaxialSimulationForm] Mesh scale is within reasonable range, no rescaling needed");
+            }
+
+            Logger.Log("[TriaxialSimulationForm] FixMeshScale() - End");
+        }
         private void ComboMaterials_SelectedIndexChanged(object sender, EventArgs e)
         {
             // Reset mesh generation status
@@ -1615,7 +2204,29 @@ namespace CTS
 
             // Start simulation
             simulationRunning = true;
+            if (fastSimulationMode)
+            {
+                progressLabel.Text = "Fast simulation started - 3D view will update at completion";
+            }
             simulationTimer.Start();
+            try
+            {
+                if (diagramsForm == null || diagramsForm.IsDisposed)
+                {
+                    InitializeDiagramsForm();
+                }
+
+                if (diagramsForm != null)
+                {
+                    diagramsForm.Show();
+                    UpdateDiagramsForm();
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[TriaxialSimulationForm] Error initializing DiagramsForm: {ex.Message}");
+                // Continue simulation even if diagrams fail
+            }
         }
 
         private void BtnStopSimulation_Click(object sender, EventArgs e)
@@ -1634,7 +2245,6 @@ namespace CTS
             comboMaterials.Enabled = true;
             comboDirection.Enabled = true;
         }
-
         private void SimulationTimer_Tick(object sender, EventArgs e)
         {
             if (!simulationRunning)
@@ -1655,109 +2265,198 @@ namespace CTS
             // Add to stress-strain curve
             stressStrainCurve.Add(new Point((int)(currentStrain * 1000), (int)averageStress));
 
-            // Update mesh deformation
+            // Update mesh deformation based on original vertex positions
             UpdateDeformation(currentStrain, averageStress);
 
-            // Redraw
-            stressStrainGraph.Invalidate();
-            mohrCoulombGraph.Invalidate();
-            glControl.Invalidate();
+            // Only redraw UI if not in fast simulation mode
+            if (!fastSimulationMode || currentStrain >= maxStrain - 0.001f)
+            {
+                // Redraw charts
+                if (stressStrainGraph != null)
+                    stressStrainGraph.Invalidate();
+
+                if (mohrCoulombGraph != null)
+                    mohrCoulombGraph.Invalidate();
+
+                // Update DiagramsForm if available
+                if (diagramsForm != null && !diagramsForm.IsDisposed)
+                {
+                    try
+                    {
+                        UpdateDiagramsForm();
+                    }
+                    catch (Exception ex)
+                    {
+                        // Log but don't crash
+                        Logger.Log($"[TriaxialSimulationForm] Error updating diagrams: {ex.Message}");
+                    }
+                }
+
+                // Update 3D view
+                glControl.Invalidate();
+            }
+        }
+        private void UpdateDiagramsForm()
+        {
+            if (diagramsForm != null && !diagramsForm.IsDisposed)
+            {
+                diagramsForm.UpdateData(
+                    stressStrainCurve,
+                    currentStrain,
+                    stressStrainCurve.Count > 0 ? stressStrainCurve.Last().Y / 10.0f : 0,
+                    cohesion,
+                    frictionAngle,
+                    normalStress,
+                    shearStress,
+                    bulkDensity,
+                    porosity,
+                    minPressure,
+                    maxPressure,
+                    yieldStrength,
+                    brittleStrength,
+                    isElasticEnabled,
+                    isPlasticEnabled,
+                    isBrittleEnabled,
+                    simulationRunning
+                );
+            }
         }
 
         private float CalculateStress(float strain)
         {
-            float totalStress = 0;
+            // Initialize thread-safe collections for parallel processing
+            ConcurrentDictionary<int, float> concurrentElementStresses = new ConcurrentDictionary<int, float>();
+
+            // Use thread-safe counter for total stress accumulation
+            double totalStressSum = 0;
+
+            // Physical constants
             float yieldStrain = yieldStrength / youngModulus;
             float brittleStrain = brittleStrength / youngModulus;
 
-            // Clear element stresses dictionary
-            elementStresses.Clear();
+            // Process all tetrahedral elements in parallel
+            Parallel.For(0, tetrahedralElements.Count,
+                // Initialize local thread state (local sum accumulator)
+                () => 0.0f,
+                // Process each element and update local state
+                (i, loop, localSum) => {
+                    // Calculate average density for this element
+                    float elementDensity = GetElementDensity(tetrahedralElements[i]);
 
-            // Stress calculation for each element considering density variations
-            for (int i = 0; i < tetrahedralElements.Count; i++)
-            {
-                float elementStress = 0;
+                    // Adjust material properties based on density
+                    // Higher density materials are typically stiffer and stronger
+                    float densityRatio = isDensityCalibrated && elementDensity > 0 ?
+                        elementDensity / bulkDensity : 1.0f;
 
-                // Calculate average density for this element
-                float elementDensity = GetElementDensity(tetrahedralElements[i]);
+                    // Scale modulus using an empirical power law relationship (realistic for rocks)
+                    // E ∝ ρ^n where n~2-3 for most rocks
+                    float elementYoungModulus = youngModulus * (float)Math.Pow(densityRatio, 2.5);
 
-                // Adjust modulus based on element density
-                float elementYoungModulus = youngModulus;
-                if (isDensityCalibrated && elementDensity > 0)
-                {
-                    // Scale modulus with density - stiffer materials have higher density
-                    float densityRatio = elementDensity / bulkDensity;
-                    elementYoungModulus *= (float)Math.Pow(densityRatio, 2.0); // Squared relationship
-                }
+                    // Update yield and brittle thresholds based on adjusted modulus
+                    // Maintaining constant strain thresholds for the material
+                    float elementYieldStrength = yieldStrength * (float)Math.Pow(densityRatio, 1.5);
+                    float elementBrittleStrength = brittleStrength * (float)Math.Pow(densityRatio, 1.2);
+                    float elementYieldStrain = elementYieldStrength / elementYoungModulus;
+                    float elementBrittleStrain = elementBrittleStrength / elementYoungModulus;
 
-                // Calculate element yield and brittle strains based on adjusted modulus
-                float elementYieldStrain = yieldStrength / elementYoungModulus;
-                float elementBrittleStrain = brittleStrength / elementYoungModulus;
+                    // Initialize element stress
+                    float elementStress = 0;
 
-                // Start with elastic contribution
-                if (isElasticEnabled)
-                {
-                    elementStress = elementYoungModulus * strain;
-                }
-
-                // Apply plastic effect if enabled and strain exceeds yield point
-                if (isPlasticEnabled && strain > elementYieldStrain)
-                {
-                    // Replace elastic component beyond yield point with plastic behavior
-                    float elasticComponent = isElasticEnabled ? yieldStrength : 0;
-
-                    // Density affects plastic hardening (higher density = more hardening)
-                    float densityFactor = isDensityCalibrated ? Math.Max(0.5f, Math.Min(1.5f, elementDensity / bulkDensity)) : 1.0f;
-                    float hardening = elementYoungModulus * 0.1f * densityFactor; // Hardening modulus with density factor
-
-                    float plasticComponent = hardening * (strain - elementYieldStrain);
-
-                    // If both elastic and plastic are enabled, we combine them
+                    // Calculate stress based on material behavior models
+                    // 1. Elastic behavior (linear up to yield point)
                     if (isElasticEnabled)
                     {
-                        elementStress = elasticComponent + plasticComponent;
+                        // Linear elastic relationship: σ = E·ε
+                        if (strain <= elementYieldStrain || !isPlasticEnabled)
+                        {
+                            elementStress = elementYoungModulus * strain;
+                        }
+                        else
+                        {
+                            // Elastic contribution limited to yield strength
+                            elementStress = elementYieldStrength;
+                        }
                     }
-                    else
+
+                    // 2. Plastic behavior (post-yield hardening or perfect plasticity)
+                    if (isPlasticEnabled && strain > elementYieldStrain)
                     {
-                        elementStress = plasticComponent;
+                        // Calculate plastic strain
+                        float plasticStrain = strain - elementYieldStrain;
+
+                        // Density-dependent hardening modulus (typically 1-10% of Young's modulus)
+                        // Higher density materials usually show more strain hardening
+                        float hardeningModulus = elementYoungModulus * 0.05f * densityRatio;
+
+                        // Add plastic hardening component: σp = σy + H·εp
+                        float plasticComponent = hardeningModulus * plasticStrain;
+
+                        // Combine with elastic component if enabled
+                        if (isElasticEnabled)
+                        {
+                            elementStress += plasticComponent;
+                        }
+                        else
+                        {
+                            elementStress = elementYieldStrength + plasticComponent;
+                        }
                     }
+
+                    // 3. Brittle behavior (stress drop after failure)
+                    if (isBrittleEnabled && strain > elementBrittleStrain)
+                    {
+                        float residualFactor = 0.2f + 0.3f / densityRatio;
+                        residualFactor = Math.Max(0.05f, Math.Min(0.5f, residualFactor));
+
+                        
+                        float postFailureStrain = strain - elementBrittleStrain;
+                        float decayRate = 20.0f; // Controls how quickly strength is lost
+                        float decayFactor = (float)Math.Exp(-decayRate * postFailureStrain);
+
+                        // Transition from peak to residual strength
+                        float residualStrength = elementBrittleStrength * residualFactor;
+                        float brittleStress = residualStrength + (elementBrittleStrength - residualStrength) * decayFactor;
+
+                        // If no other behaviors are enabled, use brittle stress directly
+                        if (!isElasticEnabled && !isPlasticEnabled)
+                        {
+                            elementStress = brittleStress;
+                        }
+                        else
+                        {
+                            // Otherwise, take the minimum of calculated stress and brittle stress
+                            // This ensures stress can't exceed the brittle failure envelope
+                            elementStress = Math.Min(elementStress, brittleStress);
+                        }
+                    }
+
+                    // Store element stress in thread-safe dictionary
+                    concurrentElementStresses[i] = elementStress;
+
+                    // Add to thread-local sum
+                    return localSum + elementStress;
+                },
+                // Combine all local sums using a thread-safe addition
+                (localSum) => {
+                    // Use Interlocked.Add for thread-safe addition to shared counter
+                    double currentSum = localSum;
+                    Interlocked.Exchange(ref totalStressSum, totalStressSum + currentSum);
                 }
+            );
 
-                // Apply brittle effect if enabled and strain exceeds brittle point
-                if (isBrittleEnabled && strain > elementBrittleStrain)
-                {
-                    // Density affects brittleness (higher density = more brittle behavior)
-                    float densityFactor = isDensityCalibrated ? Math.Max(0.5f, Math.Min(1.5f, elementDensity / bulkDensity)) : 1.0f;
-
-                    // Dramatic stress drop after brittle failure - more severe for dense materials
-                    float reduction = 0.8f * densityFactor; // 80% stress reduction scaled by density
-                    reduction = Math.Min(reduction, 0.95f); // Cap at 95% reduction
-
-                    // If no other behaviors are enabled, start from brittle strength
-                    if (!isElasticEnabled && !isPlasticEnabled)
-                    {
-                        elementStress = brittleStrength * (1.0f - reduction);
-                    }
-                    else
-                    {
-                        // Reduce the current stress from other behaviors
-                        elementStress *= (1.0f - reduction);
-                    }
-                }
-
-                // Store element stress
-                elementStresses[i] = elementStress;
-
-                // Add to total stress (weighted by element volume)
-                totalStress += elementStress;
+            // Copy concurrent dictionary to regular dictionary for compatibility with existing code
+            elementStresses.Clear();
+            foreach (var pair in concurrentElementStresses)
+            {
+                elementStresses[pair.Key] = pair.Value;
             }
 
-            // Calculate average stress across all elements
-            float averageStress = tetrahedralElements.Count > 0 ? totalStress / tetrahedralElements.Count : 0;
+            // Calculate average stress
+            float averageStress = tetrahedralElements.Count > 0 ?
+                (float)(totalStressSum / tetrahedralElements.Count) : 0;
 
             return averageStress;
         }
-
         private float GetElementDensity(TetrahedralElement element)
         {
             if (!isDensityCalibrated || element.Vertices.Length != 4)
@@ -1781,97 +2480,123 @@ namespace CTS
 
         private void UpdateDeformation(float strain, float stress)
         {
-            // Calculate deformation based on current strain
-            deformedVertices = new List<Vector3>(vertices.Count);
+            // Start with fresh copy of scaled vertices if needed
+            if (deformedVertices == null || deformedVertices.Count != vertices.Count)
+            {
+                ScaleMeshForDisplay();
+            }
 
+            // Create thread-local storage array for vertex positions
+            Vector3[] newPositions = new Vector3[vertices.Count];
+
+            // Copy initial vertex positions
             for (int i = 0; i < vertices.Count; i++)
             {
-                Vector3 vertex = vertices[i];
-                Vector3 deformed = vertex;
+                newPositions[i] = vertices[i];
+            }
 
-                // Get vertex density value for deformation scaling
+            // Process all vertices in parallel
+            Parallel.For(0, vertices.Count, i =>
+            {
+                // Get original vertex position
+                Vector3 vertex = newPositions[i];
+
+                // Get vertex density for property scaling
                 float vertexDensity = (i < densityValues.Count) ? densityValues[i] : bulkDensity;
 
-                // Calculate porosity-dependent Poisson ratio
-                // Higher porosity materials have higher Poisson's ratio
-                float effectivePoissonRatio = poissonRatio;
-                if (isDensityCalibrated)
-                {
-                    // Estimate porosity from density
-                    float grainDensity = 2650.0f; // kg/m³ (typical for quartz/feldspar)
-                    float vertexPorosity = 1.0f - (vertexDensity / grainDensity);
-                    vertexPorosity = Math.Max(0.01f, Math.Min(0.5f, vertexPorosity));
+               
+                float grainDensity = 2650.0f; // kg/m³ (typical for quartz/feldspar)
+                float vertexPorosity = 1.0f - (vertexDensity / grainDensity);
+                vertexPorosity = Math.Max(0.01f, Math.Min(0.5f, vertexPorosity));
 
-                    // Adjust Poisson's ratio based on porosity (empirical relationship)
-                    effectivePoissonRatio = poissonRatio * (1.0f + 0.5f * vertexPorosity);
-                    effectivePoissonRatio = Math.Min(effectivePoissonRatio, 0.49f); // Cap at 0.49
-                }
+                // Calculate effective Poisson's ratio based on porosity
+                // Higher porosity typically means higher Poisson's ratio up to ~0.5 limit
+                float effectivePoissonRatio = Math.Min(
+                    poissonRatio * (1.0f + 0.3f * vertexPorosity),
+                    0.49f
+                );
 
-                // Apply deformation along selected axis
+                // Apply deformation based on selected loading direction
+                // Using Hooke's Law for anisotropic deformation
                 switch (selectedDirection)
                 {
                     case SimulationDirection.X:
-                        // Deform along X-axis
-                        deformed.X = vertex.X * (1 + strain);
-
-                        // Apply lateral contraction (Poisson effect)
-                        deformed.Y = vertex.Y * (1 - strain * effectivePoissonRatio);
-                        deformed.Z = vertex.Z * (1 - strain * effectivePoissonRatio);
+                        // Apply axial strain in X direction
+                        vertex.X *= (1 + strain);
+                        // Apply lateral contraction in Y and Z (Poisson effect)
+                        vertex.Y *= (1 - strain * effectivePoissonRatio);
+                        vertex.Z *= (1 - strain * effectivePoissonRatio);
                         break;
 
                     case SimulationDirection.Y:
-                        // Deform along Y-axis
-                        deformed.Y = vertex.Y * (1 + strain);
-
-                        // Apply lateral contraction (Poisson effect)
-                        deformed.X = vertex.X * (1 - strain * effectivePoissonRatio);
-                        deformed.Z = vertex.Z * (1 - strain * effectivePoissonRatio);
+                        vertex.Y *= (1 + strain);
+                        vertex.X *= (1 - strain * effectivePoissonRatio);
+                        vertex.Z *= (1 - strain * effectivePoissonRatio);
                         break;
 
                     case SimulationDirection.Z:
-                        // Deform along Z-axis
-                        deformed.Z = vertex.Z * (1 + strain);
-
-                        // Apply lateral contraction (Poisson effect)
-                        deformed.X = vertex.X * (1 - strain * effectivePoissonRatio);
-                        deformed.Y = vertex.Y * (1 - strain * effectivePoissonRatio);
+                        vertex.Z *= (1 + strain);
+                        vertex.X *= (1 - strain * effectivePoissonRatio);
+                        vertex.Y *= (1 - strain * effectivePoissonRatio);
                         break;
                 }
 
-                // Apply density-dependent deformation scaling if we have density data
+                // Apply heterogeneous deformation based on local material properties
                 if (isDensityCalibrated && i < densityValues.Count)
                 {
+                    // Calculate deformation influence factor based on porosity
                     // Higher porosity (lower density) materials deform more
-                    // Estimate porosity from density
-                    float grainDensity = 2650.0f; // kg/m³ (typical for quartz/feldspar)
-                    float vertexPorosity = 1.0f - (vertexDensity / grainDensity);
-                    vertexPorosity = Math.Max(0.01f, Math.Min(0.5f, vertexPorosity));
+                    float stiffnessRatio = (bulkDensity / vertexDensity);
+                    stiffnessRatio = Math.Max(0.5f, Math.Min(2.0f, stiffnessRatio));
 
-                    // Density influence factor (higher porosity = more deformation)
-                    float porosityInfluence = 0.5f * vertexPorosity;
+                    // Calculate original position
+                    Vector3 originalPos = vertices[i];
 
-                    // Interpolate between original position and deformed position based on density
-                    Vector3 additionalDeformation = deformed - vertex;
-                    deformed = vertex + additionalDeformation * (1.0f + porosityInfluence);
+                    // Calculate elastic deformation vector
+                    Vector3 deformationVector = vertex - originalPos;
+
+                    // Scale deformation based on local stiffness
+                    // Less stiff (more porous) material deforms more
+                    Vector3 scaledDeformation = deformationVector * stiffnessRatio;
+
+                    // Calculate new position with adjusted deformation
+                    vertex = originalPos + scaledDeformation;
                 }
 
-                // Add to deformed vertices list
-                deformedVertices.Add(deformed);
+                // Save the updated position to the thread-local array
+                newPositions[i] = vertex;
+            });
+
+            // Now transfer the results to the deformed vertices list
+            // This avoids thread contention during the parallel loop
+            lock (deformedVertices)
+            {
+                deformedVertices.Clear();
+                for (int i = 0; i < newPositions.Length; i++)
+                {
+                    deformedVertices.Add(newPositions[i]);
+                }
             }
 
             // Apply brittle fracturing effects
             if (isBrittleEnabled && strain > brittleStrength / youngModulus)
             {
-                // Get a deterministic but varied seed based on current strain
+                // Create a fixed seed for reproducible randomness
                 int seed = (int)(currentStrain * 10000);
-                Random rand = new Random(seed); // Use fixed seed for reproducibility
+                Random globalRand = new Random(seed);
 
-                for (int i = 0; i < deformedVertices.Count; i++)
+                // Create an array to store displacements
+                Vector3[] displacements = new Vector3[deformedVertices.Count];
+
+                // Calculate vertex stress factors in parallel
+                float[] vertexStressFactors = new float[deformedVertices.Count];
+
+                Parallel.For(0, deformedVertices.Count, i =>
                 {
-                    // Get vertex stress state - prone to fracture if high stress
-                    float vertexStressFactor = 0.0f;
+                    // Initialize stress factor for this vertex
+                    float maxStressFactor = 0.0f;
 
-                    // Calculate stress factor for this vertex
+                    // Find elements containing this vertex and get their stress states
                     foreach (var tetra in tetrahedralElements)
                     {
                         if (Array.IndexOf(tetra.Vertices, i) >= 0)
@@ -1880,42 +2605,236 @@ namespace CTS
                             int tetraIndex = tetrahedralElements.IndexOf(tetra);
                             if (elementStresses.TryGetValue(tetraIndex, out float elementStress))
                             {
-                                // Normalize stress by brittle strength
-                                vertexStressFactor = Math.Max(vertexStressFactor, elementStress / brittleStrength);
+                                // Normalize stress by brittle strength to get a stress factor
+                                float stressFactor = elementStress / brittleStrength;
+                                maxStressFactor = Math.Max(maxStressFactor, stressFactor);
                             }
                         }
                     }
 
-                    // Higher stress regions are more likely to fracture
-                    if (rand.NextDouble() < 0.3 * vertexStressFactor)
+                    vertexStressFactors[i] = maxStressFactor;
+                });
+
+                // Now apply fracture displacements based on stress factors
+                Parallel.For(0, deformedVertices.Count, i =>
+                {
+                    float stressFactor = vertexStressFactors[i];
+
+                    // Only create fractures where stress exceeds threshold
+                    if (stressFactor > 0.8f)
                     {
-                        // Only displace vertices in high stress regions
+                        // Create a thread-local random generator with a fixed seed
+                        // based on the global seed and vertex index
+                        Random localRand = new Random(seed + i);
+
+                        // Scale displacement with stress factor - higher stress, more displacement
+                        float displacementMagnitude = 0.05f * stressFactor * stressFactor;
+
+                        // Generate random displacement vector
                         Vector3 displacement = new Vector3(
-                            (float)(rand.NextDouble() - 0.5) * 0.05f * vertexStressFactor,
-                            (float)(rand.NextDouble() - 0.5) * 0.05f * vertexStressFactor,
-                            (float)(rand.NextDouble() - 0.5) * 0.05f * vertexStressFactor
+                            (float)(localRand.NextDouble() - 0.5) * displacementMagnitude,
+                            (float)(localRand.NextDouble() - 0.5) * displacementMagnitude,
+                            (float)(localRand.NextDouble() - 0.5) * displacementMagnitude
                         );
-                        deformedVertices[i] += displacement;
+
+                        // Store displacement in array
+                        displacements[i] = displacement;
+                    }
+                    else
+                    {
+                        displacements[i] = Vector3.Zero;
+                    }
+                });
+
+                // Apply all displacements at once
+                lock (deformedVertices)
+                {
+                    for (int i = 0; i < deformedVertices.Count; i++)
+                    {
+                        deformedVertices[i] += displacements[i];
                     }
                 }
             }
-        }
 
+            // Update OpenGL buffers if initialized
+            if (buffersInitialized)
+            {
+                // Upload new vertex positions to GPU
+                float[] vertexData = new float[deformedVertices.Count * 3];
+
+                lock (deformedVertices)
+                {
+                    for (int i = 0; i < deformedVertices.Count; i++)
+                    {
+                        vertexData[i * 3] = deformedVertices[i].X;
+                        vertexData[i * 3 + 1] = deformedVertices[i].Y;
+                        vertexData[i * 3 + 2] = deformedVertices[i].Z;
+                    }
+                }
+
+                GL.BindBuffer(BufferTarget.ArrayBuffer, vertexBufferId);
+                GL.BufferData(BufferTarget.ArrayBuffer, (IntPtr)(vertexData.Length * sizeof(float)),
+                                vertexData, BufferUsageHint.StaticDraw);
+                GL.BindBuffer(BufferTarget.ArrayBuffer, 0);
+            }
+
+            // Force display list recreation
+            if (meshDisplayList != 0)
+            {
+                GL.DeleteLists(meshDisplayList, 1);
+                meshDisplayList = 0;
+            }
+
+            // Recalculate normals for proper lighting
+            RecalculateNormals();
+        }
+        private void RecalculateNormals()
+        {
+            int vertexCount = deformedVertices.Count;
+
+            // Create thread-safe accumulators for normals
+            Vector3[] tempNormals = new Vector3[vertexCount];
+
+            // Reset normals array first
+            for (int i = 0; i < normals.Count; i++)
+            {
+                normals[i] = Vector3.Zero;
+            }
+
+            // Calculate face normals and accumulate to vertices - in parallel
+            Parallel.For(0, indices.Count / 3, faceIndex =>
+            {
+                int i = faceIndex * 3;
+
+                // Skip if out of bounds
+                if (i + 2 >= indices.Count)
+                    return;
+
+                int i1 = indices[i];
+                int i2 = indices[i + 1];
+                int i3 = indices[i + 2];
+
+                // Skip if any vertex index is out of bounds
+                if (i1 >= deformedVertices.Count ||
+                    i2 >= deformedVertices.Count ||
+                    i3 >= deformedVertices.Count)
+                    return;
+
+                // Get vertex positions
+                Vector3 v1 = deformedVertices[i1];
+                Vector3 v2 = deformedVertices[i2];
+                Vector3 v3 = deformedVertices[i3];
+
+                // Calculate face normal
+                Vector3 edge1 = v2 - v1;
+                Vector3 edge2 = v3 - v1;
+                Vector3 faceNormal = Vector3.Cross(edge1, edge2);
+
+                // Skip degenerate triangles
+                if (faceNormal.LengthSquared < 0.000001f)
+                    return;
+
+                // Normalize the face normal
+                float length = faceNormal.Length;
+                if (length > 0.000001f)
+                    faceNormal = faceNormal / length;
+
+                // Add weighted face normal to vertex normals (using Interlocked methods for thread safety)
+                // Weight by face area for more accurate normals on irregular meshes
+                float area = length * 0.5f;
+
+                // Accumulate to thread-local arrays
+                Vector3 weightedNormal = faceNormal * area;
+
+                // Using lock per vertex is more granular than a global lock
+                if (i1 < tempNormals.Length)
+                    lock (tempNormals)
+                        tempNormals[i1] += weightedNormal;
+
+                if (i2 < tempNormals.Length)
+                    lock (tempNormals)
+                        tempNormals[i2] += weightedNormal;
+
+                if (i3 < tempNormals.Length)
+                    lock (tempNormals)
+                        tempNormals[i3] += weightedNormal;
+            });
+
+            // Transfer accumulated normals to the main normals array
+            for (int i = 0; i < vertexCount && i < normals.Count; i++)
+            {
+                normals[i] = tempNormals[i];
+            }
+
+            // Normalize all vertex normals in parallel
+            Parallel.For(0, vertexCount, i =>
+            {
+                // Skip if out of bounds
+                if (i >= normals.Count)
+                    return;
+
+                if (normals[i].LengthSquared > 0.000001f)
+                {
+                    normals[i].Normalize();
+                }
+                else
+                {
+                    // Default normal for degenerate cases
+                    normals[i] = new Vector3(0, 1, 0);
+                }
+            });
+
+            // Update normal buffer if using VBOs
+            if (buffersInitialized)
+            {
+                float[] normalData = new float[normals.Count * 3];
+                for (int i = 0; i < normals.Count; i++)
+                {
+                    normalData[i * 3] = normals[i].X;
+                    normalData[i * 3 + 1] = normals[i].Y;
+                    normalData[i * 3 + 2] = normals[i].Z;
+                }
+
+                GL.BindBuffer(BufferTarget.ArrayBuffer, normalBufferId);
+                GL.BufferData(BufferTarget.ArrayBuffer, (IntPtr)(normalData.Length * sizeof(float)),
+                              normalData, BufferUsageHint.StaticDraw);
+                GL.BindBuffer(BufferTarget.ArrayBuffer, 0);
+            }
+        }
         private void ExtractVolumeData(Material material)
         {
+            if (material == null)
+            {
+                Logger.Log("[TriaxialSimulationForm] Error: Null material in ExtractVolumeData");
+                return;
+            }
+
             // Get volume data from MainForm
             labelVolume = mainForm.volumeLabels;
+
+            if (labelVolume == null)
+            {
+                Logger.Log("[TriaxialSimulationForm] Error: Null label volume in ExtractVolumeData");
+                return;
+            }
 
             // Get dimensions
             width = LabelVolumeHelper.GetWidth(labelVolume);
             height = LabelVolumeHelper.GetHeight(labelVolume);
             depth = LabelVolumeHelper.GetDepth(labelVolume);
 
+            Logger.Log($"[TriaxialSimulationForm] Volume dimensions: {width}x{height}x{depth}");
+
             // Create a byte array to store density values
             densityVolume = new byte[width, height, depth];
 
             // Extract density data from grayscale volume for selected material
             byte materialID = material.ID;
+
+            Logger.Log($"[TriaxialSimulationForm] Extracting volume data for material ID {materialID}, name: {material.Name}");
+
+            // Count material voxels for validation
+            int materialVoxelCount = 0;
 
             // Use parallel processing to speed up extraction
             Parallel.For(0, depth, z =>
@@ -1929,6 +2848,7 @@ namespace CTS
                         {
                             // Store the grayscale value as a proxy for density
                             densityVolume[x, y, z] = mainForm.volumeData[x, y, z];
+                            Interlocked.Increment(ref materialVoxelCount);
                         }
                         else
                         {
@@ -1938,602 +2858,203 @@ namespace CTS
                     }
                 }
             });
-        }
 
+            Logger.Log($"[TriaxialSimulationForm] Found {materialVoxelCount} voxels of material ID {materialID}");
+        }
+        /// <summary>
+        /// Build a watertight surface mesh of the selected material.
+        /// – samplingRate ≥ 1 : 1 = full resolution, 2 = every second voxel, …  
+        /// – worker        : BackgroundWorker for UI progress/cancel
+        /// 
+        /// Global lists filled:
+        ///     vertices, normals, indices, densityValues, tetrahedralElements
+        /// Flags set/updated:
+        ///     minDensity, maxDensity, meshGenerationComplete (in caller)
+        /// </summary>
+        /// 
+        private struct Dir
+        {
+            public int dx, dy, dz;
+            public Vector3 n;
+            public Dir(int dx, int dy, int dz, Vector3 n) { this.dx = dx; this.dy = dy; this.dz = dz; this.n = n; }
+        }
         private void GenerateMesh(int samplingRate, BackgroundWorker worker)
         {
-            // Clear previous mesh data
+            /* ---------- 0. reset ---------- */
             vertices.Clear();
-            indices.Clear();
             normals.Clear();
+            indices.Clear();
             densityValues.Clear();
             tetrahedralElements.Clear();
-
-            // Reset min/max density
             minDensity = float.MaxValue;
             maxDensity = float.MinValue;
 
-            // Create a list to hold voxel coordinates for the selected material
-            List<Tuple<int, int, int>> materialVoxels = new List<Tuple<int, int, int>>();
+            /* ---------- 1. collect voxel centres that belong to the specimen ---------- */
+            var voxels = new List<Tuple<int, int, int>>();
 
-            // Calculate the center of the volume
-            float centerX = width / 2.0f;
-            float centerY = height / 2.0f;
-            float centerZ = depth / 2.0f;
+            float vSize = (float)pixelSize;                 // isotropic voxel size
+            float cx = width * 0.5f;
+            float cy = height * 0.5f;
+            float cz = depth * 0.5f;
 
-            // Calculate the radius for the cylindrical core (40% of the minimum dimension)
-            float radius = Math.Min(Math.Min(width, height), depth) * 0.4f;
+            float radius = Math.Min(Math.Min(width, height), depth) * vSize * 0.30f;
+            float halfLen;
+            switch (selectedDirection)
+            {
+                case SimulationDirection.X: halfLen = width * vSize * 0.40f; break;
+                case SimulationDirection.Y: halfLen = height * vSize * 0.40f; break;
+                default: halfLen = depth * vSize * 0.40f; break; // Z
+            }
 
-            // First pass: collect voxels of the selected material that are within the cylindrical core
             for (int z = 0; z < depth; z += samplingRate)
             {
+                float pz = (z - cz) * vSize;
                 for (int y = 0; y < height; y += samplingRate)
                 {
+                    float py = (y - cy) * vSize;
                     for (int x = 0; x < width; x += samplingRate)
                     {
-                        if (densityVolume[x, y, z] > 0) // Part of the material
-                        {
-                            // Check if within the cylindrical core along the selected direction
-                            bool isInCylinder = false;
+                        if (densityVolume[x, y, z] == 0) continue;
 
-                            switch (selectedDirection)
-                            {
-                                case SimulationDirection.X:
-                                    // Cylinder along X-axis
-                                    float distYZ = (float)Math.Sqrt(
-                                        Math.Pow(y - centerY, 2) +
-                                        Math.Pow(z - centerZ, 2));
-                                    isInCylinder = distYZ <= radius;
-                                    break;
-
-                                case SimulationDirection.Y:
-                                    // Cylinder along Y-axis
-                                    float distXZ = (float)Math.Sqrt(
-                                        Math.Pow(x - centerX, 2) +
-                                        Math.Pow(z - centerZ, 2));
-                                    isInCylinder = distXZ <= radius;
-                                    break;
-
-                                case SimulationDirection.Z:
-                                    // Cylinder along Z-axis (default)
-                                    float distXY = (float)Math.Sqrt(
-                                        Math.Pow(x - centerX, 2) +
-                                        Math.Pow(y - centerY, 2));
-                                    isInCylinder = distXY <= radius;
-                                    break;
-                            }
-
-                            if (isInCylinder)
-                            {
-                                materialVoxels.Add(new Tuple<int, int, int>(x, y, z));
-
-                                // Update min/max density
-                                float density = densityVolume[x, y, z] / 255.0f;
-                                minDensity = Math.Min(minDensity, density);
-                                maxDensity = Math.Max(maxDensity, density);
-                            }
-                        }
+                            voxels.Add(Tuple.Create(x, y, z));
                     }
                 }
-
-                // Report progress periodically
                 if (z % Math.Max(1, depth / 10) == 0)
-                {
-                    int progressPercentage = 30 + (z * 30 / depth);
-                    worker.ReportProgress(progressPercentage, $"Found {materialVoxels.Count} voxels in cylindrical core...");
-
-                    // Check for cancellation
-                    if (worker.CancellationPending)
-                        return;
-                }
+                    worker.ReportProgress(10 + z * 30 / depth, $"Scanning… {z}/{depth}");
+                if (worker.CancellationPending) return;
             }
 
-            // If no voxels were found, return
-            if (materialVoxels.Count == 0)
-                return;
+            if (voxels.Count == 0) return;
+            worker.ReportProgress(40, $"Core voxels: {voxels.Count}");
 
-            worker.ReportProgress(60, $"Creating mesh from {materialVoxels.Count} voxels...");
-
-            // Create simplified surface mesh using marching cubes-inspired approach
-            // First, create a dictionary mapping voxel coordinates to vertex indices
-            Dictionary<Tuple<int, int, int>, int> voxelToVertexIndex = new Dictionary<Tuple<int, int, int>, int>();
-
-            // Create vertices at each sample point
-            foreach (var voxel in materialVoxels)
+            /* ---------- 2. build faces – every exposed side gets its own quad ---------- */
+            Dir[] dirs =
             {
-                // Create a vertex at the center of the voxel
-                float px = (voxel.Item1) * (float)pixelSize;
-                float py = (voxel.Item2) * (float)pixelSize;
-                float pz = (voxel.Item3) * (float)pixelSize;
+        new Dir( 1, 0, 0, new Vector3( 1, 0, 0)),
+        new Dir(-1, 0, 0, new Vector3(-1, 0, 0)),
+        new Dir( 0, 1, 0, new Vector3( 0, 1, 0)),
+        new Dir( 0,-1, 0, new Vector3( 0,-1, 0)),
+        new Dir( 0, 0, 1, new Vector3( 0, 0, 1)),
+        new Dir( 0, 0,-1, new Vector3( 0, 0,-1))
+    };
 
-                // Normalize coordinates to center the model
-                px -= (width / 2.0f) * (float)pixelSize;
-                py -= (height / 2.0f) * (float)pixelSize;
-                pz -= (depth / 2.0f) * (float)pixelSize;
+            /* quick lookup so we know if the neighbour is inside material */
+            var voxelSet = new HashSet<Tuple<int, int, int>>(voxels);
 
-                // Add vertex
-                vertices.Add(new Vector3(px, py, pz));
+            float half = vSize * samplingRate * 0.5f;       // half-edge of a sampled “supervoxel”
 
-                // Store the density value - normalized to [0-1] range
-                float density = densityVolume[voxel.Item1, voxel.Item2, voxel.Item3] / 255.0f;
-
-                // Apply calibration if available
-                if (isDensityCalibrated)
-                {
-                    // Convert from normalized [0-1] to grayscale [0-255]
-                    float grayValue = density * 255f;
-
-                    // Apply calibration to get density in kg/m³
-                    density = (float)(grayValue * densityCalibrationSlope + densityCalibrationIntercept);
-                }
-
-                densityValues.Add(density);
-
-                // Store mapping from voxel coordinates to vertex index
-                voxelToVertexIndex[voxel] = vertices.Count - 1;
-            }
-
-            worker.ReportProgress(70, $"Created {vertices.Count} vertices, generating surface...");
-
-            // Initialize normals
-            for (int i = 0; i < vertices.Count; i++)
+            foreach (var vxc in voxels)
             {
-                normals.Add(new Vector3(0, 0, 0));
-            }
+                int x = vxc.Item1, y = vxc.Item2, z = vxc.Item3;
+                float dens = densityVolume[x, y, z] / 255f;
+                minDensity = Math.Min(minDensity, dens);
+                maxDensity = Math.Max(maxDensity, dens);
+                /* voxel centre in physical space */
+                float cX = (x - cx) * vSize;
+                float cY = (y - cy) * vSize;
+                float cZ = (z - cz) * vSize;
 
-            // Counter for progress tracking
-            int processedVoxels = 0;
-            int totalVoxels = materialVoxels.Count;
-
-            // Create triangles connecting adjacent voxels
-            foreach (var voxel in materialVoxels)
-            {
-                int x = voxel.Item1;
-                int y = voxel.Item2;
-                int z = voxel.Item3;
-
-                // Check neighbors in all 6 directions
-                Tuple<int, int, int>[] neighbors = new Tuple<int, int, int>[]
+                foreach (Dir d in dirs)
                 {
-                    new Tuple<int, int, int>(x + samplingRate, y, z), // +X
-                    new Tuple<int, int, int>(x, y + samplingRate, z), // +Y
-                    new Tuple<int, int, int>(x, y, z + samplingRate), // +Z
-                    new Tuple<int, int, int>(x - samplingRate, y, z), // -X
-                    new Tuple<int, int, int>(x, y - samplingRate, z), // -Y
-                    new Tuple<int, int, int>(x, y, z - samplingRate)  // -Z
-                };
+                    var nb = Tuple.Create(x + d.dx, y + d.dy, z + d.dz);
+                    if (voxelSet.Contains(nb)) continue;    // neighbour also inside → hidden face
 
-                Vector3[] directions = new Vector3[]
-                {
-                    new Vector3(1, 0, 0),  // +X
-                    new Vector3(0, 1, 0),  // +Y
-                    new Vector3(0, 0, 1),  // +Z
-                    new Vector3(-1, 0, 0), // -X
-                    new Vector3(0, -1, 0), // -Y
-                    new Vector3(0, 0, -1)  // -Z
-                };
-
-                // Get the vertex index for this voxel
-                int vIndex = voxelToVertexIndex[voxel];
-
-                // Check each neighbor
-                for (int i = 0; i < neighbors.Length; i++)
-                {
-                    var neighbor = neighbors[i];
-
-                    // If the neighbor is not in the material but within bounds, 
-                    // then it's on the surface in that direction
-                    if (!voxelToVertexIndex.ContainsKey(neighbor) &&
-                        neighbor.Item1 >= 0 && neighbor.Item1 < width &&
-                        neighbor.Item2 >= 0 && neighbor.Item2 < height &&
-                        neighbor.Item3 >= 0 && neighbor.Item3 < depth)
+                    /* four corners of the face */
+                    Vector3 p1, p2, p3, p4;     // order: CCW seen from outside
+                    if (d.dx != 0)             /* ±X face */
                     {
-                        // Record this surface normal direction
-                        normals[vIndex] += directions[i];
+                        float sign = d.dx > 0 ? +half : -half;
+                        p1 = new Vector3(cX + sign, cY - half, cZ - half);
+                        p2 = new Vector3(cX + sign, cY + half, cZ - half);
+                        p3 = new Vector3(cX + sign, cY + half, cZ + half);
+                        p4 = new Vector3(cX + sign, cY - half, cZ + half);
                     }
-                }
+                    else if (d.dy != 0)        /* ±Y face */
+                    {
+                        float sign = d.dy > 0 ? +half : -half;
+                        p1 = new Vector3(cX - half, cY + sign, cZ - half);
+                        p2 = new Vector3(cX + half, cY + sign, cZ - half);
+                        p3 = new Vector3(cX + half, cY + sign, cZ + half);
+                        p4 = new Vector3(cX - half, cY + sign, cZ + half);
+                    }
+                    else                       /* ±Z face */
+                    {
+                        float sign = d.dz > 0 ? +half : -half;
+                        p1 = new Vector3(cX - half, cY - half, cZ + sign);
+                        p2 = new Vector3(cX + half, cY - half, cZ + sign);
+                        p3 = new Vector3(cX + half, cY + half, cZ + sign);
+                        p4 = new Vector3(cX - half, cY + half, cZ + sign);
+                    }
 
-                // Periodically report progress
-                processedVoxels++;
-                if (processedVoxels % Math.Max(1, totalVoxels / 20) == 0)
-                {
-                    int progressPercentage = 70 + (processedVoxels * 20 / totalVoxels);
-                    worker.ReportProgress(progressPercentage, $"Generating surface mesh: {processedVoxels}/{totalVoxels}");
+                    /* add vertices & attributes */
+                    int i1 = vertices.Count; vertices.Add(p1);
+                    int i2 = vertices.Count; vertices.Add(p2);
+                    int i3 = vertices.Count; vertices.Add(p3);
+                    int i4 = vertices.Count; vertices.Add(p4);
 
-                    // Check for cancellation
-                    if (worker.CancellationPending)
-                        return;
+                    normals.Add(d.n); normals.Add(d.n); normals.Add(d.n); normals.Add(d.n);
+
+                    densityValues.Add(dens); densityValues.Add(dens);
+                    densityValues.Add(dens); densityValues.Add(dens);
+
+                    /* two triangles */
+                    indices.Add(i1); indices.Add(i2); indices.Add(i3);
+                    indices.Add(i3); indices.Add(i4); indices.Add(i1);
                 }
             }
 
-            worker.ReportProgress(90, "Finalizing mesh...");
+            worker.ReportProgress(90, $"Vertices {vertices.Count}, faces {indices.Count / 3}");
 
-            // Normalize the normals
-            for (int i = 0; i < normals.Count; i++)
+            /* ---------- 3. (unchanged) lightweight tetrahedral fill ---------- */
+            int made = 0, limit = 5000, stride = samplingRate;
+            foreach (var vxc in voxels)
             {
-                if (normals[i] != Vector3.Zero)
-                {
-                    normals[i].Normalize();
-                }
-                else
-                {
-                    // Default normal if none was calculated
-                    normals[i] = new Vector3(0, 1, 0);
-                }
-            }
+                if (made >= limit) break;
+                int x = vxc.Item1, y = vxc.Item2, z = vxc.Item3;
 
-            // Create quad faces for each voxel facing an empty neighbor
-            HashSet<string> processedEdges = new HashSet<string>();
+                var v000 = Tuple.Create(x, y, z);
+                var v100 = Tuple.Create(x + stride, y, z);
+                var v010 = Tuple.Create(x, y + stride, z);
+                var v001 = Tuple.Create(x, y, z + stride);
+                var v111 = Tuple.Create(x + stride, y + stride, z + stride);
 
-            foreach (var voxel in materialVoxels)
-            {
-                int x = voxel.Item1;
-                int y = voxel.Item2;
-                int z = voxel.Item3;
-
-                // Only process if we have this voxel in our mapping
-                if (!voxelToVertexIndex.TryGetValue(voxel, out int centerIndex))
+                if (!voxelSet.Contains(v100) ||
+                    !voxelSet.Contains(v010) ||
+                    !voxelSet.Contains(v001) ||
+                    !voxelSet.Contains(v111))
                     continue;
 
-                // Check for neighbors in 6 directions to create face quads
-                ProcessQuadDirection(voxel, new Tuple<int, int, int>(x + samplingRate, y, z),
-                                    new Tuple<int, int, int>(x, y + samplingRate, z),
-                                    voxelToVertexIndex, processedEdges);
+                /* indices for the *centre* vertices, not the face vertices – use voxel order */
+                int i000 = vertices.Count;    // add voxel centre as a tet node
+                vertices.Add(new Vector3((x - cx) * vSize, (y - cy) * vSize, (z - cz) * vSize));
+                normals.Add(Vector3.UnitY); densityValues.Add(0);
 
-                ProcessQuadDirection(voxel, new Tuple<int, int, int>(x, y + samplingRate, z),
-                                    new Tuple<int, int, int>(x, y, z + samplingRate),
-                                    voxelToVertexIndex, processedEdges);
+                int i100 = vertices.Count;
+                vertices.Add(new Vector3((x + stride - cx) * vSize, (y - cy) * vSize, (z - cz) * vSize));
+                normals.Add(Vector3.UnitY); densityValues.Add(0);
 
-                ProcessQuadDirection(voxel, new Tuple<int, int, int>(x, y, z + samplingRate),
-                                    new Tuple<int, int, int>(x + samplingRate, y, z),
-                                    voxelToVertexIndex, processedEdges);
+                int i010 = vertices.Count;
+                vertices.Add(new Vector3((x - cx) * vSize, (y + stride - cy) * vSize, (z - cz) * vSize));
+                normals.Add(Vector3.UnitY); densityValues.Add(0);
+
+                int i001 = vertices.Count;
+                vertices.Add(new Vector3((x - cx) * vSize, (y - cy) * vSize, (z + stride - cz) * vSize));
+                normals.Add(Vector3.UnitY); densityValues.Add(0);
+
+                int i111 = vertices.Count;
+                vertices.Add(new Vector3((x + stride - cx) * vSize, (y + stride - cy) * vSize, (z + stride - cz) * vSize));
+                normals.Add(Vector3.UnitY); densityValues.Add(0);
+
+                tetrahedralElements.Add(new TetrahedralElement(i000, i100, i010, i001));
+                if (++made >= limit) break;
+                tetrahedralElements.Add(new TetrahedralElement(i111, i100, i010, i001));
+                if (++made >= limit) break;
             }
-
-            worker.ReportProgress(95, $"Mesh complete: {vertices.Count} vertices, {indices.Count / 3} triangles");
-
-            // Generate tetrahedral elements for simulation
-            CreateTetrahedralElements(materialVoxels, voxelToVertexIndex, samplingRate, worker);
-
-            worker.ReportProgress(100, "Cylindrical core mesh generation complete!");
-        }
-
-        private void ProcessQuadDirection(Tuple<int, int, int> voxel,
-                                         Tuple<int, int, int> neighbor1,
-                                         Tuple<int, int, int> neighbor2,
-                                         Dictionary<Tuple<int, int, int>, int> voxelToVertexIndex,
-                                         HashSet<string> processedEdges)
-        {
-            // Get vertex indices
-            if (!voxelToVertexIndex.TryGetValue(voxel, out int v0))
-                return;
-
-            if (!voxelToVertexIndex.TryGetValue(neighbor1, out int v1))
-                return;
-
-            if (!voxelToVertexIndex.TryGetValue(neighbor2, out int v2))
-                return;
-
-            // Calculate the fourth vertex of the quad (diagonal from v0)
-            int nx = neighbor1.Item1 + (neighbor2.Item1 - voxel.Item1);
-            int ny = neighbor1.Item2 + (neighbor2.Item2 - voxel.Item2);
-            int nz = neighbor1.Item3 + (neighbor2.Item3 - voxel.Item3);
-
-            Tuple<int, int, int> diagNeighbor = new Tuple<int, int, int>(nx, ny, nz);
-
-            if (!voxelToVertexIndex.TryGetValue(diagNeighbor, out int v3))
-                return;
-
-            // Create a unique key for this quad to avoid duplicates
-            int[] sortedVertices = new[] { v0, v1, v2, v3 };
-            Array.Sort(sortedVertices);
-            string quadKey = string.Join(",", sortedVertices);
-
-            if (processedEdges.Contains(quadKey))
-                return;
-
-            // Add the quad as two triangles
-            indices.Add(v0);
-            indices.Add(v1);
-            indices.Add(v2);
-
-            indices.Add(v2);
-            indices.Add(v3);
-            indices.Add(v0);
-
-            // Mark this quad as processed
-            processedEdges.Add(quadKey);
-        }
-
-        private void CreateTetrahedralElements(List<Tuple<int, int, int>> materialVoxels,
-                                              Dictionary<Tuple<int, int, int>, int> voxelToVertexIndex,
-                                              int samplingRate, BackgroundWorker worker)
-        {
-            // We'll create tetrahedral elements using a more systematic approach for better results
-            int elementsCreated = 0;
-            int maxElements = 5000; // Limit to a reasonable number
-
-            worker.ReportProgress(95, "Creating tetrahedral elements for simulation...");
-
-            // Create a regular grid of tetrahedra
-            for (int i = 0; i < materialVoxels.Count; i++)
+            if (Math.Abs(maxDensity - minDensity) < 0.001f)
             {
-                var v0 = materialVoxels[i];
-
-                // Define the various tetrahedra patterns
-                // Each pattern consists of vertices relative to v0
-                // These patterns ensure complete coverage of the space
-                List<Tuple<int, int, int>[]> patterns = new List<Tuple<int, int, int>[]>();
-
-                // Pattern 1: Basic tetrahedron
-                patterns.Add(new Tuple<int, int, int>[] {
-                    v0,
-                    new Tuple<int, int, int>(v0.Item1 + samplingRate, v0.Item2, v0.Item3),
-                    new Tuple<int, int, int>(v0.Item1, v0.Item2 + samplingRate, v0.Item3),
-                    new Tuple<int, int, int>(v0.Item1, v0.Item2, v0.Item3 + samplingRate)
-                });
-
-                // Pattern 2: Complementary tetrahedron
-                patterns.Add(new Tuple<int, int, int>[] {
-                    new Tuple<int, int, int>(v0.Item1 + samplingRate, v0.Item2 + samplingRate, v0.Item3 + samplingRate),
-                    new Tuple<int, int, int>(v0.Item1 + samplingRate, v0.Item2, v0.Item3),
-                    new Tuple<int, int, int>(v0.Item1, v0.Item2 + samplingRate, v0.Item3),
-                    new Tuple<int, int, int>(v0.Item1, v0.Item2, v0.Item3 + samplingRate)
-                });
-
-                // Pattern 3: Diagonal tetrahedron 1
-                patterns.Add(new Tuple<int, int, int>[] {
-                    v0,
-                    new Tuple<int, int, int>(v0.Item1 + samplingRate, v0.Item2 + samplingRate, v0.Item3),
-                    new Tuple<int, int, int>(v0.Item1 + samplingRate, v0.Item2, v0.Item3 + samplingRate),
-                    new Tuple<int, int, int>(v0.Item1, v0.Item2 + samplingRate, v0.Item3 + samplingRate)
-                });
-
-                // Pattern 4: Diagonal tetrahedron 2
-                patterns.Add(new Tuple<int, int, int>[] {
-                    v0,
-                    new Tuple<int, int, int>(v0.Item1 + samplingRate, v0.Item2, v0.Item3),
-                    new Tuple<int, int, int>(v0.Item1, v0.Item2 + samplingRate, v0.Item3),
-                    new Tuple<int, int, int>(v0.Item1 + samplingRate, v0.Item2 + samplingRate, v0.Item3 + samplingRate)
-                });
-
-                // Try to create tetrahedra from each pattern
-                foreach (var pattern in patterns)
-                {
-                    // Check if all vertices in this pattern exist
-                    bool allVerticesExist = true;
-                    int[] vertexIndices = new int[4];
-
-                    for (int j = 0; j < 4; j++)
-                    {
-                        if (!voxelToVertexIndex.TryGetValue(pattern[j], out vertexIndices[j]))
-                        {
-                            allVerticesExist = false;
-                            break;
-                        }
-                    }
-
-                    if (allVerticesExist)
-                    {
-                        // Create a tetrahedral element
-                        tetrahedralElements.Add(new TetrahedralElement(
-                            vertexIndices[0], vertexIndices[1], vertexIndices[2], vertexIndices[3]));
-
-                        elementsCreated++;
-                        if (elementsCreated >= maxElements)
-                        {
-                            worker.ReportProgress(98, $"Created {elementsCreated} tetrahedral elements (max limit)");
-                            return;
-                        }
-                    }
-                }
-
-                // Report progress periodically
-                if (elementsCreated % 1000 == 0)
-                {
-                    worker.ReportProgress(96, $"Created {elementsCreated} tetrahedral elements...");
-
-                    // Check for cancellation
-                    if (worker.CancellationPending)
-                        return;
-                }
+                maxDensity = minDensity + 1.0f;
             }
-
-            worker.ReportProgress(98, $"Created {elementsCreated} tetrahedral elements");
-        }
-        private void DrawColorLegend()
-        {
-            // Draw a color legend in viewport space (2D overlay)
-            GL.MatrixMode(MatrixMode.Projection);
-            GL.PushMatrix();
-            GL.LoadIdentity();
-            GL.Ortho(0, glControl.Width, 0, glControl.Height, -1, 1);
-
-            GL.MatrixMode(MatrixMode.Modelview);
-            GL.PushMatrix();
-            GL.LoadIdentity();
-
-            GL.Disable(EnableCap.Lighting);
-            GL.Disable(EnableCap.DepthTest);
-
-            // Position and size of legend
-            int legendWidth = 20;
-            int legendHeight = 150;
-            int startX = glControl.Width - legendWidth - 20;
-            int startY = 50;
-
-            // Draw the color gradient
-            GL.Begin(PrimitiveType.Quads);
-
-            // Blue to cyan (0.0-0.25)
-            GL.Color4(0.0f, 0.0f, 1.0f, 1.0f);
-            GL.Vertex2(startX, startY);
-            GL.Vertex2(startX + legendWidth, startY);
-
-            GL.Color4(0.0f, 1.0f, 1.0f, 1.0f);
-            GL.Vertex2(startX + legendWidth, startY + legendHeight * 0.25f);
-            GL.Vertex2(startX, startY + legendHeight * 0.25f);
-
-            // Cyan to green (0.25-0.5)
-            GL.Color4(0.0f, 1.0f, 1.0f, 1.0f);
-            GL.Vertex2(startX, startY + legendHeight * 0.25f);
-            GL.Vertex2(startX + legendWidth, startY + legendHeight * 0.25f);
-
-            GL.Color4(0.0f, 1.0f, 0.0f, 1.0f);
-            GL.Vertex2(startX + legendWidth, startY + legendHeight * 0.5f);
-            GL.Vertex2(startX, startY + legendHeight * 0.5f);
-
-            // Green to yellow (0.5-0.75)
-            GL.Color4(0.0f, 1.0f, 0.0f, 1.0f);
-            GL.Vertex2(startX, startY + legendHeight * 0.5f);
-            GL.Vertex2(startX + legendWidth, startY + legendHeight * 0.5f);
-
-            GL.Color4(1.0f, 1.0f, 0.0f, 1.0f);
-            GL.Vertex2(startX + legendWidth, startY + legendHeight * 0.75f);
-            GL.Vertex2(startX, startY + legendHeight * 0.75f);
-
-            // Yellow to red (0.75-1.0)
-            GL.Color4(1.0f, 1.0f, 0.0f, 1.0f);
-            GL.Vertex2(startX, startY + legendHeight * 0.75f);
-            GL.Vertex2(startX + legendWidth, startY + legendHeight * 0.75f);
-
-            GL.Color4(1.0f, 0.0f, 0.0f, 1.0f);
-            GL.Vertex2(startX + legendWidth, startY + legendHeight);
-            GL.Vertex2(startX, startY + legendHeight);
-
-            GL.End();
-
-            // Draw border around the legend
-            GL.Color4(1.0f, 1.0f, 1.0f, 1.0f);
-            GL.Begin(PrimitiveType.LineLoop);
-            GL.Vertex2(startX, startY);
-            GL.Vertex2(startX + legendWidth, startY);
-            GL.Vertex2(startX + legendWidth, startY + legendHeight);
-            GL.Vertex2(startX, startY + legendHeight);
-            GL.End();
-
-            // Draw tick marks and labels
-            GL.Begin(PrimitiveType.Lines);
-            for (int i = 0; i <= 4; i++)
-            {
-                float y = startY + (i * legendHeight / 4.0f);
-                GL.Vertex2(startX, y);
-                GL.Vertex2(startX - 5, y);
-            }
-            GL.End();
-
-            // Restore matrices
-            GL.MatrixMode(MatrixMode.Projection);
-            GL.PopMatrix();
-            GL.MatrixMode(MatrixMode.Modelview);
-            GL.PopMatrix();
-
-            // Restore states
-            GL.Enable(EnableCap.DepthTest);
-            GL.Enable(EnableCap.Lighting);
-        }
-        private void DrawPressureArrow(Vector3 position, Vector3 direction, float scale)
-        {
-            // Scale the arrow size
-            float arrowLength = 0.4f * scale;
-            float arrowWidth = 0.1f * scale;
-
-            // Calculate arrow head position
-            Vector3 tip = position + direction * arrowLength;
-
-            // Draw the main arrow line
-            GL.Vertex3(position);
-            GL.Vertex3(tip);
-
-            // Calculate perpendicular vectors for arrow head
-            Vector3 perp1, perp2;
-            if (Math.Abs(direction.Y) < 0.99f)
-            {
-                perp1 = Vector3.Cross(direction, new Vector3(0, 1, 0));
-                perp1.Normalize();
-            }
-            else
-            {
-                perp1 = Vector3.Cross(direction, new Vector3(1, 0, 0));
-                perp1.Normalize();
-            }
-
-            perp2 = Vector3.Cross(direction, perp1);
-            perp2.Normalize();
-
-            // Draw arrow head
-            Vector3 base1 = tip - direction * arrowWidth;
-
-            // Draw 4 triangular arrow head faces
-            GL.Vertex3(tip);
-            GL.Vertex3(base1 + perp1 * arrowWidth);
-
-            GL.Vertex3(tip);
-            GL.Vertex3(base1 - perp1 * arrowWidth);
-
-            GL.Vertex3(tip);
-            GL.Vertex3(base1 + perp2 * arrowWidth);
-
-            GL.Vertex3(tip);
-            GL.Vertex3(base1 - perp2 * arrowWidth);
-        }
-        private void DrawPressureIndicators()
-        {
-            // Draw arrows indicating pressure direction with appropriate magnitudes
-            GL.LineWidth(3.0f);
-            GL.Begin(PrimitiveType.Lines);
-
-            // Calculate arrow size based on pressure
-            float confiningScale = minPressure / 1000.0f; // Scale to reasonable size
-            float axialScale = maxPressure / 1000.0f;     // Scale to reasonable size
-
-            // Calculate arrow positions based on model size
-            float modelSize = 1.5f; // Adjust based on your model dimensions
-
-            if (selectedDirection == SimulationDirection.X)
-            {
-                // Axial pressure in X direction
-                GL.Color3(1.0f, 0.0f, 0.0f); // Red for axial
-                DrawPressureArrow(new Vector3(-modelSize, 0, 0), new Vector3(1, 0, 0), axialScale);
-                DrawPressureArrow(new Vector3(modelSize, 0, 0), new Vector3(-1, 0, 0), axialScale);
-
-                // Confining pressure in Y and Z
-                GL.Color3(0.0f, 0.7f, 1.0f); // Cyan for confining
-                DrawPressureArrow(new Vector3(0, -modelSize, 0), new Vector3(0, 1, 0), confiningScale);
-                DrawPressureArrow(new Vector3(0, modelSize, 0), new Vector3(0, -1, 0), confiningScale);
-                DrawPressureArrow(new Vector3(0, 0, -modelSize), new Vector3(0, 0, 1), confiningScale);
-                DrawPressureArrow(new Vector3(0, 0, modelSize), new Vector3(0, 0, -1), confiningScale);
-            }
-            else if (selectedDirection == SimulationDirection.Y)
-            {
-                // Axial pressure in Y direction
-                GL.Color3(0.0f, 1.0f, 0.0f); // Green for axial
-                DrawPressureArrow(new Vector3(0, -modelSize, 0), new Vector3(0, 1, 0), axialScale);
-                DrawPressureArrow(new Vector3(0, modelSize, 0), new Vector3(0, -1, 0), axialScale);
-
-                // Confining pressure in X and Z
-                GL.Color3(0.0f, 0.7f, 1.0f); // Cyan for confining
-                DrawPressureArrow(new Vector3(-modelSize, 0, 0), new Vector3(1, 0, 0), confiningScale);
-                DrawPressureArrow(new Vector3(modelSize, 0, 0), new Vector3(-1, 0, 0), confiningScale);
-                DrawPressureArrow(new Vector3(0, 0, -modelSize), new Vector3(0, 0, 1), confiningScale);
-                DrawPressureArrow(new Vector3(0, 0, modelSize), new Vector3(0, 0, -1), confiningScale);
-            }
-            else // Z direction
-            {
-                // Axial pressure in Z direction
-                GL.Color3(0.0f, 0.0f, 1.0f); // Blue for axial
-                DrawPressureArrow(new Vector3(0, 0, -modelSize), new Vector3(0, 0, 1), axialScale);
-                DrawPressureArrow(new Vector3(0, 0, modelSize), new Vector3(0, 0, -1), axialScale);
-
-                // Confining pressure in X and Y
-                GL.Color3(0.0f, 0.7f, 1.0f); // Cyan for confining
-                DrawPressureArrow(new Vector3(-modelSize, 0, 0), new Vector3(1, 0, 0), confiningScale);
-                DrawPressureArrow(new Vector3(modelSize, 0, 0), new Vector3(-1, 0, 0), confiningScale);
-                DrawPressureArrow(new Vector3(0, -modelSize, 0), new Vector3(0, 1, 0), confiningScale);
-                DrawPressureArrow(new Vector3(0, modelSize, 0), new Vector3(0, -1, 0), confiningScale);
-            }
-
-            GL.End();
-            GL.LineWidth(1.0f);
+            worker.ReportProgress(100, "Mesh generation finished");
         }
         private void GlControl_MouseDown(object sender, MouseEventArgs e)
         {
@@ -2541,9 +3062,9 @@ namespace CTS
             {
                 lastMousePos = e.Location;
                 isDragging = true;
+                rotationTimer.Start(); // Start continuous rendering during drag
             }
         }
-
         private void GlControl_MouseMove(object sender, MouseEventArgs e)
         {
             if (isDragging)
@@ -2553,9 +3074,9 @@ namespace CTS
 
                 rotationY += deltaX * 0.5f;
                 rotationX += deltaY * 0.5f;
-
                 lastMousePos = e.Location;
-                glControl.Invalidate();
+
+                // No need to invalidate here, the timer does it
             }
         }
         private void StressStrainGraph_Paint(object sender, PaintEventArgs e)
@@ -2843,359 +3364,533 @@ namespace CTS
         }
         private void GlControl_Paint(object sender, PaintEventArgs e)
         {
-            if (!glControl.IsHandleCreated || !glControl.Context.IsCurrent)
-            {
-                if (glControl.IsHandleCreated)
-                {
-                    glControl.MakeCurrent();
-                }
-                else
-                {
-                    return; // Can't render if the handle isn't created yet
-                }
-            }
+            // Ensure valid context
+            if (!glControl.IsHandleCreated) return;
+            if (!glControl.Context.IsCurrent) glControl.MakeCurrent();
 
-            // If the control hasn't been initialized yet, initialize it
-            if (!glControlInitialized)
-            {
-                GlControl_Load(sender, e);
-            }
-
-            // Clear the buffers
+            // Clear buffers
+            GL.ClearColor(0.2f, 0.2f, 0.2f, 1.0f);
             GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
-            // Set up model view matrix
+            // Skip if no mesh
+            if (deformedVertices.Count == 0)
+            {
+                glControl.SwapBuffers();
+                return;
+            }
+
+            // Set up camera
+            GL.MatrixMode(MatrixMode.Projection);
+            GL.LoadIdentity();
+            float aspect = glControl.Width / (float)glControl.Height;
+            Matrix4 proj = Matrix4.CreatePerspectiveFieldOfView(
+                MathHelper.DegreesToRadians(40.0f),
+                aspect,
+                0.1f,
+                1000.0f);
+            GL.LoadMatrix(ref proj);
+
+            // Set up modelview matrix
             GL.MatrixMode(MatrixMode.Modelview);
             GL.LoadIdentity();
 
-            // Position the camera - moved further back to better see the model
-            GL.Translate(0.0f, 0.0f, -5.0f * (1.0f / zoom));
+            // Position camera
+            GL.Translate(0, 0, -20.0f * zoom);
             GL.Rotate(rotationX, 1.0f, 0.0f, 0.0f);
             GL.Rotate(rotationY, 0.0f, 1.0f, 0.0f);
 
-            // Enable/disable wireframe mode
+            // Set up basic lighting
+            if (!wireframeMode && !isRotating)
+            {
+                GL.Enable(EnableCap.Lighting);
+                GL.Enable(EnableCap.Light0);
+
+                float[] lightPos = { 10.0f, 10.0f, 10.0f, 1.0f };
+                float[] lightAmbient = { 0.4f, 0.4f, 0.4f, 1.0f };
+                float[] lightDiffuse = { 0.8f, 0.8f, 0.8f, 1.0f };
+
+                GL.Light(LightName.Light0, LightParameter.Position, lightPos);
+                GL.Light(LightName.Light0, LightParameter.Ambient, lightAmbient);
+                GL.Light(LightName.Light0, LightParameter.Diffuse, lightDiffuse);
+            }
+            else
+            {
+                GL.Disable(EnableCap.Lighting);
+            }
+
+            // Draw mesh
+            DrawMesh();
+
+            // Draw color legend if enabled
+            if (chkShowDensity.Checked)
+            {
+                //DrawColorLegend();
+            }
+
+            // Present
+            glControl.SwapBuffers();
+        }
+        private void DisposeDisplayList()
+        {
+            if (meshDisplayList != 0)
+            {
+                GL.DeleteLists(meshDisplayList, 1);
+                meshDisplayList = 0;
+            }
+        }
+       
+        private void DrawMesh()
+        {
+            // Only do color mapping when not rotating for better performance
+            bool showDensity = chkShowDensity.Checked && !isRotating;
+
             if (wireframeMode)
             {
+                GL.Disable(EnableCap.Lighting);
+                if (!showDensity)
+                {
+                    GL.Color3(1.0f, 1.0f, 1.0f);
+                }
                 GL.PolygonMode(MaterialFace.FrontAndBack, PolygonMode.Line);
             }
             else
             {
+                GL.Enable(EnableCap.Lighting);
                 GL.PolygonMode(MaterialFace.FrontAndBack, PolygonMode.Fill);
             }
 
-            // Draw the mesh if we have vertices and indices
-            if (deformedVertices.Count > 0 && indices.Count > 0)
+            // Draw the mesh as direct triangles - most efficient approach
+            GL.Begin(PrimitiveType.Triangles);
+
+            // Draw every Nth triangle when rotating for better performance
+            // This is a brutal optimization but will make rotation smooth
+            int stride = isRotating ? 10 : 1;
+
+            for (int i = 0; i < indices.Count; i += 3 * stride)
             {
-                // Check if number of indices is valid (must be multiple of 3 for triangles)
-                int numTriangles = indices.Count / 3;
-                if (numTriangles > 0)
+                if (i + 2 >= indices.Count) break;
+
+                int i1 = indices[i];
+                int i2 = indices[i + 1];
+                int i3 = indices[i + 2];
+
+                // Safety check
+                if (i1 < deformedVertices.Count && i2 < deformedVertices.Count && i3 < deformedVertices.Count)
                 {
-                    // Enable lighting for better visualization
+                    // Apply density-based color if showing density
+                    if (showDensity && i1 < densityValues.Count && i2 < densityValues.Count && i3 < densityValues.Count)
+                    {
+                        float density = densityValues[i1];
+                        float normalizedDensity = 0.0f;
+                        if (maxDensity > minDensity)
+                        {
+                            normalizedDensity = (density - minDensity) / (maxDensity - minDensity);
+                            normalizedDensity = Math.Max(0.0f, Math.Min(1.0f, normalizedDensity));
+                            SetColorForValue(normalizedDensity);
+                        }
+                    }
+
+                    if (i1 < normals.Count) GL.Normal3(normals[i1]);
+                    GL.Vertex3(deformedVertices[i1]);
+
+                    if (i2 < normals.Count) GL.Normal3(normals[i2]);
+                    GL.Vertex3(deformedVertices[i2]);
+
+                    if (i3 < normals.Count) GL.Normal3(normals[i3]);
+                    GL.Vertex3(deformedVertices[i3]);
+                }
+            }
+
+            GL.End();
+
+            // Reset state
+            GL.PolygonMode(MaterialFace.FrontAndBack, PolygonMode.Fill);
+
+            // Draw density legend
+            if (showDensity)
+            {
+                //DrawSimpleColorLegend();
+            }
+        }
+
+        private Bitmap CaptureGLControl()
+        {
+            if (!glControl.IsHandleCreated)
+                return new Bitmap(1, 1);
+
+            glControl.MakeCurrent();
+
+            // Create a bitmap to hold the image
+            Bitmap bitmap = new Bitmap(glControl.Width, glControl.Height);
+
+            // Render the scene exactly like in GlControl_Paint
+            GL.ClearColor(0.2f, 0.2f, 0.2f, 1.0f);
+            GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
+
+            if (deformedVertices.Count > 0)
+            {
+                // Set up camera
+                GL.MatrixMode(MatrixMode.Projection);
+                GL.LoadIdentity();
+                float aspect = glControl.Width / (float)glControl.Height;
+                Matrix4 proj = Matrix4.CreatePerspectiveFieldOfView(
+                    MathHelper.DegreesToRadians(40.0f),
+                    aspect,
+                    0.1f,
+                    1000.0f);
+                GL.LoadMatrix(ref proj);
+
+                // Set up modelview matrix
+                GL.MatrixMode(MatrixMode.Modelview);
+                GL.LoadIdentity();
+
+                // Position camera
+                GL.Translate(0, 0, -20.0f * zoom);
+                GL.Rotate(rotationX, 1.0f, 0.0f, 0.0f);
+                GL.Rotate(rotationY, 0.0f, 1.0f, 0.0f);
+
+                // Set up lighting
+                bool lightingWasEnabled = GL.IsEnabled(EnableCap.Lighting);
+                if (!wireframeMode)
+                {
                     GL.Enable(EnableCap.Lighting);
                     GL.Enable(EnableCap.Light0);
-                    GL.Enable(EnableCap.Light1);
-                    GL.Enable(EnableCap.ColorMaterial);
 
-                    // Draw mesh using vertex arrays for better performance
-                    GL.EnableClientState(ArrayCap.VertexArray);
-                    GL.EnableClientState(ArrayCap.NormalArray);
-                    GL.EnableClientState(ArrayCap.ColorArray);
+                    float[] lightPos = { 10.0f, 10.0f, 10.0f, 1.0f };
+                    float[] lightAmbient = { 0.4f, 0.4f, 0.4f, 1.0f };
+                    float[] lightDiffuse = { 0.8f, 0.8f, 0.8f, 1.0f };
 
-                    try
+                    GL.Light(LightName.Light0, LightParameter.Position, lightPos);
+                    GL.Light(LightName.Light0, LightParameter.Ambient, lightAmbient);
+                    GL.Light(LightName.Light0, LightParameter.Diffuse, lightDiffuse);
+                }
+                else
+                {
+                    GL.Disable(EnableCap.Lighting);
+                }
+
+                // Draw mesh
+                DrawMesh();
+
+                // Draw density legend if showing density
+                if (chkShowDensity.Checked)
+                {
+                    DrawColorLegendGL();
+                }
+
+                // Restore lighting state
+                if (lightingWasEnabled && !GL.IsEnabled(EnableCap.Lighting))
+                    GL.Enable(EnableCap.Lighting);
+                else if (!lightingWasEnabled && GL.IsEnabled(EnableCap.Lighting))
+                    GL.Disable(EnableCap.Lighting);
+            }
+
+            // Make sure rendering is complete
+            GL.Flush();
+            GL.Finish();
+
+            // Copy the framebuffer to the bitmap
+            System.Drawing.Imaging.BitmapData data = bitmap.LockBits(
+                new Rectangle(0, 0, bitmap.Width, bitmap.Height),
+                System.Drawing.Imaging.ImageLockMode.WriteOnly,
+                System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+
+            GL.ReadPixels(0, 0, bitmap.Width, bitmap.Height,
+                PixelFormat.Bgr, PixelType.UnsignedByte, data.Scan0);
+
+            bitmap.UnlockBits(data);
+
+            // OpenGL's origin is bottom-left, while GDI+'s is top-left, so flip the image
+            bitmap.RotateFlip(RotateFlipType.RotateNoneFlipY);
+
+            // Force a redraw to ensure normal rendering continues
+            glControl.Invalidate();
+
+            return bitmap;
+        }
+
+        
+        private void DrawSimpleColorLegend()
+        {
+            // Save current matrices
+            GL.MatrixMode(MatrixMode.Projection);
+            GL.PushMatrix();
+            GL.LoadIdentity();
+            GL.Ortho(0, glControl.Width, 0, glControl.Height, -1, 1);
+
+            GL.MatrixMode(MatrixMode.Modelview);
+            GL.PushMatrix();
+            GL.LoadIdentity();
+
+            // Save OpenGL state
+            bool lightingEnabled = GL.IsEnabled(EnableCap.Lighting);
+            bool depthTestEnabled = GL.IsEnabled(EnableCap.DepthTest);
+
+            // Disable 3D features for 2D overlay
+            GL.Disable(EnableCap.Lighting);
+            GL.Disable(EnableCap.DepthTest);
+
+            // Legend dimensions and position
+            int x = glControl.Width - 30;
+            int width = 20;
+            int y = 20;
+            int height = 200;
+
+            // Draw color gradient
+            GL.Begin(PrimitiveType.Quads);
+
+            // Draw gradient in 10 segments for smoother appearance
+            for (int i = 0; i < 10; i++)
+            {
+                float top = y + i * (height / 10.0f);
+                float bottom = y + (i + 1) * (height / 10.0f);
+                float value = 1.0f - (i / 10.0f);  // Map from 1.0 to 0.0 (high to low)
+
+                // Set color for this segment
+                SetColorForValue(value);
+
+                // Draw segment
+                GL.Vertex2(x, top);
+                GL.Vertex2(x + width, top);
+                GL.Vertex2(x + width, bottom);
+                GL.Vertex2(x, bottom);
+            }
+
+            GL.End();
+
+            // Draw border
+            GL.Color3(1.0f, 1.0f, 1.0f);
+            GL.Begin(PrimitiveType.LineLoop);
+            GL.Vertex2(x, y);
+            GL.Vertex2(x + width, y);
+            GL.Vertex2(x + width, y + height);
+            GL.Vertex2(x, y + height);
+            GL.End();
+
+            // Draw tick marks
+            GL.Begin(PrimitiveType.Lines);
+            for (int i = 0; i <= 5; i++)
+            {
+                float tickY = y + i * (height / 5.0f);
+                GL.Vertex2(x, tickY);
+                GL.Vertex2(x - 5, tickY);
+            }
+            GL.End();
+
+            // Restore 3D settings if they were enabled
+            if (lightingEnabled) GL.Enable(EnableCap.Lighting);
+            if (depthTestEnabled) GL.Enable(EnableCap.DepthTest);
+
+            // Restore matrices
+            GL.MatrixMode(MatrixMode.Projection);
+            GL.PopMatrix();
+            GL.MatrixMode(MatrixMode.Modelview);
+            GL.PopMatrix();
+
+            // Now draw the text using GDI+ (keeping the same approach)
+            using (Graphics g = Graphics.FromHwnd(glControl.Handle))
+            {
+                // Rest of the text drawing code remains the same
+                if (g != null)
+                {
+                    // Set high quality text rendering
+                    g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+                    using (Font font = new Font("Arial", 8, FontStyle.Bold))
                     {
-                        // Prepare vertex array
-                        float[] vertexArray = new float[deformedVertices.Count * 3];
-                        for (int i = 0; i < deformedVertices.Count; i++)
+                        // Draw title label with dark background for better visibility
+                        using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(100, 0, 0, 0)))
                         {
-                            vertexArray[i * 3] = deformedVertices[i].X;
-                            vertexArray[i * 3 + 1] = deformedVertices[i].Y;
-                            vertexArray[i * 3 + 2] = deformedVertices[i].Z;
+                            // Title background
+                            g.FillRectangle(bgBrush, x - 65, 5, 60, 20);
+                            g.DrawString("Density", font, Brushes.White, x - 60, 10);
+
+                            // Units background and text
+                            string unitText = isDensityCalibrated ? "kg/m³" : "(norm)";
+                            g.FillRectangle(bgBrush, x - 65, 25, 60, 15);
+                            g.DrawString(unitText, font, Brushes.White, x - 60, 25);
                         }
 
-                        // Prepare normal array
-                        float[] normalArray = new float[normals.Count * 3];
-                        for (int i = 0; i < normals.Count; i++)
+                        // Draw tick labels
+                        for (int i = 0; i <= 5; i++)
                         {
-                            normalArray[i * 3] = normals[i].X;
-                            normalArray[i * 3 + 1] = normals[i].Y;
-                            normalArray[i * 3 + 2] = normals[i].Z;
-                        }
+                            float normalizedValue = 1.0f - (i / 5.0f);  // 1.0 to 0.0 (top to bottom)
+                            float value = minDensity + (maxDensity - minDensity) * normalizedValue;
 
-                        // Prepare color array based on density or stress
-                        float[] colorArray = new float[densityValues.Count * 4]; // RGBA
-                        for (int i = 0; i < densityValues.Count; i++)
-                        {
-                            // Determine if we're showing density or element stress
-                            float colorValue;
+                            // Calculate screen coordinates - y is inverted in GDI+
+                            int tickY = (int)(y + i * (height / 5.0f));
+                            int screenY = glControl.Height - tickY - 6;  // Adjust y for GDI+
 
-                            if (chkShowDensity.Checked)
+                            // Format the value based on calibration
+                            string valueText = isDensityCalibrated
+                                ? $"{value:F0}" // Integer format for density
+                                : $"{normalizedValue:F1}"; // One decimal place for normalized value
+
+                            // Draw background for better visibility
+                            using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(100, 0, 0, 0)))
                             {
-                                // Use density for coloring
-                                if (isDensityCalibrated)
-                                {
-                                    // Normalize based on real density values in kg/m³
-                                    colorValue = (densityValues[i] - minDensity) / (maxDensity - minDensity);
-                                }
-                                else
-                                {
-                                    // Use normalized grayscale value
-                                    colorValue = (densityValues[i] - minDensity) / (maxDensity - minDensity);
-                                }
+                                g.FillRectangle(bgBrush, x - 45, screenY - 6, 40, 15);
                             }
-                            else
+
+                            // Draw text
+                            g.DrawString(valueText, font, Brushes.White, x - 40, screenY - 6);
+                        }
+
+                        // Add min/max labels if calibrated
+                        if (isDensityCalibrated)
+                        {
+                            using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(100, 0, 0, 0)))
                             {
-                                // Use stress for coloring (if simulation is running)
-                                colorValue = 0.5f; // Default mid-value
+                                int maxY = glControl.Height - y - height - 6;
+                                int minY = glControl.Height - y - 6;
 
-                                if (simulationRunning && elementStresses.Count > 0)
+                                g.FillRectangle(bgBrush, x - 65, maxY - 6, 20, 15);
+                                g.DrawString("Max", font, Brushes.White, x - 60, maxY - 6);
+
+                                g.FillRectangle(bgBrush, x - 65, minY - 6, 20, 15);
+                                g.DrawString("Min", font, Brushes.White, x - 60, minY - 6);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        private void SetColorForValue(float normalizedValue)
+        {
+            // Clamp value to 0-1 range
+            normalizedValue = Math.Max(0.0f, Math.Min(1.0f, normalizedValue));
+
+            // Blue to red color spectrum
+            float r, g, b;
+
+            if (normalizedValue < 0.25f)
+            {
+                // Blue to Cyan
+                r = 0.0f;
+                g = normalizedValue * 4.0f;
+                b = 1.0f;
+            }
+            else if (normalizedValue < 0.5f)
+            {
+                // Cyan to Green
+                r = 0.0f;
+                g = 1.0f;
+                b = 1.0f - (normalizedValue - 0.25f) * 4.0f;
+            }
+            else if (normalizedValue < 0.75f)
+            {
+                // Green to Yellow
+                r = (normalizedValue - 0.5f) * 4.0f;
+                g = 1.0f;
+                b = 0.0f;
+            }
+            else
+            {
+                // Yellow to Red
+                r = 1.0f;
+                g = 1.0f - (normalizedValue - 0.75f) * 4.0f;
+                b = 0.0f;
+            }
+
+            // Set color
+            GL.Color3(r, g, b);
+        }
+        
+        
+        private int meshDisplayList = 0;
+        private void AddSaveImageButton()
+        {
+            // Create the save image button
+            btnSaveImage = new KryptonButton
+            {
+                Text = "Save Image",
+                Location = new Point(10, 910), // Position below the Stop Simulation button
+                Width = 310,
+                Height = 30,
+                StateCommon = {
+            Back = { Color1 = Color.FromArgb(60, 60, 120) },
+            Content = { ShortText = { Color1 = Color.White } }
+        }
+            };
+            btnSaveImage.Click += BtnSaveImage_Click;
+
+            // Find the controls content panel to add the button to
+            Panel controlsContent = null;
+            foreach (Control control in this.Controls)
+            {
+                if (control is TableLayoutPanel mainLayout)
+                {
+                    foreach (Control panelControl in mainLayout.Controls)
+                    {
+                        if (panelControl is Panel panel)
+                        {
+                            foreach (Control c in panel.Controls)
+                            {
+                                if (c is Panel scrollablePanel && scrollablePanel.AutoScroll)
                                 {
-                                    // Find the element(s) this vertex belongs to
-                                    float vertexStress = 0.0f;
-                                    int elementCount = 0;
-
-                                    foreach (var tetra in tetrahedralElements)
+                                    foreach (Control sc in scrollablePanel.Controls)
                                     {
-                                        if (Array.IndexOf(tetra.Vertices, i) >= 0)
+                                        if (sc is Panel content && content.Height > 800)
                                         {
-                                            // This vertex is part of this tetrahedron
-                                            int tetraIndex = tetrahedralElements.IndexOf(tetra);
-                                            if (elementStresses.TryGetValue(tetraIndex, out float elementStress))
-                                            {
-                                                vertexStress += elementStress;
-                                                elementCount++;
-                                            }
+                                            controlsContent = content;
+                                            break;
                                         }
                                     }
-
-                                    if (elementCount > 0)
-                                    {
-                                        // Average stress for this vertex
-                                        vertexStress /= elementCount;
-
-                                        // Normalize by yield strength for coloring
-                                        colorValue = Math.Min(1.0f, vertexStress / yieldStrength);
-                                    }
                                 }
                             }
-
-                            // Apply color gradient based on the value
-                            // Using a multistage gradient: blue -> cyan -> green -> yellow -> red
-                            // This provides better visual discrimination of values
-                            if (colorValue < 0.25f)
-                            {
-                                // Blue to cyan (0.0-0.25)
-                                float t = colorValue * 4.0f;
-                                colorArray[i * 4] = 0.0f;         // R
-                                colorArray[i * 4 + 1] = t;        // G
-                                colorArray[i * 4 + 2] = 1.0f;     // B
-                                colorArray[i * 4 + 3] = 1.0f;     // A
-                            }
-                            else if (colorValue < 0.5f)
-                            {
-                                // Cyan to green (0.25-0.5)
-                                float t = (colorValue - 0.25f) * 4.0f;
-                                colorArray[i * 4] = 0.0f;         // R
-                                colorArray[i * 4 + 1] = 1.0f;     // G
-                                colorArray[i * 4 + 2] = 1.0f - t; // B
-                                colorArray[i * 4 + 3] = 1.0f;     // A
-                            }
-                            else if (colorValue < 0.75f)
-                            {
-                                // Green to yellow (0.5-0.75)
-                                float t = (colorValue - 0.5f) * 4.0f;
-                                colorArray[i * 4] = t;            // R
-                                colorArray[i * 4 + 1] = 1.0f;     // G
-                                colorArray[i * 4 + 2] = 0.0f;     // B
-                                colorArray[i * 4 + 3] = 1.0f;     // A
-                            }
-                            else
-                            {
-                                // Yellow to red (0.75-1.0)
-                                float t = (colorValue - 0.75f) * 4.0f;
-                                colorArray[i * 4] = 1.0f;         // R
-                                colorArray[i * 4 + 1] = 1.0f - t; // G
-                                colorArray[i * 4 + 2] = 0.0f;     // B
-                                colorArray[i * 4 + 3] = 1.0f;     // A
-                            }
-
-                            // Add slight transparency to make internal structure visible in solid mode
-                            if (!wireframeMode)
-                            {
-                                colorArray[i * 4 + 3] = 0.9f;  // Slight transparency
-                            }
                         }
-
-                        // Set up the arrays
-                        GL.VertexPointer(3, VertexPointerType.Float, 0, vertexArray);
-                        GL.NormalPointer(NormalPointerType.Float, 0, normalArray);
-                        GL.ColorPointer(4, ColorPointerType.Float, 0, colorArray);
-
-                        // Draw the triangles
-                        GL.DrawElements(PrimitiveType.Triangles, indices.Count, DrawElementsType.UnsignedInt, indices.ToArray());
-                    }
-                    finally
-                    {
-                        // Clean up state
-                        GL.DisableClientState(ArrayCap.VertexArray);
-                        GL.DisableClientState(ArrayCap.NormalArray);
-                        GL.DisableClientState(ArrayCap.ColorArray);
                     }
                 }
             }
 
-            // Draw coordinate axes for reference
-            GL.Disable(EnableCap.Lighting);
-            GL.LineWidth(2.0f);
-            GL.Begin(PrimitiveType.Lines);
-
-            // X-axis (red) with arrow
-            GL.Color3(1.0f, 0.0f, 0.0f);
-            GL.Vertex3(0.0f, 0.0f, 0.0f);
-            GL.Vertex3(1.0f, 0.0f, 0.0f);
-
-            // X-axis arrow
-            GL.Vertex3(1.0f, 0.0f, 0.0f);
-            GL.Vertex3(0.9f, 0.05f, 0.0f);
-            GL.Vertex3(1.0f, 0.0f, 0.0f);
-            GL.Vertex3(0.9f, -0.05f, 0.0f);
-
-            // Y-axis (green) with arrow
-            GL.Color3(0.0f, 1.0f, 0.0f);
-            GL.Vertex3(0.0f, 0.0f, 0.0f);
-            GL.Vertex3(0.0f, 1.0f, 0.0f);
-
-            // Y-axis arrow
-            GL.Vertex3(0.0f, 1.0f, 0.0f);
-            GL.Vertex3(0.05f, 0.9f, 0.0f);
-            GL.Vertex3(0.0f, 1.0f, 0.0f);
-            GL.Vertex3(-0.05f, 0.9f, 0.0f);
-
-            // Z-axis (blue) with arrow
-            GL.Color3(0.0f, 0.0f, 1.0f);
-            GL.Vertex3(0.0f, 0.0f, 0.0f);
-            GL.Vertex3(0.0f, 0.0f, 1.0f);
-
-            // Z-axis arrow
-            GL.Vertex3(0.0f, 0.0f, 1.0f);
-            GL.Vertex3(0.05f, 0.0f, 0.9f);
-            GL.Vertex3(0.0f, 0.0f, 1.0f);
-            GL.Vertex3(-0.05f, 0.0f, 0.9f);
-
-            GL.End();
-
-            // Add text labels for axes
-            GL.RasterPos3(1.1f, 0.0f, 0.0f);
-            // Draw "X" (OpenGL doesn't have text rendering by default)
-
-            GL.RasterPos3(0.0f, 1.1f, 0.0f);
-            // Draw "Y"
-
-            GL.RasterPos3(0.0f, 0.0f, 1.1f);
-            // Draw "Z"
-
-            // Draw pressure indicators for triaxial test
-            if (simulationRunning)
+            if (controlsContent != null)
             {
-                DrawPressureIndicators();
+                controlsContent.Controls.Add(btnSaveImage);
             }
-
-            GL.LineWidth(1.0f);
-            GL.Enable(EnableCap.Lighting);
-
-            // Draw color legend if in density visualization mode
-            if (chkShowDensity.Checked && !wireframeMode)
+            else
             {
-                DrawColorLegend();
+                // Fallback - add directly to form
+                this.Controls.Add(btnSaveImage);
             }
-
-            // Swap buffers to display the rendered image
-            glControl.SwapBuffers();
         }
         private void GlControl_Load(object sender, EventArgs e)
         {
-            // Make sure we're using the OpenGL control's context
+            if (!glControl.IsHandleCreated) return;
+
             glControl.MakeCurrent();
 
-            // Initialize OpenGL
+            // Set up OpenGL state
             GL.ClearColor(0.2f, 0.2f, 0.2f, 1.0f);
             GL.Enable(EnableCap.DepthTest);
-            GL.Enable(EnableCap.CullFace);
-            GL.CullFace(CullFaceMode.Back);
-
-            // Set up better lighting
-            GL.Enable(EnableCap.Lighting);
-            GL.Enable(EnableCap.Light0);
-            GL.Enable(EnableCap.Light1); // Add a second light for better illumination
-            GL.Enable(EnableCap.ColorMaterial);
-            GL.ColorMaterial(MaterialFace.FrontAndBack, ColorMaterialParameter.AmbientAndDiffuse);
-
-            // Set up primary light properties (white light from upper right)
-            float[] lightPosition = new float[] { 10.0f, 10.0f, 10.0f, 1.0f };
-            float[] lightAmbient = new float[] { 0.3f, 0.3f, 0.3f, 1.0f };
-            float[] lightDiffuse = new float[] { 0.8f, 0.8f, 0.8f, 1.0f };
-            float[] lightSpecular = new float[] { 1.0f, 1.0f, 1.0f, 1.0f };
-
-            GL.Light(LightName.Light0, LightParameter.Position, lightPosition);
-            GL.Light(LightName.Light0, LightParameter.Ambient, lightAmbient);
-            GL.Light(LightName.Light0, LightParameter.Diffuse, lightDiffuse);
-            GL.Light(LightName.Light0, LightParameter.Specular, lightSpecular);
-
-            // Set up secondary light (softer blue light from lower left for fill)
-            float[] light2Position = new float[] { -8.0f, -5.0f, -3.0f, 1.0f };
-            float[] light2Ambient = new float[] { 0.0f, 0.0f, 0.1f, 1.0f };  // Slight blue ambient
-            float[] light2Diffuse = new float[] { 0.2f, 0.2f, 0.3f, 1.0f };  // Soft blue diffuse
-            float[] light2Specular = new float[] { 0.0f, 0.0f, 0.0f, 1.0f }; // No specular
-
-            GL.Light(LightName.Light1, LightParameter.Position, light2Position);
-            GL.Light(LightName.Light1, LightParameter.Ambient, light2Ambient);
-            GL.Light(LightName.Light1, LightParameter.Diffuse, light2Diffuse);
-            GL.Light(LightName.Light1, LightParameter.Specular, light2Specular);
-
-            // Add attenuation to make lighting more realistic
-            GL.Light(LightName.Light0, LightParameter.ConstantAttenuation, 1.0f);
-            GL.Light(LightName.Light0, LightParameter.LinearAttenuation, 0.02f);
-            GL.Light(LightName.Light0, LightParameter.QuadraticAttenuation, 0.0f);
-
-            GL.Light(LightName.Light1, LightParameter.ConstantAttenuation, 1.0f);
-            GL.Light(LightName.Light1, LightParameter.LinearAttenuation, 0.05f);
-            GL.Light(LightName.Light1, LightParameter.QuadraticAttenuation, 0.0f);
-
-            // Set up material properties
-            float[] materialAmbient = new float[] { 0.2f, 0.2f, 0.2f, 1.0f };
-            float[] materialDiffuse = new float[] { 0.8f, 0.8f, 0.8f, 1.0f };
-            float[] materialSpecular = new float[] { 0.5f, 0.5f, 0.5f, 1.0f }; // Reduced specular for more realism
-            float materialShininess = 32.0f; // Reduced shininess for rock-like materials
-
-            GL.Material(MaterialFace.Front, MaterialParameter.Ambient, materialAmbient);
-            GL.Material(MaterialFace.Front, MaterialParameter.Diffuse, materialDiffuse);
-            GL.Material(MaterialFace.Front, MaterialParameter.Specular, materialSpecular);
-            GL.Material(MaterialFace.Front, MaterialParameter.Shininess, materialShininess);
-
-            // Enable blending for transparency
-            GL.Enable(EnableCap.Blend);
-            GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
-
-            // Enable smoother shading
+            GL.DepthFunc(DepthFunction.Less);
             GL.ShadeModel(ShadingModel.Smooth);
 
-            // Enable face culling to improve performance
+            // Disable unused features
+            GL.Disable(EnableCap.Texture2D);
+            GL.Disable(EnableCap.Fog);
+            GL.Disable(EnableCap.Dither);
+
+            // Enable backface culling for better performance
             GL.Enable(EnableCap.CullFace);
             GL.CullFace(CullFaceMode.Back);
 
-            // Enable normalization of normals
-            GL.Enable(EnableCap.Normalize);
+            // Set up viewport
+            GL.Viewport(0, 0, glControl.Width, glControl.Height);
+
+            // Check hardware acceleration
+            CheckHardwareAcceleration();
 
             glControlInitialized = true;
-            GlControl_Resize(sender, e); // Initialize the viewport and projection
         }
         private void GlControl_MouseUp(object sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left)
             {
                 isDragging = false;
+                rotationTimer.Stop(); // Stop continuous rendering
+                glControl.Invalidate(); // Final redraw
             }
         }
-
         private void GlControl_MouseWheel(object sender, MouseEventArgs e)
         {
             zoom *= (float)Math.Pow(1.1, e.Delta / 120.0);
@@ -3204,37 +3899,588 @@ namespace CTS
         }
         private void GlControl_Resize(object sender, EventArgs e)
         {
-            if (!glControl.IsHandleCreated || !glControl.Context.IsCurrent)
-                return;
+            if (!glControl.IsHandleCreated) return;
+            if (!glControl.Context.IsCurrent) glControl.MakeCurrent();
+            if (glControl.Width <= 0 || glControl.Height <= 0) return;
 
-            if (glControl.Width <= 0 || glControl.Height <= 0)
-                return;
-
-            // Set viewport to cover the entire control
+            // Update viewport
             GL.Viewport(0, 0, glControl.Width, glControl.Height);
 
-            // Set up the projection matrix
+            // Reposition legend panel
+            if (colorLegendPanel != null)
+            {
+                colorLegendPanel.Location = new Point(glControl.Width - 105, 10);
+            }
+
+            // Force redraw
+            glControl.Invalidate();
+        }
+        private void BtnSaveImage_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                using (SaveFileDialog saveDialog = new SaveFileDialog())
+                {
+                    saveDialog.Filter = "PNG Image|*.png|JPEG Image|*.jpg|Bitmap Image|*.bmp";
+                    saveDialog.Title = "Save Simulation Image";
+                    saveDialog.DefaultExt = "png";
+                    saveDialog.FileName = $"TriaxialSimulation_{DateTime.Now:yyyyMMdd_HHmmss}";
+
+                    if (saveDialog.ShowDialog() == DialogResult.OK)
+                    {
+                        // Render the scene once to ensure it's up-to-date
+                        glControl.Invalidate();
+                        glControl.Update();
+
+                        // Create the composite image
+                        Bitmap compositeImage = CreateCompositeImage();
+
+                        // Save the image
+                        string extension = Path.GetExtension(saveDialog.FileName).ToLower();
+                        switch (extension)
+                        {
+                            case ".jpg":
+                            case ".jpeg":
+                                compositeImage.Save(saveDialog.FileName, System.Drawing.Imaging.ImageFormat.Jpeg);
+                                break;
+                            case ".bmp":
+                                compositeImage.Save(saveDialog.FileName, System.Drawing.Imaging.ImageFormat.Bmp);
+                                break;
+                            case ".png":
+                            default:
+                                compositeImage.Save(saveDialog.FileName, System.Drawing.Imaging.ImageFormat.Png);
+                                break;
+                        }
+
+                        MessageBox.Show($"Image saved to {saveDialog.FileName}", "Save Complete",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+                        // Force a final redraw to ensure the display is correct
+                        glControl.Invalidate();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error saving image: {ex.Message}", "Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Logger.Log($"[TriaxialSimulationForm] Error saving image: {ex.Message}");
+
+                // Force a redraw in case of error
+                glControl.Invalidate();
+            }
+        }
+        private Bitmap CreateCompositeImage()
+        {
+            // Capture the OpenGL render
+            Bitmap glRender = CaptureGLControl();
+
+            // Create the composite bitmap
+            Bitmap compositeImage = new Bitmap(glRender.Width, glRender.Height);
+
+            using (Graphics g = Graphics.FromImage(compositeImage))
+            {
+                // Draw the OpenGL render
+                g.DrawImage(glRender, 0, 0, glRender.Width, glRender.Height);
+
+                // Draw legend if enabled
+                if (chkShowDensity.Checked)
+                {
+                    // Temporarily create a bitmap of the legend panel
+                    using (Bitmap legendBitmap = new Bitmap(colorLegendPanel.Width, colorLegendPanel.Height))
+                    {
+                        colorLegendPanel.DrawToBitmap(legendBitmap, new Rectangle(0, 0, colorLegendPanel.Width, colorLegendPanel.Height));
+                        g.DrawImage(legendBitmap, colorLegendPanel.Location);
+                    }
+                }
+
+                // Add simulation info
+                string info = $"Material: {(selectedMaterial != null ? selectedMaterial.Name : "Unknown")}";
+                info += $"\nDensity: {bulkDensity:F0} kg/m³";
+
+                if (simulationRunning || stressStrainCurve.Count > 0)
+                {
+                    float currentStress = stressStrainCurve.Count > 0 ?
+                        stressStrainCurve.Last().Y / 10.0f : 0; // Convert to MPa
+                    float currentStrainPercent = currentStrain * 100; // Convert to percentage
+
+                    info += $"\nStrain: {currentStrainPercent:F1}%";
+                    info += $"\nStress: {currentStress:F1} MPa";
+                }
+
+                using (Font font = new Font("Arial", 10, FontStyle.Bold))
+                using (Brush brush = new SolidBrush(Color.White))
+                using (Brush shadowBrush = new SolidBrush(Color.FromArgb(128, 0, 0, 0)))
+                {
+                    // Draw text shadow and then text for better readability
+                    g.DrawString(info, font, shadowBrush, glRender.Width + 5 + 1, 11);
+                    g.DrawString(info, font, brush, glRender.Width + 5, 10);
+                }
+            }
+
+            return compositeImage;
+        }
+       
+        
+        private Color GetColorForValue(float normalizedValue)
+        {
+            // Clamp value to 0-1 range
+            normalizedValue = Math.Max(0.0f, Math.Min(1.0f, normalizedValue));
+
+            // Blue to red color spectrum (same as in SetColorForValue method)
+            float r, g, b;
+
+            if (normalizedValue < 0.25f)
+            {
+                // Blue to Cyan
+                r = 0.0f;
+                g = normalizedValue * 4.0f;
+                b = 1.0f;
+            }
+            else if (normalizedValue < 0.5f)
+            {
+                // Cyan to Green
+                r = 0.0f;
+                g = 1.0f;
+                b = 1.0f - (normalizedValue - 0.25f) * 4.0f;
+            }
+            else if (normalizedValue < 0.75f)
+            {
+                // Green to Yellow
+                r = (normalizedValue - 0.5f) * 4.0f;
+                g = 1.0f;
+                b = 0.0f;
+            }
+            else
+            {
+                // Yellow to Red
+                r = 1.0f;
+                g = 1.0f - (normalizedValue - 0.75f) * 4.0f;
+                b = 0.0f;
+            }
+
+            return Color.FromArgb(255, (int)(r * 255), (int)(g * 255), (int)(b * 255));
+        }
+        
+        private void InitializeFontTexture()
+        {
+            if (fontTextureInitialized)
+                return;
+
+            // Create a texture bitmap for rendering text
+            fontTexture = new Bitmap(256, 256);
+            using (Graphics g = Graphics.FromImage(fontTexture))
+            {
+                g.Clear(Color.Transparent);
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+
+                // Use a monospace font for simplicity
+                Font font = new Font("Consolas", 16, FontStyle.Bold);
+
+                // Generate all ASCII printable characters
+                for (char c = ' '; c <= '~'; c++)
+                {
+                    int index = c - ' ';
+                    int row = index / 16;
+                    int col = index % 16;
+
+                    Rectangle rect = new Rectangle(col * 16, row * 16, 16, 16);
+                    characterRects[c] = rect;
+
+                    // Draw character
+                    g.DrawString(c.ToString(), font, Brushes.White, rect.X, rect.Y);
+                }
+            }
+
+            // Create OpenGL texture
+            GL.GenTextures(1, out fontTextureId);
+            GL.BindTexture(TextureTarget.Texture2D, fontTextureId);
+
+            // Set texture parameters
+            GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+            GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+
+            // Get bitmap data
+            System.Drawing.Imaging.BitmapData data = fontTexture.LockBits(
+                new Rectangle(0, 0, fontTexture.Width, fontTexture.Height),
+                System.Drawing.Imaging.ImageLockMode.ReadOnly,
+                System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+
+            // Upload texture
+            GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba,
+                data.Width, data.Height, 0, PixelFormat.Bgra,
+                PixelType.UnsignedByte, data.Scan0);
+
+            fontTexture.UnlockBits(data);
+            GL.BindTexture(TextureTarget.Texture2D, 0);
+
+            fontTextureInitialized = true;
+        }
+        private void DrawColorLegend()
+        {
+            // Keep the 3D rendering intact by saving the current matrices and states
+            GL.MatrixMode(MatrixMode.Projection);
+            GL.PushMatrix();
+            GL.MatrixMode(MatrixMode.Modelview);
+            GL.PushMatrix();
+
+            // Save relevant OpenGL states
+            bool lighting = GL.IsEnabled(EnableCap.Lighting);
+            bool texture = GL.IsEnabled(EnableCap.Texture2D);
+            bool depthTest = GL.IsEnabled(EnableCap.DepthTest);
+
+            // Set up for 2D overlay drawing
             GL.MatrixMode(MatrixMode.Projection);
             GL.LoadIdentity();
+            GL.Ortho(0, glControl.Width, 0, glControl.Height, -1, 1);
 
-            // Create perspective projection with better parameters
-            float aspectRatio = (float)glControl.Width / glControl.Height;
-            Matrix4 perspective = Matrix4.CreatePerspectiveFieldOfView(
-                MathHelper.DegreesToRadians(45.0f), // FOV
-                aspectRatio,                        // Aspect ratio
-                0.1f,                               // Near plane
-                1000.0f);                           // Far plane (increased for better depth)
-            GL.LoadMatrix(ref perspective);
-
-            // Reset back to model view matrix
             GL.MatrixMode(MatrixMode.Modelview);
             GL.LoadIdentity();
 
-            // Request a redraw
-            glControl.Invalidate();
+            // Disable features that would interfere with 2D drawing
+            GL.Disable(EnableCap.Lighting);
+            GL.Disable(EnableCap.Texture2D);
+            GL.Disable(EnableCap.DepthTest);
+
+            // Draw the colorbar
+            int barWidth = 20;
+            int barHeight = 200;
+            int barX = glControl.Width - barWidth - 10;
+            int barY = 50;
+
+            // Draw the gradient bar
+            GL.Begin(PrimitiveType.Quads);
+            for (int i = 0; i < barHeight; i++)
+            {
+                float normalizedValue = 1.0f - (i / (float)barHeight);
+                SetColorForValue(normalizedValue);
+
+                GL.Vertex2(barX, barY + i);
+                GL.Vertex2(barX + barWidth, barY + i);
+
+                normalizedValue = 1.0f - ((i + 1) / (float)barHeight);
+                SetColorForValue(normalizedValue);
+
+                GL.Vertex2(barX + barWidth, barY + i + 1);
+                GL.Vertex2(barX, barY + i + 1);
+            }
+            GL.End();
+
+            // Draw border around the colorbar
+            GL.Color3(1.0f, 1.0f, 1.0f);
+            GL.Begin(PrimitiveType.LineLoop);
+            GL.Vertex2(barX, barY);
+            GL.Vertex2(barX + barWidth, barY);
+            GL.Vertex2(barX + barWidth, barY + barHeight);
+            GL.Vertex2(barX, barY + barHeight);
+            GL.End();
+
+            // Draw tick marks
+            GL.Begin(PrimitiveType.Lines);
+            for (int i = 0; i <= 5; i++)
+            {
+                float y = barY + i * (barHeight / 5.0f);
+                GL.Vertex2(barX, y);
+                GL.Vertex2(barX - 5, y);
+            }
+            GL.End();
+
+            // Finish OpenGL rendering
+            GL.Flush();
+
+            // Restore OpenGL state
+            if (lighting) GL.Enable(EnableCap.Lighting);
+            if (texture) GL.Enable(EnableCap.Texture2D);
+            if (depthTest) GL.Enable(EnableCap.DepthTest);
+
+            // Restore matrices
+            GL.MatrixMode(MatrixMode.Projection);
+            GL.PopMatrix();
+            GL.MatrixMode(MatrixMode.Modelview);
+            GL.PopMatrix();
+
+            // Now draw text using GDI+ in a safe, separate pass
+            try
+            {
+                using (Graphics g = Graphics.FromHwnd(glControl.Handle))
+                {
+                    using (Font font = new Font("Arial", 8, FontStyle.Bold))
+                    {
+                        // Draw title
+                        g.DrawString("Density", font, Brushes.White, glControl.Width - barWidth - 50, 20);
+
+                        // Draw unit label
+                        string unitText = isDensityCalibrated ? "kg/m³" : "(norm)";
+                        g.DrawString(unitText, font, Brushes.White, glControl.Width - barWidth - 50, 35);
+
+                        // Draw tick labels
+                        for (int i = 0; i <= 5; i++)
+                        {
+                            float normalizedValue = 1.0f - (i / 5.0f);
+                            float value = minDensity + (maxDensity - minDensity) * normalizedValue;
+
+                            int screenY = glControl.Height - (barY + (int)(i * barHeight / 5.0f)) - 6;
+
+                            string label = isDensityCalibrated ?
+                                $"{value:F0}" :
+                                $"{normalizedValue:F1}";
+
+                            g.DrawString(label, font, Brushes.White, glControl.Width - barWidth - 40, screenY);
+                        }
+
+                        // Draw min/max labels if calibrated
+                        if (isDensityCalibrated)
+                        {
+                            g.DrawString("Max", font, Brushes.White, glControl.Width - barWidth - 60,
+                                glControl.Height - barY - barHeight);
+                            g.DrawString("Min", font, Brushes.White, glControl.Width - barWidth - 60,
+                                glControl.Height - barY - 15);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Just log the error but continue rendering
+                Logger.Log($"[TriaxialSimulationForm] Error drawing legend text: {ex.Message}");
+            }
+        }
+        private void DrawColorLegendGL()
+        {
+            // Save OpenGL state
+            bool depthTestEnabled = GL.IsEnabled(EnableCap.DepthTest);
+            bool lightingEnabled = GL.IsEnabled(EnableCap.Lighting);
+            bool blendEnabled = GL.IsEnabled(EnableCap.Blend);
+
+            // Setup 2D orthographic projection
+            GL.MatrixMode(MatrixMode.Projection);
+            GL.PushMatrix();
+            GL.LoadIdentity();
+            GL.Ortho(0, glControl.Width, glControl.Height, 0, -1, 1);
+
+            GL.MatrixMode(MatrixMode.Modelview);
+            GL.PushMatrix();
+            GL.LoadIdentity();
+
+            // Set up for 2D rendering
+            GL.Disable(EnableCap.DepthTest);
+            GL.Disable(EnableCap.Lighting);
+            GL.Enable(EnableCap.Blend);
+            GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+
+            // Colorbar parameters
+            int barWidth = 25;
+            int barHeight = 200;
+            int barX = glControl.Width - barWidth - 10;
+            int barY = 50;
+
+            // Draw colorbar background
+            GL.Color4(0.1f, 0.1f, 0.1f, 0.5f);
+            GL.Begin(PrimitiveType.Quads);
+            GL.Vertex2(barX - 60, barY - 30);
+            GL.Vertex2(barX + barWidth + 5, barY - 30);
+            GL.Vertex2(barX + barWidth + 5, barY + barHeight + 5);
+            GL.Vertex2(barX - 60, barY + barHeight + 5);
+            GL.End();
+
+            // Draw colorbar gradient
+            GL.Begin(PrimitiveType.Quads);
+            for (int i = 0; i < barHeight; i++)
+            {
+                float normalizedValue = 1.0f - (i / (float)barHeight);
+
+                // Set color for current position
+                SetColorForValue(normalizedValue);
+
+                GL.Vertex2(barX, barY + i);
+                GL.Vertex2(barX + barWidth, barY + i);
+
+                SetColorForValue(1.0f - ((i + 1) / (float)barHeight));
+
+                GL.Vertex2(barX + barWidth, barY + i + 1);
+                GL.Vertex2(barX, barY + i + 1);
+            }
+            GL.End();
+
+            // Draw colorbar border
+            GL.Color3(1.0f, 1.0f, 1.0f);
+            GL.Begin(PrimitiveType.LineLoop);
+            GL.Vertex2(barX, barY);
+            GL.Vertex2(barX + barWidth, barY);
+            GL.Vertex2(barX + barWidth, barY + barHeight);
+            GL.Vertex2(barX, barY + barHeight);
+            GL.End();
+
+            // Draw tick marks and labels
+            GL.Begin(PrimitiveType.Lines);
+            int numTicks = 6;
+            for (int i = 0; i < numTicks; i++)
+            {
+                float yPos = barY + i * (barHeight / (numTicks - 1));
+                GL.Vertex2(barX, yPos);
+                GL.Vertex2(barX - 5, yPos);
+            }
+            GL.End();
+
+            // Draw title
+            RenderText("Density", barX - 55, barY - 25, 1.0f);
+
+            // Draw unit label
+            string unitText = isDensityCalibrated ? "kg/m³" : "(norm)";
+            RenderText(unitText, barX - 55, barY - 5, 0.8f);
+
+            // Draw tick labels
+            for (int i = 0; i < numTicks; i++)
+            {
+                float normalizedValue = 1.0f - (i / (float)(numTicks - 1));
+                float value = minDensity + (maxDensity - minDensity) * normalizedValue;
+                float yPos = barY + i * (barHeight / (numTicks - 1)) - 8;
+
+                string label = isDensityCalibrated ?
+                    $"{value:F0}" : // Density in kg/m³
+                    $"{normalizedValue:F1}"; // Normalized value
+
+                RenderText(label, barX - 45, yPos, 0.8f);
+            }
+
+            // Draw max/min labels if calibrated
+            if (isDensityCalibrated)
+            {
+                RenderText("Max", barX - 55, barY - 15, 0.8f);
+                RenderText("Min", barX - 55, barY + barHeight - 10, 0.8f);
+            }
+
+            // Restore OpenGL state
+            GL.MatrixMode(MatrixMode.Projection);
+            GL.PopMatrix();
+            GL.MatrixMode(MatrixMode.Modelview);
+            GL.PopMatrix();
+
+            if (depthTestEnabled) GL.Enable(EnableCap.DepthTest);
+            if (lightingEnabled) GL.Enable(EnableCap.Lighting);
+            if (!blendEnabled) GL.Disable(EnableCap.Blend);
+        }
+        private void RenderText(string text, float x, float y, float scale, bool centerX = false)
+        {
+            if (!fontTextureInitialized)
+                InitializeFontTexture();
+
+            // Bind texture
+            GL.Enable(EnableCap.Texture2D);
+            GL.Enable(EnableCap.Blend);
+            GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+            GL.BindTexture(TextureTarget.Texture2D, fontTextureId);
+
+            // If centering, calculate width
+            if (centerX)
+            {
+                float width = text.Length * 16 * scale;
+                x -= width / 2;
+            }
+
+            GL.Begin(PrimitiveType.Quads);
+            GL.Color4(1.0f, 1.0f, 1.0f, 1.0f); // White text
+
+            float xPos = x;
+            foreach (char c in text)
+            {
+                if (characterRects.TryGetValue(c, out Rectangle rect))
+                {
+                    float texX = rect.X / 256.0f;
+                    float texY = rect.Y / 256.0f;
+                    float texWidth = rect.Width / 256.0f;
+                    float texHeight = rect.Height / 256.0f;
+
+                    float charWidth = rect.Width * scale;
+                    float charHeight = rect.Height * scale;
+
+                    // Draw character quad
+                    GL.TexCoord2(texX, texY);
+                    GL.Vertex2(xPos, y);
+
+                    GL.TexCoord2(texX + texWidth, texY);
+                    GL.Vertex2(xPos + charWidth, y);
+
+                    GL.TexCoord2(texX + texWidth, texY + texHeight);
+                    GL.Vertex2(xPos + charWidth, y + charHeight);
+
+                    GL.TexCoord2(texX, texY + texHeight);
+                    GL.Vertex2(xPos, y + charHeight);
+
+                    xPos += charWidth;
+                }
+            }
+            GL.End();
+
+            // Restore state
+            GL.Disable(EnableCap.Texture2D);
+            GL.BindTexture(TextureTarget.Texture2D, 0);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                // Dispose OpenGL resources
+                DisposeDisplayList();
+                if (meshDisplayList != 0)
+                {
+                    GL.DeleteLists(meshDisplayList, 1);
+                    meshDisplayList = 0;
+                }
+                if (fontTextureInitialized && fontTextureId != 0)
+                {
+                    GL.DeleteTextures(1, ref fontTextureId);
+                    fontTextureId = 0;
+                }
+
+                if (fontTexture != null)
+                {
+                    fontTexture.Dispose();
+                    fontTexture = null;
+                }
+                // Delete VBOs
+                if (buffersInitialized)
+                {
+                    GL.DeleteBuffers(1, ref vertexBufferId);
+                    GL.DeleteBuffers(1, ref normalBufferId);
+                    GL.DeleteBuffers(1, ref colorBufferId);
+                    GL.DeleteBuffers(1, ref indexBufferId);
+                    buffersInitialized = false;
+                }
+                if (rotationTimer != null)
+                {
+                    rotationTimer.Stop();
+                    rotationTimer.Dispose();
+                    rotationTimer = null;
+                }
+                // Dispose other managed resources if needed
+                if (meshWorker != null)
+                {
+                    meshWorker.Dispose();
+                }
+
+                if (simulationTimer != null)
+                {
+                    simulationTimer.Stop();
+                    simulationTimer.Dispose();
+                }
+
+                if (glControl != null)
+                {
+                    glControl.Dispose();
+                }
+                if (diagramsForm != null && !diagramsForm.IsDisposed)
+                {
+                    diagramsForm.Dispose();
+                    diagramsForm = null;
+                }
+            }
+
+            base.Dispose(disposing);
         }
     }
-
+    
     public class TetrahedralElement
     {
         public int[] Vertices { get; private set; }
@@ -3245,7 +4491,6 @@ namespace CTS
         }
     }
 
-    
     public class MeshGenerationParameters
     {
         public Material Material { get; set; }

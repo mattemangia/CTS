@@ -88,6 +88,7 @@
     <Reference Include="System.Data" />
     <Reference Include="System.Data.DataSetExtensions" />
     <Reference Include="System.Drawing" />
+    <Reference Include="System.IO.Compression.FileSystem" />
     <Reference Include="System.Numerics" />
     <Reference Include="System.Runtime.Serialization" />
     <Reference Include="System.Web.Extensions" />
@@ -155,10 +156,17 @@
     <Compile Include="Modules\ArtificialIntelligence\GroundingDINO\GroundingDINODetector.cs" />
     <Compile Include="Modules\ArtificialIntelligence\MicroSAM\MicroSAM.cs" />
     <Compile Include="Modules\AutoUpdater\AutoUpdater.cs" />
+    <Compile Include="Modules\AutoUpdater\CTSUpdater.cs" />
+    <Compile Include="Modules\AutoUpdater\UpdateProgressForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Modules\BandDetection\BandDetectionForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Modules\BandDetection\BandDetectionFormVariance.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Modules\BugSubmission\BugSubmissionForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Modules\StressAnalysis\AcousticVelocitySimulation.cs" />
@@ -175,7 +183,7 @@
     </Compile>
     <Compile Include="Modules\StressAnalysis\StressAnalysisFormExtension.cs" />
     <Compile Include="Modules\StressAnalysis\TriaxialSimulation.cs" />
-    <Compile Include="Modules\Triaxial_Simulation\DiagramsForm.cs">
+    <Compile Include="Modules\Triaxial_Simulation\TriaxialDiagramsForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Modules\Triaxial_Simulation\TriaxialSimulationForm.cs">
@@ -293,6 +301,9 @@
     <Content Include="favicon.ico" />
   </ItemGroup>
   <ItemGroup>
+    <EmbeddedResource Include="Modules\BugSubmission\BugSubmissionForm.resx">
+      <DependentUpon>BugSubmissionForm.cs</DependentUpon>
+    </EmbeddedResource>
     <EmbeddedResource Include="UI\MainForm.resx">
       <DependentUpon>MainForm.cs</DependentUpon>
     </EmbeddedResource>

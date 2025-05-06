@@ -11,7 +11,7 @@ using Krypton.Toolkit;
 
 namespace CTS
 {
-    public partial class DiagramsForm : KryptonForm
+    public partial class TriaxialDiagramsForm : KryptonForm
     {
         // Data from simulation
         private float currentStrain = 0.0f;
@@ -38,7 +38,7 @@ namespace CTS
         private KryptonButton btnSaveImage;
         private SaveFileDialog saveFileDialog;
 
-        public DiagramsForm()
+        public TriaxialDiagramsForm()
         {
             InitializeComponent();
         }

@@ -7,6 +7,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CTS", "CTS.csproj", "{A890B
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "CTViewer", "..\3DViewer\3DViewer.vcxproj", "{62B7D874-1E68-4032-AE8D-60E78B51EBE4}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "UpdaterBuilder", "..\UpdaterBuilder\UpdaterBuilder.csproj", "{F1AAC855-E5F7-475C-A5F6-0FB980FE9B8A}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -31,8 +33,19 @@ Global
 		{62B7D874-1E68-4032-AE8D-60E78B51EBE4}.Release|x64.Build.0 = Release|x64
 		{62B7D874-1E68-4032-AE8D-60E78B51EBE4}.Release|x86.ActiveCfg = Release|Win32
 		{62B7D874-1E68-4032-AE8D-60E78B51EBE4}.Release|x86.Build.0 = Release|Win32
+		{F1AAC855-E5F7-475C-A5F6-0FB980FE9B8A}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{F1AAC855-E5F7-475C-A5F6-0FB980FE9B8A}.Debug|x64.Build.0 = Debug|Any CPU
+		{F1AAC855-E5F7-475C-A5F6-0FB980FE9B8A}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{F1AAC855-E5F7-475C-A5F6-0FB980FE9B8A}.Debug|x86.Build.0 = Debug|Any CPU
+		{F1AAC855-E5F7-475C-A5F6-0FB980FE9B8A}.Release|x64.ActiveCfg = Release|Any CPU
+		{F1AAC855-E5F7-475C-A5F6-0FB980FE9B8A}.Release|x64.Build.0 = Release|Any CPU
+		{F1AAC855-E5F7-475C-A5F6-0FB980FE9B8A}.Release|x86.ActiveCfg = Release|Any CPU
+		{F1AAC855-E5F7-475C-A5F6-0FB980FE9B8A}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {B9F6A300-7EB3-476A-8D2E-838CF1624F5B}
 	EndGlobalSection
 EndGlobal

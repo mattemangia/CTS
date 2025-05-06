@@ -8,7 +8,7 @@ namespace CTS
 {
     public static class Logger
     {
-        private static readonly string LogFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log.txt");
+        public static readonly string LogFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log.txt");
         private static readonly object LockObj = new object();
         private static Thread logWindowThread;
         public static bool ShuttingDown { get; set; } = false;

@@ -697,11 +697,51 @@ namespace CTS
                 }
             };
 
+            // Check For Updates
+            ToolStripMenuItem checkUpdatesMenuItem = new ToolStripMenuItem("Check For Updates");
+            checkUpdatesMenuItem.Click += (s, e) =>
+            {
+                try
+                {
+                    // Show the update progress form
+                    Modules.AutoUpdater.UpdateProgressForm updateForm = new Modules.AutoUpdater.UpdateProgressForm();
+                    updateForm.ShowDialog();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[ControlForm] Error checking for updates: {ex.Message}");
+                    MessageBox.Show($"Error checking for updates: {ex.Message}",
+                        "Update Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            };
+
+            // Report Bug
+            ToolStripMenuItem reportBugMenuItem = new ToolStripMenuItem("Report Bug");
+            reportBugMenuItem.Click += (s, e) =>
+            {
+                try
+                {
+                    // Show the bug submission form
+                    Modules.BugSubmission.BugSubmissionForm.ShowBugReportDialog();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[ControlForm] Error opening bug report form: {ex.Message}");
+                    MessageBox.Show($"Error opening bug report form: {ex.Message}",
+                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            };
+
             // About
             about = new ToolStripMenuItem("About");
 
             // Add items to Help menu
-            helpMenu.DropDownItems.AddRange(new ToolStripItem[] { dbgConsole, about });
+            helpMenu.DropDownItems.AddRange(new ToolStripItem[] {
+        dbgConsole,
+        checkUpdatesMenuItem,
+        reportBugMenuItem,
+        about
+    });
         }
         private void CreateSimulationMenu()
         {

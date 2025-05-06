@@ -139,7 +139,7 @@ namespace CTS
         private bool buffersInitialized = false;
         private System.Windows.Forms.Timer rotationTimer;
         private bool hardwareAccelerated = false;
-        private DiagramsForm diagramsForm;
+        private TriaxialDiagramsForm diagramsForm;
         private int fontTextureId = 0;
         private bool fontTextureInitialized = false;
         private Bitmap fontTexture = null;
@@ -149,7 +149,7 @@ namespace CTS
         public Material SelectedMaterial => selectedMaterial;
         private void InitializeDiagramsForm()
         {
-            diagramsForm = new DiagramsForm();
+            diagramsForm = new TriaxialDiagramsForm();
         }
         private void AddDiagramsButton()
         {

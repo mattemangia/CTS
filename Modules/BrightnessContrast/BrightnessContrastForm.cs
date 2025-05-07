@@ -55,6 +55,11 @@ namespace CTS
 
         public BrightnessContrastForm(MainForm form)
         {
+            try
+            {
+                this.Icon = Properties.Resources.favicon;
+            }
+            catch { }
             mainForm = form;
             volumeData = (ChunkedVolume)form.volumeData;
             currentSlice = form.CurrentSlice;

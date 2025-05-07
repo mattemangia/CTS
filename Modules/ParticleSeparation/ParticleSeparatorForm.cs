@@ -86,6 +86,11 @@ namespace CTS
 
         public ParticleSeparatorForm(MainForm mainForm, Material selectedMaterial)
         {
+            try
+            {
+                this.Icon = Properties.Resources.favicon;
+            }
+            catch { }
             Logger.Log("[ParticleSeparatorForm] Opening particle separator for material: " + selectedMaterial.Name);
 
             this.mainForm = mainForm;

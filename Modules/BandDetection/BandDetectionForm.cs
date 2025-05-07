@@ -62,6 +62,11 @@ namespace CTS
 
         public BandDetectionForm(MainForm form)
         {
+            try
+            {
+                this.Icon = Properties.Resources.favicon;
+            }
+            catch { }
             mainForm = form;
             cancellationTokenSource = new CancellationTokenSource();
             InitializeComponents();

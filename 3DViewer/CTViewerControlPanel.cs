@@ -84,6 +84,11 @@ namespace CTS.SharpDXIntegration
 
         public SharpDXControlPanel(SharpDXViewerForm viewer, MainForm main, SharpDXVolumeRenderer renderer)
         {
+            try
+            {
+                this.Icon = Properties.Resources.favicon;
+            }
+            catch { }
             viewerForm = viewer;
             mainForm = main;
             volumeRenderer = renderer;

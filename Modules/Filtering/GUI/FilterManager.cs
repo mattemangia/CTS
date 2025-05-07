@@ -92,6 +92,7 @@ namespace CTS
         /// </summary>
         public FilterManager(MainForm mainForm)
         {
+            
             this.mainForm = mainForm;
             InitializeGPU();
             InitializeForm();
@@ -156,12 +157,14 @@ namespace CTS
 
         private void InitializeForm()
         {
+
             // Main window
             filterForm = new Form
             {
                 Text = "Filter Manager",
                 Size = new Size(1000, 840),
-                StartPosition = FormStartPosition.CenterScreen
+                StartPosition = FormStartPosition.CenterScreen,
+                Icon = Properties.Resources.favicon
             };
             try
             {

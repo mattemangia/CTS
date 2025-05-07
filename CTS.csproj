@@ -1,5 +1,6 @@
 <Project ToolsVersion="12.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup>
+    <RestoreProjectStyle>PackagesConfig</RestoreProjectStyle>
     <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
     <Platform Condition=" '$(Platform)' == '' ">x86</Platform>
     <ProjectGuid>{A890BC78-2B81-4116-A284-9A76A35D1996}</ProjectGuid>
@@ -103,10 +104,6 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
-    <None Include="Properties\Settings.settings">
-      <Generator>SettingsSingleFileGenerator</Generator>
-      <LastGenOutput>Settings1.Designer.cs</LastGenOutput>
-    </None>
     <None Include="Ruleset.ruleset" />
   </ItemGroup>
   <ItemGroup>
@@ -133,6 +130,7 @@
     <Compile Include="Misc\RangeSlider.cs">
       <SubType>Component</SubType>
     </Compile>
+    <Compile Include="Misc\ScanToVolume.cs" />
     <Compile Include="Misc\Triangle.cs" />
     <Compile Include="Misc\WMVWriter.cs" />
     <Compile Include="Modules\Acoustic_Simulation\AcousticResults.cs">
@@ -190,6 +188,11 @@
     <Compile Include="Modules\Triaxial_Simulation\TriaxialSimulationForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="Properties\Resources.Designer.cs">
+      <AutoGen>True</AutoGen>
+      <DesignTime>True</DesignTime>
+      <DependentUpon>Resources.resx</DependentUpon>
+    </Compile>
     <Compile Include="UI\CancellableProgressForm.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -245,6 +248,7 @@
     <Compile Include="Modules\BandDetection\VarianceKernels.cs" />
     <Compile Include="3DViewer\Renderer\VolumeRendererSharpDX.cs" />
     <Compile Include="3DViewer\Meshing\VoxelMeshExporter.cs" />
+    <None Include="bin\x64\Debug\favicon.ico" />
     <Content Include="OldCode_Deprecated\CT3DViewer.txt">
       <SubType>Form</SubType>
     </Content>
@@ -277,19 +281,6 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Modules\ArtificialIntelligence\SAM2\Prompt.cs" />
-    <Compile Include="Properties\AssemblyInfo.cs" />
-    <Compile Include="Properties\Resources.Designer.cs" />
-    <Compile Include="Properties\Resources1.Designer.cs">
-      <AutoGen>True</AutoGen>
-      <DesignTime>True</DesignTime>
-      <DependentUpon>Resources.resx</DependentUpon>
-    </Compile>
-    <Compile Include="Properties\Settings.Designer.cs" />
-    <Compile Include="Properties\Settings1.Designer.cs">
-      <AutoGen>True</AutoGen>
-      <DesignTimeSharedInput>True</DesignTimeSharedInput>
-      <DependentUpon>Settings.settings</DependentUpon>
-    </Compile>
     <Compile Include="Misc\SafeInvokeAsync.cs" />
     <Content Include="OldCode_Deprecated\CTMemorySegmenter.txt" />
     <Content Include="OldCode_Deprecated\SegmentationPropagator.txt" />
@@ -297,6 +288,7 @@
     <Compile Include="Modules\ArtificialIntelligence\TextureClassifier\TextureClassifier.cs" />
     <Compile Include="VolumeOperations\VolumeExtensions.cs" />
     <Content Include="OldCode_Deprecated\VolumeShader.hlsl" />
+    <None Include="Resources\favicon.ico" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="favicon.ico" />
@@ -305,16 +297,16 @@
     <EmbeddedResource Include="Modules\BugSubmission\BugSubmissionForm.resx">
       <DependentUpon>BugSubmissionForm.cs</DependentUpon>
     </EmbeddedResource>
+    <EmbeddedResource Include="Properties\Resources.resx">
+      <Generator>ResXFileCodeGenerator</Generator>
+      <LastGenOutput>Resources.Designer.cs</LastGenOutput>
+    </EmbeddedResource>
     <EmbeddedResource Include="UI\MainForm.resx">
       <DependentUpon>MainForm.cs</DependentUpon>
     </EmbeddedResource>
     <EmbeddedResource Include="UI\LogWindow.resx">
       <DependentUpon>LogWindow.cs</DependentUpon>
       <SubType>Designer</SubType>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Properties\Resources.resx">
-      <Generator>ResXFileCodeGenerator</Generator>
-      <LastGenOutput>Resources1.Designer.cs</LastGenOutput>
     </EmbeddedResource>
   </ItemGroup>
   <ItemGroup>
@@ -458,6 +450,15 @@
       <Guid>{2DF8D04C-5BFA-101B-BDE5-00AA0044DE52}</Guid>
       <VersionMajor>2</VersionMajor>
       <VersionMinor>7</VersionMinor>
+      <Lcid>0</Lcid>
+      <WrapperTool>primary</WrapperTool>
+      <Isolated>False</Isolated>
+      <EmbedInteropTypes>True</EmbedInteropTypes>
+    </COMReference>
+    <COMReference Include="Microsoft.Office.Interop.Excel">
+      <Guid>{00020813-0000-0000-C000-000000000046}</Guid>
+      <VersionMajor>1</VersionMajor>
+      <VersionMinor>8</VersionMinor>
       <Lcid>0</Lcid>
       <WrapperTool>primary</WrapperTool>
       <Isolated>False</Isolated>

@@ -129,6 +129,7 @@ namespace CTS.Modules.ArtificialIntelligence.MicroSAM
         public MicroSAM(MainForm mainForm, Material selectedMaterial, AnnotationManager annotationManager, bool showUI = true)
         {
             Logger.Log("[MicroSAM] Creating MicroSAM interface");
+
             this.mainForm = mainForm;
             this.selectedMaterial = selectedMaterial;
             this.annotationManager = annotationManager;
@@ -198,7 +199,8 @@ namespace CTS.Modules.ArtificialIntelligence.MicroSAM
                 Text = "MicroSAM - CT",
                 Size = new Size(1100, 850),
                 StartPosition = FormStartPosition.CenterScreen,
-                FormBorderStyle = FormBorderStyle.Sizable
+                FormBorderStyle = FormBorderStyle.Sizable,
+                Icon=Properties.Resources.favicon
             };
 
             // Main layout with 2x2 grid

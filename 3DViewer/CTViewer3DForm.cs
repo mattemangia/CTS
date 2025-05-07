@@ -81,6 +81,11 @@ namespace CTS.SharpDXIntegration
 
         public SharpDXViewerForm(MainForm main)
         {
+            try
+            {
+                this.Icon = Properties.Resources.favicon;
+            }
+            catch { }
             mainForm = main;
             InitializeComponent();
             Logger.Log("[SharpDXViewerForm] Constructor finished.");

@@ -44,6 +44,11 @@ namespace CTS
 
         public DensitySettingsForm(IMaterialDensityProvider parent, MainForm mainForm)
         {
+            try
+            {
+                this.Icon = Properties.Resources.favicon;
+            }
+            catch { }
             this.parentForm = parent;
             this.mainForm = mainForm;
             this.Text = "Density Settings";

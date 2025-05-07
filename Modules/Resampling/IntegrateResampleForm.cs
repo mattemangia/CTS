@@ -58,6 +58,11 @@ namespace CTS
 
         private void InitializeComponent()
         {
+            try
+            {
+                this.Icon = Properties.Resources.favicon;
+            }
+            catch { }
             this.cboDevices = new ComboBox();
             this.btnOK = new Button();
             this.btnCancel = new Button();

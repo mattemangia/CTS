@@ -22,6 +22,9 @@ using Rectangle = System.Drawing.Rectangle;
 using System.IO;
 using static CTS.MeshGenerator;
 using Task = System.Threading.Tasks.Task;
+using CTS.Misc;
+using MathHelper = OpenTK.MathHelper;
+using System.Text;
 
 
 namespace CTS
@@ -59,6 +62,7 @@ namespace CTS
         private float elasticEnergy = 0.0f;
         private float plasticEnergy = 0.0f;
         private bool failureState = false;
+        private KryptonButton btnExportToVolume;
 
         // Density calibration data
         private List<CalibrationPoint> calibrationPoints = new List<CalibrationPoint>();
@@ -145,6 +149,7 @@ namespace CTS
         private KryptonPanel simulationPanel;
         private PictureBox stressStrainGraph;
         private KryptonGroupBox petrophysicalGroup;
+        private KryptonButton btnExportResults;
         private Point lastMousePos;
         private bool isDragging = false;
         private int vertexBufferId = 0;
@@ -168,6 +173,11 @@ namespace CTS
         public Material SelectedMaterial => selectedMaterial;
         private void InitializeDirectCompute()
         {
+            try
+            {
+                this.Icon = Properties.Resources.favicon;
+            }
+            catch { }
             try
             {
                 // Create the DirectCompute engine
@@ -2604,6 +2614,49 @@ namespace CTS
 
             yPos += 40;
 
+            // Place both export buttons side by side
+            // Export to Volume Button (half width)
+            btnExportToVolume = new KryptonButton
+            {
+                Text = "Export to Volume",
+                Location = new Point(10, yPos),
+                Width = 150, // Half the original width
+                Height = 30,
+                Enabled = false, // Initially disabled
+                StateCommon = {
+            Back = { Color1 = Color.FromArgb(60, 100, 120) },
+            Content = { ShortText = { Color1 = Color.White } }
+        },
+                StateDisabled = {
+            Back = { Color1 = Color.FromArgb(60, 60, 60) },
+            Content = { ShortText = { Color1 = Color.Silver } }
+        }
+            };
+            btnExportToVolume.Click += BtnExportToVolume_Click;
+            controlsContent.Controls.Add(btnExportToVolume);
+
+            // NEW: Export Results Button (half width)
+            btnExportResults = new KryptonButton
+            {
+                Text = "Export Results",
+                Location = new Point(170, yPos), // Position beside first button
+                Width = 150, // Same width as first button
+                Height = 30,
+                Enabled = false, // Initially disabled
+                StateCommon = {
+            Back = { Color1 = Color.FromArgb(100, 100, 60) },
+            Content = { ShortText = { Color1 = Color.White } }
+        },
+                StateDisabled = {
+            Back = { Color1 = Color.FromArgb(60, 60, 60) },
+            Content = { ShortText = { Color1 = Color.Silver } }
+        }
+            };
+            btnExportResults.Click += BtnExportResults_Click;
+            controlsContent.Controls.Add(btnExportResults);
+
+            yPos += 40;
+
             // Save Image Button
             KryptonButton btnSaveImage = new KryptonButton
             {
@@ -2619,7 +2672,6 @@ namespace CTS
             btnSaveImage.Click += BtnSaveImage_Click;
             controlsContent.Controls.Add(btnSaveImage);
         }
-
         private void ColorLegendPanel_Paint(object sender, PaintEventArgs e)
         {
             Graphics g = e.Graphics;
@@ -3453,6 +3505,162 @@ namespace CTS
 
             Logger.Log("[TriaxialSimulationForm] FixMeshScale() - End");
         }
+        private void BtnExportToVolume_Click(object sender, EventArgs e)
+        {
+            if (deformedVertices == null || deformedVertices.Count == 0 ||
+                indices == null || indices.Count == 0)
+            {
+                MessageBox.Show("No valid mesh data available to export.",
+                    "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            try
+            {
+                // Create a form to get export parameters
+                using (var exportForm = new Form
+                {
+                    Text = "Volume Export Parameters",
+                    Size = new Size(400, 200),
+                    StartPosition = FormStartPosition.CenterParent,
+                    FormBorderStyle = FormBorderStyle.FixedDialog,
+                    MaximizeBox = false,
+                    MinimizeBox = false
+                })
+                {
+                    // Add resolution input
+                    Label lblResolution = new Label
+                    {
+                        Text = "Resolution (voxels per unit):",
+                        Location = new Point(20, 20),
+                        AutoSize = true
+                    };
+                    exportForm.Controls.Add(lblResolution);
+
+                    NumericUpDown numResolution = new NumericUpDown
+                    {
+                        Location = new Point(200, 18),
+                        Width = 120,
+                        Minimum = 10,
+                        Maximum = 200,
+                        Value = 50,
+                        DecimalPlaces = 0
+                    };
+                    exportForm.Controls.Add(numResolution);
+
+                    // Add pixel size display
+                    Label lblPixelSize = new Label
+                    {
+                        Text = $"Pixel Size: {pixelSize:E6} m",
+                        Location = new Point(20, 60),
+                        AutoSize = true
+                    };
+                    exportForm.Controls.Add(lblPixelSize);
+
+                    // Add OK and Cancel buttons
+                    Button btnOK = new Button
+                    {
+                        Text = "OK",
+                        DialogResult = DialogResult.OK,
+                        Location = new Point(200, 120),
+                        Width = 80
+                    };
+                    exportForm.Controls.Add(btnOK);
+
+                    Button btnCancel = new Button
+                    {
+                        Text = "Cancel",
+                        DialogResult = DialogResult.Cancel,
+                        Location = new Point(290, 120),
+                        Width = 80
+                    };
+                    exportForm.Controls.Add(btnCancel);
+
+                    // Show dialog
+                    if (exportForm.ShowDialog() == DialogResult.OK)
+                    {
+                        // Get parameters
+                        float resolution = (float)numResolution.Value;
+
+                        // Show progress form
+                        var progressForm = new ProgressFormWithProgress("Exporting mesh to volume...");
+                        progressForm.Show();
+
+                        // Run the mesh conversion in a background thread to keep UI responsive
+                        Task.Run(() =>
+                        {
+                            try
+                            {
+                                // Create ScanToVolume instance
+                                ScanToVolume scanner = new ScanToVolume();
+
+                                // Update progress
+                                this.SafeInvokeAsync(() => progressForm.UpdateProgress(10));
+
+                                // Convert mesh to volume
+                                scanner.ConvertMeshToVolume(deformedVertices, indices, densityValues, resolution, pixelSize);
+
+                                // Get volume dimensions for user output
+                                scanner.GetVolumeDimensions(out int width, out int height, out int depth);
+
+                                // Update progress
+                                this.SafeInvokeAsync(() => progressForm.UpdateProgress(50));
+
+                                // Show folder browser dialog on UI thread
+                                string outputFolder = "";
+                                this.SafeInvokeAsync(() =>
+                                {
+                                    using (var dialog = new FolderBrowserDialog())
+                                    {
+                                        dialog.Description = "Select folder to save volume slices";
+                                        if (dialog.ShowDialog() == DialogResult.OK)
+                                        {
+                                            outputFolder = dialog.SelectedPath;
+                                        }
+                                    }
+                                });
+
+                                if (string.IsNullOrEmpty(outputFolder))
+                                {
+                                    this.SafeInvokeAsync(() => progressForm.Close());
+                                    return;
+                                }
+
+                                // Update progress
+                                this.SafeInvokeAsync(() => progressForm.UpdateProgress(70));
+
+                                // Export the volume
+                                scanner.ExportVolumeToImages(outputFolder, "slice_");
+
+                                // Complete
+                                this.SafeInvokeAsync(() =>
+                                {
+                                    progressForm.Close();
+                                    MessageBox.Show($"Volume exported successfully!\nDimensions: {width}x{height}x{depth}" +
+                                                  $"\nPixel Size: {scanner.GetPixelSize():E6} m", "Export Complete");
+                                });
+                            }
+                            catch (Exception ex)
+                            {
+                                this.SafeInvokeAsync(() =>
+                                {
+                                    progressForm.Close();
+                                    MessageBox.Show($"Error exporting volume: {ex.Message}", "Export Error",
+                                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                                    Logger.Log($"[TriaxialSimulationForm] Error in volume export: {ex.Message}");
+                                });
+                            }
+                        });
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error setting up export dialog: {ex.Message}",
+                    "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Logger.Log($"[TriaxialSimulationForm] Error setting up export dialog: {ex.Message}");
+            }
+        }
         private void ComboMaterials_SelectedIndexChanged(object sender, EventArgs e)
         {
             // Reset mesh generation status
@@ -3701,6 +3909,8 @@ namespace CTS
             btnContinueSimulation.Enabled = failureState && currentStrain < maxStrain;
             comboMaterials.Enabled = true;
             comboDirection.Enabled = true;
+            btnExportResults.Enabled = true;
+            btnExportToVolume.Enabled = true;
             chkElastic.Enabled = true;
             chkPlastic.Enabled = true;
             chkBrittle.Enabled = true;
@@ -6544,6 +6754,9 @@ namespace CTS
                 btnStopSimulation.Enabled = false;
                 comboMaterials.Enabled = true;
                 comboDirection.Enabled = true;
+                btnExportResults.Enabled = true;
+
+                btnExportToVolume.Enabled = true;
 
                 // Enable continue button if failure was detected and we haven't reached max strain
                 btnContinueSimulation.Enabled = e.HasFailed && currentStrain < maxStrain;
@@ -6931,6 +7144,386 @@ namespace CTS
             if (lightingEnabled) GL.Enable(EnableCap.Lighting);
             if (!blendEnabled) GL.Disable(EnableCap.Blend);
         }
+        private void BtnExportResults_Click(object sender, EventArgs e)
+        {
+            // Check if we have simulation results to export
+            if (stressStrainCurve == null || stressStrainCurve.Count == 0)
+            {
+                MessageBox.Show("No simulation results available to export.",
+                    "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            try
+            {
+                // Ask user for the file format
+                string fileFormat = AskForFileFormat();
+                if (string.IsNullOrEmpty(fileFormat))
+                    return; // User cancelled
+
+                // Create save file dialog
+                using (SaveFileDialog saveDialog = new SaveFileDialog())
+                {
+                    saveDialog.Title = "Save Simulation Results";
+                    saveDialog.Filter = fileFormat == "csv" ?
+                        "CSV Files (*.csv)|*.csv" :
+                        "Excel Files (*.xlsx)|*.xlsx";
+                    saveDialog.DefaultExt = fileFormat;
+                    saveDialog.FileName = $"TriaxialSimulation_{DateTime.Now:yyyyMMdd_HHmmss}";
+
+                    if (saveDialog.ShowDialog() == DialogResult.OK)
+                    {
+                        // Show progress dialog
+                        var progressForm = new ProgressFormWithProgress("Exporting simulation results...");
+                        progressForm.Show();
+
+                        // Export in background to keep UI responsive
+                        Task.Run(() =>
+                        {
+                            try
+                            {
+                                if (fileFormat == "csv")
+                                    ExportToCsv(saveDialog.FileName, progressForm);
+                                else
+                                    ExportToExcel(saveDialog.FileName, progressForm);
+
+                                this.SafeInvokeAsync(() =>
+                                {
+                                    progressForm.Close();
+                                    MessageBox.Show("Simulation results exported successfully!",
+                                                   "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                                });
+                            }
+                            catch (Exception ex)
+                            {
+                                this.SafeInvokeAsync(() =>
+                                {
+                                    progressForm.Close();
+                                    MessageBox.Show($"Error exporting results: {ex.Message}",
+                                                  "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                                    Logger.Log($"[TriaxialSimulationForm] Error exporting results: {ex.Message}");
+                                });
+                            }
+                        });
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error setting up export: {ex.Message}",
+                              "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Logger.Log($"[TriaxialSimulationForm] Error setting up export: {ex.Message}");
+            }
+        }
+        private string AskForFileFormat()
+        {
+            string result = null;
+
+            using (Form formatForm = new Form()
+            {
+                Text = "Choose Export Format",
+                Width = 300,
+                Height = 150,
+                StartPosition = FormStartPosition.CenterParent,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                MaximizeBox = false,
+                MinimizeBox = false
+            })
+            {
+                Label label = new Label()
+                {
+                    Text = "Choose export format:",
+                    Location = new Point(20, 20),
+                    AutoSize = true
+                };
+                formatForm.Controls.Add(label);
+
+                Button btnCsv = new Button()
+                {
+                    Text = "CSV Format",
+                    Location = new Point(20, 60),
+                    Width = 120,
+                    Height = 30
+                };
+                btnCsv.Click += (s, e) => { result = "csv"; formatForm.DialogResult = DialogResult.OK; };
+                formatForm.Controls.Add(btnCsv);
+
+                Button btnExcel = new Button()
+                {
+                    Text = "Excel Format",
+                    Location = new Point(150, 60),
+                    Width = 120,
+                    Height = 30
+                };
+                btnExcel.Click += (s, e) => { result = "xlsx"; formatForm.DialogResult = DialogResult.OK; };
+                formatForm.Controls.Add(btnExcel);
+
+                formatForm.ShowDialog();
+            }
+
+            return result;
+        }
+        private void ExportToCsv(string filePath, ProgressFormWithProgress progressForm)
+        {
+            try
+            {
+                this.SafeInvokeAsync(() => progressForm.UpdateProgress(10));
+
+                // Create a CSV string builder
+                StringBuilder csv = new StringBuilder();
+
+                // Add header
+                csv.AppendLine("Simulation Results");
+                csv.AppendLine($"Date: {DateTime.Now}");
+                csv.AppendLine($"Material: {(selectedMaterial != null ? selectedMaterial.Name : "Unknown")}");
+                csv.AppendLine();
+
+                // Add material properties section
+                csv.AppendLine("Material Properties:");
+                csv.AppendLine($"Bulk Density (kg/m³),{bulkDensity}");
+                csv.AppendLine($"Young's Modulus (MPa),{youngModulus}");
+                csv.AppendLine($"Poisson's Ratio,{poissonRatio}");
+                csv.AppendLine($"Yield Strength (MPa),{yieldStrength}");
+                csv.AppendLine($"Brittle Strength (MPa),{brittleStrength}");
+                csv.AppendLine($"Cohesion (MPa),{cohesion}");
+                csv.AppendLine($"Friction Angle (°),{frictionAngle}");
+                csv.AppendLine($"Porosity,{porosity}");
+                csv.AppendLine($"Permeability (mD),{permeability}");
+                csv.AppendLine();
+
+                // Add simulation parameters
+                csv.AppendLine("Simulation Parameters:");
+                csv.AppendLine($"Direction,{selectedDirection}");
+                csv.AppendLine($"Min Pressure (kPa),{minPressure}");
+                csv.AppendLine($"Max Pressure (kPa),{maxPressure}");
+                csv.AppendLine($"Elastic Behavior,{isElasticEnabled}");
+                csv.AppendLine($"Plastic Behavior,{isPlasticEnabled}");
+                csv.AppendLine($"Brittle Behavior,{isBrittleEnabled}");
+                csv.AppendLine();
+
+                this.SafeInvokeAsync(() => progressForm.UpdateProgress(40));
+
+                // Add stress-strain curve data
+                csv.AppendLine("Stress-Strain Data:");
+                csv.AppendLine("Strain (%),Stress (MPa)");
+
+                foreach (var point in stressStrainCurve)
+                {
+                    // Convert units: point.X is in 0.1% units, point.Y is in 0.1 MPa units
+                    double strain = point.X / 10.0; // Convert to %
+                    double stress = point.Y / 10.0; // Convert to MPa
+                    csv.AppendLine($"{strain:F4},{stress:F4}");
+                }
+                csv.AppendLine();
+
+                // Add final results section
+                csv.AppendLine("Final Results:");
+                csv.AppendLine($"Max Strain (%),{currentStrain * 100:F4}");
+
+                // Find peak stress
+                double peakStress = 0;
+                double strainAtPeak = 0;
+                if (stressStrainCurve.Count > 0)
+                {
+                    int maxY = stressStrainCurve.Max(p => p.Y);
+                    int peakIndex = stressStrainCurve.FindIndex(p => p.Y == maxY);
+
+                    if (peakIndex >= 0)
+                    {
+                        peakStress = maxY / 10.0; // Convert to MPa
+                        strainAtPeak = stressStrainCurve[peakIndex].X / 10.0; // Convert to %
+                    }
+                }
+
+                csv.AppendLine($"Peak Stress (MPa),{peakStress:F4}");
+                csv.AppendLine($"Strain at Peak (%),{strainAtPeak:F4}");
+                csv.AppendLine($"Volumetric Strain,{volumetricStrain:F6}");
+                csv.AppendLine($"Final Porosity,{porosity:F4}");
+                csv.AppendLine($"Final Permeability (mD),{permeability:F6}");
+                csv.AppendLine($"Failure Status,{(failureState ? "Failed" : "Intact")}");
+
+                this.SafeInvokeAsync(() => progressForm.UpdateProgress(80));
+
+                // Write to file
+                System.IO.File.WriteAllText(filePath, csv.ToString());
+
+                this.SafeInvokeAsync(() => progressForm.UpdateProgress(100));
+            }
+            catch (Exception ex)
+            {
+                throw new Exception("Error creating CSV file: " + ex.Message, ex);
+            }
+        }
+        private void ExportToExcel(string filePath, ProgressFormWithProgress progressForm)
+        {
+            try
+            {
+                this.SafeInvokeAsync(() => progressForm.UpdateProgress(10));
+
+                // Create Excel application
+                Microsoft.Office.Interop.Excel.Application excelApp = new Microsoft.Office.Interop.Excel.Application();
+                excelApp.Visible = false;
+
+                // Create workbook
+                Microsoft.Office.Interop.Excel.Workbook workbook = excelApp.Workbooks.Add();
+
+                // Create worksheets
+                Microsoft.Office.Interop.Excel.Worksheet summarySheet = workbook.Sheets[1];
+                summarySheet.Name = "Summary";
+
+                Microsoft.Office.Interop.Excel.Worksheet dataSheet = workbook.Sheets.Add();
+                dataSheet.Name = "Stress-Strain Data";
+
+                this.SafeInvokeAsync(() => progressForm.UpdateProgress(30));
+
+                // Add header to summary sheet
+                summarySheet.Cells[1, 1] = "Simulation Results";
+                summarySheet.Cells[2, 1] = "Date:";
+                summarySheet.Cells[2, 2] = DateTime.Now.ToString();
+                summarySheet.Cells[3, 1] = "Material:";
+                summarySheet.Cells[3, 2] = selectedMaterial != null ? selectedMaterial.Name : "Unknown";
+
+                // Add material properties
+                summarySheet.Cells[5, 1] = "Material Properties";
+                summarySheet.Cells[6, 1] = "Bulk Density (kg/m³)";
+                summarySheet.Cells[6, 2] = bulkDensity;
+                summarySheet.Cells[7, 1] = "Young's Modulus (MPa)";
+                summarySheet.Cells[7, 2] = youngModulus;
+                summarySheet.Cells[8, 1] = "Poisson's Ratio";
+                summarySheet.Cells[8, 2] = poissonRatio;
+                summarySheet.Cells[9, 1] = "Yield Strength (MPa)";
+                summarySheet.Cells[9, 2] = yieldStrength;
+                summarySheet.Cells[10, 1] = "Brittle Strength (MPa)";
+                summarySheet.Cells[10, 2] = brittleStrength;
+                summarySheet.Cells[11, 1] = "Cohesion (MPa)";
+                summarySheet.Cells[11, 2] = cohesion;
+                summarySheet.Cells[12, 1] = "Friction Angle (°)";
+                summarySheet.Cells[12, 2] = frictionAngle;
+                summarySheet.Cells[13, 1] = "Porosity";
+                summarySheet.Cells[13, 2] = porosity;
+                summarySheet.Cells[14, 1] = "Permeability (mD)";
+                summarySheet.Cells[14, 2] = permeability;
+
+                // Add simulation parameters
+                summarySheet.Cells[16, 1] = "Simulation Parameters";
+                summarySheet.Cells[17, 1] = "Direction";
+                summarySheet.Cells[17, 2] = selectedDirection.ToString();
+                summarySheet.Cells[18, 1] = "Min Pressure (kPa)";
+                summarySheet.Cells[18, 2] = minPressure;
+                summarySheet.Cells[19, 1] = "Max Pressure (kPa)";
+                summarySheet.Cells[19, 2] = maxPressure;
+                summarySheet.Cells[20, 1] = "Elastic Behavior";
+                summarySheet.Cells[20, 2] = isElasticEnabled ? "Yes" : "No";
+                summarySheet.Cells[21, 1] = "Plastic Behavior";
+                summarySheet.Cells[21, 2] = isPlasticEnabled ? "Yes" : "No";
+                summarySheet.Cells[22, 1] = "Brittle Behavior";
+                summarySheet.Cells[22, 2] = isBrittleEnabled ? "Yes" : "No";
+
+                this.SafeInvokeAsync(() => progressForm.UpdateProgress(50));
+
+                // Add final results
+                summarySheet.Cells[24, 1] = "Final Results";
+                summarySheet.Cells[25, 1] = "Max Strain (%)";
+                summarySheet.Cells[25, 2] = currentStrain * 100;
+
+                // Find peak stress
+                double peakStress = 0;
+                double strainAtPeak = 0;
+                if (stressStrainCurve.Count > 0)
+                {
+                    int maxY = stressStrainCurve.Max(p => p.Y);
+                    int peakIndex = stressStrainCurve.FindIndex(p => p.Y == maxY);
+
+                    if (peakIndex >= 0)
+                    {
+                        peakStress = maxY / 10.0; // Convert to MPa
+                        strainAtPeak = stressStrainCurve[peakIndex].X / 10.0; // Convert to %
+                    }
+                }
+
+                summarySheet.Cells[26, 1] = "Peak Stress (MPa)";
+                summarySheet.Cells[26, 2] = peakStress;
+                summarySheet.Cells[27, 1] = "Strain at Peak (%)";
+                summarySheet.Cells[27, 2] = strainAtPeak;
+                summarySheet.Cells[28, 1] = "Volumetric Strain";
+                summarySheet.Cells[28, 2] = volumetricStrain;
+                summarySheet.Cells[29, 1] = "Final Porosity";
+                summarySheet.Cells[29, 2] = porosity;
+                summarySheet.Cells[30, 1] = "Final Permeability (mD)";
+                summarySheet.Cells[30, 2] = permeability;
+                summarySheet.Cells[31, 1] = "Failure Status";
+                summarySheet.Cells[31, 2] = failureState ? "Failed" : "Intact";
+
+                // Format summary sheet
+                summarySheet.Columns.AutoFit();
+
+                this.SafeInvokeAsync(() => progressForm.UpdateProgress(70));
+
+                // Add stress-strain data to data sheet
+                dataSheet.Cells[1, 1] = "Strain (%)";
+                dataSheet.Cells[1, 2] = "Stress (MPa)";
+
+                for (int i = 0; i < stressStrainCurve.Count; i++)
+                {
+                    // Convert units: point.X is in 0.1% units, point.Y is in 0.1 MPa units
+                    double strain = stressStrainCurve[i].X / 10.0; // Convert to %
+                    double stress = stressStrainCurve[i].Y / 10.0; // Convert to MPa
+
+                    dataSheet.Cells[i + 2, 1] = strain;
+                    dataSheet.Cells[i + 2, 2] = stress;
+                }
+
+                // Create chart of stress-strain curve
+                if (stressStrainCurve.Count > 0)
+                {
+                    Microsoft.Office.Interop.Excel.ChartObjects charts = dataSheet.ChartObjects();
+                    Microsoft.Office.Interop.Excel.ChartObject chartObj = charts.Add(300, 10, 500, 300);
+                    Microsoft.Office.Interop.Excel.Chart chart = chartObj.Chart;
+
+                    // Define data range for chart
+                    Microsoft.Office.Interop.Excel.Range dataRange = dataSheet.Range[
+                        dataSheet.Cells[2, 1],
+                        dataSheet.Cells[stressStrainCurve.Count + 1, 2]
+                    ];
+
+                    chart.SetSourceData(dataRange);
+                    chart.ChartType = Microsoft.Office.Interop.Excel.XlChartType.xlXYScatterSmooth;
+                    chart.HasTitle = true;
+                    chart.ChartTitle.Text = "Stress-Strain Curve";
+
+                    // Format chart
+                    chart.Axes(Microsoft.Office.Interop.Excel.XlAxisType.xlCategory).HasTitle = true;
+                    chart.Axes(Microsoft.Office.Interop.Excel.XlAxisType.xlCategory).AxisTitle.Text = "Strain (%)";
+                    chart.Axes(Microsoft.Office.Interop.Excel.XlAxisType.xlValue).HasTitle = true;
+                    chart.Axes(Microsoft.Office.Interop.Excel.XlAxisType.xlValue).AxisTitle.Text = "Stress (MPa)";
+                }
+
+                // Format data sheet
+                dataSheet.Columns.AutoFit();
+
+                this.SafeInvokeAsync(() => progressForm.UpdateProgress(90));
+
+                // Save workbook
+                workbook.SaveAs(filePath);
+
+                // Clean up Excel objects
+                workbook.Close(false);
+                excelApp.Quit();
+
+                // Release COM objects to avoid memory leaks
+                System.Runtime.InteropServices.Marshal.ReleaseComObject(dataSheet);
+                System.Runtime.InteropServices.Marshal.ReleaseComObject(summarySheet);
+                System.Runtime.InteropServices.Marshal.ReleaseComObject(workbook);
+                System.Runtime.InteropServices.Marshal.ReleaseComObject(excelApp);
+
+                this.SafeInvokeAsync(() => progressForm.UpdateProgress(100));
+            }
+            catch (Exception ex)
+            {
+                throw new Exception("Error creating Excel file: " + ex.Message, ex);
+            }
+        }
+
         private void RenderText(string text, float x, float y, float scale, bool centerX = false)
         {
             if (!fontTextureInitialized)

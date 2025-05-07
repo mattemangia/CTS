@@ -223,7 +223,8 @@ namespace CTS
                 Text = "Texture Classifier",
                 Size = new Size(1100, 850),
                 StartPosition = FormStartPosition.CenterScreen,
-                FormBorderStyle = FormBorderStyle.Sizable
+                FormBorderStyle = FormBorderStyle.Sizable,
+                Icon=Properties.Resources.favicon
             };
 
             // Main layout with 2x2 grid

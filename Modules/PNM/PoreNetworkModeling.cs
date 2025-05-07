@@ -79,6 +79,11 @@ namespace CTS
         /// </summary>
         public PoreNetworkModelingForm(MainForm mainForm)
         {
+            try
+            {
+                this.Icon = Properties.Resources.favicon;
+            }
+            catch { }
             this.mainForm = mainForm;
             this.viewerMode = false;
             InitializeComponent();

@@ -154,6 +154,11 @@ namespace CTS
 
         public TransformDatasetForm(MainForm mainForm)
         {
+            try
+            {
+                this.Icon = Properties.Resources.favicon;
+            }
+            catch { }
             _mainForm = mainForm;
 
             // Store reference to original volume data

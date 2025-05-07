@@ -36,6 +36,11 @@ namespace CTS
         /// <param name="form">Reference to the MainForm</param>
         public MaterialStatisticsForm(MainForm form)
         {
+            try
+            {
+                this.Icon = Properties.Resources.favicon;
+            }
+            catch { }
             mainForm = form;
             InitializeComponent();
         }

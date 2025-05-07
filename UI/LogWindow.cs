@@ -13,20 +13,9 @@ namespace CTS
         {
             try
             {
-                string iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "favicon.ico");
-                if (File.Exists(iconPath))
-                {
-                    this.Icon = new Icon(iconPath);
-                }
-                else
-                {
-                    // Optionally log that the icon file wasn't found.
-                }
+                this.Icon = Properties.Resources.favicon;
             }
-            catch (Exception)
-            {
-                // Optionally log or handle the exception.
-            }
+            catch { }
             Text = "Log Window";
             Width = 800;
             Height = 600;

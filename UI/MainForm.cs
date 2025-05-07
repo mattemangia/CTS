@@ -187,9 +187,7 @@ namespace CTS
                 Logger.Log("[MainForm] Constructor start.");
                 try
                 {
-                    string iconPath = Path.Combine(Application.StartupPath, "favicon.ico");
-                    if (File.Exists(iconPath))
-                        this.Icon = new Icon(iconPath);
+                    this.Icon = Properties.Resources.favicon;
                 }
                 catch { }
                 // Set basic form properties

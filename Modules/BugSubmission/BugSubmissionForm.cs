@@ -50,6 +50,11 @@ namespace CTS.Modules.BugSubmission
         /// </summary>
         public BugSubmissionForm()
         {
+            try
+            {
+                this.Icon = Properties.Resources.favicon;
+            }
+            catch { }
             InitializeComponent();
 
             // Make the form dark themed

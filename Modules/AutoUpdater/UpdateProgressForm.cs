@@ -27,6 +27,11 @@ namespace CTS.Modules.AutoUpdater
         /// </summary>
         private void InitializeComponent()
         {
+            try
+            {
+                this.Icon = Properties.Resources.favicon;
+            }
+            catch { }
             this.Text = "CTS Update";
             this.Size = new System.Drawing.Size(450, 300);
             this.FormBorderStyle = FormBorderStyle.FixedDialog;

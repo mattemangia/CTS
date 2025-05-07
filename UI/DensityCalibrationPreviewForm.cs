@@ -30,6 +30,11 @@ namespace CTS
 
         public DensityCalibrationPreviewForm(MainForm mainForm)
         {
+            try
+            {
+                this.Icon = Properties.Resources.favicon;
+            }
+            catch { }
             this.mainForm = mainForm;
             this.Text = "Density Calibration - Region Selection";
             this.Size = new Size(800, 700);

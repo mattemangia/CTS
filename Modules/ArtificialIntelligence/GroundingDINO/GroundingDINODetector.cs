@@ -35,6 +35,7 @@ namespace CTS.Modules.ArtificialIntelligence.GroundingDINO
 
     internal class GroundingDINODetector
     {
+
         // Loading form
         private ProgressBar loadingProgressBar;
 
@@ -124,6 +125,7 @@ namespace CTS.Modules.ArtificialIntelligence.GroundingDINO
         {
             Logger.Log("[GroundingDINO] Creating Grounding DINO detector interface");
             this.mainForm = mainForm;
+            
             this.selectedMaterial = selectedMaterial;
             this.annotationManager = annotationManager ?? new AnnotationManager();
 
@@ -220,7 +222,8 @@ namespace CTS.Modules.ArtificialIntelligence.GroundingDINO
                 Size = new Size(1200, 800),
                 StartPosition = FormStartPosition.CenterScreen,
                 FormBorderStyle = FormBorderStyle.Sizable,
-                MinimumSize = new Size(900, 600)
+                MinimumSize = new Size(900, 600),
+                Icon = Properties.Resources.favicon
             };
             dinoForm.Icon = mainForm.Icon;
             // Main layout with 2 columns

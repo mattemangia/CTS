@@ -38,6 +38,8 @@ namespace CTS
         private AcousticSimulatorGPUWrapper gpuSimulator;
         private bool usingGpuSimulator = false;
         private AcousticSimulationVisualizer visualizer;
+        public event EventHandler<AcousticSimulationCompleteEventArgs> SimulationCompleted;
+
         // UI Controls
         private TabControl tabControl;
         private TabPage tabVolume;
@@ -142,7 +144,7 @@ namespace CTS
             try
             {
                 InitializeComponent();
-
+                
                 // Set the initial view parameters
                 rotationX = 30;
                 rotationY = 30;
@@ -166,7 +168,7 @@ namespace CTS
             this.Size = new Size(1000, 800);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.BackColor = Color.FromArgb(45, 45, 48); // Dark background
-
+            this.Icon = Properties.Resources.favicon; // Set the icon
             // Create toolbar
             toolStrip = new ToolStrip();
             toolStrip.BackColor = Color.FromArgb(30, 30, 30);
@@ -174,7 +176,8 @@ namespace CTS
             toolStrip.Renderer = new DarkToolStripRenderer();
             toolStrip.Dock = DockStyle.Top;
 
-            // Add some placeholder buttons to the toolbar
+
+
             ToolStripButton btnNew = new ToolStripButton("New");
             btnNew.DisplayStyle = ToolStripItemDisplayStyle.Image;
             btnNew.Image = CreateSimpleIcon(16, Color.White);
@@ -252,6 +255,7 @@ namespace CTS
                     }
                 }
             };
+            InitializeCalibrationComponents();
         }
         private void InitializeSimulationTab()
         {
@@ -483,7 +487,45 @@ namespace CTS
             };
             controlPanel.Controls.Add(chkAutoElasticProps);
             currentY += verticalSpacing+20;
+            chkAutoCalibrate = new KryptonCheckBox
+            {
+                Text = "Auto-apply calibration",
+                Location = new Point(10, currentY),
+                Width = 230,
+                Checked = false,
+                ToolTipValues = {
+            Description = "Automatically apply calibration to new materials"
+        }
+            };
 
+            // When auto-calibrate is checked, disable auto-elastic
+            chkAutoCalibrate.CheckedChanged += (s, e) => {
+                if (chkAutoCalibrate.Checked)
+                {
+                    chkAutoElasticProps.Checked = false;
+                    chkAutoElasticProps.Enabled = false;
+
+                    // Apply calibration immediately if we have enough points
+                    if (calibrationManager.CurrentCalibration.CalibrationPoints.Count >= 2)
+                    {
+                        ApplyCalibrationToCurrentMaterial();
+                    }
+                    else
+                    {
+                        MessageBox.Show("Not enough calibration points. Add at least 2 points using the Manage Calibration button.",
+                            "Calibration Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        chkAutoCalibrate.Checked = false;
+                        chkAutoElasticProps.Enabled = true;
+                    }
+                }
+                else
+                {
+                    chkAutoElasticProps.Enabled = true;
+                }
+            };
+            controlPanel.Controls.Add(chkAutoCalibrate);
+
+            currentY += verticalSpacing + 20;
             // Young's Modulus
             var lblYoung = new KryptonLabel { Text = "Young’s Modulus (MPa):", Location = new Point(10, currentY) };
             controlPanel.Controls.Add(lblYoung);
@@ -625,6 +667,14 @@ namespace CTS
             };
             controlPanel.Controls.Add(chkRunOnGpu);
             currentY += verticalSpacing;
+            btnManageCalibration = new KryptonButton();
+            btnManageCalibration.Text = "Manage Calibration";
+            btnManageCalibration.Location = new Point(10, currentY);
+            btnManageCalibration.Width = controlWidth - 30;
+            btnManageCalibration.Click += BtnManageCalibration_Click;
+            controlPanel.Controls.Add(btnManageCalibration);
+
+            currentY += 40;
             // 11. Start Simulation button
             btnStartSimulation = new KryptonButton();
             btnStartSimulation.Text = "Start Simulation";
@@ -669,6 +719,14 @@ namespace CTS
 
             // Initialize material library
             InitializeMaterialLibrary();
+
+            // Create but hide calibration button for results tab
+            btnCalibrate = new KryptonButton();
+            btnCalibrate.Text = "Calibrate with this Result";
+            btnCalibrate.Visible = false;
+            btnCalibrate.Click += BtnCalibrate_Click;
+            comboMaterials.SelectedIndexChanged -= comboMaterials_SelectedIndexChanged;
+            comboMaterials.SelectedIndexChanged += comboMaterials_SelectedIndexChanged_Extended;
         }
         private void BtnCalculatePath_Click(object sender, EventArgs e)
         {
@@ -2237,6 +2295,7 @@ namespace CTS
                 PWaveTravelTime = e.PWaveTravelTime,
                 SWaveTravelTime = e.SWaveTravelTime
             };
+
             if (usingGpuSimulator && gpuSimulator != null)
             {
                 var snapshot = gpuSimulator.GetWaveFieldSnapshot();
@@ -2249,6 +2308,7 @@ namespace CTS
                 cachedPWaveField = ConvertToFloat(snapshot.vx);
                 cachedSWaveField = ConvertToFloat(snapshot.vy);
             }
+
             foreach (ToolStripItem item in toolStrip.Items)
             {
                 if (item.ToolTipText == "Open Visualizer")
@@ -2257,6 +2317,7 @@ namespace CTS
                     break;
                 }
             }
+
             UpdateResultsDisplay();
             InitializeVelocityField();
             // Display results
@@ -2264,6 +2325,9 @@ namespace CTS
 
             // Switch to the results tab
             tabControl.SelectedTab = tabResults;
+
+            // Raise the SimulationCompleted event
+            SimulationCompleted?.Invoke(this, e);
         }
         private float[,,] ConvertToFloat(double[,,] src, double amplification = 1.0)
         {
@@ -3963,12 +4027,15 @@ namespace CTS
             }
         }
 
-        public void ApplyDensityCalibration(List<CalibrationPoint> calibrationPoints)
+        public void ApplyDensityCalibration(List<CTS.CalibrationPoint> calibrationPoints)
         {
             // Apply the calibration - use the linear regression model to calculate density
             if (calibrationPoints.Count >= 2)
             {
-                var model = MaterialDensityLibrary.CalculateLinearDensityModel(calibrationPoints);
+                // Convert to MaterialDensityLibrary.CalibrationPoint format
+                var convertedPoints = ConvertCalibrationPoints(calibrationPoints);
+
+                var model = MaterialDensityLibrary.CalculateLinearDensityModel(convertedPoints);
                 double avgGrayValue = CalculateAverageGrayValue();
 
                 // Calculate density based on the model
@@ -3987,8 +4054,34 @@ namespace CTS
                 pictureBoxVolume.Invalidate();
             }
         }
+        /// <summary>
+        /// Converts our CTS.CalibrationPoint objects to MaterialDensityLibrary.CalibrationPoint objects
+        /// </summary>
+        private List<MaterialDensityLibrary.CalibrationPoint> ConvertCalibrationPoints(List<CTS.CalibrationPoint> ctsPoints)
+        {
+            var materialLibraryPoints = new List<MaterialDensityLibrary.CalibrationPoint>();
 
-        private double CalculateAverageGrayValue()
+            foreach (var ctsPoint in ctsPoints)
+            {
+                var convertedPoint = new MaterialDensityLibrary.CalibrationPoint
+                {
+                    // MaterialDensityLibrary.CalibrationPoint properties:
+                    AvgGrayValue = ctsPoint.AvgGrayValue,
+                    Density = ctsPoint.MeasuredDensity,
+                    Material = ctsPoint.MaterialName,
+                    Region = "Calibrated" // Default value
+                };
+                materialLibraryPoints.Add(convertedPoint);
+            }
+
+            return materialLibraryPoints;
+        }
+
+        /// <summary>
+        /// Calculates the average gray value for the currently selected material
+        /// </summary>
+        /// <returns>Average gray value</returns>
+        public double CalculateAverageGrayValue()
         {
             if (mainForm.volumeData == null || mainForm.volumeLabels == null || selectedMaterial == null)
                 return 128.0;

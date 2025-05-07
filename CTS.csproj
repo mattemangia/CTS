@@ -139,6 +139,9 @@
     <Compile Include="Modules\Acoustic_Simulation\AcousticSimulationForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="Modules\Acoustic_Simulation\AcousticSimulationForm_calibration.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Modules\Acoustic_Simulation\AcousticSimulator.cs" />
     <Compile Include="Modules\Acoustic_Simulation\AcousticSimulatorGPU.cs" />
     <Compile Include="Modules\Acoustic_Simulation\AcousticSimulatorGPUWrapper.cs" />
@@ -146,6 +149,10 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Modules\Acoustic_Simulation\AStar.cs" />
+    <Compile Include="Modules\Acoustic_Simulation\CalibrationDialog.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Modules\Acoustic_Simulation\CalibrationManager.cs" />
     <Compile Include="Modules\Acoustic_Simulation\ToolbarExtension.cs">
       <SubType>Form</SubType>
     </Compile>

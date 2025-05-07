@@ -3756,7 +3756,7 @@ namespace CTS
             return t;
         }
 
-        private void UpdateResultsDisplay()
+        public virtual void UpdateResultsDisplay()
         {
             if (simulationResults == null)
             {

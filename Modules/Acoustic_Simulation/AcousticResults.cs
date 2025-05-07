@@ -1947,36 +1947,44 @@ namespace CTS
                 }
                 return;
             }
-
-            // Apply view transformation
-            g.TranslateTransform(tomographyPictureBox.Width / 2 + tomographyPan.X,
-                                tomographyPictureBox.Height / 2 + tomographyPan.Y);
-            g.ScaleTransform(tomographyZoom, tomographyZoom);
-            g.RotateTransform(tomographyRotationY);
-            g.RotateTransform(tomographyRotationX, MatrixOrder.Append);
-
-            // Get dimensions of the velocity field
             int width = velocityField.GetLength(0);
             int height = velocityField.GetLength(1);
             int depth = velocityField.GetLength(2);
 
-            // Scale to fit in view
-            float scale = 200.0f / Math.Max(Math.Max(width, height), depth);
+            // CENTER OF ROTATION FIX - Always rotate around the center of the volume
+            float centerX = width / 2.0f;
+            float centerY = height / 2.0f;
+            float centerZ = depth / 2.0f;
 
-            // Center the volume
-            g.TranslateTransform(-width * scale / 2, -height * scale / 2);
+            // Scale to fit in view - make this constant for consistent size
+            float maxDim = Math.Max(Math.Max(width, height), depth);
+            float scale = Math.Min(tomographyPictureBox.Width, tomographyPictureBox.Height) * 0.7f / maxDim;
 
-            // Draw bounding box with slightly brighter color for visibility
-            using (Pen boxPen = new Pen(Color.FromArgb(120, 120, 120), 1))
+            // IMPORTANT: Apply transformations in the correct order
+            // 1. Start with center of picture box
+            g.TranslateTransform(tomographyPictureBox.Width / 2 + tomographyPan.X,
+                                tomographyPictureBox.Height / 2 + tomographyPan.Y);
+
+            // 2. Apply zoom
+            g.ScaleTransform(tomographyZoom, tomographyZoom);
+
+            // 3. Apply rotations
+            g.RotateTransform(tomographyRotationY);
+            g.RotateTransform(tomographyRotationX, MatrixOrder.Append);
+
+            // 4. Center on volume (subtract half volume size * scale to center)
+            g.TranslateTransform(-centerX * scale, -centerY * scale);
+
+            // Draw bounding box wireframe
+            using (Pen boxPen = new Pen(Color.FromArgb(150, 150, 150), 1))
             {
-                // Draw a wireframe box representing the volume
+                // Draw a wireframe box representing the volume - using actual volume dimensions
                 DrawBoundingBox(g, width * scale, height * scale, depth * scale, boxPen);
             }
 
-            // Choose rendering method based on checkbox
+            // Choose rendering method
             if (showFullVolumeInTomography)
             {
-                // Render full volume
                 RenderFullVolume(g, scale);
             }
             else
@@ -2004,6 +2012,73 @@ namespace CTS
 
             // Draw legend and information
             DrawTomographyLegend(g);
+        }
+        private Color GetEnhancedVelocityColor(float velocity, float localMin, float localMax)
+        {
+            // Use the local range to enhance contrast
+            double normalizedValue;
+
+            // Add some padding to avoid extreme values
+            double padding = (localMax - localMin) * 0.05;
+            double effectiveMin = Math.Max(1, localMin - padding);
+            double effectiveMax = localMax + padding;
+
+            // Normalize using the local range
+            normalizedValue = (velocity - effectiveMin) / (effectiveMax - effectiveMin);
+            normalizedValue = Math.Max(0, Math.Min(1, normalizedValue));
+
+            // Create a perceptually balanced colormap (viridis-like)
+            // This offers better perceptual distinction for small variations
+            if (normalizedValue < 0.2)
+            {
+                // Dark blue to blue
+                double t = normalizedValue / 0.2;
+                return Color.FromArgb(
+                    255,
+                    0,
+                    (int)(50 + 100 * t),
+                    (int)(100 + 155 * t));
+            }
+            else if (normalizedValue < 0.4)
+            {
+                // Blue to cyan
+                double t = (normalizedValue - 0.2) / 0.2;
+                return Color.FromArgb(
+                    255,
+                    0,
+                    (int)(150 + 105 * t),
+                    (int)(255));
+            }
+            else if (normalizedValue < 0.6)
+            {
+                // Cyan to green
+                double t = (normalizedValue - 0.4) / 0.2;
+                return Color.FromArgb(
+                    255,
+                    (int)(0 + 100 * t),
+                    (int)(255),
+                    (int)(255 - 55 * t));
+            }
+            else if (normalizedValue < 0.8)
+            {
+                // Green to yellow
+                double t = (normalizedValue - 0.6) / 0.2;
+                return Color.FromArgb(
+                    255,
+                    (int)(100 + 155 * t),
+                    (int)(255),
+                    (int)(200 - 200 * t));
+            }
+            else
+            {
+                // Yellow to red
+                double t = (normalizedValue - 0.8) / 0.2;
+                return Color.FromArgb(
+                    255,
+                    255,
+                    (int)(255 - 255 * t),
+                    0);
+            }
         }
         private void DrawBoundingBox(Graphics g, float width, float height, float depth, Pen pen)
         {
@@ -2059,6 +2134,34 @@ namespace CTS
             for (int i = 0; i < bytes; i++)
                 rgbValues[i] = 0;
 
+            // Find actual value range in this slice to enhance color contrast
+            float sliceMin = float.MaxValue;
+            float sliceMax = float.MinValue;
+
+            // First pass - find min/max values in this slice
+            for (int y = 0; y < height; y++)
+            {
+                for (int z = 0; z < depth; z++)
+                {
+                    if (slice < velocityField.GetLength(0) &&
+                        y < velocityField.GetLength(1) &&
+                        z < velocityField.GetLength(2) &&
+                        mainForm.volumeLabels[slice, y, z] == selectedMaterialID)
+                    {
+
+                        float velocity = velocityField[slice, y, z];
+                        if (velocity > 0)
+                        {
+                            sliceMin = Math.Min(sliceMin, velocity);
+                            sliceMax = Math.Max(sliceMax, velocity);
+                        }
+                    }
+                }
+            }
+
+            // If we found valid range, use it for enhanced contrast
+            bool useSliceRange = (sliceMin < sliceMax);
+
             // Populate the array with velocity data
             for (int y = 0; y < height; y++)
             {
@@ -2070,7 +2173,8 @@ namespace CTS
                     float velocity = 0;
                     if (slice < velocityField.GetLength(0) &&
                         y < velocityField.GetLength(1) &&
-                        z < velocityField.GetLength(2))
+                        z < velocityField.GetLength(2) &&
+                        mainForm.volumeLabels[slice, y, z] == selectedMaterialID)
                     {
                         velocity = velocityField[slice, y, z];
                     }
@@ -2079,10 +2183,18 @@ namespace CTS
                     if (velocity <= 0 || velocity < minFilterVelocity || velocity > maxFilterVelocity)
                         continue;
 
-                    // Map velocity to color with enhanced saturation for visibility
-                    System.Drawing.Color color = GetVelocityColor(velocity);
+                    // Get enhanced color for this slice by using local min/max
+                    Color color;
+                    if (useSliceRange)
+                    {
+                        color = GetEnhancedVelocityColor(velocity, sliceMin, sliceMax);
+                    }
+                    else
+                    {
+                        color = GetVelocityColor(velocity);
+                    }
 
-                    // Make the color more vibrant for better visibility (optional)
+                    // Make the color more vibrant for better visibility
                     color = Color.FromArgb(
                         255, // Full opacity
                         Math.Min(255, (int)(color.R * 1.2)),
@@ -2104,16 +2216,20 @@ namespace CTS
             // Unlock the bitmap
             sliceBitmap.UnlockBits(bmpData);
 
-            // Draw slice as a floating pane with half-transparency
+            // Calculate the correct position for the slice within the bounding box
+            // The slice should be positioned at x*scale along the X axis
+            float xPos = slice * scale;
+
+            // Draw the slice as a floating pane with proper position
             using (ImageAttributes ia = new ImageAttributes())
             {
                 ColorMatrix cm = new ColorMatrix();
                 cm.Matrix33 = 0.9f; // 90% opacity
                 ia.SetColorMatrix(cm);
 
-                // Draw the Y-Z slice at position X=slice
+                // Draw the slice at the correct position in 3D space
                 g.DrawImage(sliceBitmap,
-                    new Rectangle((int)(slice * scale), 0, (int)(depth * scale), (int)(height * scale)),
+                    new Rectangle((int)xPos, 0, (int)(depth * scale), (int)(height * scale)),
                     0, 0, depth, height,
                     GraphicsUnit.Pixel, ia);
             }
@@ -2132,7 +2248,7 @@ namespace CTS
             if (slice < 0 || slice >= height)
                 return;
 
-            // Create a bitmap with better resolution
+            // Create a bitmap for this slice
             Bitmap sliceBitmap = new Bitmap(width, depth);
 
             // Lock the bitmap for faster access
@@ -2152,6 +2268,34 @@ namespace CTS
             for (int i = 0; i < bytes; i++)
                 rgbValues[i] = 0;
 
+            // Find actual value range in this slice to enhance color contrast
+            float sliceMin = float.MaxValue;
+            float sliceMax = float.MinValue;
+
+            // First pass - find min/max values in this slice
+            for (int x = 0; x < width; x++)
+            {
+                for (int z = 0; z < depth; z++)
+                {
+                    if (x < velocityField.GetLength(0) &&
+                        slice < velocityField.GetLength(1) &&
+                        z < velocityField.GetLength(2) &&
+                        mainForm.volumeLabels[x, slice, z] == selectedMaterialID)
+                    {
+
+                        float velocity = velocityField[x, slice, z];
+                        if (velocity > 0)
+                        {
+                            sliceMin = Math.Min(sliceMin, velocity);
+                            sliceMax = Math.Max(sliceMax, velocity);
+                        }
+                    }
+                }
+            }
+
+            // If we found valid range, use it for enhanced contrast
+            bool useSliceRange = (sliceMin < sliceMax);
+
             // Populate the array with velocity data
             for (int x = 0; x < width; x++)
             {
@@ -2162,7 +2306,8 @@ namespace CTS
                     float velocity = 0;
                     if (x < velocityField.GetLength(0) &&
                         slice < velocityField.GetLength(1) &&
-                        z < velocityField.GetLength(2))
+                        z < velocityField.GetLength(2) &&
+                        mainForm.volumeLabels[x, slice, z] == selectedMaterialID)
                     {
                         velocity = velocityField[x, slice, z];
                     }
@@ -2171,10 +2316,20 @@ namespace CTS
                     if (velocity <= 0 || velocity < minFilterVelocity || velocity > maxFilterVelocity)
                         continue;
 
-                    Color color = GetVelocityColor(velocity);
+                    // Get enhanced color for this slice by using local min/max
+                    Color color;
+                    if (useSliceRange)
+                    {
+                        color = GetEnhancedVelocityColor(velocity, sliceMin, sliceMax);
+                    }
+                    else
+                    {
+                        color = GetVelocityColor(velocity);
+                    }
 
-                    // Enhance visibility
-                    color = Color.FromArgb(255,
+                    // Make the color more vibrant for better visibility
+                    color = Color.FromArgb(
+                        255, // Full opacity
                         Math.Min(255, (int)(color.R * 1.2)),
                         Math.Min(255, (int)(color.G * 1.2)),
                         Math.Min(255, (int)(color.B * 1.2)));
@@ -2191,6 +2346,9 @@ namespace CTS
             System.Runtime.InteropServices.Marshal.Copy(rgbValues, 0, ptr, bytes);
             sliceBitmap.UnlockBits(bmpData);
 
+            // Calculate the correct position for the slice within the bounding box
+            float yPos = slice * scale;
+
             // Draw the X-Z slice at position Y=slice
             using (ImageAttributes ia = new ImageAttributes())
             {
@@ -2199,14 +2357,13 @@ namespace CTS
                 ia.SetColorMatrix(cm);
 
                 g.DrawImage(sliceBitmap,
-                    new Rectangle(0, (int)(slice * scale), (int)(width * scale), (int)(depth * scale)),
+                    new Rectangle(0, (int)yPos, (int)(width * scale), (int)(depth * scale)),
                     0, 0, width, depth,
                     GraphicsUnit.Pixel, ia);
             }
 
             sliceBitmap.Dispose();
         }
-
         private void DrawZSlice(Graphics g, float scale)
         {
             // Ensure slice is in valid range
@@ -2238,6 +2395,34 @@ namespace CTS
             for (int i = 0; i < bytes; i++)
                 rgbValues[i] = 0;
 
+            // Find actual value range in this slice to enhance color contrast
+            float sliceMin = float.MaxValue;
+            float sliceMax = float.MinValue;
+
+            // First pass - find min/max values in this slice
+            for (int x = 0; x < width; x++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    if (x < velocityField.GetLength(0) &&
+                        y < velocityField.GetLength(1) &&
+                        slice < velocityField.GetLength(2) &&
+                        mainForm.volumeLabels[x, y, slice] == selectedMaterialID)
+                    {
+
+                        float velocity = velocityField[x, y, slice];
+                        if (velocity > 0)
+                        {
+                            sliceMin = Math.Min(sliceMin, velocity);
+                            sliceMax = Math.Max(sliceMax, velocity);
+                        }
+                    }
+                }
+            }
+
+            // If we found valid range, use it for enhanced contrast
+            bool useSliceRange = (sliceMin < sliceMax);
+
             // Populate the array with velocity data
             for (int x = 0; x < width; x++)
             {
@@ -2248,7 +2433,8 @@ namespace CTS
                     float velocity = 0;
                     if (x < velocityField.GetLength(0) &&
                         y < velocityField.GetLength(1) &&
-                        slice < velocityField.GetLength(2))
+                        slice < velocityField.GetLength(2) &&
+                        mainForm.volumeLabels[x, y, slice] == selectedMaterialID)
                     {
                         velocity = velocityField[x, y, slice];
                     }
@@ -2257,7 +2443,16 @@ namespace CTS
                     if (velocity <= 0 || velocity < minFilterVelocity || velocity > maxFilterVelocity)
                         continue;
 
-                    Color color = GetVelocityColor(velocity);
+                    // Get enhanced color for this slice by using local min/max
+                    Color color;
+                    if (useSliceRange)
+                    {
+                        color = GetEnhancedVelocityColor(velocity, sliceMin, sliceMax);
+                    }
+                    else
+                    {
+                        color = GetVelocityColor(velocity);
+                    }
 
                     // Enhance visibility
                     color = Color.FromArgb(255,
@@ -2277,6 +2472,11 @@ namespace CTS
             System.Runtime.InteropServices.Marshal.Copy(rgbValues, 0, ptr, bytes);
             sliceBitmap.UnlockBits(bmpData);
 
+            // Calculate the Z position in 3D space
+            // We need to represent Z as depth into the model
+            float zDepth = slice * scale;
+            float zOffset = -zDepth; // Negative because Z increases into the screen
+
             // Draw the X-Y slice at position Z=slice
             using (ImageAttributes ia = new ImageAttributes())
             {
@@ -2284,8 +2484,17 @@ namespace CTS
                 cm.Matrix33 = 0.9f; // 90% opacity
                 ia.SetColorMatrix(cm);
 
+                // To simulate Z position:
+                // 1. Translate XY position based on the Z-depth
+                // 2. This creates a perspective-like effect
+                float perspectiveOffset = zOffset * 0.5f;
+
                 g.DrawImage(sliceBitmap,
-                    new Rectangle(0, 0, (int)(width * scale), (int)(height * scale)),
+                    new Rectangle(
+                        (int)perspectiveOffset, // X offset based on Z depth
+                        (int)perspectiveOffset, // Y offset based on Z depth
+                        (int)(width * scale),
+                        (int)(height * scale)),
                     0, 0, width, height,
                     GraphicsUnit.Pixel, ia);
             }
@@ -2384,19 +2593,63 @@ namespace CTS
         }
         private void AutoAdjustColorScale()
         {
-            AnalyzeVelocityRange();
+            int width = velocityField.GetLength(0);
+            int height = velocityField.GetLength(1);
+            int depth = velocityField.GetLength(2);
 
-            // Only update if we have valid values
-            if (minVelocityValue > 0 && maxVelocityValue > minVelocityValue)
+            // Storage for velocity statistics
+            List<float> validValues = new List<float>();
+            float[] velocityQuantiles = new float[5]; // 0%, 25%, 50%, 75%, 100%
+
+            // Collect all valid velocity values
+            for (int z = 0; z < depth; z++)
             {
-                // Update filter velocities to match actual data range with small padding
-                double padding = (maxVelocityValue - minVelocityValue) * 0.05; // 5% padding on each end
-                minFilterVelocity = minVelocityValue - padding;
-                maxFilterVelocity = maxVelocityValue + padding;
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        if (mainForm.volumeLabels[x, y, z] == selectedMaterialID)
+                        {
+                            float velocity = velocityField[x, y, z];
+                            if (velocity > 0)
+                            {
+                                validValues.Add(velocity);
+                            }
+                        }
+                    }
+                }
+            }
 
-                // Ensure positive values
-                minFilterVelocity = Math.Max(1, minFilterVelocity);
+            // Sort values and calculate quantiles
+            if (validValues.Count > 0)
+            {
+                validValues.Sort();
 
+                // Get 0%, 25%, 50%, 75%, 100% quantiles
+                velocityQuantiles[0] = validValues[0]; // Min
+                velocityQuantiles[1] = validValues[(int)(validValues.Count * 0.25f)];
+                velocityQuantiles[2] = validValues[(int)(validValues.Count * 0.5f)];
+                velocityQuantiles[3] = validValues[(int)(validValues.Count * 0.75f)];
+                velocityQuantiles[4] = validValues[validValues.Count - 1]; // Max
+
+                // Use 5th and 95th percentiles as min/max to avoid outliers
+                int p05Index = Math.Max(0, (int)(validValues.Count * 0.05f));
+                int p95Index = Math.Min(validValues.Count - 1, (int)(validValues.Count * 0.95f));
+
+                float p05Value = validValues[p05Index];
+                float p95Value = validValues[p95Index];
+
+                // Update the filter velocities with a small buffer
+                minFilterVelocity = Math.Max(1, p05Value - (p95Value - p05Value) * 0.05f);
+                maxFilterVelocity = p95Value + (p95Value - p05Value) * 0.05f;
+
+                // Update trackbar positions
+                minVelocityTrackBar.Value = 0;
+                maxVelocityTrackBar.Value = 100;
+
+                // Log the results
+                Logger.Log($"[AutoAdjustColorScale] Quantiles: Min={velocityQuantiles[0]:F1}, Q1={velocityQuantiles[1]:F1}, " +
+                           $"Median={velocityQuantiles[2]:F1}, Q3={velocityQuantiles[3]:F1}, Max={velocityQuantiles[4]:F1}");
                 Logger.Log($"[AutoAdjustColorScale] Adjusted range to: {minFilterVelocity:F1} - {maxFilterVelocity:F1} m/s");
             }
         }
@@ -2625,10 +2878,53 @@ namespace CTS
             int height = velocityField.GetLength(1);
             int depth = velocityField.GetLength(2);
 
-            // Render each slice
+            // Analyze the data range for this rendering to enhance contrast
+            float volMin = float.MaxValue;
+            float volMax = float.MinValue;
+            int validVoxels = 0;
+
+            // Find actual min/max values in the visible volume
+            for (int z = 0; z < depth; z++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        if (mainForm.volumeLabels[x, y, z] == selectedMaterialID)
+                        {
+                            float velocity = velocityField[x, y, z];
+                            if (velocity > 0)
+                            {
+                                volMin = Math.Min(volMin, velocity);
+                                volMax = Math.Max(volMax, velocity);
+                                validVoxels++;
+                            }
+                        }
+                    }
+                }
+            }
+
+            bool useEnhancedColors = (volMin < volMax && validVoxels > 0);
+
+            // Render each slice from back to front for proper transparency
             for (int i = 0; i < depth; i += stepSize)
             {
-                int z = reverse ? depth - 1 - i : i;
+                int z = reverse ? i : depth - 1 - i;
+
+                // Skip slices with no material for performance
+                bool hasVisibleMaterial = false;
+                for (int y = 0; y < height && !hasVisibleMaterial; y++)
+                {
+                    for (int x = 0; x < width && !hasVisibleMaterial; x++)
+                    {
+                        if (mainForm.volumeLabels[x, y, z] == selectedMaterialID)
+                        {
+                            hasVisibleMaterial = true;
+                        }
+                    }
+                }
+
+                if (!hasVisibleMaterial) continue;
 
                 // Create a bitmap for this slice
                 using (Bitmap sliceBitmap = new Bitmap(width, height))
@@ -2646,7 +2942,7 @@ namespace CTS
                     int bytes = stride * height;
                     byte[] rgbValues = new byte[bytes];
 
-                    // Initialize with transparent black
+                    // Initialize with transparent
                     for (int j = 0; j < bytes; j++)
                         rgbValues[j] = 0;
 
@@ -2658,7 +2954,8 @@ namespace CTS
                             // Calculate position in bitmap
                             int index = y * stride + x * bytesPerPixel;
 
-                            if (x < width && y < height && z < depth)
+                            if (x < width && y < height && z < depth &&
+                                mainForm.volumeLabels[x, y, z] == selectedMaterialID)
                             {
                                 float velocity = velocityField[x, y, z];
 
@@ -2666,15 +2963,23 @@ namespace CTS
                                 if (velocity <= 0 || velocity < minFilterVelocity || velocity > maxFilterVelocity)
                                     continue;
 
-                                // Map to color
-                                Color color = GetVelocityColor(velocity);
+                                // Choose between enhanced or standard colors
+                                Color color;
+                                if (useEnhancedColors)
+                                {
+                                    color = GetEnhancedVelocityColor(velocity, volMin, volMax);
+                                }
+                                else
+                                {
+                                    color = GetVelocityColor(velocity);
+                                }
 
-                                // Apply volume opacity
-                                int alpha = (int)(color.A * volumeOpacity);
+                                // Apply volume opacity - make deeper slices more transparent
+                                int alpha = (int)(255 * volumeOpacity * (0.5f + 0.5f * i / (float)depth));
                                 alpha = Math.Max(0, Math.Min(255, alpha));
 
                                 // Write BGRA values
-                                rgbValues[index + 3] = (byte)alpha;  // Alpha
+                                rgbValues[index + 3] = (byte)alpha;  // Alpha 
                                 rgbValues[index + 2] = color.R;      // Red
                                 rgbValues[index + 1] = color.G;      // Green
                                 rgbValues[index] = color.B;          // Blue
@@ -2686,25 +2991,19 @@ namespace CTS
                     System.Runtime.InteropServices.Marshal.Copy(rgbValues, 0, ptr, bytes);
                     sliceBitmap.UnlockBits(bmpData);
 
-                    // Draw the slice
-                    using (ImageAttributes ia = new ImageAttributes())
-                    {
-                        // Setup proper color matrix for transparency
-                        ColorMatrix cm = new ColorMatrix();
-                        cm.Matrix33 = 1.0f; // Full opacity scale
-                        ia.SetColorMatrix(cm);
+                    // Calculate Z-offset for this slice - this creates the 3D effect
+                    float zOffset = (z - depth / 2) * scale * 0.5f;
 
-                        // Draw at proper depth position
-                        float zPos = -z * scale; // Negative because Z increases into the screen
-                        g.DrawImage(sliceBitmap,
-                            new Rectangle(0, 0, (int)(width * scale), (int)(height * scale)),
-                            0, 0, width, height,
-                            GraphicsUnit.Pixel, ia);
-
-                        // Apply Z position transform by translating
-                        float zOffset = z * scale;
-                        g.TranslateTransform(zOffset * 0.7f, zOffset * 0.7f, MatrixOrder.Append);
-                    }
+                    // Draw the slice with proper Z position by modifying XY position
+                    // This simulates Z depth without using a 3D matrix
+                    g.DrawImage(sliceBitmap,
+                        new Rectangle(
+                            (int)(zOffset * 0.5f),           // X offset based on Z position
+                            (int)(zOffset * 0.5f),           // Y offset based on Z position
+                            (int)(width * scale),
+                            (int)(height * scale)),
+                        0, 0, width, height,
+                        GraphicsUnit.Pixel);
                 }
             }
         }
@@ -2714,10 +3013,53 @@ namespace CTS
             int height = velocityField.GetLength(1);
             int depth = velocityField.GetLength(2);
 
-            // Render each slice
+            // Analyze the data range for this rendering to enhance contrast
+            float volMin = float.MaxValue;
+            float volMax = float.MinValue;
+            int validVoxels = 0;
+
+            // Find actual min/max values in the visible volume
+            for (int x = 0; x < width; x++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    for (int z = 0; z < depth; z++)
+                    {
+                        if (mainForm.volumeLabels[x, y, z] == selectedMaterialID)
+                        {
+                            float velocity = velocityField[x, y, z];
+                            if (velocity > 0)
+                            {
+                                volMin = Math.Min(volMin, velocity);
+                                volMax = Math.Max(volMax, velocity);
+                                validVoxels++;
+                            }
+                        }
+                    }
+                }
+            }
+
+            bool useEnhancedColors = (volMin < volMax && validVoxels > 0);
+
+            // Render each slice from back to front for proper transparency
             for (int i = 0; i < height; i += stepSize)
             {
-                int y = reverse ? height - 1 - i : i;
+                int y = reverse ? i : height - 1 - i;
+
+                // Skip slices with no material for performance
+                bool hasVisibleMaterial = false;
+                for (int x = 0; x < width && !hasVisibleMaterial; x++)
+                {
+                    for (int z = 0; z < depth && !hasVisibleMaterial; z++)
+                    {
+                        if (mainForm.volumeLabels[x, y, z] == selectedMaterialID)
+                        {
+                            hasVisibleMaterial = true;
+                        }
+                    }
+                }
+
+                if (!hasVisibleMaterial) continue;
 
                 // Create a bitmap for this slice
                 using (Bitmap sliceBitmap = new Bitmap(width, depth))
@@ -2747,7 +3089,7 @@ namespace CTS
                             // Calculate position in bitmap
                             int index = z * stride + x * bytesPerPixel;
 
-                            if (x < width && y < height && z < depth)
+                            if (mainForm.volumeLabels[x, y, z] == selectedMaterialID)
                             {
                                 float velocity = velocityField[x, y, z];
 
@@ -2755,11 +3097,19 @@ namespace CTS
                                 if (velocity <= 0 || velocity < minFilterVelocity || velocity > maxFilterVelocity)
                                     continue;
 
-                                // Map to color
-                                Color color = GetVelocityColor(velocity);
+                                // Choose between enhanced or standard colors
+                                Color color;
+                                if (useEnhancedColors)
+                                {
+                                    color = GetEnhancedVelocityColor(velocity, volMin, volMax);
+                                }
+                                else
+                                {
+                                    color = GetVelocityColor(velocity);
+                                }
 
                                 // Apply volume opacity
-                                int alpha = (int)(color.A * volumeOpacity);
+                                int alpha = (int)(255 * volumeOpacity * (0.5f + 0.5f * i / (float)height));
                                 alpha = Math.Max(0, Math.Min(255, alpha));
 
                                 // Write BGRA values
@@ -2775,19 +3125,18 @@ namespace CTS
                     System.Runtime.InteropServices.Marshal.Copy(rgbValues, 0, ptr, bytes);
                     sliceBitmap.UnlockBits(bmpData);
 
-                    // Draw the slice
-                    using (ImageAttributes ia = new ImageAttributes())
-                    {
-                        // Setup proper color matrix for transparency
-                        ColorMatrix cm = new ColorMatrix();
-                        cm.Matrix33 = 1.0f; // Full opacity scale
-                        ia.SetColorMatrix(cm);
+                    // Calculate Y position in model space
+                    float yPos = y * scale;
 
-                        g.DrawImage(sliceBitmap,
-                            new Rectangle(0, (int)(y * scale), (int)(width * scale), (int)(depth * scale)),
-                            0, 0, width, depth,
-                            GraphicsUnit.Pixel, ia);
-                    }
+                    // Draw the slice at the correct Y position
+                    g.DrawImage(sliceBitmap,
+                        new Rectangle(
+                            0,                            // X position
+                            (int)yPos,                    // Y position
+                            (int)(width * scale),
+                            (int)(depth * scale)),
+                        0, 0, width, depth,
+                        GraphicsUnit.Pixel);
                 }
             }
         }
@@ -2797,10 +3146,53 @@ namespace CTS
             int height = velocityField.GetLength(1);
             int depth = velocityField.GetLength(2);
 
-            // Render each slice
+            // Analyze the data range for this rendering to enhance contrast
+            float volMin = float.MaxValue;
+            float volMax = float.MinValue;
+            int validVoxels = 0;
+
+            // Find actual min/max values in the visible volume
+            for (int x = 0; x < width; x++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    for (int z = 0; z < depth; z++)
+                    {
+                        if (mainForm.volumeLabels[x, y, z] == selectedMaterialID)
+                        {
+                            float velocity = velocityField[x, y, z];
+                            if (velocity > 0)
+                            {
+                                volMin = Math.Min(volMin, velocity);
+                                volMax = Math.Max(volMax, velocity);
+                                validVoxels++;
+                            }
+                        }
+                    }
+                }
+            }
+
+            bool useEnhancedColors = (volMin < volMax && validVoxels > 0);
+
+            // Render each slice from back to front for proper transparency
             for (int i = 0; i < width; i += stepSize)
             {
-                int x = reverse ? width - 1 - i : i;
+                int x = reverse ? i : width - 1 - i;
+
+                // Skip slices with no material for performance
+                bool hasVisibleMaterial = false;
+                for (int y = 0; y < height && !hasVisibleMaterial; y++)
+                {
+                    for (int z = 0; z < depth && !hasVisibleMaterial; z++)
+                    {
+                        if (mainForm.volumeLabels[x, y, z] == selectedMaterialID)
+                        {
+                            hasVisibleMaterial = true;
+                        }
+                    }
+                }
+
+                if (!hasVisibleMaterial) continue;
 
                 // Create a bitmap for this slice
                 using (Bitmap sliceBitmap = new Bitmap(depth, height))
@@ -2830,7 +3222,7 @@ namespace CTS
                             // Calculate position in bitmap
                             int index = y * stride + z * bytesPerPixel;
 
-                            if (x < width && y < height && z < depth)
+                            if (mainForm.volumeLabels[x, y, z] == selectedMaterialID)
                             {
                                 float velocity = velocityField[x, y, z];
 
@@ -2838,14 +3230,22 @@ namespace CTS
                                 if (velocity <= 0 || velocity < minFilterVelocity || velocity > maxFilterVelocity)
                                     continue;
 
-                                // Map to color
-                                Color color = GetVelocityColor(velocity);
+                                // Choose between enhanced or standard colors
+                                Color color;
+                                if (useEnhancedColors)
+                                {
+                                    color = GetEnhancedVelocityColor(velocity, volMin, volMax);
+                                }
+                                else
+                                {
+                                    color = GetVelocityColor(velocity);
+                                }
 
-                                // Apply volume opacity
-                                int alpha = (int)(color.A * volumeOpacity);
+                                // Apply volume opacity - make deeper slices more transparent
+                                int alpha = (int)(255 * volumeOpacity * (0.5f + 0.5f * i / (float)width));
                                 alpha = Math.Max(0, Math.Min(255, alpha));
 
-                                // Write BGRA values (note B=0, G=1, R=2, A=3)
+                                // Write BGRA values
                                 rgbValues[index + 3] = (byte)alpha;   // Alpha
                                 rgbValues[index + 2] = color.R;      // Red
                                 rgbValues[index + 1] = color.G;      // Green
@@ -2858,19 +3258,19 @@ namespace CTS
                     System.Runtime.InteropServices.Marshal.Copy(rgbValues, 0, ptr, bytes);
                     sliceBitmap.UnlockBits(bmpData);
 
-                    // Draw the slice
-                    using (ImageAttributes ia = new ImageAttributes())
-                    {
-                        // Setup proper color matrix for transparency
-                        ColorMatrix cm = new ColorMatrix();
-                        cm.Matrix33 = 1.0f; // Full opacity scale
-                        ia.SetColorMatrix(cm);
+                    // Calculate X position for this slice
+                    float xOffset = (x - width / 2) * scale * 0.5f;
 
-                        g.DrawImage(sliceBitmap,
-                            new Rectangle((int)(x * scale), 0, (int)(depth * scale), (int)(height * scale)),
-                            0, 0, depth, height,
-                            GraphicsUnit.Pixel, ia);
-                    }
+                    // Draw the slice at the correct X position
+                    // We simulate depth by offsetting in the screen XY plane
+                    g.DrawImage(sliceBitmap,
+                        new Rectangle(
+                            (int)(x * scale),             // Actual X position 
+                            0,                            // Y position
+                            (int)(depth * scale),
+                            (int)(height * scale)),
+                        0, 0, depth, height,
+                        GraphicsUnit.Pixel);
                 }
             }
         }

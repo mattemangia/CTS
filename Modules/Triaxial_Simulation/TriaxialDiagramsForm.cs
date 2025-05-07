@@ -53,6 +53,7 @@ namespace CTS
 
         public TriaxialDiagramsForm()
         {
+            this.Icon = Properties.Resources.favicon;
             InitializeComponent();
         }
 

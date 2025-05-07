@@ -132,6 +132,7 @@ namespace CTS
     int width, int height, int depth, float pixelSize,
     int tx, int ty, int tz, int rx, int ry, int rz)
         {
+            this.Icon = Properties.Resources.favicon;
             // Store simulation parameters
             _width = width;
             _height = height;
@@ -796,7 +797,7 @@ namespace CTS
             float[,] rawVelocity; // To hold the non-normalized values for the colorbar
 
             // Apply a consistent amplification for visualization
-            const double VELOCITY_AMPLIFICATION = 50000.0;
+            //const double VELOCITY_AMPLIFICATION = 50000.0;
 
             // For tomography, we want a plane that is PARALLEL to wave path
             if (dx >= dy && dx >= dz) // X is primary axis
@@ -820,7 +821,8 @@ namespace CTS
                                 vy[x, y, midZ] * vy[x, y, midZ] +
                                 vz[x, y, midZ] * vz[x, y, midZ]);
 
-                            rawVelocity[x, y] = (float)(magnitude * VELOCITY_AMPLIFICATION);
+                            // rawVelocity[x, y] = (float)(magnitude * VELOCITY_AMPLIFICATION);
+                            rawVelocity[x, y] = (float)(magnitude);
                             tomography[x, y] = rawVelocity[x, y];
                         }
                     }
@@ -843,7 +845,8 @@ namespace CTS
                                 vy[x, midY, z] * vy[x, midY, z] +
                                 vz[x, midY, z] * vz[x, midY, z]);
 
-                            rawVelocity[x, z] = (float)(magnitude * VELOCITY_AMPLIFICATION);
+                            //rawVelocity[x, z] = (float)(magnitude * VELOCITY_AMPLIFICATION);
+                            rawVelocity[x, z] = (float)(magnitude);
                             tomography[x, z] = rawVelocity[x, z];
                         }
                     }
@@ -870,7 +873,8 @@ namespace CTS
                                 vy[x, y, midZ] * vy[x, y, midZ] +
                                 vz[x, y, midZ] * vz[x, y, midZ]);
 
-                            rawVelocity[x, y] = (float)(magnitude * VELOCITY_AMPLIFICATION);
+                            //rawVelocity[x, y] = (float)(magnitude * VELOCITY_AMPLIFICATION);
+                            rawVelocity[x, y] = (float)(magnitude);
                             tomography[x, y] = rawVelocity[x, y];
                         }
                     }
@@ -893,7 +897,8 @@ namespace CTS
                                 vy[midX, y, z] * vy[midX, y, z] +
                                 vz[midX, y, z] * vz[midX, y, z]);
 
-                            rawVelocity[y, z] = (float)(magnitude * VELOCITY_AMPLIFICATION);
+                            //rawVelocity[y, z] = (float)(magnitude * VELOCITY_AMPLIFICATION);
+                            rawVelocity[y, z] = (float)(magnitude);
                             tomography[y, z] = rawVelocity[y, z];
                         }
                     }
@@ -920,7 +925,8 @@ namespace CTS
                                 vy[x, midY, z] * vy[x, midY, z] +
                                 vz[x, midY, z] * vz[x, midY, z]);
 
-                            rawVelocity[x, z] = (float)(magnitude * VELOCITY_AMPLIFICATION);
+                            //rawVelocity[x, z] = (float)(magnitude * VELOCITY_AMPLIFICATION);
+                            rawVelocity[x, z] = (float)(magnitude);
                             tomography[x, z] = rawVelocity[x, z];
                         }
                     }
@@ -943,7 +949,8 @@ namespace CTS
                                 vy[midX, y, z] * vy[midX, y, z] +
                                 vz[midX, y, z] * vz[midX, y, z]);
 
-                            rawVelocity[y, z] = (float)(magnitude * VELOCITY_AMPLIFICATION);
+                            //rawVelocity[y, z] = (float)(magnitude * VELOCITY_AMPLIFICATION);
+                            rawVelocity[y, z] = (float)(magnitude );
                             tomography[y, z] = rawVelocity[y, z];
                         }
                     }
@@ -1057,7 +1064,7 @@ namespace CTS
             int dz = Math.Abs(rz - tz);
 
             float[,] crossSection;
-            const double AMPLIFICATION = 20000.0;
+            const double AMPLIFICATION = 1.0;
 
             // For cross-section, we want a plane PERPENDICULAR to wave path
             if (dx >= dy && dx >= dz) // X is primary axis
@@ -2191,7 +2198,7 @@ namespace CTS
             else if (Math.Abs(value) < 1000)
                 return $"{value:0.0} m/s";
             else
-                return $"{value / 1000:0.00} km/s";
+                return $"{value:0.0} m/s"; 
         }
         /// <summary>
         /// Draw heatmap data on the specified graphics context

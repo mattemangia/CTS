@@ -190,7 +190,7 @@ namespace CTS
                 }
 
                 computeEngine = new DirectTriaxialCompute();
-
+                computeEngine.SetCompatibilityMode(true);
                 // Hook up events with explicit delegate references to prevent memory leaks
                 computeEngine.ProgressUpdated += new EventHandler<DirectComputeProgressEventArgs>(ComputeEngine_ProgressUpdated);
                 computeEngine.SimulationCompleted += new EventHandler<DirectComputeCompletedEventArgs>(ComputeEngine_SimulationCompleted);

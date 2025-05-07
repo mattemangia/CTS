@@ -17,6 +17,8 @@ using Pen = System.Drawing.Pen;
 using Brush = System.Drawing.Brush;
 using DashStyle = System.Drawing.Drawing2D.DashStyle;
 using LinearGradientBrush = System.Drawing.Drawing2D.LinearGradientBrush;
+using PixelFormat = System.Drawing.Imaging.PixelFormat;
+using Matrix = System.Drawing.Drawing2D.Matrix;
 
 namespace CTS
 {
@@ -32,6 +34,15 @@ namespace CTS
         private float[,,] cachedSWaveField;
         
         private int cachedTotalTimeSteps;
+
+        private bool showFullVolumeInTomography = false;
+        private KryptonCheckBox chkShowFullVolume;
+        private KryptonTrackBar volumeOpacityTrackBar;
+        private float volumeOpacity = 0.7f;
+        private float minVelocityValue;
+        private float maxVelocityValue;
+        private KryptonButton btnAutoAdjustColorScale;
+        private bool useAdaptiveColorScale = true;
 
         // Sliders Debouncing
         private System.Threading.Timer sliceUpdateTimer;
@@ -423,19 +434,78 @@ namespace CTS
                 tomographyPictureBox.Invalidate();
             };
 
+            // Add Volume Rendering toggle
+            chkShowFullVolume = new KryptonCheckBox
+            {
+                Text = "Show Full Volume Rendering",
+                Location = new Point(10, 60),
+                Size = new Size(230, 25),
+                Checked = showFullVolumeInTomography,
+                StateCommon = {
+                    ShortText = {
+                        Color1 = Color.White
+                    }
+                }
+            };
+            chkShowFullVolume.CheckedChanged += (s, e) => {
+                showFullVolumeInTomography = chkShowFullVolume.Checked;
+                // Enable/disable slice controls based on volume rendering
+                bool slicesEnabled = !showFullVolumeInTomography;
+                radioSliceX.Enabled = slicesEnabled;
+                radioSliceY.Enabled = slicesEnabled;
+                radioSliceZ.Enabled = slicesEnabled;
+                sliceXTrackBar.Enabled = slicesEnabled && radioSliceX.Checked;
+                sliceYTrackBar.Enabled = slicesEnabled && radioSliceY.Checked;
+                sliceZTrackBar.Enabled = slicesEnabled && radioSliceZ.Checked;
+
+                // Refresh visualization
+                tomographyPictureBox.Invalidate();
+            };
+            controlPanel.Controls.Add(chkShowFullVolume);
+
+            // Add Volume Opacity control
+            KryptonLabel lblVolumeOpacity = new KryptonLabel
+            {
+                Text = "Volume Opacity:",
+                Location = new Point(10, 90),
+                Size = new Size(230, 20),
+                StateCommon = {
+                    ShortText = {
+                        Color1 = Color.White
+                    }
+                }
+            };
+            controlPanel.Controls.Add(lblVolumeOpacity);
+
+            volumeOpacityTrackBar = new KryptonTrackBar
+            {
+                Minimum = 1,
+                Maximum = 100,
+                Value = (int)(volumeOpacity * 100),
+                SmallChange = 5,
+                LargeChange = 20,
+                Location = new Point(10, 110),
+                Size = new Size(230, 30)
+            };
+            volumeOpacityTrackBar.ValueChanged += (s, e) => {
+                volumeOpacity = volumeOpacityTrackBar.Value / 100.0f;
+                tomographyPictureBox.Invalidate();
+            };
+            controlPanel.Controls.Add(volumeOpacityTrackBar);
+
             // Slice direction radio buttons
             KryptonGroupBox sliceGroup = new KryptonGroupBox
             {
                 Text = "Slice Direction",
-                Location = new Point(10, 60),
+                Location = new Point(10, 150),
                 Size = new Size(230, 110), // Increased height to fit all three radio buttons
                 StateCommon = {
-        Content = {
-            ShortText = {
-                Color1 = Color.White
-            }
-        }
-    }
+                    Content = {
+                        ShortText = {
+                            Color1 = Color.White
+                        }
+                    }
+                }
             };
 
             radioSliceX = new KryptonRadioButton
@@ -445,10 +515,10 @@ namespace CTS
                 Location = new Point(10, 20),
                 Size = new Size(180, 20), // Reduced height for tighter spacing
                 StateCommon = {
-        ShortText = {
-            Color1 = Color.White
-        }
-    }
+                    ShortText = {
+                        Color1 = Color.White
+                    }
+                }
             };
             radioSliceX.CheckedChanged += (s, e) => {
                 if (radioSliceX.Checked)
@@ -467,10 +537,10 @@ namespace CTS
                 Location = new Point(10, 45),
                 Size = new Size(180, 20), // Reduced height for tighter spacing
                 StateCommon = {
-        ShortText = {
-            Color1 = Color.White
-        }
-    }
+                    ShortText = {
+                        Color1 = Color.White
+                    }
+                }
             };
             radioSliceY.CheckedChanged += (s, e) => {
                 if (radioSliceY.Checked)
@@ -489,10 +559,10 @@ namespace CTS
                 Location = new Point(10, 70),
                 Size = new Size(180, 20), // Reduced height for tighter spacing
                 StateCommon = {
-        ShortText = {
-            Color1 = Color.White
-        }
-    }
+                    ShortText = {
+                        Color1 = Color.White
+                    }
+                }
             };
             radioSliceZ.CheckedChanged += (s, e) => {
                 if (radioSliceZ.Checked)
@@ -506,23 +576,25 @@ namespace CTS
             };
             sliceGroup.StateCommon.Back.Color1 = Color.FromArgb(40, 40, 40);
             sliceGroup.StateCommon.Back.Color2 = Color.FromArgb(40, 40, 40);
-            
+
             sliceGroup.Panel.Controls.Add(radioSliceX);
             sliceGroup.Panel.Controls.Add(radioSliceY);
             sliceGroup.Panel.Controls.Add(radioSliceZ);
+            controlPanel.Controls.Add(sliceGroup);
 
             // Slice position track bars
             KryptonLabel lblSliceX = new KryptonLabel
             {
                 Text = "X Slice Position:",
-                Location = new Point(10, 175), // Increased Y position
+                Location = new Point(10, 265), // Adjusted position
                 Size = new Size(230, 20),
                 StateCommon = {
-        ShortText = {
-            Color1 = Color.White
-        }
-    }
+                    ShortText = {
+                        Color1 = Color.White
+                    }
+                }
             };
+            controlPanel.Controls.Add(lblSliceX);
 
             sliceXTrackBar = new KryptonTrackBar
             {
@@ -531,7 +603,7 @@ namespace CTS
                 Value = mainForm.GetWidth() > 0 ? mainForm.GetWidth() / 2 : 50,
                 SmallChange = 1,
                 LargeChange = 10,
-                Location = new Point(10, 195),
+                Location = new Point(10, 285),
                 Size = new Size(230, 30)
             };
             sliceXTrackBar.ValueChanged += (s, e) => {
@@ -545,13 +617,20 @@ namespace CTS
                     }
                 }
             };
+            controlPanel.Controls.Add(sliceXTrackBar);
 
             KryptonLabel lblSliceY = new KryptonLabel
             {
                 Text = "Y Slice Position:",
-                Location = new Point(10, 225),
-                Size = new Size(230, 20)
+                Location = new Point(10, 315),
+                Size = new Size(230, 20),
+                StateCommon = {
+                    ShortText = {
+                        Color1 = Color.White
+                    }
+                }
             };
+            controlPanel.Controls.Add(lblSliceY);
 
             sliceYTrackBar = new KryptonTrackBar
             {
@@ -560,7 +639,7 @@ namespace CTS
                 Value = mainForm.GetHeight() > 0 ? mainForm.GetHeight() / 2 : 50,
                 SmallChange = 1,
                 LargeChange = 10,
-                Location = new Point(10, 245),
+                Location = new Point(10, 335),
                 Size = new Size(230, 30),
                 Enabled = false
             };
@@ -575,13 +654,20 @@ namespace CTS
                     }
                 }
             };
+            controlPanel.Controls.Add(sliceYTrackBar);
 
             KryptonLabel lblSliceZ = new KryptonLabel
             {
                 Text = "Z Slice Position:",
-                Location = new Point(10, 275),
-                Size = new Size(230, 20)
+                Location = new Point(10, 365),
+                Size = new Size(230, 20),
+                StateCommon = {
+                    ShortText = {
+                        Color1 = Color.White
+                    }
+                }
             };
+            controlPanel.Controls.Add(lblSliceZ);
 
             sliceZTrackBar = new KryptonTrackBar
             {
@@ -590,7 +676,7 @@ namespace CTS
                 Value = mainForm.GetDepth() > 0 ? mainForm.GetDepth() / 2 : 50,
                 SmallChange = 1,
                 LargeChange = 10,
-                Location = new Point(10, 295),
+                Location = new Point(10, 385),
                 Size = new Size(230, 30),
                 Enabled = false
             };
@@ -605,30 +691,59 @@ namespace CTS
                     }
                 }
             };
+            controlPanel.Controls.Add(sliceZTrackBar);
             sliceUpdateTimer = new System.Threading.Timer(OnSliceUpdateTimerElapsed, null, Timeout.Infinite, Timeout.Infinite);
+
             // Histogram and velocity range filtering
             KryptonLabel lblHistogram = new KryptonLabel
             {
                 Text = "Velocity Distribution:",
-                Location = new Point(10, 330),
-                Size = new Size(230, 20)
+                Location = new Point(10, 420),
+                Size = new Size(230, 20),
+                StateCommon = {
+                    ShortText = {
+                        Color1 = Color.White
+                    }
+                }
             };
+            controlPanel.Controls.Add(lblHistogram);
 
             histogramPictureBox = new PictureBox
             {
-                Location = new Point(10, 350),
+                Location = new Point(10, 440),
                 Size = new Size(230, 100),
                 BackColor = Color.FromArgb(20, 20, 20),
                 BorderStyle = BorderStyle.FixedSingle
             };
             histogramPictureBox.Paint += HistogramPictureBox_Paint;
+            controlPanel.Controls.Add(histogramPictureBox);
+
+            // Add an Auto-Adjust Color Scale button
+            btnAutoAdjustColorScale = new KryptonButton
+            {
+                Text = "Auto-Adjust Color Scale",
+                Location = new Point(10, 545),
+                Size = new Size(230, 30)
+            };
+            btnAutoAdjustColorScale.Click += (s, e) => {
+                AutoAdjustColorScale();
+                tomographyPictureBox.Invalidate();
+                histogramPictureBox.Invalidate();
+            };
+            controlPanel.Controls.Add(btnAutoAdjustColorScale);
 
             KryptonLabel lblVelocityRange = new KryptonLabel
             {
                 Text = "Velocity Range Filter:",
-                Location = new Point(10, 460),
-                Size = new Size(230, 20)
+                Location = new Point(10, 580),
+                Size = new Size(230, 20),
+                StateCommon = {
+                    ShortText = {
+                        Color1 = Color.White
+                    }
+                }
             };
+            controlPanel.Controls.Add(lblVelocityRange);
 
             minVelocityTrackBar = new KryptonTrackBar
             {
@@ -637,7 +752,7 @@ namespace CTS
                 Value = 0,
                 SmallChange = 1,
                 LargeChange = 10,
-                Location = new Point(10, 480),
+                Location = new Point(10, 600),
                 Size = new Size(230, 30)
             };
             minVelocityTrackBar.ValueChanged += (s, e) => {
@@ -645,6 +760,7 @@ namespace CTS
                 tomographyPictureBox.Invalidate();
                 histogramPictureBox.Invalidate();
             };
+            controlPanel.Controls.Add(minVelocityTrackBar);
 
             maxVelocityTrackBar = new KryptonTrackBar
             {
@@ -653,7 +769,7 @@ namespace CTS
                 Value = 100,
                 SmallChange = 1,
                 LargeChange = 10,
-                Location = new Point(10, 510),
+                Location = new Point(10, 630),
                 Size = new Size(230, 30)
             };
             maxVelocityTrackBar.ValueChanged += (s, e) => {
@@ -661,19 +777,13 @@ namespace CTS
                 tomographyPictureBox.Invalidate();
                 histogramPictureBox.Invalidate();
             };
+            controlPanel.Controls.Add(maxVelocityTrackBar);
 
-            // Export button
-            btnExportTomography = new KryptonButton
-            {
-                Text = "Export Image",
-                Location = new Point(10, 550),
-                Size = new Size(230, 30)
-            };
-            btnExportTomography.Click += (s, e) => ExportImage(tomographyPictureBox, "Tomography");
+            // Add standard view buttons for easier orientation
             KryptonButton btnTopView = new KryptonButton
             {
                 Text = "Top View",
-                Location = new Point(10, controlPanel.Height - 80),
+                Location = new Point(10, 670),
                 Size = new Size(75, 25)
             };
             btnTopView.Click += (s, e) => {
@@ -681,11 +791,12 @@ namespace CTS
                 tomographyRotationY = 0;
                 tomographyPictureBox.Invalidate();
             };
+            controlPanel.Controls.Add(btnTopView);
 
             KryptonButton btnFrontView = new KryptonButton
             {
                 Text = "Front View",
-                Location = new Point(85, controlPanel.Height - 80),
+                Location = new Point(85, 670),
                 Size = new Size(75, 25)
             };
             btnFrontView.Click += (s, e) => {
@@ -693,11 +804,12 @@ namespace CTS
                 tomographyRotationY = 0;
                 tomographyPictureBox.Invalidate();
             };
+            controlPanel.Controls.Add(btnFrontView);
 
             KryptonButton btnSideView = new KryptonButton
             {
                 Text = "Side View",
-                Location = new Point(160, controlPanel.Height - 80),
+                Location = new Point(160, 670),
                 Size = new Size(75, 25)
             };
             btnSideView.Click += (s, e) => {
@@ -705,28 +817,34 @@ namespace CTS
                 tomographyRotationY = 90;
                 tomographyPictureBox.Invalidate();
             };
-
-            // Add controls to the control panel
-            controlPanel.Controls.Add(btnReset3DView);
-            controlPanel.Controls.Add(sliceGroup);
-            controlPanel.Controls.Add(lblSliceX);
-            controlPanel.Controls.Add(sliceXTrackBar);
-            controlPanel.Controls.Add(lblSliceY);
-            controlPanel.Controls.Add(sliceYTrackBar);
-            controlPanel.Controls.Add(lblSliceZ);
-            controlPanel.Controls.Add(sliceZTrackBar);
-            controlPanel.Controls.Add(lblHistogram);
-            controlPanel.Controls.Add(histogramPictureBox);
-            controlPanel.Controls.Add(lblVelocityRange);
-            controlPanel.Controls.Add(minVelocityTrackBar);
-            controlPanel.Controls.Add(maxVelocityTrackBar);
-            controlPanel.Controls.Add(btnExportTomography);
-            controlPanel.Controls.Add(btnTopView);
-            controlPanel.Controls.Add(btnFrontView);
             controlPanel.Controls.Add(btnSideView);
+
+            // Export button at the bottom
+            btnExportTomography = new KryptonButton
+            {
+                Text = "Export Image",
+                Location = new Point(10, 705),
+                Size = new Size(230, 30)
+            };
+            btnExportTomography.Click += (s, e) => ExportImage(tomographyPictureBox, "Tomography");
+            controlPanel.Controls.Add(btnExportTomography);
+
             // Add main components to the tomography panel
             tomographyPanel.Controls.Add(tomographyPictureBox);
             tomographyPanel.Controls.Add(controlPanel);
+
+            // Make the control panel scrollable
+            Panel scrollPanel = new Panel
+            {
+                Dock = DockStyle.Right,
+                Width = 250,
+                AutoScroll = true,
+                BackColor = Color.FromArgb(40, 40, 40)
+            };
+            scrollPanel.Controls.Add(controlPanel);
+            controlPanel.Size = new Size(230, 750); // Set larger height for scrolling
+            controlPanel.Dock = DockStyle.None;
+            tomographyPanel.Controls.Add(scrollPanel);
 
             // Add to tab
             tomographyTab.Controls.Add(tomographyPanel);
@@ -737,8 +855,12 @@ namespace CTS
             currentSliceZ = sliceZTrackBar.Value;
             velocityField = new float[1, 1, 1];
             velocityHistogram = new float[100];
+
             // Initialize velocity data
             InitializeVelocityField();
+
+            // Analyze velocity range for automatic color scaling
+            AnalyzeVelocityRange();
         }
         private void OnSliceUpdateTimerElapsed(object state)
         {
@@ -1315,6 +1437,15 @@ namespace CTS
 
                 Logger.Log($"[InitializeVelocityField] Velocity field generated using simulation data");
                 LogVelocityFieldStats();
+
+                // Analyze the actual velocity range in the data
+                AnalyzeVelocityRange();
+
+                // Auto-adjust color scale if enabled
+                if (useAdaptiveColorScale)
+                {
+                    AutoAdjustColorScale();
+                }
             }
             catch (Exception ex)
             {
@@ -1323,6 +1454,51 @@ namespace CTS
                 GenerateDensityBasedVelocityField();
             }
         }
+
+        private void DrawTomographyLegend(Graphics g)
+        {
+            int legendWidth = 200;
+            int legendHeight = 100; // Increased height for more info
+            int legendX = tomographyPictureBox.Width - legendWidth - 10;
+            int legendY = 10;
+
+            // Draw semi-transparent background
+            using (Brush bgBrush = new SolidBrush(Color.FromArgb(120, 0, 0, 0)))
+            {
+                g.FillRectangle(bgBrush, legendX, legendY, legendWidth, legendHeight);
+                g.DrawRectangle(Pens.Gray, legendX, legendY, legendWidth, legendHeight);
+            }
+
+            // Draw title
+            using (Font titleFont = new Font("Segoe UI", 9, FontStyle.Bold))
+            using (Brush textBrush = new SolidBrush(Color.White))
+            {
+                g.DrawString("Velocity Tomography", titleFont, textBrush, legendX + 10, legendY + 5);
+            }
+
+            // Draw colorbar
+            DrawVelocityColorbar(g, legendX + 10, legendY + 25, legendWidth - 20, 20);
+
+            // Draw velocity range
+            using (Font font = new Font("Segoe UI", 8))
+            using (Brush textBrush = new SolidBrush(Color.White))
+            {
+                string minText = $"{minFilterVelocity:F0} m/s";
+                string maxText = $"{maxFilterVelocity:F0} m/s";
+
+                // Left aligned min value
+                g.DrawString(minText, font, textBrush, legendX + 10, legendY + 50);
+
+                // Right aligned max value
+                SizeF maxSize = g.MeasureString(maxText, font);
+                g.DrawString(maxText, font, textBrush, legendX + legendWidth - 10 - maxSize.Width, legendY + 50);
+
+                // Display rendering mode
+                string renderMode = showFullVolumeInTomography ? "Full Volume Rendering" : "Slice View";
+                g.DrawString(renderMode, font, textBrush, legendX + 10, legendY + 70);
+            }
+        }
+
         private double DistanceToPath(int x, int y, int z, List<Point3D> path)
         {
             if (path == null || path.Count < 2)
@@ -1772,9 +1948,6 @@ namespace CTS
                 return;
             }
 
-            // Add debug information
-            Logger.Log($"[TomographyPictureBox_Paint] Rendering tomography view with rotation ({tomographyRotationX}, {tomographyRotationY}), zoom {tomographyZoom}");
-
             // Apply view transformation
             g.TranslateTransform(tomographyPictureBox.Width / 2 + tomographyPan.X,
                                 tomographyPictureBox.Height / 2 + tomographyPan.Y);
@@ -1800,20 +1973,27 @@ namespace CTS
                 DrawBoundingBox(g, width * scale, height * scale, depth * scale, boxPen);
             }
 
-            // Draw appropriate slice based on active direction
-            switch (activeSliceDirection)
+            // Choose rendering method based on checkbox
+            if (showFullVolumeInTomography)
             {
-                case 0: // X slice
-                    DrawXSlice(g, scale);
-                    break;
-
-                case 1: // Y slice
-                    DrawYSlice(g, scale);
-                    break;
-
-                case 2: // Z slice
-                    DrawZSlice(g, scale);
-                    break;
+                // Render full volume
+                RenderFullVolume(g, scale);
+            }
+            else
+            {
+                // Draw appropriate slice based on active direction
+                switch (activeSliceDirection)
+                {
+                    case 0: // X slice
+                        DrawXSlice(g, scale);
+                        break;
+                    case 1: // Y slice
+                        DrawYSlice(g, scale);
+                        break;
+                    case 2: // Z slice
+                        DrawZSlice(g, scale);
+                        break;
+                }
             }
 
             // Draw TX and RX markers
@@ -2154,46 +2334,72 @@ namespace CTS
             }
         }
 
-        private void DrawTomographyLegend(Graphics g)
+        private void AnalyzeVelocityRange()
         {
-            int legendWidth = 200;
-            int legendHeight = 80;
-            int legendX = tomographyPictureBox.Width - legendWidth - 10;
-            int legendY = 10;
-
-            // Draw semi-transparent background
-            using (Brush bgBrush = new SolidBrush(Color.FromArgb(120, 0, 0, 0)))
+            if (velocityField == null ||
+                velocityField.GetLength(0) <= 1 ||
+                velocityField.GetLength(1) <= 1 ||
+                velocityField.GetLength(2) <= 1)
             {
-                g.FillRectangle(bgBrush, legendX, legendY, legendWidth, legendHeight);
-                g.DrawRectangle(Pens.Gray, legendX, legendY, legendWidth, legendHeight);
+                return;
             }
 
-            // Draw title
-            using (Font titleFont = new Font("Segoe UI", 9, FontStyle.Bold))
-            using (Brush textBrush = new SolidBrush(Color.White))
+            int width = velocityField.GetLength(0);
+            int height = velocityField.GetLength(1);
+            int depth = velocityField.GetLength(2);
+
+            minVelocityValue = float.MaxValue;
+            maxVelocityValue = float.MinValue;
+            int nonZeroCount = 0;
+
+            // Analyze actual data range
+            for (int z = 0; z < depth; z++)
             {
-                g.DrawString("Velocity Tomography", titleFont, textBrush, legendX + 10, legendY + 5);
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        float velocity = velocityField[x, y, z];
+                        if (velocity > 0)
+                        {
+                            minVelocityValue = Math.Min(minVelocityValue, velocity);
+                            maxVelocityValue = Math.Max(maxVelocityValue, velocity);
+                            nonZeroCount++;
+                        }
+                    }
+                }
             }
 
-            // Draw colorbar
-            DrawVelocityColorbar(g, legendX + 10, legendY + 25, legendWidth - 20, 20);
-
-            // Draw velocity range
-            using (Font font = new Font("Segoe UI", 8))
-            using (Brush textBrush = new SolidBrush(Color.White))
+            // Log the found range
+            if (nonZeroCount > 0)
             {
-                string minText = $"{minFilterVelocity:F0} m/s";
-                string maxText = $"{maxFilterVelocity:F0} m/s";
-
-                // Left aligned min value
-                g.DrawString(minText, font, textBrush, legendX + 10, legendY + 50);
-
-                // Right aligned max value
-                SizeF maxSize = g.MeasureString(maxText, font);
-                g.DrawString(maxText, font, textBrush, legendX + legendWidth - 10 - maxSize.Width, legendY + 50);
+                Logger.Log($"[AnalyzeVelocityRange] Found velocity range: {minVelocityValue:F1} - {maxVelocityValue:F1} m/s in {nonZeroCount} voxels");
+            }
+            else
+            {
+                minVelocityValue = 0;
+                maxVelocityValue = 0;
+                Logger.Log("[AnalyzeVelocityRange] No non-zero velocity values found");
             }
         }
+        private void AutoAdjustColorScale()
+        {
+            AnalyzeVelocityRange();
 
+            // Only update if we have valid values
+            if (minVelocityValue > 0 && maxVelocityValue > minVelocityValue)
+            {
+                // Update filter velocities to match actual data range with small padding
+                double padding = (maxVelocityValue - minVelocityValue) * 0.05; // 5% padding on each end
+                minFilterVelocity = minVelocityValue - padding;
+                maxFilterVelocity = maxVelocityValue + padding;
+
+                // Ensure positive values
+                minFilterVelocity = Math.Max(1, minFilterVelocity);
+
+                Logger.Log($"[AutoAdjustColorScale] Adjusted range to: {minFilterVelocity:F1} - {maxFilterVelocity:F1} m/s");
+            }
+        }
         private void DrawVelocityColorbar(Graphics g, int x, int y, int width, int height)
         {
             using (LinearGradientBrush gradientBrush = new LinearGradientBrush(
@@ -2346,12 +2552,29 @@ namespace CTS
 
         private Color GetVelocityColor(float velocity)
         {
-            // Map velocity to the colormap (blue->cyan->green->yellow->red)
-            // Use the P-wave velocity as reference or a default if not available
-            double referenceVelocity = simulationResults != null ? simulationResults.PWaveVelocity : 3000;
+            // Use adaptive color scale based on actual velocity data or predefined ranges
+            double velocityMin, velocityMax;
+
+            if (useAdaptiveColorScale && minVelocityValue > 0 && maxVelocityValue > minVelocityValue)
+            {
+                // Use actual data range with small padding
+                double padding = (maxVelocityValue - minVelocityValue) * 0.05; // 5% padding
+                velocityMin = minVelocityValue - padding;
+                velocityMax = maxVelocityValue + padding;
+            }
+            else
+            {
+                // Fallback to simulation-based reference velocity
+                double referenceVelocity = simulationResults != null ? simulationResults.PWaveVelocity : 3000;
+                velocityMin = referenceVelocity * 0.5;  // 50% of P-wave velocity
+                velocityMax = referenceVelocity * 1.5;  // 150% of P-wave velocity
+            }
+
+            // Ensure velocity is in the range
+            velocityMin = Math.Max(1, velocityMin); // Avoid zero or negative
 
             // Calculate normalized value in range [0-1]
-            double normalizedValue = (velocity - referenceVelocity * 0.5) / (referenceVelocity);
+            double normalizedValue = (velocity - velocityMin) / (velocityMax - velocityMin);
             normalizedValue = Math.Max(0, Math.Min(1, normalizedValue));
 
             // Map to colormap
@@ -2360,6 +2583,7 @@ namespace CTS
                 // Blue to Cyan
                 double t = normalizedValue * 4;
                 return Color.FromArgb(
+                    255, // Full opacity
                     0,
                     (int)(255 * t),
                     255);
@@ -2369,6 +2593,7 @@ namespace CTS
                 // Cyan to Green
                 double t = (normalizedValue - 0.25) * 4;
                 return Color.FromArgb(
+                    255, // Full opacity
                     0,
                     255,
                     (int)(255 * (1 - t)));
@@ -2378,6 +2603,7 @@ namespace CTS
                 // Green to Yellow
                 double t = (normalizedValue - 0.5) * 4;
                 return Color.FromArgb(
+                    255, // Full opacity
                     (int)(255 * t),
                     255,
                     0);
@@ -2387,13 +2613,317 @@ namespace CTS
                 // Yellow to Red
                 double t = (normalizedValue - 0.75) * 4;
                 return Color.FromArgb(
+                    255, // Full opacity
                     255,
                     (int)(255 * (1 - t)),
                     0);
             }
         }
+        private void RenderVolumeZSlices(Graphics g, float scale, int stepSize, bool reverse)
+        {
+            int width = velocityField.GetLength(0);
+            int height = velocityField.GetLength(1);
+            int depth = velocityField.GetLength(2);
 
+            // Render each slice
+            for (int i = 0; i < depth; i += stepSize)
+            {
+                int z = reverse ? depth - 1 - i : i;
 
+                // Create a bitmap for this slice
+                using (Bitmap sliceBitmap = new Bitmap(width, height))
+                {
+                    // Lock the bitmap for faster access
+                    Rectangle rect = new Rectangle(0, 0, width, height);
+                    BitmapData bmpData = sliceBitmap.LockBits(rect,
+                        ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+
+                    int stride = bmpData.Stride;
+                    IntPtr ptr = bmpData.Scan0;
+                    int bytesPerPixel = 4;
+
+                    // Create byte array to hold pixel data
+                    int bytes = stride * height;
+                    byte[] rgbValues = new byte[bytes];
+
+                    // Initialize with transparent black
+                    for (int j = 0; j < bytes; j++)
+                        rgbValues[j] = 0;
+
+                    // Fill with velocity data for this slice
+                    for (int x = 0; x < width; x++)
+                    {
+                        for (int y = 0; y < height; y++)
+                        {
+                            // Calculate position in bitmap
+                            int index = y * stride + x * bytesPerPixel;
+
+                            if (x < width && y < height && z < depth)
+                            {
+                                float velocity = velocityField[x, y, z];
+
+                                // Skip if not in range
+                                if (velocity <= 0 || velocity < minFilterVelocity || velocity > maxFilterVelocity)
+                                    continue;
+
+                                // Map to color
+                                Color color = GetVelocityColor(velocity);
+
+                                // Apply volume opacity
+                                int alpha = (int)(color.A * volumeOpacity);
+                                alpha = Math.Max(0, Math.Min(255, alpha));
+
+                                // Write BGRA values
+                                rgbValues[index + 3] = (byte)alpha;  // Alpha
+                                rgbValues[index + 2] = color.R;      // Red
+                                rgbValues[index + 1] = color.G;      // Green
+                                rgbValues[index] = color.B;          // Blue
+                            }
+                        }
+                    }
+
+                    // Copy data back to bitmap
+                    System.Runtime.InteropServices.Marshal.Copy(rgbValues, 0, ptr, bytes);
+                    sliceBitmap.UnlockBits(bmpData);
+
+                    // Draw the slice
+                    using (ImageAttributes ia = new ImageAttributes())
+                    {
+                        // Setup proper color matrix for transparency
+                        ColorMatrix cm = new ColorMatrix();
+                        cm.Matrix33 = 1.0f; // Full opacity scale
+                        ia.SetColorMatrix(cm);
+
+                        // Draw at proper depth position
+                        float zPos = -z * scale; // Negative because Z increases into the screen
+                        g.DrawImage(sliceBitmap,
+                            new Rectangle(0, 0, (int)(width * scale), (int)(height * scale)),
+                            0, 0, width, height,
+                            GraphicsUnit.Pixel, ia);
+
+                        // Apply Z position transform by translating
+                        float zOffset = z * scale;
+                        g.TranslateTransform(zOffset * 0.7f, zOffset * 0.7f, MatrixOrder.Append);
+                    }
+                }
+            }
+        }
+        private void RenderVolumeYSlices(Graphics g, float scale, int stepSize, bool reverse)
+        {
+            int width = velocityField.GetLength(0);
+            int height = velocityField.GetLength(1);
+            int depth = velocityField.GetLength(2);
+
+            // Render each slice
+            for (int i = 0; i < height; i += stepSize)
+            {
+                int y = reverse ? height - 1 - i : i;
+
+                // Create a bitmap for this slice
+                using (Bitmap sliceBitmap = new Bitmap(width, depth))
+                {
+                    // Lock the bitmap for faster access
+                    Rectangle rect = new Rectangle(0, 0, width, depth);
+                    BitmapData bmpData = sliceBitmap.LockBits(rect,
+                        ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+
+                    int stride = bmpData.Stride;
+                    IntPtr ptr = bmpData.Scan0;
+                    int bytesPerPixel = 4;
+
+                    // Create byte array to hold pixel data
+                    int bytes = stride * depth;
+                    byte[] rgbValues = new byte[bytes];
+
+                    // Initialize with transparent black
+                    for (int j = 0; j < bytes; j++)
+                        rgbValues[j] = 0;
+
+                    // Fill with velocity data for this slice
+                    for (int x = 0; x < width; x++)
+                    {
+                        for (int z = 0; z < depth; z++)
+                        {
+                            // Calculate position in bitmap
+                            int index = z * stride + x * bytesPerPixel;
+
+                            if (x < width && y < height && z < depth)
+                            {
+                                float velocity = velocityField[x, y, z];
+
+                                // Skip if not in range
+                                if (velocity <= 0 || velocity < minFilterVelocity || velocity > maxFilterVelocity)
+                                    continue;
+
+                                // Map to color
+                                Color color = GetVelocityColor(velocity);
+
+                                // Apply volume opacity
+                                int alpha = (int)(color.A * volumeOpacity);
+                                alpha = Math.Max(0, Math.Min(255, alpha));
+
+                                // Write BGRA values
+                                rgbValues[index + 3] = (byte)alpha;   // Alpha
+                                rgbValues[index + 2] = color.R;      // Red
+                                rgbValues[index + 1] = color.G;      // Green
+                                rgbValues[index] = color.B;          // Blue
+                            }
+                        }
+                    }
+
+                    // Copy data back to bitmap
+                    System.Runtime.InteropServices.Marshal.Copy(rgbValues, 0, ptr, bytes);
+                    sliceBitmap.UnlockBits(bmpData);
+
+                    // Draw the slice
+                    using (ImageAttributes ia = new ImageAttributes())
+                    {
+                        // Setup proper color matrix for transparency
+                        ColorMatrix cm = new ColorMatrix();
+                        cm.Matrix33 = 1.0f; // Full opacity scale
+                        ia.SetColorMatrix(cm);
+
+                        g.DrawImage(sliceBitmap,
+                            new Rectangle(0, (int)(y * scale), (int)(width * scale), (int)(depth * scale)),
+                            0, 0, width, depth,
+                            GraphicsUnit.Pixel, ia);
+                    }
+                }
+            }
+        }
+        private void RenderVolumeXSlices(Graphics g, float scale, int stepSize, bool reverse)
+        {
+            int width = velocityField.GetLength(0);
+            int height = velocityField.GetLength(1);
+            int depth = velocityField.GetLength(2);
+
+            // Render each slice
+            for (int i = 0; i < width; i += stepSize)
+            {
+                int x = reverse ? width - 1 - i : i;
+
+                // Create a bitmap for this slice
+                using (Bitmap sliceBitmap = new Bitmap(depth, height))
+                {
+                    // Lock the bitmap for faster access
+                    Rectangle rect = new Rectangle(0, 0, depth, height);
+                    BitmapData bmpData = sliceBitmap.LockBits(rect,
+                        ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+
+                    int stride = bmpData.Stride;
+                    IntPtr ptr = bmpData.Scan0;
+                    int bytesPerPixel = 4;
+
+                    // Create byte array to hold pixel data
+                    int bytes = stride * height;
+                    byte[] rgbValues = new byte[bytes];
+
+                    // Initialize with transparent black
+                    for (int j = 0; j < bytes; j++)
+                        rgbValues[j] = 0;
+
+                    // Fill with velocity data for this slice
+                    for (int y = 0; y < height; y++)
+                    {
+                        for (int z = 0; z < depth; z++)
+                        {
+                            // Calculate position in bitmap
+                            int index = y * stride + z * bytesPerPixel;
+
+                            if (x < width && y < height && z < depth)
+                            {
+                                float velocity = velocityField[x, y, z];
+
+                                // Skip if not in range
+                                if (velocity <= 0 || velocity < minFilterVelocity || velocity > maxFilterVelocity)
+                                    continue;
+
+                                // Map to color
+                                Color color = GetVelocityColor(velocity);
+
+                                // Apply volume opacity
+                                int alpha = (int)(color.A * volumeOpacity);
+                                alpha = Math.Max(0, Math.Min(255, alpha));
+
+                                // Write BGRA values (note B=0, G=1, R=2, A=3)
+                                rgbValues[index + 3] = (byte)alpha;   // Alpha
+                                rgbValues[index + 2] = color.R;      // Red
+                                rgbValues[index + 1] = color.G;      // Green
+                                rgbValues[index] = color.B;          // Blue
+                            }
+                        }
+                    }
+
+                    // Copy data back to bitmap
+                    System.Runtime.InteropServices.Marshal.Copy(rgbValues, 0, ptr, bytes);
+                    sliceBitmap.UnlockBits(bmpData);
+
+                    // Draw the slice
+                    using (ImageAttributes ia = new ImageAttributes())
+                    {
+                        // Setup proper color matrix for transparency
+                        ColorMatrix cm = new ColorMatrix();
+                        cm.Matrix33 = 1.0f; // Full opacity scale
+                        ia.SetColorMatrix(cm);
+
+                        g.DrawImage(sliceBitmap,
+                            new Rectangle((int)(x * scale), 0, (int)(depth * scale), (int)(height * scale)),
+                            0, 0, depth, height,
+                            GraphicsUnit.Pixel, ia);
+                    }
+                }
+            }
+        }
+        private void RenderFullVolume(Graphics g, float scale)
+        {
+            int width = velocityField.GetLength(0);
+            int height = velocityField.GetLength(1);
+            int depth = velocityField.GetLength(2);
+
+            // We need to render from back to front for proper transparency
+            // First, determine the viewing direction based on rotation
+            float cosX = (float)Math.Cos(tomographyRotationX * Math.PI / 180);
+            float sinX = (float)Math.Sin(tomographyRotationX * Math.PI / 180);
+            float cosY = (float)Math.Cos(tomographyRotationY * Math.PI / 180);
+            float sinY = (float)Math.Sin(tomographyRotationY * Math.PI / 180);
+
+            // Simplified volume rendering using a slice-based approach
+            // This renders multiple semi-transparent slices to create a 3D effect
+            int sliceCount = (int)Math.Sqrt(width * width + height * height + depth * depth); // Diagonal distance
+            int stepSize = Math.Max(1, sliceCount / 40); // Limit to ~40 slices for performance
+
+            // Determine which axis to slice based on view direction
+            int sliceAxis;
+            float majorY = Math.Abs(sinX);
+            float majorX = Math.Abs(sinY * cosX);
+            float majorZ = Math.Abs(cosY * cosX);
+
+            if (majorX >= majorY && majorX >= majorZ)
+                sliceAxis = 0; // X axis
+            else if (majorY >= majorX && majorY >= majorZ)
+                sliceAxis = 1; // Y axis
+            else
+                sliceAxis = 2; // Z axis
+
+            // Determine slice direction (forward or backward)
+            bool reverseSlices = ((sliceAxis == 0 && sinY > 0) ||
+                                 (sliceAxis == 1 && sinX < 0) ||
+                                 (sliceAxis == 2 && cosY < 0));
+
+            // Render slices from back to front
+            switch (sliceAxis)
+            {
+                case 0: // X slices
+                    RenderVolumeXSlices(g, scale, stepSize, reverseSlices);
+                    break;
+                case 1: // Y slices
+                    RenderVolumeYSlices(g, scale, stepSize, reverseSlices);
+                    break;
+                case 2: // Z slices
+                    RenderVolumeZSlices(g, scale, stepSize, reverseSlices);
+                    break;
+            }
+        }
         private float[] GenerateWaveformData(bool isPWave)
         {
             // Create synthetic waveform data based on simulation results

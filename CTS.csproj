@@ -258,6 +258,7 @@
     <Compile Include="Modules\BandDetection\VarianceKernels.cs" />
     <Compile Include="3DViewer\Renderer\VolumeRendererSharpDX.cs" />
     <Compile Include="3DViewer\Meshing\VoxelMeshExporter.cs" />
+    <None Include="Resources\favicon.ico" />
     <None Include="Resources\logo.png" />
     <None Include="bin\x64\Debug\favicon.ico" />
     <Content Include="OldCode_Deprecated\CT3DViewer.txt">
@@ -299,7 +300,6 @@
     <Compile Include="Modules\ArtificialIntelligence\TextureClassifier\TextureClassifier.cs" />
     <Compile Include="VolumeOperations\VolumeExtensions.cs" />
     <Content Include="OldCode_Deprecated\VolumeShader.hlsl" />
-    <None Include="Resources\favicon.ico" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="favicon.ico" />

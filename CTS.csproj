@@ -200,6 +200,9 @@
       <DesignTime>True</DesignTime>
       <DependentUpon>Resources.resx</DependentUpon>
     </Compile>
+    <Compile Include="UI\About.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="UI\CancellableProgressForm.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -255,6 +258,7 @@
     <Compile Include="Modules\BandDetection\VarianceKernels.cs" />
     <Compile Include="3DViewer\Renderer\VolumeRendererSharpDX.cs" />
     <Compile Include="3DViewer\Meshing\VoxelMeshExporter.cs" />
+    <None Include="Resources\logo.png" />
     <None Include="bin\x64\Debug\favicon.ico" />
     <Content Include="OldCode_Deprecated\CT3DViewer.txt">
       <SubType>Form</SubType>

@@ -735,6 +735,23 @@ namespace CTS
             // About
             about = new ToolStripMenuItem("About");
 
+            // Add this click handler right after it:
+            about.Click += (s, e) =>
+            {
+                try
+                {
+                    // Create and show the About form
+                    About aboutForm = new About();
+                    aboutForm.ShowDialog(this);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[ControlForm] Error opening About form: {ex.Message}");
+                    MessageBox.Show($"Error opening About form: {ex.Message}",
+                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            };
+
             // Add items to Help menu
             helpMenu.DropDownItems.AddRange(new ToolStripItem[] {
         dbgConsole,

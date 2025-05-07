@@ -88,6 +88,7 @@ namespace CTS.SharpDXIntegration
             catch { }
             mainForm = main;
             InitializeComponent();
+            SetupRenderTimer();
             Logger.Log("[SharpDXViewerForm] Constructor finished.");
         }
 
@@ -195,7 +196,7 @@ namespace CTS.SharpDXIntegration
             renderPanel.SizeChanged += (s, e) => { volumeRenderer?.OnResize(); };
 
             // Add render timer
-            renderTimer = new Timer();
+            /*renderTimer = new Timer();
             renderTimer.Interval = 50; // 20 fps
             renderTimer.Tick += (s, e) =>
             {
@@ -203,7 +204,7 @@ namespace CTS.SharpDXIntegration
                 {
                     volumeRenderer.Render();
                 }
-            };
+            };*/
         }
 
         private void OnFormLoaded()
@@ -296,20 +297,32 @@ namespace CTS.SharpDXIntegration
 
 #pragma warning disable CS0114 // Il membro nasconde il membro ereditato. Manca la parola chiave override
         private void OnFormClosing(FormClosingEventArgs e)
-#pragma warning restore CS0114 // Il membro nasconde il membro ereditato. Manca la parola chiave override
         {
             try
             {
-                // Stop the render timer
-                renderTimer.Stop();
+                // Stop and dispose the render timer so it can't fire again
+                if (renderTimer != null)
+                {
+                    renderTimer.Stop();
+                    renderTimer.Dispose();
+                    renderTimer = null;
+                }
 
-                // Dispose volume renderer
+                // Dispose the 3D renderer (frees DX device & swapchain) :contentReference[oaicite:0]{index=0}:contentReference[oaicite:1]{index=1}
                 volumeRenderer?.Dispose();
                 volumeRenderer = null;
+
+                // Close and dispose the control panel so it doesn't hold stale refs
+                if (controlPanel != null)
+                {
+                    controlPanel.Close();
+                    controlPanel.Dispose();
+                    controlPanel = null;
+                }
             }
             catch (Exception ex)
             {
-                Logger.Log("[SharpDXViewerForm] Error disposing volume renderer: " + ex.Message);
+                Logger.Log("[SharpDXViewerForm] Error tearing down renderer: " + ex.Message);
             }
         }
 

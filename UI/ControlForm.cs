@@ -13,7 +13,7 @@ namespace CTS
     // ControlForm – provides UI controls for loading, segmentation, materials etc.
     // ------------------------------------------------------------------------
 
-    public partial class ControlForm : KryptonForm
+    public partial class ControlForm : KryptonPanel
     {
         // Current segmentation tool. Default is Pan.
         private SegmentationTool currentTool = SegmentationTool.Pan;
@@ -122,7 +122,7 @@ namespace CTS
             foreach (Control c in root.Controls) MakeEverythingDark(c);
         }
 
-        protected override void OnFormClosing(FormClosingEventArgs e)
+        /*protected override void OnFormClosing(FormClosingEventArgs e)
         {
             Logger.ShuttingDown = true;
             if (Logger.LogWindowInstance != null && !Logger.LogWindowInstance.IsDisposed)
@@ -131,7 +131,7 @@ namespace CTS
             }
             System.Diagnostics.Process.GetCurrentProcess().Kill();
             Application.Exit();
-        }
+        }*/
 
         private void InitializeSliceControls()
         {
@@ -174,20 +174,21 @@ namespace CTS
         private void InitializeComponent()
         {
             // ==== Form Setup ====
-            this.FormBorderStyle = FormBorderStyle.None;
-            this.CloseBox = false;
-            this.TopMost = false;
+            //this.FormBorderStyle = FormBorderStyle.None;
+          
+            //this.CloseBox = false;
+            //this.TopMost = false;
             this.Text = "Controls";
             this.Size = new Size(700, 645);
 
             // Try to load the icon if it exists
-            try
+            /*try
             {
                 string iconPath = Path.Combine(Application.StartupPath, "favicon.ico");
                 if (File.Exists(iconPath))
                     this.Icon = new Icon(iconPath);
             }
-            catch { }
+            catch { }*/
 
             // ==== Menu Setup ====
             InitializeMenus();
@@ -228,7 +229,7 @@ namespace CTS
                 brushOverlayTimer.Stop();
             };
 
-            this.ActiveControl = menuStrip;
+            //this.ActiveControl = menuStrip;
         }
         private void InitializeMenus()
         {
@@ -236,7 +237,7 @@ namespace CTS
             menuStrip = new MenuStrip();
             menuStrip.Dock = DockStyle.Top;
             this.Controls.Add(menuStrip);
-            this.MainMenuStrip = menuStrip;
+            //this.MainMenuStrip = menuStrip;
 
             // ==== File Menu ====
             CreateFileMenu();

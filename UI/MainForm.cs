@@ -1,6 +1,7 @@
 ﻿using Krypton.Docking;
 using Krypton.Navigator;
 using Krypton.Toolkit;
+using Microsoft.Office.Interop.Word;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -11,6 +12,12 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Application = System.Windows.Forms.Application;
+using CheckBox = System.Windows.Forms.CheckBox;
+using Font = System.Drawing.Font;
+using Point = System.Drawing.Point;
+using Rectangle = System.Drawing.Rectangle;
+using Task = System.Threading.Tasks.Task;
 
 namespace CTS
 {
@@ -199,6 +206,7 @@ namespace CTS
 
                 // Create and configure the main layout
                 SetupMainLayout();
+                this.Controls.Add(mainLayout);
                 InitializeDocking();
                 // Initialize materials
                 //InitializeMaterials();
@@ -243,99 +251,49 @@ namespace CTS
                 mainLayout.RowStyles[i] = new RowStyle(SizeType.Percent, 50F);
             }
         }
+
         private void InitializeDocking()
         {
-            //--------------------------------------------------------------
-            // Global dark palette
-            //--------------------------------------------------------------
-            _kryptonManager = new KryptonManager();
-            _kryptonManager.GlobalPaletteMode = PaletteMode.Office2010Black; // dark
-
-            //--------------------------------------------------------------
-            // Host panel (acts like a "document" workspace)
-            //--------------------------------------------------------------
-            var hostPanel = new KryptonPanel { Dock = DockStyle.Fill };
-            Controls.Add(hostPanel);
-            hostPanel.Controls.Add(mainLayout); // mainLayout is your 2×2 grid
-            hostPanel.BringToFront();
-
-            //--------------------------------------------------------------
-            // Docking manager
-            //--------------------------------------------------------------
+            // 1) single docking manager for the whole app
             _dockingManager = new KryptonDockingManager();
-            _dockingManager.ManageControl("MainHost", hostPanel);
 
-            //--------------------------------------------------------------
-            // Create ControlForm as dockable page on the right
-            //--------------------------------------------------------------
-            var ctrlForm = new ControlForm(this)
-            {
-                TopLevel = false,
-                FormBorderStyle = FormBorderStyle.None,
-                Dock = DockStyle.Fill
-            };
+            //----------------------------------------------------------------------
+            // 2) tell the manager that *this form* is the root docking control
+            //----------------------------------------------------------------------
+            _dockingManager.ManageControl("MainHost", this);
+            _dockingManager.ManageFloating("Floating", this);
+            //----------------------------------------------------------------------
+            // 3) build the control-form and wrap it in a page
+            //----------------------------------------------------------------------
+            var controlForm = new ControlForm(this) { Dock = DockStyle.Fill };
 
-            // Create a KryptonPage to host the ControlForm
             var page = new KryptonPage
             {
                 Text = "Controls",
-                UniqueName = "ControlsPage",
-                MinimumSize = new Size(700, 0),  // Set minimum width to 700px
-                TextTitle = "Controls"           // Set the page title correctly
+                TextTitle = "Controls",
+                MinimumSize = new Size(700, 645)
             };
-
-            // Configure page flags to allow floating and docking
-            // First clear any existing flags that might interfere
             page.ClearFlags(KryptonPageFlags.DockingAllowClose);
-
-            // Then set the flags we want
             page.SetFlags(KryptonPageFlags.DockingAllowFloating |
-                         KryptonPageFlags.DockingAllowDocked);
+                            KryptonPageFlags.DockingAllowDocked);
+            page.Controls.Add(controlForm);
 
-            // Handle form closing to exit the application
-            ctrlForm.FormClosing += (s, e) =>
-            {
-                Application.Exit();
-            };
+            //----------------------------------------------------------------------
+            // 4) create a RIGHT-hand dock-space under the root just registered
+            //----------------------------------------------------------------------
+            var dockElem = _dockingManager.AddDockspace(
+                               "MainHost",           // must match the ManageControl() path
+                               DockingEdge.Right,
+                               new[] { page });      // must be an array
 
-            page.Controls.Add(ctrlForm);
-            ctrlForm.Show();
+            // widen the pane a bit
+            if (dockElem?.DockspaceControl != null)
+                dockElem.DockspaceControl.Width = 700;
 
-            // Create the dockspace on the right with this page
-            var dockspace = _dockingManager.AddDockspace("MainHost", DockingEdge.Right, new[] { page });
-
-            // Ensure the dockspace has adequate width
-            if (dockspace?.DockspaceControl != null)
-            {
-                dockspace.DockspaceControl.Width = 700;
-                dockspace.DockspaceControl.MinimumSize = new Size(700, 0);
-            }
-
-            // Add a custom handler to the docking manager to handle page removal
-            _dockingManager.PageCloseRequest += (s, e) =>
-            {
-                // When any page is requested to close, exit the application
-                Application.Exit();
-            };
-
-            // Subscribe to the application exit event to ensure clean shutdown
-            Application.ApplicationExit += (s, e) =>
-            {
-                try
-                {
-                    if (!IsDisposed)
-                    {
-                        Dispose();
-                    }
-                }
-                catch { }
-            };
-
-            // Handle form closing to properly exit the application
-            this.FormClosing += (s, e) =>
-            {
-                Application.Exit();
-            };
+            //----------------------------------------------------------------------
+            // 5) show the embedded form so it gets a handle
+            //----------------------------------------------------------------------
+            controlForm.Show();
         }
 
         public void DockExternalControlForm(ControlForm ctrl)
@@ -343,8 +301,8 @@ namespace CTS
             //----------------------------------------------------------------------
             // 1) prepare the already‑created ControlForm
             //----------------------------------------------------------------------
-            ctrl.TopLevel = false;
-            ctrl.FormBorderStyle = FormBorderStyle.None; // kills old title‑bar
+            //ctrl.TopLevel = false;
+            //ctrl.FormBorderStyle = FormBorderStyle.None; // kills old title‑bar
             ctrl.Dock = DockStyle.Fill;
 
             // wrap it in a KryptonPage
@@ -359,13 +317,13 @@ namespace CTS
             page.ClearFlags(KryptonPageFlags.DockingAllowClose);
 
             page.SetFlags(KryptonPageFlags.DockingAllowFloating |
-                         KryptonPageFlags.DockingAllowDocked);
-
+                         KryptonPageFlags.DockingAllowDocked );
+            
             // Handle form closing to exit the application
-            ctrl.FormClosing += (s, e) =>
+            /*ctrl.FormClosing += (s, e) =>
             {
                 Application.Exit();
-            };
+            };*/
 
             page.Controls.Add(ctrl);
 
@@ -529,7 +487,8 @@ namespace CTS
                 yzView.MouseUp += (s, e) => ViewMouseUp(ViewType.YZ, e);
                 yzView.MouseWheel += (s, e) => ViewMouseWheel(ViewType.YZ, e);
                 yzView.Paint += (s, e) => ViewPaint(ViewType.YZ, e);
-
+                this.Controls.Add(mainLayout);      // let the grid live on the form
+                mainLayout.Dock = DockStyle.Fill;
                 // Set resize handler for the form
                 this.Resize += (s, e) =>
                 {

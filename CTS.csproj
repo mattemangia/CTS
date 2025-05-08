@@ -226,9 +226,7 @@
     </Compile>
     <Compile Include="VolumeOperations\ChunkedLabelVolume.cs" />
     <Compile Include="VolumeOperations\ChunkedVolume.cs" />
-    <Compile Include="UI\ControlForm.cs">
-      <SubType>Form</SubType>
-    </Compile>
+    <Compile Include="UI\ControlForm.cs" />
     <Compile Include="3DViewer\CTViewerControlPanel.cs">
       <SubType>Form</SubType>
     </Compile>

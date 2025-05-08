@@ -1924,7 +1924,6 @@ namespace CTS.Modules.ArtificialIntelligence.MicroSAM
                 UpdateViewers();
             }
         }
-
         private void UpdateViewers()
         {
             // Update XY viewer
@@ -1955,6 +1954,9 @@ namespace CTS.Modules.ArtificialIntelligence.MicroSAM
                     ApplySegmentationOverlay(xzSliceBitmap, segmentationMask, ActiveView.XZ);
                 }
 
+                // NOW draw the yellow line AFTER the segmentation overlay
+                DrawXYPositionLine(xzSliceBitmap, xySlice, true);
+
                 xzViewer.Image = new Bitmap(xzSliceBitmap);
                 UpdateXZScrollbars();
             }
@@ -1971,6 +1973,9 @@ namespace CTS.Modules.ArtificialIntelligence.MicroSAM
                     ApplySegmentationOverlay(yzSliceBitmap, segmentationMask, ActiveView.YZ);
                 }
 
+                // NOW draw the yellow line AFTER the segmentation overlay
+                DrawXYPositionLine(yzSliceBitmap, xySlice, false);
+
                 yzViewer.Image = new Bitmap(yzSliceBitmap);
                 UpdateYZScrollbars();
             }
@@ -1980,7 +1985,63 @@ namespace CTS.Modules.ArtificialIntelligence.MicroSAM
             xzViewer.Invalidate();
             yzViewer.Invalidate();
         }
+        private unsafe void DrawXYPositionLine(Bitmap bmp, int xyLine, bool isXZView)
+        {
+            int width = bmp.Width;
+            int height = bmp.Height;
 
+            // Only proceed if the line is within the image bounds
+            if (xyLine < 0 || (isXZView && xyLine >= height) || (!isXZView && xyLine >= width))
+                return;
+
+            BitmapData bmpData = bmp.LockBits(
+                new Rectangle(0, 0, width, height),
+                ImageLockMode.ReadWrite,
+                PixelFormat.Format24bppRgb);
+
+            int stride = bmpData.Stride;
+            int bytesPerPixel = 3;
+
+            byte* ptr = (byte*)bmpData.Scan0;
+
+            // Draw the bright yellow line
+            if (isXZView)
+            {
+                // For XZ view, the XY slice is a horizontal line
+                for (int x = 0; x < width; x++)
+                {
+                    int offset = xyLine * stride + x * bytesPerPixel;
+
+                    // Make sure we're within bounds
+                    if (offset >= 0 && offset + 2 < stride * height)
+                    {
+                        // Bright yellow
+                        ptr[offset] = 0;       // Blue
+                        ptr[offset + 1] = 255; // Green
+                        ptr[offset + 2] = 255; // Red
+                    }
+                }
+            }
+            else
+            {
+                // For YZ view, the XY slice is a vertical line
+                for (int y = 0; y < height; y++)
+                {
+                    int offset = y * stride + xyLine * bytesPerPixel;
+
+                    // Make sure we're within bounds
+                    if (offset >= 0 && offset + 2 < stride * height)
+                    {
+                        // Bright yellow
+                        ptr[offset] = 0;       // Blue
+                        ptr[offset + 1] = 255; // Green
+                        ptr[offset + 2] = 255; // Red
+                    }
+                }
+            }
+
+            bmp.UnlockBits(bmpData);
+        }
         private unsafe Bitmap CreateSliceBitmap(int sliceZ)
         {
             // Try to get from cache first
@@ -2070,20 +2131,8 @@ namespace CTS.Modules.ArtificialIntelligence.MicroSAM
                 }
             }
 
-            // Mark the current XY slice position
-            int xyLine = xySlice;
-            if (xyLine >= 0 && xyLine < d)
-            {
-                for (int x = 0; x < w; x++)
-                {
-                    int offset = xyLine * stride + x * bytesPerPixel;
-
-                    // Bright yellow line
-                    ptr[offset] = 0;       // Blue
-                    ptr[offset + 1] = 255; // Green
-                    ptr[offset + 2] = 255; // Red
-                }
-            }
+            // REMOVED: No longer draw the yellow line here
+            // It will be drawn after segmentation mask is applied
 
             bmp.UnlockBits(bmpData);
 
@@ -2094,7 +2143,6 @@ namespace CTS.Modules.ArtificialIntelligence.MicroSAM
 
             return bmp;
         }
-
         private unsafe Bitmap CreateYZSliceBitmap(int sliceX)
         {
             // Try to get from cache first
@@ -2134,20 +2182,8 @@ namespace CTS.Modules.ArtificialIntelligence.MicroSAM
                 }
             }
 
-            // Mark the current XY slice position
-            int xyLine = xySlice;
-            if (xyLine >= 0 && xyLine < d)
-            {
-                for (int y = 0; y < h; y++)
-                {
-                    int offset = y * stride + xyLine * bytesPerPixel;
-
-                    // Bright yellow line
-                    ptr[offset] = 0;       // Blue
-                    ptr[offset + 1] = 255; // Green
-                    ptr[offset + 2] = 255; // Red
-                }
-            }
+            // REMOVED: No longer draw the yellow line here
+            // It will be drawn after segmentation mask is applied
 
             bmp.UnlockBits(bmpData);
 

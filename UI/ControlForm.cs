@@ -28,7 +28,7 @@ namespace CTS
 
         // New UI elements in the left panel.
         private Button btnInterpolate;
-
+        private Button btnExtractFromMaterial;
         private TrackBar toolSizeSlider;
         private Label toolSizeLabel;
         private Timer brushOverlayTimer;
@@ -325,6 +325,9 @@ namespace CTS
             mergeMaterialMenuItem = new ToolStripMenuItem("Merge Material");
             mergeMaterialMenuItem.Click += (s, e) => OnMergeMaterial();
 
+            ToolStripMenuItem extractFromMaterialMenuItem = new ToolStripMenuItem("Extract from Material");
+            extractFromMaterialMenuItem.Click += async (s, e) => await OnExtractFromMaterialAsync();
+
             // Separator
             editSep1 = new ToolStripSeparator();
 
@@ -373,8 +376,10 @@ namespace CTS
             // Add items to Edit menu
             editMenu.DropDownItems.AddRange(new ToolStripItem[]
             {
-        addMaterialMenuItem, deleteMaterialMenuItem, renameMaterialMenuItem, mergeMaterialMenuItem, editSep1,
-        addThresholdedMenuItem, subtractThresholdedMenuItem, editSep2, segmentAnythingMenuItem
+                addMaterialMenuItem, deleteMaterialMenuItem, renameMaterialMenuItem,
+                mergeMaterialMenuItem, extractFromMaterialMenuItem, editSep1,
+                addThresholdedMenuItem, subtractThresholdedMenuItem, editSep2,
+                segmentAnythingMenuItem
             });
         }
 
@@ -932,10 +937,16 @@ namespace CTS
             btnRenameMaterial = new Button { Text = "Rename", Width = 70, Height = 25 };
             btnRenameMaterial.Click += (s, e) => OnRenameMaterial();
 
+            // Add the Extract from material button
+            btnExtractFromMaterial = new Button { Text = "Extract", Width = 70, Height = 25 };
+            btnExtractFromMaterial.Click += async (s, e) => await OnExtractFromMaterialAsync();
+
             materialPanel.Controls.Add(btnAddMaterial);
             materialPanel.Controls.Add(btnRemoveMaterial);
             materialPanel.Controls.Add(btnRenameMaterial);
+            materialPanel.Controls.Add(btnExtractFromMaterial);
             leftPanel.Controls.Add(materialPanel);
+
 
             // Materials list
             Label lblMaterials = new Label { Text = "Materials:", AutoSize = true };
@@ -1503,6 +1514,155 @@ namespace CTS
                 }
             }
         }
+        /// Handles the Extract from Material button click event
+        /// </summary>
+        private async Task OnExtractFromMaterialAsync()
+        {
+            // Check if a valid source material is selected
+            int sourceIdx = lstMaterials.SelectedIndex;
+            if (sourceIdx <= 0 || sourceIdx >= mainForm.Materials.Count)
+            {
+                MessageBox.Show("Please select a valid source material (not the Exterior).",
+                    "Invalid Selection", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            Material sourceMaterial = mainForm.Materials[sourceIdx];
+
+            // Build a dialog to select target material
+            using (Form dlg = new Form
+            {
+                Text = $"Extract from '{sourceMaterial.Name}'",
+                Width = 350,
+                Height = 170,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent
+            })
+            {
+                Label lblTarget = new Label
+                {
+                    Text = "Target material:",
+                    Left = 10,
+                    Top = 15,
+                    AutoSize = true
+                };
+
+                ComboBox cbTargetMaterial = new ComboBox
+                {
+                    Left = 110,
+                    Top = 12,
+                    Width = 200,
+                    DropDownStyle = ComboBoxStyle.DropDownList
+                };
+
+                Label lblMode = new Label
+                {
+                    Text = "Extraction mode:",
+                    Left = 10,
+                    Top = 45,
+                    AutoSize = true
+                };
+
+                RadioButton rbCurrent = new RadioButton
+                {
+                    Text = "Current selection/threshold",
+                    Left = 110,
+                    Top = 45,
+                    Width = 200,
+                    Checked = true
+                };
+
+                RadioButton rbAll = new RadioButton
+                {
+                    Text = "All voxels of this material",
+                    Left = 110,
+                    Top = 70,
+                    Width = 200
+                };
+
+                Button btnOK = new Button
+                {
+                    Text = "Extract",
+                    DialogResult = DialogResult.OK,
+                    Left = 75,
+                    Width = 90,
+                    Top = 100
+                };
+
+                Button btnCancel = new Button
+                {
+                    Text = "Cancel",
+                    DialogResult = DialogResult.Cancel,
+                    Left = 175,
+                    Width = 90,
+                    Top = 100
+                };
+
+                // Populate with all other materials except source
+                foreach (var m in mainForm.Materials.FindAll(m => m.ID != sourceMaterial.ID && !m.IsExterior))
+                {
+                    cbTargetMaterial.Items.Add(m);
+                }
+
+                // Add the exterior material at the beginning for emergency removal cases
+                if (mainForm.Materials.Count > 0 && mainForm.Materials[0].IsExterior)
+                {
+                    cbTargetMaterial.Items.Insert(0, mainForm.Materials[0]);
+                }
+
+                if (cbTargetMaterial.Items.Count == 0)
+                {
+                    MessageBox.Show("No target materials available. Please create another material first.",
+                                    "No Target Material", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                cbTargetMaterial.SelectedIndex = 0;
+
+                dlg.Controls.AddRange(new Control[] { lblTarget, cbTargetMaterial, lblMode, rbCurrent, rbAll, btnOK, btnCancel });
+                dlg.AcceptButton = btnOK;
+                dlg.CancelButton = btnCancel;
+
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                {
+                    Material targetMaterial = (Material)cbTargetMaterial.SelectedItem;
+                    bool currentSelectionOnly = rbCurrent.Checked;
+
+                    // Create and show a progress form
+                    using (ProgressForm progressForm = new ProgressForm($"Extracting from '{sourceMaterial.Name}' to '{targetMaterial.Name}'..."))
+                    {
+                        progressForm.Show();
+                        this.Enabled = false;
+
+                        try
+                        {
+                            // Run the extraction operation asynchronously
+                            await Task.Run(() =>
+                            {
+                                ExtractFromMaterial(sourceMaterial, targetMaterial, currentSelectionOnly);
+                            });
+
+                            Logger.Log($"[ControlForm] Extracted voxels from material '{sourceMaterial.Name}' to '{targetMaterial.Name}'");
+
+                            // Update UI and refresh views
+                            mainForm.SaveLabelsChk();
+                            mainForm.RenderViews();
+                            await mainForm.RenderOrthoViewsAsync();
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[ControlForm] Error during material extraction: {ex.Message}");
+                            MessageBox.Show($"Error during extraction: {ex.Message}",
+                                "Extraction Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
+                        finally
+                        {
+                            this.Enabled = true;
+                        }
+                    }
+                }
+            }
+        }
 
         private void OnAddMaterial()
         {
@@ -1867,7 +2027,199 @@ namespace CTS
                 lstMaterials.SelectedIndex = 0;
         }
 
-        
+        /// <summary>
+        /// Extracts voxels from source material to target material
+        /// </summary>
+        private void ExtractFromMaterial(Material sourceMaterial, Material targetMaterial, bool currentSelectionOnly)
+        {
+            if (mainForm.volumeLabels == null || mainForm.volumeData == null)
+                return;
+
+            // Check which tool is active and process accordingly
+            if (currentSelectionOnly)
+            {
+                if (currentTool == SegmentationTool.Brush)
+                {
+                    // For brush tool, extract using the current 2D selections
+                    ExtractUsingBrushSelection(sourceMaterial.ID, targetMaterial.ID);
+                }
+                else if (currentTool == SegmentationTool.Thresholding)
+                {
+                    // For thresholding tool, extract within the threshold range
+                    ExtractUsingThreshold(sourceMaterial.ID, targetMaterial.ID);
+                }
+                else
+                {
+                    // Default to using the current material's threshold range
+                    ExtractUsingMaterialThreshold(sourceMaterial, targetMaterial);
+                }
+            }
+            else
+            {
+                // Extract all voxels of the source material to the target material
+                ExtractAllVoxels(sourceMaterial.ID, targetMaterial.ID);
+            }
+        }
+
+        /// <summary>
+        /// Extracts voxels using the current brush selection
+        /// </summary>
+        private void ExtractUsingBrushSelection(byte sourceID, byte targetID)
+        {
+            // Handle extraction for the current XY slice
+            if (mainForm.currentSelection != null)
+            {
+                int w = mainForm.GetWidth();
+                int h = mainForm.GetHeight();
+                int currentSlice = mainForm.CurrentSlice;
+
+                // Process each voxel in the current slice
+                for (int y = 0; y < h; y++)
+                {
+                    for (int x = 0; x < w; x++)
+                    {
+                        // If the voxel is selected (non-zero in selection) and matches source material
+                        if (mainForm.currentSelection[x, y] != 0 && mainForm.volumeLabels[x, y, currentSlice] == sourceID)
+                        {
+                            // Transfer the voxel to the target material
+                            mainForm.volumeLabels[x, y, currentSlice] = targetID;
+                        }
+                    }
+                }
+            }
+
+            // Also process ortho selections if they exist
+            if (mainForm.currentSelectionXZ != null)
+            {
+                int w = mainForm.GetWidth();
+                int d = mainForm.GetDepth();
+                int yFixed = mainForm.XzSliceY;
+
+                for (int z = 0; z < d; z++)
+                {
+                    for (int x = 0; x < w; x++)
+                    {
+                        if (x < mainForm.currentSelectionXZ.GetLength(0) && z < mainForm.currentSelectionXZ.GetLength(1) &&
+                            mainForm.currentSelectionXZ[x, z] != 0 && mainForm.volumeLabels[x, yFixed, z] == sourceID)
+                        {
+                            mainForm.volumeLabels[x, yFixed, z] = targetID;
+                        }
+                    }
+                }
+            }
+
+            if (mainForm.currentSelectionYZ != null)
+            {
+                int h = mainForm.GetHeight();
+                int d = mainForm.GetDepth();
+                int xFixed = mainForm.YzSliceX;
+
+                for (int z = 0; z < d; z++)
+                {
+                    for (int y = 0; y < h; y++)
+                    {
+                        if (z < mainForm.currentSelectionYZ.GetLength(0) && y < mainForm.currentSelectionYZ.GetLength(1) &&
+                            mainForm.currentSelectionYZ[z, y] != 0 && mainForm.volumeLabels[xFixed, y, z] == sourceID)
+                        {
+                            mainForm.volumeLabels[xFixed, y, z] = targetID;
+                        }
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Extracts voxels based on the current threshold settings
+        /// </summary>
+        private void ExtractUsingThreshold(byte sourceID, byte targetID)
+        {
+            int w = mainForm.GetWidth();
+            int h = mainForm.GetHeight();
+            int d = mainForm.GetDepth();
+
+            byte minThreshold = (byte)thresholdRangeSlider.RangeMinimum;
+            byte maxThreshold = (byte)thresholdRangeSlider.RangeMaximum;
+
+            // Only extract voxels that are within the threshold range AND belong to the source material
+            Parallel.For(0, d, z =>
+            {
+                for (int y = 0; y < h; y++)
+                {
+                    for (int x = 0; x < w; x++)
+                    {
+                        byte grayValue = mainForm.volumeData[x, y, z];
+                        byte labelValue = mainForm.volumeLabels[x, y, z];
+
+                        // Check if the voxel is within threshold range and belongs to source material
+                        if (grayValue >= minThreshold && grayValue <= maxThreshold && labelValue == sourceID)
+                        {
+                            // Transfer to target material
+                            mainForm.volumeLabels[x, y, z] = targetID;
+                        }
+                    }
+                }
+            });
+        }
+
+        /// <summary>
+        /// Extracts voxels using the source material's threshold range
+        /// </summary>
+        private void ExtractUsingMaterialThreshold(Material sourceMaterial, Material targetMaterial)
+        {
+            int w = mainForm.GetWidth();
+            int h = mainForm.GetHeight();
+            int d = mainForm.GetDepth();
+
+            byte minThreshold = sourceMaterial.Min;
+            byte maxThreshold = sourceMaterial.Max;
+
+            // Extract voxels that are within the source material's threshold range AND belong to the source material
+            Parallel.For(0, d, z =>
+            {
+                for (int y = 0; y < h; y++)
+                {
+                    for (int x = 0; x < w; x++)
+                    {
+                        byte grayValue = mainForm.volumeData[x, y, z];
+                        byte labelValue = mainForm.volumeLabels[x, y, z];
+
+                        // Check if the voxel is within threshold range and belongs to source material
+                        if (grayValue >= minThreshold && grayValue <= maxThreshold && labelValue == sourceMaterial.ID)
+                        {
+                            // Transfer to target material
+                            mainForm.volumeLabels[x, y, z] = targetMaterial.ID;
+                        }
+                    }
+                }
+            });
+        }
+
+        /// <summary>
+        /// Extracts all voxels from source material to target material
+        /// </summary>
+        private void ExtractAllVoxels(byte sourceID, byte targetID)
+        {
+            int w = mainForm.GetWidth();
+            int h = mainForm.GetHeight();
+            int d = mainForm.GetDepth();
+
+            // Process the entire volume
+            Parallel.For(0, d, z =>
+            {
+                for (int y = 0; y < h; y++)
+                {
+                    for (int x = 0; x < w; x++)
+                    {
+                        // If the voxel belongs to the source material
+                        if (mainForm.volumeLabels[x, y, z] == sourceID)
+                        {
+                            // Transfer it to the target material
+                            mainForm.volumeLabels[x, y, z] = targetID;
+                        }
+                    }
+                }
+            });
+        }
         private void OnMergeMaterial()
         {
             int idxTarget = lstMaterials.SelectedIndex;

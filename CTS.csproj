@@ -266,6 +266,7 @@
     <Compile Include="Modules\BandDetection\VarianceKernels.cs" />
     <Compile Include="3DViewer\Renderer\VolumeRendererSharpDX.cs" />
     <Compile Include="3DViewer\Meshing\VoxelMeshExporter.cs" />
+    <Content Include="Resources\logo2.png" />
     <None Include="Resources\favicon.ico" />
     <None Include="Resources\logo.png" />
     <None Include="bin\x64\Debug\favicon.ico" />

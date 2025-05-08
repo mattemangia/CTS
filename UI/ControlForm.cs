@@ -268,6 +268,25 @@ namespace CTS
         {
             fileMenu = new ToolStripMenuItem("File");
 
+            // If New then: APP RESTART
+            var newMenuItem = new ToolStripMenuItem("New");
+            newMenuItem.Click += (s, e) =>
+            {
+                var result = MessageBox.Show(
+                    "Are you sure you want to restart the application?",
+                    "Confirm Restart",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
+
+                if (result == DialogResult.Yes)
+                {
+                    // this will close and launch a fresh instance
+                    Application.Restart();
+                    mainForm.Close();
+                }
+            };
+            fileMenu.DropDownItems.Add(newMenuItem);
+
             // Load Folder
             loadFolderMenuItem = new ToolStripMenuItem("Load Folder");
             loadFolderMenuItem.Click += async (s, e) => await OnLoadFolderClicked();
@@ -288,7 +307,7 @@ namespace CTS
             exportImagesMenuItem.Click += (s, e) => mainForm.ExportImages();
 
             // Close Dataset
-            closeDatasetMenuItem = new ToolStripMenuItem("Close B/W Dataset");
+            closeDatasetMenuItem = new ToolStripMenuItem("Close Greyscale Dataset");
             closeDatasetMenuItem.Click += (s, e) => OnCloseDataset();
 
             // Exit
@@ -1426,6 +1445,8 @@ namespace CTS
             {
                 mainForm.volumeData.Dispose();
                 mainForm.volumeData = null;
+                mainForm.RenderViews();
+                _ = mainForm.RenderOrthoViewsAsync();
                 Logger.Log("[OnCloseDataset] Grayscale dataset closed.");
                 MessageBox.Show("Dataset successfully closed.", "Info", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }

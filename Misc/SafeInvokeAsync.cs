@@ -17,5 +17,16 @@ namespace CTS
                 action();
             }
         }
+        public static void SetStyle(this Control control, ControlStyles style, bool value)
+        {
+            Type type = control.GetType();
+            System.Reflection.MethodInfo method = type.GetMethod("SetStyle",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+
+            if (method != null)
+            {
+                method.Invoke(control, new object[] { style, value });
+            }
+        }
     }
 }

@@ -177,6 +177,7 @@
     <Compile Include="Modules\BugSubmission\BugSubmissionForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="Modules\PNM\PoreNetworkButtonIcons.cs" />
     <Compile Include="Modules\StressAnalysis\AcousticVelocitySimulation.cs" />
     <Compile Include="Modules\StressAnalysis\DensityVisualizationForm.cs">
       <SubType>Form</SubType>

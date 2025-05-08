@@ -118,6 +118,9 @@ namespace CTS
 
                 // Calculate network properties
                 CalculateNetworkProperties(model);
+
+                // Calculate tortuosity for the network
+                model.Tortuosity = CalculateTortuosity(model);
             });
 
             progress?.Report(100);
@@ -410,6 +413,194 @@ namespace CTS
             // Typically 0.3-0.7 times the smaller pore radius in real rocks
             double minRadius = Math.Min(radius1, radius2);
             return minRadius * 0.4; // Standard factor in petrophysical models
+        }
+
+        /// <summary>
+        /// Calculate tortuosity of the pore network model
+        /// </summary>
+        /// <param name="model">The pore network model</param>
+        /// <returns>Geometric tortuosity value</returns>
+        private double CalculateTortuosity(PoreNetworkModel model)
+        {
+            // Skip if we don't have enough pores or throats
+            if (model.Pores.Count < 2 || model.Throats.Count == 0)
+                return 1.0; // Default value for no tortuosity (straight path)
+
+            // Create a graph representation for path analysis
+            Dictionary<int, List<(int poreId, double distance)>> graph = new Dictionary<int, List<(int, double)>>();
+
+            // Initialize the graph with all pores
+            foreach (var pore in model.Pores)
+            {
+                graph[pore.Id] = new List<(int, double)>();
+            }
+
+            // Add throat connections to the graph
+            foreach (var throat in model.Throats)
+            {
+                // Get the pores connected by this throat
+                var pore1 = model.Pores.First(p => p.Id == throat.PoreId1);
+                var pore2 = model.Pores.First(p => p.Id == throat.PoreId2);
+
+                // Calculate the actual length from center-to-center including throat length
+                double distance = throat.Length + pore1.Radius + pore2.Radius;
+
+                // Add the bidirectional connection to the graph
+                graph[throat.PoreId1].Add((throat.PoreId2, distance));
+                graph[throat.PoreId2].Add((throat.PoreId1, distance));
+            }
+
+            // We'll calculate tortuosity along all three principal axes and average them
+            double tortuosityX = CalculateAxisTortuosity(model, graph, axis: "X");
+            double tortuosityY = CalculateAxisTortuosity(model, graph, axis: "Y");
+            double tortuosityZ = CalculateAxisTortuosity(model, graph, axis: "Z");
+
+            // Average the three tortuosity values (geometric mean would also be reasonable)
+            double averageTortuosity = (tortuosityX + tortuosityY + tortuosityZ) / 3.0;
+
+            Logger.Log($"[PoreNetworkGenerator] Calculated tortuosity: X={tortuosityX:F3}, Y={tortuosityY:F3}, Z={tortuosityZ:F3}, Avg={averageTortuosity:F3}");
+
+            return averageTortuosity;
+        }
+
+        /// <summary>
+        /// Calculate tortuosity along a specific axis
+        /// </summary>
+        /// <param name="model">The pore network model</param>
+        /// <param name="graph">The network graph representation</param>
+        /// <param name="axis">The axis to calculate tortuosity along ("X", "Y", or "Z")</param>
+        /// <returns>Tortuosity value along the specified axis</returns>
+        private double CalculateAxisTortuosity(PoreNetworkModel model, Dictionary<int, List<(int poreId, double distance)>> graph, string axis)
+        {
+            // Determine inlet and outlet pores based on the specified axis
+            List<Pore> sortedPores;
+            if (axis == "X")
+                sortedPores = model.Pores.OrderBy(p => p.Center.X).ToList();
+            else if (axis == "Y")
+                sortedPores = model.Pores.OrderBy(p => p.Center.Y).ToList();
+            else // Z is the default
+                sortedPores = model.Pores.OrderBy(p => p.Center.Z).ToList();
+
+            // Define inlet and outlet regions (first and last 10% of pores along the axis)
+            int boundaryCount = Math.Max(1, (int)(sortedPores.Count * 0.1));
+            var inletPores = sortedPores.Take(boundaryCount).ToList();
+            var outletPores = sortedPores.Skip(sortedPores.Count - boundaryCount).ToList();
+
+            // Calculate the straight-line distance between the average positions of inlet and outlet regions
+            double avgInletX = inletPores.Average(p => p.Center.X);
+            double avgInletY = inletPores.Average(p => p.Center.Y);
+            double avgInletZ = inletPores.Average(p => p.Center.Z);
+
+            double avgOutletX = outletPores.Average(p => p.Center.X);
+            double avgOutletY = outletPores.Average(p => p.Center.Y);
+            double avgOutletZ = outletPores.Average(p => p.Center.Z);
+
+            double straightLineDistance = Math.Sqrt(
+                Math.Pow(avgOutletX - avgInletX, 2) +
+                Math.Pow(avgOutletY - avgInletY, 2) +
+                Math.Pow(avgOutletZ - avgInletZ, 2));
+
+            // Calculate shortest paths from all inlet pores to all outlet pores using Dijkstra's algorithm
+            List<double> pathLengths = new List<double>();
+
+            foreach (var inletPore in inletPores)
+            {
+                // Run Dijkstra's algorithm from this inlet pore
+                var shortestPaths = CalculateShortestPaths(model, graph, inletPore.Id);
+
+                // Find shortest path to each outlet pore
+                foreach (var outletPore in outletPores)
+                {
+                    if (shortestPaths.ContainsKey(outletPore.Id))
+                    {
+                        pathLengths.Add(shortestPaths[outletPore.Id]);
+                    }
+                }
+            }
+
+            // If no valid paths were found, return default value
+            if (pathLengths.Count == 0)
+                return 1.0;
+
+            // Calculate the average path length
+            double avgPathLength = pathLengths.Average();
+
+            // Tortuosity is the square of the ratio of actual path length to straight-line distance
+            // τ = (Le/L)²
+            double tortuosity = straightLineDistance > 0 ?
+                Math.Pow(avgPathLength / straightLineDistance, 2) : 1.0;
+
+            // Ensure we have a reasonable value (tortuosity is always >= 1)
+            tortuosity = Math.Max(1.0, tortuosity);
+
+            return tortuosity;
+        }
+
+        /// <summary>
+        /// Calculate shortest paths from a source pore to all other pores using Dijkstra's algorithm
+        /// </summary>
+        /// <param name="model">The pore network model</param>
+        /// <param name="graph">The network graph representation</param>
+        /// <param name="sourceId">The source pore ID</param>
+        /// <returns>Dictionary mapping pore IDs to their shortest path distances from the source</returns>
+        private Dictionary<int, double> CalculateShortestPaths(
+            PoreNetworkModel model,
+            Dictionary<int, List<(int poreId, double distance)>> graph,
+            int sourceId)
+        {
+            // Dictionary to hold distances from source to each pore
+            Dictionary<int, double> distances = new Dictionary<int, double>();
+
+            // Initialize all distances to infinity except the source
+            foreach (var pore in model.Pores)
+            {
+                distances[pore.Id] = pore.Id == sourceId ? 0 : double.PositiveInfinity;
+            }
+
+            // Priority queue implemented as a sorted list for simplicity
+            // Each entry is (poreId, currentDistance)
+            var queue = new SortedList<double, int>();
+            queue.Add(0, sourceId);
+
+            // Set to track processed nodes
+            HashSet<int> processed = new HashSet<int>();
+
+            while (queue.Count > 0)
+            {
+                // Get the pore with the smallest distance
+                int currentId = queue.Values[0];
+                double currentDistance = queue.Keys[0];
+                queue.RemoveAt(0);
+
+                // Skip if we've already processed this pore
+                if (processed.Contains(currentId))
+                    continue;
+
+                // Mark as processed
+                processed.Add(currentId);
+
+                // Process each neighbor
+                foreach (var (neighborId, edgeDistance) in graph[currentId])
+                {
+                    // Skip already processed neighbors
+                    if (processed.Contains(neighborId))
+                        continue;
+
+                    // Calculate new potential distance
+                    double newDistance = currentDistance + edgeDistance;
+
+                    // Update if we found a shorter path
+                    if (newDistance < distances[neighborId])
+                    {
+                        distances[neighborId] = newDistance;
+
+                        // Add to queue with new priority
+                        queue.Add(newDistance, neighborId);
+                    }
+                }
+            }
+
+            return distances;
         }
 
         private void GenerateConsistentThroats(PoreNetworkModel model, int maxConnections, Random random)

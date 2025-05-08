@@ -5,6 +5,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -143,7 +144,12 @@ namespace CTS
                 Padding = new Padding(5),
                 BorderStyle = BorderStyle.FixedSingle
             };
-
+            Size iconSize = new Size(24, 24);
+            Color primaryColor = Color.FromArgb(64, 105, 180);
+            Bitmap separateIcon = PoreNetworkButtonIcons.CreateParticleSeparationIcon(iconSize, primaryColor);
+            Bitmap networkIcon = PoreNetworkButtonIcons.CreateNetworkGenerationIcon(iconSize, primaryColor);
+            Bitmap permeabilityIcon = PoreNetworkButtonIcons.CreatePermeabilityIcon(iconSize, primaryColor);
+            Bitmap tortuosityIcon = PoreNetworkButtonIcons.CreateTortuosityIcon(iconSize, primaryColor);
             // FIRST ROW OF CONTROLS - Major functional groups
             // Material Selection Group
             GroupBox materialGroup = new GroupBox
@@ -198,7 +204,7 @@ namespace CTS
                 Height = 50,
                 FlatStyle = FlatStyle.Flat,
                 BackColor = Color.FromArgb(225, 225, 225),
-                Image = SystemIcons.Information.ToBitmap(),
+                Image = separateIcon,
                 ImageAlign = ContentAlignment.MiddleLeft,
                 TextImageRelation = TextImageRelation.ImageBeforeText,
                 Padding = new Padding(5, 0, 5, 0)
@@ -215,7 +221,7 @@ namespace CTS
                 FlatStyle = FlatStyle.Flat,
                 BackColor = Color.FromArgb(225, 225, 225),
                 Enabled = false,
-                Image = SystemIcons.Application.ToBitmap(),
+                Image = networkIcon,
                 ImageAlign = ContentAlignment.MiddleLeft,
                 TextImageRelation = TextImageRelation.ImageBeforeText,
                 Padding = new Padding(5, 0, 5, 0)
@@ -277,7 +283,7 @@ namespace CTS
             {
                 Text = "Permeability",
                 Location = new Point(740, 10),
-                Size = new Size(250, 90),  // Further increased width
+                Size = new Size(250, 90), 
                 BackColor = Color.Transparent
             };
 
@@ -285,11 +291,12 @@ namespace CTS
             {
                 Text = "Simulate Permeability",
                 Location = new Point(15, 25),
-                Width = 220,  // Increased width to fit text
-                Height = 30,
+                Width = 220, 
+                Height = 32,
                 FlatStyle = FlatStyle.Flat,
                 BackColor = Color.FromArgb(225, 225, 225),
                 Enabled = false,
+                Image = permeabilityIcon,
                 ImageAlign = ContentAlignment.MiddleLeft,
                 TextImageRelation = TextImageRelation.ImageBeforeText,
                 Padding = new Padding(5, 0, 5, 0)
@@ -343,24 +350,32 @@ namespace CTS
 
             exportPermeabilityButton = new Button
             {
-                Text = "Export Permeability",
+                Text = "Export Results",
                 Location = new Point(15, 55),
                 Width = 140,
-                Height = 25,
+                Height = 32,
                 FlatStyle = FlatStyle.Flat,
                 BackColor = Color.FromArgb(225, 225, 225),
-                Enabled = false
+                Enabled = false,
+                Image = permeabilityIcon,
+                ImageAlign = ContentAlignment.MiddleLeft,
+                TextImageRelation = TextImageRelation.ImageBeforeText,
+                Padding = new Padding(2, 0, 2, 0)
             };
             exportPermeabilityButton.Click += ExportPermeabilityResults;
             settingsGroup.Controls.Add(exportPermeabilityButton);
             Button poreConnectivityButton = new Button
             {
                 Text = "Pore Connectivity",
-                Location = new Point(100, 20), // Adjust position to fit under Export Permeability
+                Location = new Point(100, 20),
                 Width = 140,
-                Height = 25,
+                Height = 32,
                 FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(225, 225, 225)
+                BackColor = Color.FromArgb(225, 225, 225),
+                Image = tortuosityIcon,
+                ImageAlign = ContentAlignment.MiddleLeft,
+                TextImageRelation = TextImageRelation.ImageBeforeText,
+                Padding = new Padding(2, 0, 2, 0)
             };
             poreConnectivityButton.Click += OpenPoreConnectivityDialog;
             settingsGroup.Controls.Add(poreConnectivityButton);
@@ -887,6 +902,13 @@ namespace CTS
                     poreDataGridView.Refresh();
                 }
             };
+            this.Disposed += (s, e) =>
+            {
+                separateIcon?.Dispose();
+                networkIcon?.Dispose();
+                permeabilityIcon?.Dispose();
+                tortuosityIcon?.Dispose();
+            };
         }
 
         /// <summary>
@@ -1280,6 +1302,11 @@ namespace CTS
                     pore.ConnectionCount
                 );
             }
+
+            // Update any statistics display to include tortuosity
+            statusLabel.Text = $"Network: {networkModel.Pores.Count} pores, {networkModel.Throats.Count} throats, " +
+                               $"Porosity: {networkModel.Porosity:P2}, Tortuosity: {networkModel.Tortuosity:F2}";
+
             EnsureDataGridViewHeadersVisible();
         }
 
@@ -1719,15 +1746,16 @@ namespace CTS
             double avgRadius = networkModel.Pores.Count > 0 ? networkModel.Pores.Average(p => p.Radius) : 0;
 
             string[] stats = {
-                $"Pores: {networkModel.Pores.Count}",
-                $"Throats: {networkModel.Throats.Count}",
-                $"Porosity: {networkModel.Porosity:P2}",
-                $"Avg. Radius: {avgRadius:F2} µm",
-                $"Connectivity: {avgConnections:F1} (max: {maxConnections})"
-            };
+        $"Pores: {networkModel.Pores.Count}",
+        $"Throats: {networkModel.Throats.Count}",
+        $"Porosity: {networkModel.Porosity:P2}",
+        $"Tortuosity: {networkModel.Tortuosity:F2}",  // Added tortuosity display
+        $"Avg. Radius: {avgRadius:F2} µm",
+        $"Connectivity: {avgConnections:F1} (max: {maxConnections})"
+    };
 
             Font font = new Font("Arial", 10, FontStyle.Bold);
-            int yPos = height - 140;
+            int yPos = height - 160; // Adjusted to accommodate the additional line
 
             foreach (string stat in stats)
             {
@@ -1739,11 +1767,11 @@ namespace CTS
 
             // Add color legend
             string[] legends = {
-                "Red: 0-1 connections",
-                "Yellow: 2 connections",
-                "Green: 3-4 connections",
-                "Blue: 5+ connections"
-            };
+        "Red: 0-1 connections",
+        "Yellow: 2 connections",
+        "Green: 3-4 connections",
+        "Blue: 5+ connections"
+    };
 
             yPos = 15;
             foreach (string text in legends)
@@ -1752,6 +1780,7 @@ namespace CTS
                 yPos += 15;
             }
         }
+
 
         // Helper method to create 3D rotation matrix
         private double[,] Create3DRotationMatrix(float angleX, float angleY, float angleZ)
@@ -1818,7 +1847,7 @@ namespace CTS
 
             using (SaveFileDialog saveDialog = new SaveFileDialog())
             {
-                saveDialog.Filter = "CSV files (*.csv)|*.csv|Excel files (*.xlsx)|*.xlsx";
+                saveDialog.Filter = "CSV files (*.csv)|*.csv|Excel files (*.xlsx)|*.xlsx|Excel 97-2003 files (*.xls)|*.xls";
                 saveDialog.Title = "Export Pore Network Data";
                 saveDialog.DefaultExt = "csv";
 
@@ -1832,9 +1861,9 @@ namespace CTS
                         {
                             ExportToCsv(saveDialog.FileName);
                         }
-                        else if (extension == ".xlsx")
+                        else if (extension == ".xlsx" || extension == ".xls")
                         {
-                            ExportToCsv(saveDialog.FileName);  // Simple CSV for now
+                            ExportToExcel(saveDialog.FileName);
                         }
 
                         statusLabel.Text = "Data exported successfully";
@@ -1845,11 +1874,402 @@ namespace CTS
                     {
                         MessageBox.Show($"Error exporting data: {ex.Message}",
                             "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        Logger.Log($"[PoreNetworkModelingForm] Export error: {ex.Message}\n{ex.StackTrace}");
                     }
                 }
             }
         }
+        /// <summary>
+        /// Export pore network data to Excel format using COM interop
+        /// </summary>
+        /// <param name="filename">The filename to export to</param>
+        private void ExportToExcel(string filename)
+        {
+            // Check if we have data to export
+            if (networkModel.Pores.Count == 0)
+            {
+                throw new InvalidOperationException("No pore data to export");
+            }
 
+            // Create Excel application instance
+            Type excelType = Type.GetTypeFromProgID("Excel.Application");
+            if (excelType == null)
+            {
+                MessageBox.Show("Microsoft Excel is not installed on this system.\nExporting to CSV format instead.",
+                    "Excel Not Found", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+
+                // Fall back to CSV if Excel is not available
+                ExportToCsv(Path.ChangeExtension(filename, ".csv"));
+                return;
+            }
+
+            // Use dynamic to simplify COM interop
+            dynamic excel = null;
+            dynamic workbook = null;
+            dynamic worksheet = null;
+
+            try
+            {
+                // Start with a progress dialog
+                using (var progressDialog = new Form())
+                {
+                    progressDialog.Text = "Exporting to Excel";
+                    progressDialog.Width = 300;
+                    progressDialog.Height = 100;
+                    progressDialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                    progressDialog.StartPosition = FormStartPosition.CenterParent;
+                    progressDialog.ControlBox = false;
+
+                    var progressLabel = new Label
+                    {
+                        Text = "Creating Excel workbook...",
+                        Location = new System.Drawing.Point(10, 15),
+                        Width = 280,
+                        TextAlign = System.Drawing.ContentAlignment.MiddleCenter
+                    };
+
+                    var progressBar = new ProgressBar
+                    {
+                        Location = new System.Drawing.Point(10, 40),
+                        Width = 280,
+                        Height = 20,
+                        Style = ProgressBarStyle.Marquee
+                    };
+
+                    progressDialog.Controls.Add(progressLabel);
+                    progressDialog.Controls.Add(progressBar);
+
+                    // Show progress dialog in a non-blocking way
+                    progressDialog.Show(this);
+                    Application.DoEvents(); // Process UI message loop
+
+                    // Create Excel application
+                    excel = Activator.CreateInstance(excelType);
+                    excel.Visible = false;
+                    excel.DisplayAlerts = false;
+
+                    // Create a new workbook
+                    workbook = excel.Workbooks.Add();
+
+                    // Ensure we have at least 3 worksheets
+                    while (workbook.Worksheets.Count < 3)
+                    {
+                        workbook.Worksheets.Add();
+                    }
+
+                    // ==========================================================
+                    // Worksheet 1: Pores
+                    // ==========================================================
+                    progressLabel.Text = "Exporting pore data...";
+                    Application.DoEvents();
+
+                    worksheet = workbook.Worksheets[1];
+                    worksheet.Name = "Pores";
+
+                    // Add headers (bold)
+                    worksheet.Cells[1, 1] = "ID";
+                    worksheet.Cells[1, 2] = "Volume (µm³)";
+                    worksheet.Cells[1, 3] = "Surface Area (µm²)";
+                    worksheet.Cells[1, 4] = "Equivalent Radius (µm)";
+                    worksheet.Cells[1, 5] = "X (µm)";
+                    worksheet.Cells[1, 6] = "Y (µm)";
+                    worksheet.Cells[1, 7] = "Z (µm)";
+                    worksheet.Cells[1, 8] = "Connections";
+
+                    // Format headers
+                    dynamic headerRange = worksheet.Range("A1:H1");
+                    headerRange.Font.Bold = true;
+                    headerRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
+
+                    // Add pore data
+                    int row = 2;
+                    foreach (var pore in networkModel.Pores)
+                    {
+                        worksheet.Cells[row, 1] = pore.Id;
+                        worksheet.Cells[row, 2] = Math.Round(pore.Volume, 2);
+                        worksheet.Cells[row, 3] = Math.Round(pore.Area, 2);
+                        worksheet.Cells[row, 4] = Math.Round(pore.Radius, 2);
+                        worksheet.Cells[row, 5] = Math.Round(pore.Center.X, 2);
+                        worksheet.Cells[row, 6] = Math.Round(pore.Center.Y, 2);
+                        worksheet.Cells[row, 7] = Math.Round(pore.Center.Z, 2);
+                        worksheet.Cells[row, 8] = pore.ConnectionCount;
+                        row++;
+                    }
+
+                    // Auto-fit columns
+                    worksheet.Columns.AutoFit();
+
+                    // Add filter
+                    headerRange.AutoFilter();
+
+                    // ==========================================================
+                    // Worksheet 2: Throats
+                    // ==========================================================
+                    progressLabel.Text = "Exporting throat data...";
+                    Application.DoEvents();
+
+                    worksheet = workbook.Worksheets[2];
+                    worksheet.Name = "Throats";
+
+                    // Add headers
+                    worksheet.Cells[1, 1] = "ID";
+                    worksheet.Cells[1, 2] = "Pore 1 ID";
+                    worksheet.Cells[1, 3] = "Pore 2 ID";
+                    worksheet.Cells[1, 4] = "Radius (µm)";
+                    worksheet.Cells[1, 5] = "Length (µm)";
+                    worksheet.Cells[1, 6] = "Volume (µm³)";
+
+                    // Format headers
+                    headerRange = worksheet.Range("A1:F1");
+                    headerRange.Font.Bold = true;
+                    headerRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
+
+                    // Add throat data
+                    row = 2;
+                    foreach (var throat in networkModel.Throats)
+                    {
+                        worksheet.Cells[row, 1] = throat.Id;
+                        worksheet.Cells[row, 2] = throat.PoreId1;
+                        worksheet.Cells[row, 3] = throat.PoreId2;
+                        worksheet.Cells[row, 4] = Math.Round(throat.Radius, 2);
+                        worksheet.Cells[row, 5] = Math.Round(throat.Length, 2);
+                        worksheet.Cells[row, 6] = Math.Round(throat.Volume, 2);
+                        row++;
+                    }
+
+                    // Auto-fit columns
+                    worksheet.Columns.AutoFit();
+
+                    // Add filter
+                    headerRange.AutoFilter();
+
+                    // ==========================================================
+                    // Worksheet 3: Network Statistics
+                    // ==========================================================
+                    progressLabel.Text = "Creating summary statistics...";
+                    Application.DoEvents();
+
+                    worksheet = workbook.Worksheets[3];
+                    worksheet.Name = "Network Statistics";
+
+                    // Add headers and data for statistics
+                    worksheet.Cells[1, 1] = "Property";
+                    worksheet.Cells[1, 2] = "Value";
+
+                    // Format headers
+                    headerRange = worksheet.Range("A1:B1");
+                    headerRange.Font.Bold = true;
+                    headerRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
+
+                    // Add network statistics
+                    row = 2;
+                    AddStatistic(worksheet, ref row, "Number of Pores", networkModel.Pores.Count);
+                    AddStatistic(worksheet, ref row, "Number of Throats", networkModel.Throats.Count);
+                    AddStatistic(worksheet, ref row, "Total Pore Volume (µm³)", Math.Round(networkModel.TotalPoreVolume, 2));
+                    AddStatistic(worksheet, ref row, "Total Throat Volume (µm³)", Math.Round(networkModel.TotalThroatVolume, 2));
+                    AddStatistic(worksheet, ref row, "Porosity", networkModel.Porosity.ToString("P2"));
+
+                    // Add tortuosity to statistics
+                    AddStatistic(worksheet, ref row, "Tortuosity", Math.Round(networkModel.Tortuosity, 4));
+
+                    AddStatistic(worksheet, ref row, "Average Coordination Number",
+                        Math.Round(networkModel.Pores.Count > 0 ?
+                        networkModel.Pores.Average(p => p.ConnectionCount) : 0, 2));
+                    AddStatistic(worksheet, ref row, "Pixel Size (m)", networkModel.PixelSize.ToString("E12"));
+                    AddStatistic(worksheet, ref row, "Export Date", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+
+                    // Add a summary chart (Pore size distribution)
+                    if (networkModel.Pores.Count > 0)
+                    {
+                        progressLabel.Text = "Creating charts...";
+                        Application.DoEvents();
+
+                        try
+                        {
+                            // Add pore size distribution data
+                            worksheet.Cells[row + 1, 1] = "Pore Size Distribution";
+                            worksheet.Cells[row + 1, 1].Font.Bold = true;
+                            row += 2;
+
+                            // Create bin headers
+                            worksheet.Cells[row, 1] = "Radius Range (µm)";
+                            worksheet.Cells[row, 2] = "Count";
+                            worksheet.Cells[row, 3] = "Volume Fraction";
+                            row++;
+
+                            // Calculate bins
+                            double minRadius = networkModel.Pores.Min(p => p.Radius);
+                            double maxRadius = networkModel.Pores.Max(p => p.Radius);
+                            int numBins = 10;
+                            double binWidth = (maxRadius - minRadius) / numBins;
+
+                            // Ensure bin width is not zero
+                            if (binWidth < 0.001)
+                                binWidth = 0.1;
+
+                            // Create bins
+                            for (int i = 0; i < numBins; i++)
+                            {
+                                double lowerBound = minRadius + i * binWidth;
+                                double upperBound = minRadius + (i + 1) * binWidth;
+
+                                string binLabel = $"{lowerBound:F2} - {upperBound:F2}";
+
+                                // Count pores in this bin
+                                int count = networkModel.Pores.Count(p =>
+                                    p.Radius >= lowerBound && p.Radius < upperBound);
+
+                                // Calculate volume fraction
+                                double volumeInBin = networkModel.Pores
+                                    .Where(p => p.Radius >= lowerBound && p.Radius < upperBound)
+                                    .Sum(p => p.Volume);
+
+                                double volumeFraction = networkModel.TotalPoreVolume > 0 ?
+                                    volumeInBin / networkModel.TotalPoreVolume : 0;
+
+                                worksheet.Cells[row, 1] = binLabel;
+                                worksheet.Cells[row, 2] = count;
+                                worksheet.Cells[row, 3] = volumeFraction;
+                                worksheet.Cells[row, 3].NumberFormat = "0.00%";
+
+                                row++;
+                            }
+
+                            // Create chart
+                            dynamic chartSheet = workbook.Charts.Add();
+                            chartSheet.Name = "Pore Size Distribution";
+
+                            // Chart data range
+                            dynamic chartRange = worksheet.Range($"A{row - numBins}:C{row - 1}");
+
+                            // Create column chart
+                            dynamic chart = chartSheet.ChartObjects.Add(50, 50, 600, 400).Chart;
+                            chart.ChartType = 51; // xlColumnClustered
+                            chart.SetSourceData(chartRange);
+                            chart.HasTitle = true;
+                            chart.ChartTitle.Text = "Pore Size Distribution";
+
+                            // Set axis titles
+                            chart.Axes(1).HasTitle = true; // x-axis
+                            chart.Axes(1).AxisTitle.Text = "Pore Radius Range (µm)";
+                            chart.Axes(2).HasTitle = true; // primary y-axis
+                            chart.Axes(2).AxisTitle.Text = "Count";
+
+                            chart.SeriesCollection(2).AxisGroup = 2; // xlSecondary (2 = xlSecondary)
+                            chart.SeriesCollection(2).ChartType = 65; // xlLineMarkers
+
+                            // Properly set up secondary axis
+                            // Excel constants: 1=xlCategory, 2=xlValue, 1=xlPrimary, 2=xlSecondary
+                            try
+                            {
+                                // Add secondary value axis
+                                chart.SetElement(142); // 142 = msoElementSecondaryValueAxisShow
+
+                                // Configure the secondary axis
+                                dynamic secondaryAxis = chart.Axes(2, 2); // 2=xlValue, 2=xlSecondary
+                                secondaryAxis.HasTitle = true;
+                                secondaryAxis.AxisTitle.Text = "Volume Fraction";
+                                secondaryAxis.Format.Line.ForeColor.RGB = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.Red);
+
+                                // Format the line series to match secondary axis color
+                                chart.SeriesCollection(2).Format.Line.ForeColor.RGB = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.Red);
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Log($"[PoreNetworkModelingForm] Error setting up secondary axis: {ex.Message}");
+                                // Try alternative approach for older Excel versions
+                                try
+                                {
+                                    dynamic axes = chart.Axes;
+                                    axes.Add(2, 2); // 2=xlValue, 2=xlSecondary
+                                    chart.Axes(2, 2).HasTitle = true;
+                                    chart.Axes(2, 2).AxisTitle.Text = "Volume Fraction";
+                                }
+                                catch
+                                {
+                                    // If both methods fail, continue without secondary axis
+                                    Logger.Log("[PoreNetworkModelingForm] Could not create secondary axis, continuing without it");
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            // If chart creation fails, log error and continue
+                            Logger.Log($"[PoreNetworkModelingForm] Error creating chart: {ex.Message}");
+                            // We don't want to stop the export if just the chart fails
+                        }
+                    }
+
+                    // Auto-fit columns in statistics sheet
+                    worksheet.Columns.AutoFit();
+
+                    // Make Pores sheet active
+                    workbook.Worksheets[1].Activate();
+
+                    // Save workbook to specified file
+                    progressLabel.Text = "Saving Excel file...";
+                    Application.DoEvents();
+
+                    // Save based on extension (.xlsx or .xls)
+                    if (Path.GetExtension(filename).ToLower() == ".xlsx")
+                    {
+                        workbook.SaveAs(filename, 51); // xlOpenXMLWorkbook (without macro's in 2007-2016, xlsx)
+                    }
+                    else
+                    {
+                        workbook.SaveAs(filename, 56); // xlExcel8 (97-2003 format, xls)
+                    }
+
+                    // Close progress dialog
+                    progressDialog.Close();
+                }
+
+                // Log success
+                Logger.Log($"[PoreNetworkModelingForm] Successfully exported to Excel: {filename}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[PoreNetworkModelingForm] Excel export error: {ex.Message}\n{ex.StackTrace}");
+                throw new Exception($"Excel export failed: {ex.Message}", ex);
+            }
+            finally
+            {
+                // Clean up COM objects to prevent memory leaks
+                if (worksheet != null)
+                {
+                    Marshal.ReleaseComObject(worksheet);
+                    worksheet = null;
+                }
+
+                if (workbook != null)
+                {
+                    workbook.Close(false);
+                    Marshal.ReleaseComObject(workbook);
+                    workbook = null;
+                }
+
+                if (excel != null)
+                {
+                    excel.Quit();
+                    Marshal.ReleaseComObject(excel);
+                    excel = null;
+                }
+
+                // Force garbage collection to release COM objects
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
+        }
+
+        /// <summary>
+        /// Helper method to add a statistic row to the Excel worksheet
+        /// </summary>
+        private void AddStatistic(dynamic worksheet, ref int row, string property, object value)
+        {
+            worksheet.Cells[row, 1] = property;
+            worksheet.Cells[row, 2] = value;
+            row++;
+        }
         private void EnsureDataGridViewHeadersVisible()
         {
             // Force the DataGridView to properly render its headers
@@ -1891,7 +2311,6 @@ namespace CTS
                 }
             }
         }
-
         private void ExportToCsv(string filename)
         {
             using (StreamWriter writer = new StreamWriter(filename))
@@ -1925,10 +2344,10 @@ namespace CTS
                 writer.WriteLine($"Total Pore Volume (µm³),{networkModel.TotalPoreVolume:F2}");
                 writer.WriteLine($"Total Throat Volume (µm³),{networkModel.TotalThroatVolume:F2}");
                 writer.WriteLine($"Porosity,{networkModel.Porosity:F4}");
+                writer.WriteLine($"Tortuosity,{networkModel.Tortuosity:F4}");  // Added tortuosity to export
                 writer.WriteLine($"Pixel Size (m),{networkModel.PixelSize:E12}");
             }
         }
-
         private void ExportSelectedRows()
         {
             if (poreDataGridView.SelectedRows.Count == 0)
@@ -1972,7 +2391,6 @@ namespace CTS
                 }
             }
         }
-
         private void SaveNetwork(string filename = null)
         {
             if (networkModel.Pores == null || networkModel.Pores.Count == 0)
@@ -2011,6 +2429,7 @@ namespace CTS
                     writer.Write(networkModel.Throats.Count);
                     writer.Write(networkModel.PixelSize);
                     writer.Write(networkModel.Porosity);
+                    writer.Write(networkModel.Tortuosity);  // Added tortuosity to save data
 
                     // Write pores
                     foreach (var pore in networkModel.Pores)
@@ -2047,7 +2466,6 @@ namespace CTS
                     "Save Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
-
         private void LoadNetwork(string filename = null)
         {
             if (string.IsNullOrEmpty(filename))
@@ -2146,7 +2564,22 @@ namespace CTS
                         double pixelSize = reader.ReadDouble();
                         double porosity = reader.ReadDouble();
 
-                        Logger.Log($"[PoreNetworkModelingForm] Metadata: {poreCount} pores, {throatCount} throats, pixelSize={pixelSize}, porosity={porosity}");
+                        // Attempt to read tortuosity if it exists in the file
+                        double tortuosity = 1.0; // Default value
+                        if (fs.Position < fs.Length - 8) // Check if we have at least 8 more bytes (for a double)
+                        {
+                            try
+                            {
+                                tortuosity = reader.ReadDouble();
+                            }
+                            catch
+                            {
+                                // If reading fails, use the default tortuosity
+                                Logger.Log("[PoreNetworkModelingForm] Could not read tortuosity from file, using default value");
+                            }
+                        }
+
+                        Logger.Log($"[PoreNetworkModelingForm] Metadata: {poreCount} pores, {throatCount} throats, pixelSize={pixelSize}, porosity={porosity}, tortuosity={tortuosity}");
 
                         if (poreCount <= 0 || poreCount > 1000000 || throatCount < 0 || throatCount > 10000000)
                         {
@@ -2158,6 +2591,7 @@ namespace CTS
                         {
                             PixelSize = pixelSize,
                             Porosity = porosity,
+                            Tortuosity = tortuosity,  // Set the tortuosity value
                             Pores = new List<Pore>(poreCount),
                             Throats = new List<Throat>(throatCount)
                         };
@@ -2269,7 +2703,6 @@ namespace CTS
                 throw; // Re-throw to allow caller to handle the error
             }
         }
-
         private async void SimulatePermeabilityClick(object sender, EventArgs e)
         {
             if (networkModel?.Pores == null || networkModel.Pores.Count == 0 ||
@@ -2371,9 +2804,6 @@ namespace CTS
             controlPanel.Controls.Add(rotationLabel);
 
             // Add reset view button
-            // In the RenderPermeabilityResults method, update the resetViewButton click handler to include panning reset:
-
-            // Add reset view button
             Button resetViewButton = new Button
             {
                 Text = "Reset View",
@@ -2416,17 +2846,17 @@ namespace CTS
             Panel resultsPanel = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 60,
+                Height = 90, // Increased height to accommodate tortuosity info
                 BackColor = Color.FromArgb(30, 30, 30),
                 Padding = new Padding(5)
             };
 
-            // Create a table layout for the results with 3 columns, 2 rows
+            // Create a table layout for the results with 3 columns, 3 rows (added a row for tortuosity)
             TableLayoutPanel tableLayout = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 3,
-                RowCount = 2,
+                RowCount = 3, // Increased to 3 rows
                 BackColor = Color.Transparent
             };
 
@@ -2436,8 +2866,9 @@ namespace CTS
             tableLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
 
             // Row styles
-            tableLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
-            tableLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+            tableLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 33.33F));
+            tableLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 33.33F));
+            tableLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 33.33F)); // Added third row
 
             // Add labels with permeability information
             // Row 1
@@ -2495,6 +2926,37 @@ namespace CTS
                 Font = new Font("Segoe UI", 9, FontStyle.Bold),
                 Anchor = AnchorStyles.Left
             }, 2, 1);
+
+            // Row 3 - New row for tortuosity information
+            tableLayout.Controls.Add(new Label
+            {
+                Text = $"Tortuosity: {permeabilityResult.Tortuosity:F2}",
+                ForeColor = Color.Yellow, // Highlighted in yellow to stand out
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                Anchor = AnchorStyles.Left
+            }, 0, 2);
+
+            tableLayout.Controls.Add(new Label
+            {
+                Text = $"Corrected Permeability: {permeabilityResult.CorrectedPermeabilityDarcy:F3} Darcy " +
+                       $"({permeabilityResult.CorrectedPermeabilityDarcy * 1000:F1} mD)",
+                ForeColor = Color.Yellow, // Highlighted in yellow to stand out
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                Anchor = AnchorStyles.Left
+            }, 1, 2);
+
+            // Add explanation tooltip for tortuosity correction
+            var correctionMethodLabel = new Label
+            {
+                Text = "Corrected via Kozeny-Carman: k' = k/τ²",
+                ForeColor = Color.LightGray,
+                AutoSize = true,
+                Font = new Font("Segoe UI", 8, FontStyle.Italic),
+                Anchor = AnchorStyles.Left
+            };
+            tableLayout.Controls.Add(correctionMethodLabel, 2, 2);
 
             resultsPanel.Controls.Add(tableLayout);
             visualizationPanel.Controls.Add(resultsPanel);
@@ -2672,10 +3134,15 @@ namespace CTS
             // Add the visualization panel to the tab
             permeabilityTab.Controls.Add(visualizationPanel);
 
-            // Enable the export button but we'll handle the screenshot button differently
+            // Enable the export button
             if (exportPermeabilityButton != null) exportPermeabilityButton.Enabled = true;
-        }
 
+            // Update status label with tortuosity information
+            statusLabel.Text = $"Permeability: {permeabilityResult.PermeabilityDarcy:F3} Darcy " +
+                                $"({permeabilityResult.PermeabilityMilliDarcy:F1} mD) | " +
+                                $"Tortuosity: {permeabilityResult.Tortuosity:F2} | " +
+                                $"Corrected: {permeabilityResult.CorrectedPermeabilityDarcy:F3} Darcy";
+        }
         private Bitmap RenderPressureField()
         {
             if (permeabilityResult == null)
@@ -3103,7 +3570,6 @@ namespace CTS
                 }
             }
         }
-
         private void SavePermeabilityResults(object sender, EventArgs e)
         {
             if (permeabilityResult == null)
@@ -3137,6 +3603,8 @@ namespace CTS
                             writer.Write(permeabilityResult.OutputPressure);
                             writer.Write(permeabilityResult.PermeabilityDarcy);
                             writer.Write(permeabilityResult.PermeabilityMilliDarcy);
+                            writer.Write(permeabilityResult.Tortuosity); // Save tortuosity
+                            writer.Write(permeabilityResult.CorrectedPermeabilityDarcy); // Save corrected permeability
                             writer.Write(permeabilityResult.TotalFlowRate);
                             writer.Write(permeabilityResult.ModelLength);
                             writer.Write(permeabilityResult.ModelArea);
@@ -3224,11 +3692,37 @@ namespace CTS
                                 InputPressure = reader.ReadDouble(),
                                 OutputPressure = reader.ReadDouble(),
                                 PermeabilityDarcy = reader.ReadDouble(),
-                                PermeabilityMilliDarcy = reader.ReadDouble(),
-                                TotalFlowRate = reader.ReadDouble(),
-                                ModelLength = reader.ReadDouble(),
-                                ModelArea = reader.ReadDouble()
+                                PermeabilityMilliDarcy = reader.ReadDouble()
                             };
+
+                            // Try to read tortuosity and corrected permeability
+                            try
+                            {
+                                if (fs.Position < fs.Length - 16) // Need at least 16 bytes (for 2 doubles)
+                                {
+                                    permeabilityResult.Tortuosity = reader.ReadDouble();
+                                    permeabilityResult.CorrectedPermeabilityDarcy = reader.ReadDouble();
+                                }
+                                else
+                                {
+                                    // If not present in file, calculate based on model tortuosity
+                                    permeabilityResult.Tortuosity = networkModel.Tortuosity;
+                                    permeabilityResult.CorrectedPermeabilityDarcy = permeabilityResult.PermeabilityDarcy /
+                                        (permeabilityResult.Tortuosity * permeabilityResult.Tortuosity);
+                                }
+                            }
+                            catch
+                            {
+                                // If reading fails, use model tortuosity and calculate corrected value
+                                permeabilityResult.Tortuosity = networkModel.Tortuosity;
+                                permeabilityResult.CorrectedPermeabilityDarcy = permeabilityResult.PermeabilityDarcy /
+                                    (permeabilityResult.Tortuosity * permeabilityResult.Tortuosity);
+                            }
+
+                            // Continue reading the remaining data
+                            permeabilityResult.TotalFlowRate = reader.ReadDouble();
+                            permeabilityResult.ModelLength = reader.ReadDouble();
+                            permeabilityResult.ModelArea = reader.ReadDouble();
 
                             // Read inlet/outlet pores
                             int inletCount = reader.ReadInt32();
@@ -3273,7 +3767,8 @@ namespace CTS
                                 catch { /* Ignore if timestamp isn't available */ }
                             }
 
-                            Logger.Log($"[PoreNetworkModelingForm] Loaded permeability results from {timestamp}");
+                            Logger.Log($"[PoreNetworkModelingForm] Loaded permeability results from {timestamp}, " +
+                                      $"tortuosity: {permeabilityResult.Tortuosity:F2}");
                         }
 
                         // Update UI with loaded results
@@ -3283,7 +3778,10 @@ namespace CTS
                         mainTabControl.SelectedTab = permeabilityTab;
 
                         // Update status
-                        statusLabel.Text = $"Loaded permeability: {permeabilityResult.PermeabilityDarcy:F3} Darcy";
+                        statusLabel.Text = $"Loaded permeability: {permeabilityResult.PermeabilityDarcy:F3} Darcy | " +
+                                          $"Tortuosity: {permeabilityResult.Tortuosity:F2} | " +
+                                          $"Corrected: {permeabilityResult.CorrectedPermeabilityDarcy:F3} Darcy";
+
                         MessageBox.Show("Permeability results loaded successfully", "Load Complete",
                             MessageBoxButtons.OK, MessageBoxIcon.Information);
                     }
@@ -3294,6 +3792,435 @@ namespace CTS
                         Logger.Log($"[PoreNetworkModelingForm] Error loading permeability: {ex.Message}\n{ex.StackTrace}");
                     }
                 }
+            }
+        }
+        private void ExportPermeabilityToExcel(string filename)
+        {
+            if (permeabilityResult == null)
+            {
+                throw new InvalidOperationException("No permeability results to export");
+            }
+
+            // Create Excel application instance
+            Type excelType = Type.GetTypeFromProgID("Excel.Application");
+            if (excelType == null)
+            {
+                MessageBox.Show("Microsoft Excel is not installed on this system.\nExporting to CSV format instead.",
+                    "Excel Not Found", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+
+                // Fall back to CSV if Excel is not available
+                ExportPermeabilityCsv(Path.ChangeExtension(filename, ".csv"));
+                return;
+            }
+
+            // Use dynamic to simplify COM interop
+            dynamic excel = null;
+            dynamic workbook = null;
+            dynamic worksheet = null;
+
+            try
+            {
+                // Start with a progress dialog
+                using (var progressDialog = new Form())
+                {
+                    progressDialog.Text = "Exporting Permeability to Excel";
+                    progressDialog.Width = 350;
+                    progressDialog.Height = 100;
+                    progressDialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                    progressDialog.StartPosition = FormStartPosition.CenterParent;
+                    progressDialog.ControlBox = false;
+
+                    var progressLabel = new Label
+                    {
+                        Text = "Creating Excel workbook...",
+                        Location = new System.Drawing.Point(10, 15),
+                        Width = 330,
+                        TextAlign = System.Drawing.ContentAlignment.MiddleCenter
+                    };
+
+                    var progressBar = new ProgressBar
+                    {
+                        Location = new System.Drawing.Point(10, 40),
+                        Width = 330,
+                        Height = 20,
+                        Style = ProgressBarStyle.Marquee
+                    };
+
+                    progressDialog.Controls.Add(progressLabel);
+                    progressDialog.Controls.Add(progressBar);
+
+                    // Show progress dialog in a non-blocking way
+                    progressDialog.Show(this);
+                    Application.DoEvents(); // Process UI message loop
+
+                    // Create Excel application
+                    excel = Activator.CreateInstance(excelType);
+                    excel.Visible = false;
+                    excel.DisplayAlerts = false;
+
+                    // Create a new workbook
+                    workbook = excel.Workbooks.Add();
+
+                    // Ensure we have at least 4 worksheets
+                    while (workbook.Worksheets.Count < 4)
+                    {
+                        workbook.Worksheets.Add();
+                    }
+
+                    // ==========================================================
+                    // Worksheet 1: Summary
+                    // ==========================================================
+                    progressLabel.Text = "Creating summary sheet...";
+                    Application.DoEvents();
+
+                    worksheet = workbook.Worksheets[1];
+                    worksheet.Name = "Permeability Summary";
+
+                    // Create a title
+                    worksheet.Cells[1, 1] = "Permeability Simulation Results";
+                    worksheet.Cells[1, 1].Font.Size = 14;
+                    worksheet.Cells[1, 1].Font.Bold = true;
+                    worksheet.Range["A1:C1"].Merge();
+
+                    // Add simulation parameters
+                    int row = 3;
+
+                    // Format header for simulation parameters
+                    worksheet.Cells[row, 1] = "Simulation Parameters";
+                    worksheet.Cells[row, 1].Font.Bold = true;
+                    worksheet.Range[$"A{row}:C{row}"].Merge();
+                    worksheet.Range[$"A{row}:C{row}"].Interior.Color =
+                        System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
+                    row++;
+
+                    AddStatistic(worksheet, ref row, "Date", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                    AddStatistic(worksheet, ref row, "Flow Axis", permeabilityResult.FlowAxis.ToString());
+                    AddStatistic(worksheet, ref row, "Fluid Viscosity (Pa·s)", permeabilityResult.Viscosity);
+                    AddStatistic(worksheet, ref row, "Input Pressure (Pa)", permeabilityResult.InputPressure);
+                    AddStatistic(worksheet, ref row, "Output Pressure (Pa)", permeabilityResult.OutputPressure);
+                    AddStatistic(worksheet, ref row, "Pressure Differential (Pa)",
+                        permeabilityResult.InputPressure - permeabilityResult.OutputPressure);
+
+                    // Add empty row for spacing
+                    row++;
+
+                    // Format header for results
+                    worksheet.Cells[row, 1] = "Results";
+                    worksheet.Cells[row, 1].Font.Bold = true;
+                    worksheet.Range[$"A{row}:C{row}"].Merge();
+                    worksheet.Range[$"A{row}:C{row}"].Interior.Color =
+                        System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
+                    row++;
+
+                    // Add permeability results and highlight tortuosity-related rows
+                    AddStatistic(worksheet, ref row, "Permeability (Darcy)", permeabilityResult.PermeabilityDarcy);
+                    AddStatistic(worksheet, ref row, "Permeability (mD)", permeabilityResult.PermeabilityMilliDarcy);
+
+                    // Add tortuosity with highlighting
+                    worksheet.Cells[row, 1] = "Tortuosity";
+                    worksheet.Cells[row, 2] = permeabilityResult.Tortuosity;
+                    worksheet.Range[$"A{row}:B{row}"].Interior.Color =
+                        System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightYellow);
+                    worksheet.Range[$"A{row}:B{row}"].Font.Bold = true;
+                    row++;
+
+                    // Add corrected permeability with highlighting
+                    worksheet.Cells[row, 1] = "Corrected Permeability (Darcy)";
+                    worksheet.Cells[row, 2] = permeabilityResult.CorrectedPermeabilityDarcy;
+                    worksheet.Range[$"A{row}:B{row}"].Interior.Color =
+                        System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightYellow);
+                    worksheet.Range[$"A{row}:B{row}"].Font.Bold = true;
+                    row++;
+
+                    worksheet.Cells[row, 1] = "Corrected Permeability (mD)";
+                    worksheet.Cells[row, 2] = permeabilityResult.CorrectedPermeabilityDarcy * 1000;
+                    worksheet.Range[$"A{row}:B{row}"].Interior.Color =
+                        System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightYellow);
+                    worksheet.Range[$"A{row}:B{row}"].Font.Bold = true;
+                    row++;
+
+                    // Add explanation of correction
+                    worksheet.Cells[row, 1] = "Correction Method";
+                    worksheet.Cells[row, 2] = "Kozeny-Carman: k' = k/τ²";
+                    worksheet.Range[$"A{row}:B{row}"].Font.Italic = true;
+                    row++;
+
+                    // Continue with other results
+                    AddStatistic(worksheet, ref row, "Total Flow Rate (m³/s)", permeabilityResult.TotalFlowRate);
+                    AddStatistic(worksheet, ref row, "Model Length (m)", permeabilityResult.ModelLength);
+                    AddStatistic(worksheet, ref row, "Model Area (m²)", permeabilityResult.ModelArea);
+
+                    // Add empty row for spacing
+                    row++;
+
+                    // Format header for model info
+                    worksheet.Cells[row, 1] = "Model Information";
+                    worksheet.Cells[row, 1].Font.Bold = true;
+                    worksheet.Range[$"A{row}:C{row}"].Merge();
+                    worksheet.Range[$"A{row}:C{row}"].Interior.Color =
+                        System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
+                    row++;
+
+                    // Add model statistics
+                    AddStatistic(worksheet, ref row, "Number of Pores", permeabilityResult.Model.Pores.Count);
+                    AddStatistic(worksheet, ref row, "Number of Throats", permeabilityResult.Model.Throats.Count);
+                    AddStatistic(worksheet, ref row, "Porosity", permeabilityResult.Model.Porosity.ToString("P2"));
+                    AddStatistic(worksheet, ref row, "Inlet Pores", permeabilityResult.InletPores.Count);
+                    AddStatistic(worksheet, ref row, "Outlet Pores", permeabilityResult.OutletPores.Count);
+
+                    // Auto-fit columns
+                    worksheet.Columns.AutoFit();
+
+                    // ==========================================================
+                    // Worksheet 2: Pressure Field
+                    // ==========================================================
+                    progressLabel.Text = "Exporting pressure field data...";
+                    Application.DoEvents();
+
+                    worksheet = workbook.Worksheets[2];
+                    worksheet.Name = "Pressure Field";
+
+                    // Add headers
+                    worksheet.Cells[1, 1] = "Pore ID";
+                    worksheet.Cells[1, 2] = "Pressure (Pa)";
+                    worksheet.Cells[1, 3] = "Is Inlet";
+                    worksheet.Cells[1, 4] = "Is Outlet";
+
+                    // Format headers
+                    dynamic headerRange = worksheet.Range("A1:D1");
+                    headerRange.Font.Bold = true;
+                    headerRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
+
+                    // Add pressure field data
+                    row = 2;
+                    foreach (var pore in permeabilityResult.Model.Pores)
+                    {
+                        bool isInlet = permeabilityResult.InletPores.Contains(pore.Id);
+                        bool isOutlet = permeabilityResult.OutletPores.Contains(pore.Id);
+                        double pressure = permeabilityResult.PressureField.TryGetValue(pore.Id, out double p) ? p : 0;
+
+                        worksheet.Cells[row, 1] = pore.Id;
+                        worksheet.Cells[row, 2] = pressure;
+                        worksheet.Cells[row, 3] = isInlet;
+                        worksheet.Cells[row, 4] = isOutlet;
+
+                        // Highlight inlet and outlet pores
+                        if (isInlet || isOutlet)
+                        {
+                            dynamic rowRange = worksheet.Range($"A{row}:D{row}");
+                            rowRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(
+                                isInlet ? System.Drawing.Color.LightPink : System.Drawing.Color.LightBlue);
+                        }
+
+                        row++;
+                    }
+
+                    // Auto-fit columns and add filter
+                    worksheet.Columns.AutoFit();
+                    headerRange.AutoFilter();
+
+                    // ==========================================================
+                    // Worksheet 3: Flow Rates
+                    // ==========================================================
+                    progressLabel.Text = "Exporting flow rate data...";
+                    Application.DoEvents();
+
+                    worksheet = workbook.Worksheets[3];
+                    worksheet.Name = "Flow Rates";
+
+                    // Add headers
+                    worksheet.Cells[1, 1] = "Throat ID";
+                    worksheet.Cells[1, 2] = "Pore 1 ID";
+                    worksheet.Cells[1, 3] = "Pore 2 ID";
+                    worksheet.Cells[1, 4] = "Flow Rate (m³/s)";
+                    worksheet.Cells[1, 5] = "Radius (µm)";
+                    worksheet.Cells[1, 6] = "Length (µm)";
+
+                    // Format headers
+                    headerRange = worksheet.Range("A1:F1");
+                    headerRange.Font.Bold = true;
+                    headerRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
+
+                    // Add flow rate data
+                    row = 2;
+                    foreach (var throat in permeabilityResult.Model.Throats)
+                    {
+                        double flowRate = permeabilityResult.ThroatFlowRates.TryGetValue(throat.Id, out double fr) ? fr : 0;
+
+                        worksheet.Cells[row, 1] = throat.Id;
+                        worksheet.Cells[row, 2] = throat.PoreId1;
+                        worksheet.Cells[row, 3] = throat.PoreId2;
+                        worksheet.Cells[row, 4] = flowRate;
+                        worksheet.Cells[row, 5] = throat.Radius;
+                        worksheet.Cells[row, 6] = throat.Length;
+
+                        row++;
+                    }
+
+                    // Auto-fit columns and add filter
+                    worksheet.Columns.AutoFit();
+                    headerRange.AutoFilter();
+
+                    // ==========================================================
+                    // Worksheet 4: Charts
+                    // ==========================================================
+                    progressLabel.Text = "Creating charts...";
+                    Application.DoEvents();
+
+                    try
+                    {
+                        // Create chart sheet
+                        worksheet = workbook.Worksheets[4];
+                        worksheet.Name = "Charts";
+
+                        // Add chart title
+                        worksheet.Cells[1, 1] = "Permeability Visualization";
+                        worksheet.Cells[1, 1].Font.Size = 14;
+                        worksheet.Cells[1, 1].Font.Bold = true;
+                        worksheet.Range["A1:G1"].Merge();
+
+                        // Add permeability and tortuosity relationship chart
+                        row = 3;
+                        worksheet.Cells[row, 1] = "Permeability Summary";
+                        worksheet.Cells[row, 1].Font.Bold = true;
+                        worksheet.Range[$"A{row}:G{row}"].Merge();
+                        worksheet.Range[$"A{row}:G{row}"].Interior.Color =
+                            System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
+                        row++;
+
+                        // Create data for a simple summary chart
+                        // Headers
+                        worksheet.Cells[row, 1] = "Measurement";
+                        worksheet.Cells[row, 2] = "Value";
+                        row++;
+
+                        // Data points
+                        worksheet.Cells[row, 1] = "Raw Permeability (mD)";
+                        worksheet.Cells[row, 2] = permeabilityResult.PermeabilityMilliDarcy;
+                        row++;
+
+                        worksheet.Cells[row, 1] = "Corrected Permeability (mD)";
+                        worksheet.Cells[row, 2] = permeabilityResult.CorrectedPermeabilityDarcy * 1000;
+                        row++;
+
+                        // Create simple column chart
+                        dynamic chartObj = worksheet.ChartObjects.Add(100, 150, 400, 250);
+                        dynamic chart = chartObj.Chart;
+
+                        // Set the source data range
+                        var dataRange = worksheet.Range[$"A{row - 2}:B{row - 1}"];
+                        chart.SetSourceData(dataRange);
+
+                        // Set chart type to column
+                        chart.ChartType = 51; // xlColumnClustered
+
+                        // Add title and labels
+                        chart.HasTitle = true;
+                        chart.ChartTitle.Text = "Permeability Comparison";
+
+                        // Create tortuosity explanation diagram
+                        row += 2;
+                        worksheet.Cells[row, 1] = "Tortuosity Explanation";
+                        worksheet.Cells[row, 1].Font.Bold = true;
+                        worksheet.Range[$"A{row}:G{row}"].Merge();
+                        worksheet.Range[$"A{row}:G{row}"].Interior.Color =
+                            System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
+                        row++;
+
+                        // Create simple table explaining tortuosity
+                        worksheet.Cells[row, 1] = "Definition:";
+                        worksheet.Cells[row, 2] = "Tortuosity (τ) measures how winding or twisted the flow paths are through the porous medium.";
+                        worksheet.Range[$"B{row}:G{row}"].Merge();
+                        row++;
+
+                        worksheet.Cells[row, 1] = "Mathematical:";
+                        worksheet.Cells[row, 2] = "τ = (Le/L)², where Le is actual path length and L is straight-line distance";
+                        worksheet.Range[$"B{row}:G{row}"].Merge();
+                        row++;
+
+                        worksheet.Cells[row, 1] = "This Model:";
+                        worksheet.Cells[row, 2] = $"τ = {permeabilityResult.Tortuosity:F2}";
+                        worksheet.Range[$"B{row}:G{row}"].Merge();
+                        row++;
+
+                        worksheet.Cells[row, 1] = "Effect:";
+                        worksheet.Cells[row, 2] = "Higher tortuosity reduces permeability according to the Kozeny-Carman relationship: k ∝ (ε³/S²)/τ²";
+                        worksheet.Range[$"B{row}:G{row}"].Merge();
+                        row++;
+
+                        worksheet.Cells[row, 1] = "Correction:";
+                        worksheet.Cells[row, 2] = $"Raw k = {permeabilityResult.PermeabilityDarcy:F3} Darcy, Corrected k = {permeabilityResult.CorrectedPermeabilityDarcy:F3} Darcy";
+                        worksheet.Range[$"B{row}:G{row}"].Merge();
+                        row++;
+
+                        // Format the explanation table
+                        worksheet.Range[$"A{row - 5}:A{row - 1}"].Font.Bold = true;
+
+                        // Auto-fit columns
+                        worksheet.Columns.AutoFit();
+                    }
+                    catch (Exception ex)
+                    {
+                        // If chart creation fails, log error and continue
+                        Logger.Log($"[PoreNetworkModelingForm] Error creating permeability charts: {ex.Message}");
+                        // We don't want to stop the export if just the chart fails
+                    }
+
+                    // Make Summary sheet active
+                    workbook.Worksheets[1].Activate();
+
+                    // Save workbook to specified file
+                    progressLabel.Text = "Saving Excel file...";
+                    Application.DoEvents();
+
+                    // Save based on extension (.xlsx or .xls)
+                    if (Path.GetExtension(filename).ToLower() == ".xlsx")
+                    {
+                        workbook.SaveAs(filename, 51); // xlOpenXMLWorkbook (without macro's in 2007-2016, xlsx)
+                    }
+                    else
+                    {
+                        workbook.SaveAs(filename, 56); // xlExcel8 (97-2003 format, xls)
+                    }
+
+                    // Close progress dialog
+                    progressDialog.Close();
+                }
+
+                // Log success
+                Logger.Log($"[PoreNetworkModelingForm] Successfully exported permeability to Excel: {filename}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[PoreNetworkModelingForm] Excel export error: {ex.Message}\n{ex.StackTrace}");
+                throw new Exception($"Excel export failed: {ex.Message}", ex);
+            }
+            finally
+            {
+                // Clean up COM objects to prevent memory leaks
+                if (worksheet != null)
+                {
+                    Marshal.ReleaseComObject(worksheet);
+                    worksheet = null;
+                }
+
+                if (workbook != null)
+                {
+                    workbook.Close(false);
+                    Marshal.ReleaseComObject(workbook);
+                    workbook = null;
+                }
+
+                if (excel != null)
+                {
+                    excel.Quit();
+                    Marshal.ReleaseComObject(excel);
+                    excel = null;
+                }
+
+                // Force garbage collection to release COM objects
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
             }
         }
 
@@ -3308,9 +4235,9 @@ namespace CTS
 
             using (SaveFileDialog saveDialog = new SaveFileDialog())
             {
-                saveDialog.Filter = "CSV files (*.csv)|*.csv|Excel files (*.xlsx)|*.xlsx";
+                saveDialog.Filter = "Excel files (*.xlsx)|*.xlsx|Excel 97-2003 files (*.xls)|*.xls|CSV files (*.csv)|*.csv";
                 saveDialog.Title = "Export Permeability Results";
-                saveDialog.DefaultExt = "csv";
+                saveDialog.DefaultExt = "xlsx";
 
                 if (saveDialog.ShowDialog() == DialogResult.OK)
                 {
@@ -3318,8 +4245,14 @@ namespace CTS
                     {
                         string extension = Path.GetExtension(saveDialog.FileName).ToLower();
 
-                        // For now, use CSV for both options
-                        ExportPermeabilityCsv(saveDialog.FileName);
+                        if (extension == ".csv")
+                        {
+                            ExportPermeabilityCsv(saveDialog.FileName);
+                        }
+                        else if (extension == ".xlsx" || extension == ".xls")
+                        {
+                            ExportPermeabilityToExcel(saveDialog.FileName);
+                        }
 
                         statusLabel.Text = "Permeability results exported successfully";
                         MessageBox.Show("Permeability results exported successfully", "Export Complete",
@@ -3334,7 +4267,6 @@ namespace CTS
                 }
             }
         }
-
         private void ExportPermeabilityCsv(string filename)
         {
             using (StreamWriter writer = new StreamWriter(filename))
@@ -3348,6 +4280,9 @@ namespace CTS
                 writer.WriteLine($"Output Pressure (Pa),{permeabilityResult.OutputPressure:F2}");
                 writer.WriteLine($"Permeability (Darcy),{permeabilityResult.PermeabilityDarcy:G8}");
                 writer.WriteLine($"Permeability (mD),{permeabilityResult.PermeabilityMilliDarcy:G8}");
+                writer.WriteLine($"Tortuosity,{permeabilityResult.Tortuosity:G8}");
+                writer.WriteLine($"Corrected Permeability (Darcy),{permeabilityResult.CorrectedPermeabilityDarcy:G8}");
+                writer.WriteLine($"Corrected Permeability (mD),{permeabilityResult.CorrectedPermeabilityDarcy * 1000:G8}");
                 writer.WriteLine($"Total Flow Rate (m³/s),{permeabilityResult.TotalFlowRate:G8}");
                 writer.WriteLine($"Model Length (m),{permeabilityResult.ModelLength:G8}");
                 writer.WriteLine($"Model Area (m²),{permeabilityResult.ModelArea:G8}");

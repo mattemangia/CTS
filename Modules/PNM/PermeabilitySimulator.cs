@@ -98,7 +98,8 @@ namespace CTS
                 FlowAxis = axis,
                 Viscosity = viscosity,
                 InputPressure = inputPressure,
-                OutputPressure = outputPressure
+                OutputPressure = outputPressure,
+                Tortuosity = model.Tortuosity // Copy tortuosity from model
             };
 
             progress?.Report(10);
@@ -113,6 +114,21 @@ namespace CTS
             {
                 Logger.Log("[PermeabilitySimulator] Using CPU for simulation");
                 await SimulatePermeabilityCPU(result, progress);
+            }
+
+            // Calculate tortuosity-corrected permeability using the Kozeny-Carman relationship
+            // k_corrected = k / τ² where τ is tortuosity
+            if (result.Tortuosity > 0)
+            {
+                result.CorrectedPermeabilityDarcy = result.PermeabilityDarcy / (result.Tortuosity * result.Tortuosity);
+                Logger.Log($"[PermeabilitySimulator] Applied tortuosity correction: original k={result.PermeabilityDarcy:F4} Darcy, " +
+                           $"τ={result.Tortuosity:F2}, corrected k={result.CorrectedPermeabilityDarcy:F4} Darcy");
+            }
+            else
+            {
+                // If tortuosity is not available, use the uncorrected value
+                result.CorrectedPermeabilityDarcy = result.PermeabilityDarcy;
+                Logger.Log("[PermeabilitySimulator] No tortuosity available for correction, using uncorrected permeability");
             }
 
             progress?.Report(100);
@@ -968,6 +984,8 @@ namespace CTS
         public double OutputPressure { get; set; }
         public double PermeabilityDarcy { get; set; }
         public double PermeabilityMilliDarcy { get; set; }
+        public double Tortuosity { get; set; } // Added tortuosity property
+        public double CorrectedPermeabilityDarcy { get; set; } // Added tortuosity-corrected permeability
         public Dictionary<int, double> PressureField { get; set; }
         public Dictionary<int, double> ThroatFlowRates { get; set; }
         public double TotalFlowRate { get; set; }

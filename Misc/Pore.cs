@@ -82,4 +82,5 @@ public class PoreNetworkModel
     public double Porosity { get; set; }
     public double TotalPoreVolume { get; set; }
     public double TotalThroatVolume { get; set; }
+    public double Tortuosity { get; set; }
 }

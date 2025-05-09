@@ -1,7 +1,9 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Threading.Tasks;
 
 namespace CTS
 {
@@ -18,6 +20,13 @@ namespace CTS
         private float minDensity, maxDensity;
         private bool uniformDensity = false;
         private bool renderFullVolume;
+
+        // Pre-computed boundary cells for performance
+        private bool[,,] boundaryCache;
+        private bool boundaryCacheValid = false;
+
+        // Lock for thread safety
+        private readonly object syncLock = new object();
 
         // Main constructor
         public VolumeRenderer(float[,,] densityVolume, int width, int height, int depth, double pixelSize, byte materialID, bool renderFullVolume = true)
@@ -40,6 +49,9 @@ namespace CTS
             this.rotationX = 30;
             this.rotationY = 30;
             this.zoom = defaultZoom;
+
+            // Initialize boundary cache
+            boundaryCache = new bool[width, height, depth];
         }
 
         // Compatibility constructor
@@ -60,11 +72,11 @@ namespace CTS
             Logger.Log($"[VolumeRenderer] Volume size: {width}x{height}x{depth}, default zoom: {defaultZoom}");
         }
 
-        // Calculate density range for color mapping
+        // Calculate density range for color mapping - OPTIMIZED with parallel processing
         private void CalculateDensityRange()
         {
-            minDensity = float.MaxValue;
-            maxDensity = float.MinValue;
+            float localMin = float.MaxValue;
+            float localMax = float.MinValue;
 
             // Calculate volume size
             long volumeSize = (long)width * height * depth;
@@ -74,37 +86,59 @@ namespace CTS
                       volumeSize > 10_000_000 ? 16 :
                       volumeSize > 1_000_000 ? 8 : 4;
 
-            // Sample the volume to find min/max density
-            for (int z = 0; z < depth; z += step)
+            // Use parallel processing with thread-safe min/max updates
+            object lockObj = new object();
+
+            // Sample the volume in parallel to find min/max density
+            Parallel.For(0, depth / step + 1, z =>
             {
+                float threadMin = float.MaxValue;
+                float threadMax = float.MinValue;
+
+                int zCoord = z * step;
+                if (zCoord >= depth) return;
+
                 for (int y = 0; y < height; y += step)
                 {
+                    if (y >= height) continue;
+
                     for (int x = 0; x < width; x += step)
                     {
-                        if (x >= width || y >= height || z >= depth) continue;
+                        if (x >= width) continue;
 
-                        float density = densityVolume[x, y, z];
+                        float density = densityVolume[x, y, zCoord];
                         if (density > 0)
                         {
-                            minDensity = Math.Min(minDensity, density);
-                            maxDensity = Math.Max(maxDensity, density);
+                            threadMin = Math.Min(threadMin, density);
+                            threadMax = Math.Max(threadMax, density);
                         }
                     }
                 }
-            }
+
+                // Update global min/max with thread-safe locking
+                if (threadMin != float.MaxValue || threadMax != float.MinValue)
+                {
+                    lock (lockObj)
+                    {
+                        localMin = Math.Min(localMin, threadMin);
+                        localMax = Math.Max(localMax, threadMax);
+                    }
+                }
+            });
 
             // Handle edge cases
-            if (minDensity == float.MaxValue || maxDensity == float.MinValue)
+            if (localMin == float.MaxValue || localMax == float.MinValue)
             {
-                minDensity = 0;
-                maxDensity = 1000;
+                localMin = 0;
+                localMax = 1000;
             }
 
             // Check if density is fairly uniform
-            if (maxDensity - minDensity < 100)
-            {
-                uniformDensity = true;
-            }
+            uniformDensity = (localMax - localMin < 100);
+
+            // Store results
+            minDensity = localMin;
+            maxDensity = localMax;
 
             Logger.Log($"[VolumeRenderer] Density range: {minDensity} to {maxDensity}, Uniform: {uniformDensity}");
         }
@@ -112,16 +146,22 @@ namespace CTS
         // Set view transformation
         public void SetTransformation(float rotationX, float rotationY, float zoom, PointF pan)
         {
-            this.rotationX = rotationX;
-            this.rotationY = rotationY;
+            lock (syncLock)
+            {
+                this.rotationX = rotationX;
+                this.rotationY = rotationY;
 
-            // Apply zoom relative to default zoom for this volume
-            this.zoom = zoom * defaultZoom;
+                // Apply zoom relative to default zoom for this volume
+                this.zoom = zoom * defaultZoom;
 
-            this.pan = pan;
+                this.pan = pan;
+
+                // Invalidate boundary cache when view changes
+                boundaryCacheValid = false;
+            }
         }
 
-        // Project 3D point to screen
+        // Project 3D point to screen - THREAD SAFE
         public PointF ProjectToScreen(float x, float y, float z, int screenWidth, int screenHeight)
         {
             // Normalize coordinates to center of volume
@@ -129,9 +169,21 @@ namespace CTS
             float ny = y - height / 2.0f;
             float nz = z - depth / 2.0f;
 
+            // Make local copies to avoid race conditions
+            float localRotationX, localRotationY, localZoom;
+            PointF localPan;
+
+            lock (syncLock)
+            {
+                localRotationX = this.rotationX;
+                localRotationY = this.rotationY;
+                localZoom = this.zoom;
+                localPan = this.pan;
+            }
+
             // Apply rotations
-            float angleXRad = rotationX * (float)Math.PI / 180;
-            float angleYRad = rotationY * (float)Math.PI / 180;
+            float angleXRad = localRotationX * (float)Math.PI / 180;
+            float angleYRad = localRotationY * (float)Math.PI / 180;
 
             // Rotate around Y axis
             float nx1 = nx * (float)Math.Cos(angleYRad) + nz * (float)Math.Sin(angleYRad);
@@ -142,8 +194,8 @@ namespace CTS
             float nz2 = ny * (float)Math.Sin(angleXRad) + nz1 * (float)Math.Cos(angleXRad);
 
             // Apply zoom directly - no extra scaling factors
-            float screenX = nx1 * zoom + screenWidth / 2.0f + pan.X;
-            float screenY = ny1 * zoom + screenHeight / 2.0f + pan.Y;
+            float screenX = nx1 * localZoom + screenWidth / 2.0f + localPan.X;
+            float screenY = ny1 * localZoom + screenHeight / 2.0f + localPan.Y;
 
             return new PointF(screenX, screenY);
         }
@@ -182,7 +234,7 @@ namespace CTS
         }
 
         // Render the volume
-        public void Render(Graphics g, int viewWidth, int viewHeight)
+        public void Render(Graphics g, int viewWidth, int viewHeight, bool isInteracting = false)
         {
             g.Clear(Color.Black);
             g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -190,26 +242,195 @@ namespace CTS
             // Always show outline box for reference
             DrawBoundingBox(g, viewWidth, viewHeight);
 
-            // Determine step size based on volume size and rendering mode
-            int volumeSize = width * height * depth;
-            int baseStep = volumeSize > 100_000_000 ? 16 :
-                           volumeSize > 10_000_000 ? 12 :
-                           volumeSize > 1_000_000 ? 8 : 4;
+            // Calculate volume size
+            long volumeSize = (long)width * height * depth;
 
-            // Use finer step if full rendering is requested
-            int step = renderFullVolume ? Math.Max(baseStep / 2, 4) : baseStep;
-
-            // Direct rendering of surface boundary cells
-            RenderSmartWireframe(g, viewWidth, viewHeight, step);
-
-            // Draw density colorbar if not uniform
-            if (!uniformDensity)
+            // If user is actively interacting, use a faster approach
+            if (isInteracting)
             {
-                DrawDensityColorbar(g, viewWidth, viewHeight);
+                RenderFastPreview(g, viewWidth, viewHeight, volumeSize);
+            }
+            else
+            {
+                // Determine step size based on volume size and rendering mode
+                int baseStep = DetermineOptimalStepSize(volumeSize);
+
+                // Use finer step if full rendering is requested
+                int step = renderFullVolume ? Math.Max(baseStep / 2, 4) : baseStep;
+
+                // Precompute boundary cells if needed
+                PrecomputeBoundaryCells();
+
+                // Direct rendering of surface boundary cells
+                RenderSmartWireframe(g, viewWidth, viewHeight, step);
+
+                // Draw density colorbar if not uniform
+                if (!uniformDensity)
+                {
+                    DrawDensityColorbar(g, viewWidth, viewHeight);
+                }
+            }
+        }
+        private int DetermineOptimalStepSize(long volumeSize)
+        {
+            // For extremely large volumes (like high-res micro-CT), use larger steps
+            if (volumeSize > 1_000_000_000) return 32;      // > 1 billion voxels
+            if (volumeSize > 500_000_000) return 24;        // > 500 million voxels
+            if (volumeSize > 100_000_000) return 16;        // > 100 million voxels
+            if (volumeSize > 10_000_000) return 12;         // > 10 million voxels
+            if (volumeSize > 1_000_000) return 8;           // > 1 million voxels
+            return 4;                                        // Default for smaller volumes
+        }
+        private void RenderFastPreview(Graphics g, int viewWidth, int viewHeight, long volumeSize)
+        {
+            // Determine super aggressive step size for interactive rendering
+            int step = DetermineInteractiveStepSize(volumeSize);
+
+            // Draw a simplified wireframe version with large steps
+            using (Pen pen = new Pen(Color.White, 1))
+            {
+                // Calculate view-dependent sort keys
+                float cosY = (float)Math.Cos(rotationY * Math.PI / 180);
+                float sinY = (float)Math.Sin(rotationY * Math.PI / 180);
+                float cosX = (float)Math.Cos(rotationX * Math.PI / 180);
+                float sinX = (float)Math.Sin(rotationX * Math.PI / 180);
+
+                // Center of volume
+                float centerX = width / 2.0f;
+                float centerY = height / 2.0f;
+                float centerZ = depth / 2.0f;
+
+                // Just draw a simple grid of voxels for speed
+                for (int z = 0; z < depth; z += step * 2)
+                {
+                    for (int y = 0; y < height; y += step * 2)
+                    {
+                        PointF? lastPoint = null;
+
+                        for (int x = 0; x < width; x += step)
+                        {
+                            if (x >= width || y >= height || z >= depth) continue;
+
+                            float density = 0;
+                            try
+                            {
+                                density = densityVolume[x, y, z];
+                            }
+                            catch
+                            {
+                                continue; // Skip any out of range
+                            }
+
+                            if (density <= 0)
+                            {
+                                lastPoint = null;
+                                continue;
+                            }
+
+                            PointF currentPoint = ProjectToScreen(x, y, z, viewWidth, viewHeight);
+
+                            if (lastPoint.HasValue)
+                            {
+                                // Set color based on density
+                                pen.Color = GetColorForDensity(density);
+                                g.DrawLine(pen, lastPoint.Value, currentPoint);
+                            }
+
+                            lastPoint = currentPoint;
+                        }
+                    }
+                }
+            }
+
+            // Draw a "Fast Preview" indicator
+            using (Font font = new Font("Arial", 10, FontStyle.Bold))
+            using (SolidBrush brush = new SolidBrush(Color.Yellow))
+            using (SolidBrush shadowBrush = new SolidBrush(Color.FromArgb(128, 0, 0, 0)))
+            {
+                string message = "FAST PREVIEW MODE - Release mouse for full quality";
+                SizeF textSize = g.MeasureString(message, font);
+                float textX = (viewWidth - textSize.Width) / 2;
+                float textY = viewHeight - textSize.Height - 10;
+
+                // Draw shadow for better visibility
+                g.FillRectangle(shadowBrush, textX - 5, textY - 2, textSize.Width + 10, textSize.Height + 4);
+                g.DrawString(message, font, brush, textX, textY);
             }
         }
 
-        // Render smart wireframe - focuses on the surface
+        // Determine step size for interactive mode
+        private int DetermineInteractiveStepSize(long volumeSize)
+        {
+            // Use even larger steps during interaction for responsiveness
+            if (volumeSize > 1_000_000_000) return 64;      // > 1 billion voxels
+            if (volumeSize > 500_000_000) return 48;        // > 500 million voxels
+            if (volumeSize > 100_000_000) return 32;        // > 100 million voxels
+            if (volumeSize > 10_000_000) return 24;         // > 10 million voxels
+            if (volumeSize > 1_000_000) return 16;          // > 1 million voxels
+            return 8;                                        // Default for smaller volumes
+        }
+        // OPTIMIZED: Precompute boundary cells
+        private void PrecomputeBoundaryCells()
+        {
+            if (boundaryCacheValid)
+                return;
+
+            // Compute boundary cells in parallel
+            Parallel.For(0, depth, z =>
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        boundaryCache[x, y, z] = false;
+
+                        // Only check cells with density
+                        if (densityVolume[x, y, z] <= 0)
+                            continue;
+
+                        // Check 6-connected neighbors
+                        if (x > 0 && densityVolume[x - 1, y, z] <= 0)
+                            boundaryCache[x, y, z] = true;
+                        else if (x < width - 1 && densityVolume[x + 1, y, z] <= 0)
+                            boundaryCache[x, y, z] = true;
+                        else if (y > 0 && densityVolume[x, y - 1, z] <= 0)
+                            boundaryCache[x, y, z] = true;
+                        else if (y < height - 1 && densityVolume[x, y + 1, z] <= 0)
+                            boundaryCache[x, y, z] = true;
+                        else if (z > 0 && densityVolume[x, y, z - 1] <= 0)
+                            boundaryCache[x, y, z] = true;
+                        else if (z < depth - 1 && densityVolume[x, y, z + 1] <= 0)
+                            boundaryCache[x, y, z] = true;
+                    }
+                }
+            });
+
+            boundaryCacheValid = true;
+        }
+
+        // OPTIMIZED: Check if a voxel is on the boundary
+        private bool IsBoundaryVoxel(int x, int y, int z)
+        {
+            // Use cached values if available
+            if (boundaryCacheValid)
+                return boundaryCache[x, y, z];
+
+            // Otherwise compute on the fly
+            if (densityVolume[x, y, z] <= 0)
+                return false;
+
+            // Check 6-connected neighbors
+            if (x > 0 && densityVolume[x - 1, y, z] <= 0) return true;
+            if (x < width - 1 && densityVolume[x + 1, y, z] <= 0) return true;
+            if (y > 0 && densityVolume[x, y - 1, z] <= 0) return true;
+            if (y < height - 1 && densityVolume[x, y + 1, z] <= 0) return true;
+            if (z > 0 && densityVolume[x, y, z - 1] <= 0) return true;
+            if (z < depth - 1 && densityVolume[x, y, z + 1] <= 0) return true;
+
+            return false;
+        }
+
+        // OPTIMIZED: Render smart wireframe with parallel processing
         private void RenderSmartWireframe(Graphics g, int viewWidth, int viewHeight, int step)
         {
             // Calculate view-dependent sort keys
@@ -223,190 +444,35 @@ namespace CTS
             float centerY = height / 2.0f;
             float centerZ = depth / 2.0f;
 
-            // Temporary storage for drawing operations
-            List<(PointF, PointF, Color, float)> drawOps = new List<(PointF, PointF, Color, float)>();
+            // Use thread-safe collection for drawing operations
+            var drawOps = new ConcurrentBag<(PointF, PointF, Color, float)>();
 
-            // Only draw lines between material cells
+            // Process X, Y, Z directions in parallel
+            Parallel.Invoke(
+                // X-direction scan
+                () => ScanXDirection(drawOps, step, viewWidth, viewHeight, centerX, centerY, centerZ, cosX, sinX, cosY, sinY),
+
+                // Y-direction scan
+                () => ScanYDirection(drawOps, step, viewWidth, viewHeight, centerX, centerY, centerZ, cosX, sinX, cosY, sinY),
+
+                // Z-direction scan
+                () => ScanZDirection(drawOps, step, viewWidth, viewHeight, centerX, centerY, centerZ, cosX, sinX, cosY, sinY)
+            );
+
+            // Add diagonal connections if needed
+            if (renderFullVolume)
+            {
+                AddDiagonalConnections(drawOps, step, viewWidth, viewHeight, centerX, centerY, centerZ, cosX, sinX, cosY, sinY);
+            }
+
+            // Sort draw operations by depth (back-to-front)
+            var sortedOps = new List<(PointF, PointF, Color, float)>(drawOps);
+            sortedOps.Sort((a, b) => a.Item4.CompareTo(b.Item4));
+
+            // Draw all lines
             using (Pen pen = new Pen(Color.White, 1))
             {
-                // Scan in primary directions with alternating patterns
-
-                // X-direction scan
-                for (int z = 0; z < depth; z += step * 2)
-                {
-                    for (int y = 0; y < height; y += step)
-                    {
-                        PointF? lastPoint = null;
-                        float lastDensity = 0;
-                        bool lastIsBoundary = false;
-
-                        for (int x = 0; x < width; x += step)
-                        {
-                            if (x >= width || y >= height || z >= depth) continue;
-
-                            float density = densityVolume[x, y, z];
-                            if (density <= 0)
-                            {
-                                lastPoint = null;
-                                continue;
-                            }
-
-                            // Check if this is a boundary cell
-                            bool isBoundary = IsBoundaryVoxel(x, y, z);
-
-                            // For interior lines, use larger steps unless full rendering
-                            if (!isBoundary && !renderFullVolume && !lastIsBoundary && x % (step * 2) != 0)
-                                continue;
-
-                            PointF currentPoint = ProjectToScreen(x, y, z, viewWidth, viewHeight);
-
-                            // Connect points with density
-                            if (lastPoint.HasValue)
-                            {
-                                // Calculate depth for sorting
-                                float midX = (x + (x - step)) / 2 - centerX;
-                                float midY = y - centerY;
-                                float midZ = z - centerZ;
-
-                                float rotX = midX * cosY + midZ * sinY;
-                                float rotZ = -midX * sinY + midZ * cosY;
-                                float rotY = midY * cosX - rotZ * sinX;
-                                float depth = midY * sinX + rotZ * cosX;
-
-                                // Use average density for line color
-                                float avgDensity = (density + lastDensity) / 2;
-                                Color lineColor = GetColorForDensity(avgDensity);
-
-                                // Add to draw operations
-                                drawOps.Add((lastPoint.Value, currentPoint, lineColor, depth));
-                            }
-
-                            lastPoint = currentPoint;
-                            lastDensity = density;
-                            lastIsBoundary = isBoundary;
-                        }
-                    }
-                }
-
-                // Y-direction scan - only for boundary cells
-                for (int z = 0; z < depth; z += step * 2)
-                {
-                    for (int x = 0; x < width; x += step)
-                    {
-                        PointF? lastPoint = null;
-                        float lastDensity = 0;
-                        bool lastIsBoundary = false;
-
-                        for (int y = 0; y < height; y += step)
-                        {
-                            if (x >= width || y >= height || z >= depth) continue;
-
-                            float density = densityVolume[x, y, z];
-                            if (density <= 0)
-                            {
-                                lastPoint = null;
-                                continue;
-                            }
-
-                            // Check if this is a boundary cell
-                            bool isBoundary = IsBoundaryVoxel(x, y, z);
-
-                            // For interior cells, use larger steps
-                            if (!isBoundary && !renderFullVolume && !lastIsBoundary && y % (step * 2) != 0)
-                                continue;
-
-                            PointF currentPoint = ProjectToScreen(x, y, z, viewWidth, viewHeight);
-
-                            if (lastPoint.HasValue)
-                            {
-                                // Calculate depth for sorting
-                                float midX = x - centerX;
-                                float midY = (y + (y - step)) / 2 - centerY;
-                                float midZ = z - centerZ;
-
-                                float rotX = midX * cosY + midZ * sinY;
-                                float rotZ = -midX * sinY + midZ * cosY;
-                                float rotY = midY * cosX - rotZ * sinX;
-                                float depth = midY * sinX + rotZ * cosX;
-
-                                float avgDensity = (density + lastDensity) / 2;
-                                Color lineColor = GetColorForDensity(avgDensity);
-
-                                drawOps.Add((lastPoint.Value, currentPoint, lineColor, depth));
-                            }
-
-                            lastPoint = currentPoint;
-                            lastDensity = density;
-                            lastIsBoundary = isBoundary;
-                        }
-                    }
-                }
-
-                // Z-direction scan - only for boundary cells
-                for (int y = 0; y < height; y += step * 2)
-                {
-                    for (int x = 0; x < width; x += step * 2)
-                    {
-                        PointF? lastPoint = null;
-                        float lastDensity = 0;
-                        bool lastIsBoundary = false;
-
-                        for (int z = 0; z < depth; z += step)
-                        {
-                            if (x >= width || y >= height || z >= depth) continue;
-
-                            float density = densityVolume[x, y, z];
-                            if (density <= 0)
-                            {
-                                lastPoint = null;
-                                continue;
-                            }
-
-                            // Check if this is a boundary cell
-                            bool isBoundary = IsBoundaryVoxel(x, y, z);
-
-                            // For interior cells, use larger steps
-                            if (!isBoundary && !renderFullVolume && !lastIsBoundary && z % (step * 2) != 0)
-                                continue;
-
-                            PointF currentPoint = ProjectToScreen(x, y, z, viewWidth, viewHeight);
-
-                            if (lastPoint.HasValue)
-                            {
-                                // Calculate depth for sorting
-                                float midX = x - centerX;
-                                float midY = y - centerY;
-                                float midZ = (z + (z - step)) / 2 - centerZ;
-
-                                float rotX = midX * cosY + midZ * sinY;
-                                float rotZ = -midX * sinY + midZ * cosY;
-                                float rotY = midY * cosX - rotZ * sinX;
-                                float depth = midY * sinX + rotZ * cosX;
-
-                                float avgDensity = (density + lastDensity) / 2;
-                                Color lineColor = GetColorForDensity(avgDensity);
-
-                                drawOps.Add((lastPoint.Value, currentPoint, lineColor, depth));
-                            }
-
-                            lastPoint = currentPoint;
-                            lastDensity = density;
-                            lastIsBoundary = isBoundary;
-                        }
-                    }
-                }
-
-                // Add some diagonal connections on boundaries for better curved surfaces
-                if (renderFullVolume)
-                {
-                    AddDiagonalConnections(drawOps, step, viewWidth, viewHeight, centerX, centerY, centerZ, cosX, sinX, cosY, sinY);
-                }
-
-                // Sort by depth and draw back-to-front
-                drawOps.Sort((a, b) => a.Item4.CompareTo(b.Item4));
-
-                // Draw all lines
-                foreach (var op in drawOps)
+                foreach (var op in sortedOps)
                 {
                     pen.Color = op.Item3;
                     g.DrawLine(pen, op.Item1, op.Item2);
@@ -414,13 +480,205 @@ namespace CTS
             }
         }
 
-        // Add diagonal connections for better curved surfaces
-        private void AddDiagonalConnections(List<(PointF, PointF, Color, float)> drawOps, int step,
+        // OPTIMIZED: Process X-direction scan
+        private void ScanXDirection(ConcurrentBag<(PointF, PointF, Color, float)> drawOps, int step,
             int viewWidth, int viewHeight, float centerX, float centerY, float centerZ,
             float cosX, float sinX, float cosY, float sinY)
         {
-            // Only connect diagonally on boundaries
-            for (int z = step; z < depth - step; z += step * 2)
+            Parallel.For(0, depth / step + 1, zIndex =>
+            {
+                int z = zIndex * step;
+                if (z >= depth) return;
+
+                for (int y = 0; y < height; y += step)
+                {
+                    if (y >= height) continue;
+
+                    PointF? lastPoint = null;
+                    float lastDensity = 0;
+                    bool lastIsBoundary = false;
+
+                    for (int x = 0; x < width; x += step)
+                    {
+                        if (x >= width) continue;
+
+                        float density = densityVolume[x, y, z];
+                        if (density <= 0)
+                        {
+                            lastPoint = null;
+                            continue;
+                        }
+
+                        // Check if this is a boundary cell
+                        bool isBoundary = IsBoundaryVoxel(x, y, z);
+
+                        // For interior lines, use larger steps unless full rendering
+                        if (!isBoundary && !renderFullVolume && !lastIsBoundary && x % (step * 2) != 0)
+                            continue;
+
+                        PointF currentPoint = ProjectToScreen(x, y, z, viewWidth, viewHeight);
+
+                        // Connect points with density
+                        if (lastPoint.HasValue)
+                        {
+                            // Calculate depth for sorting
+                            float midX = (x + (x - step)) / 2 - centerX;
+                            float midY = y - centerY;
+                            float midZ = z - centerZ;
+
+                            float rotX = midX * cosY + midZ * sinY;
+                            float rotZ = -midX * sinY + midZ * cosY;
+                            float depth = midY * sinX + rotZ * cosX;
+
+                            // Use average density for line color
+                            float avgDensity = (density + lastDensity) / 2;
+                            Color lineColor = GetColorForDensity(avgDensity);
+
+                            // Add to draw operations
+                            drawOps.Add((lastPoint.Value, currentPoint, lineColor, depth));
+                        }
+
+                        lastPoint = currentPoint;
+                        lastDensity = density;
+                        lastIsBoundary = isBoundary;
+                    }
+                }
+            });
+        }
+
+        // OPTIMIZED: Process Y-direction scan
+        private void ScanYDirection(ConcurrentBag<(PointF, PointF, Color, float)> drawOps, int step,
+            int viewWidth, int viewHeight, float centerX, float centerY, float centerZ,
+            float cosX, float sinX, float cosY, float sinY)
+        {
+            Parallel.For(0, depth / step + 1, zIndex =>
+            {
+                int z = zIndex * step;
+                if (z >= depth) return;
+
+                for (int x = 0; x < width; x += step)
+                {
+                    if (x >= width) continue;
+
+                    PointF? lastPoint = null;
+                    float lastDensity = 0;
+                    bool lastIsBoundary = false;
+
+                    for (int y = 0; y < height; y += step)
+                    {
+                        if (y >= height) continue;
+
+                        float density = densityVolume[x, y, z];
+                        if (density <= 0)
+                        {
+                            lastPoint = null;
+                            continue;
+                        }
+
+                        // Check if this is a boundary cell
+                        bool isBoundary = IsBoundaryVoxel(x, y, z);
+
+                        // For interior cells, use larger steps
+                        if (!isBoundary && !renderFullVolume && !lastIsBoundary && y % (step * 2) != 0)
+                            continue;
+
+                        PointF currentPoint = ProjectToScreen(x, y, z, viewWidth, viewHeight);
+
+                        if (lastPoint.HasValue)
+                        {
+                            // Calculate depth for sorting
+                            float midX = x - centerX;
+                            float midY = (y + (y - step)) / 2 - centerY;
+                            float midZ = z - centerZ;
+
+                            float rotX = midX * cosY + midZ * sinY;
+                            float rotZ = -midX * sinY + midZ * cosY;
+                            float depth = midY * sinX + rotZ * cosX;
+
+                            float avgDensity = (density + lastDensity) / 2;
+                            Color lineColor = GetColorForDensity(avgDensity);
+
+                            drawOps.Add((lastPoint.Value, currentPoint, lineColor, depth));
+                        }
+
+                        lastPoint = currentPoint;
+                        lastDensity = density;
+                        lastIsBoundary = isBoundary;
+                    }
+                }
+            });
+        }
+
+        // OPTIMIZED: Process Z-direction scan
+        private void ScanZDirection(ConcurrentBag<(PointF, PointF, Color, float)> drawOps, int step,
+            int viewWidth, int viewHeight, float centerX, float centerY, float centerZ,
+            float cosX, float sinX, float cosY, float sinY)
+        {
+            Parallel.For(0, height / step + 1, yIndex =>
+            {
+                int y = yIndex * step;
+                if (y >= height) return;
+
+                for (int x = 0; x < width; x += step * 2)
+                {
+                    if (x >= width) continue;
+
+                    PointF? lastPoint = null;
+                    float lastDensity = 0;
+                    bool lastIsBoundary = false;
+
+                    for (int z = 0; z < depth; z += step)
+                    {
+                        if (z >= depth) continue;
+
+                        float density = densityVolume[x, y, z];
+                        if (density <= 0)
+                        {
+                            lastPoint = null;
+                            continue;
+                        }
+
+                        // Check if this is a boundary cell
+                        bool isBoundary = IsBoundaryVoxel(x, y, z);
+
+                        // For interior cells, use larger steps
+                        if (!isBoundary && !renderFullVolume && !lastIsBoundary && z % (step * 2) != 0)
+                            continue;
+
+                        PointF currentPoint = ProjectToScreen(x, y, z, viewWidth, viewHeight);
+
+                        if (lastPoint.HasValue)
+                        {
+                            // Calculate depth for sorting
+                            float midX = x - centerX;
+                            float midY = y - centerY;
+                            float midZ = (z + (z - step)) / 2 - centerZ;
+
+                            float rotX = midX * cosY + midZ * sinY;
+                            float rotZ = -midX * sinY + midZ * cosY;
+                            float depth = midY * sinX + rotZ * cosX;
+
+                            float avgDensity = (density + lastDensity) / 2;
+                            Color lineColor = GetColorForDensity(avgDensity);
+
+                            drawOps.Add((lastPoint.Value, currentPoint, lineColor, depth));
+                        }
+
+                        lastPoint = currentPoint;
+                        lastDensity = density;
+                        lastIsBoundary = isBoundary;
+                    }
+                }
+            });
+        }
+
+        // OPTIMIZED: Add diagonal connections for better curved surfaces
+        private void AddDiagonalConnections(ConcurrentBag<(PointF, PointF, Color, float)> drawOps, int step,
+            int viewWidth, int viewHeight, float centerX, float centerY, float centerZ,
+            float cosX, float sinX, float cosY, float sinY)
+        {
+            // Using parallel processing
+            Parallel.For(step, depth - step, z =>
             {
                 for (int y = step; y < height - step; y += step * 2)
                 {
@@ -437,7 +695,10 @@ namespace CTS
                         PointF p0 = ProjectToScreen(x, y, z, viewWidth, viewHeight);
 
                         // XY diagonal - only if all corners have density
-                        if (densityVolume[x + step, y + step, z] > 0 && densityVolume[x + step, y, z] > 0 && densityVolume[x, y + step, z] > 0)
+                        if (x + step < width && y + step < height &&
+                            densityVolume[x + step, y + step, z] > 0 &&
+                            densityVolume[x + step, y, z] > 0 &&
+                            densityVolume[x, y + step, z] > 0)
                         {
                             PointF p1 = ProjectToScreen(x + step, y + step, z, viewWidth, viewHeight);
 
@@ -455,7 +716,10 @@ namespace CTS
                         }
 
                         // XZ diagonal - only if all corners have density
-                        if (densityVolume[x + step, y, z + step] > 0 && densityVolume[x + step, y, z] > 0 && densityVolume[x, y, z + step] > 0)
+                        if (x + step < width && z + step < depth &&
+                            densityVolume[x + step, y, z + step] > 0 &&
+                            densityVolume[x + step, y, z] > 0 &&
+                            densityVolume[x, y, z + step] > 0)
                         {
                             PointF p1 = ProjectToScreen(x + step, y, z + step, viewWidth, viewHeight);
 
@@ -473,7 +737,10 @@ namespace CTS
                         }
 
                         // YZ diagonal - only if all corners have density
-                        if (densityVolume[x, y + step, z + step] > 0 && densityVolume[x, y + step, z] > 0 && densityVolume[x, y, z + step] > 0)
+                        if (y + step < height && z + step < depth &&
+                            densityVolume[x, y + step, z + step] > 0 &&
+                            densityVolume[x, y + step, z] > 0 &&
+                            densityVolume[x, y, z + step] > 0)
                         {
                             PointF p1 = ProjectToScreen(x, y + step, z + step, viewWidth, viewHeight);
 
@@ -491,21 +758,7 @@ namespace CTS
                         }
                     }
                 }
-            }
-        }
-
-        // Check if a voxel is on the boundary (has empty neighbor)
-        private bool IsBoundaryVoxel(int x, int y, int z)
-        {
-            // Check 6-connected neighbors
-            if (x > 0 && densityVolume[x - 1, y, z] <= 0) return true;
-            if (x < width - 1 && densityVolume[x + 1, y, z] <= 0) return true;
-            if (y > 0 && densityVolume[x, y - 1, z] <= 0) return true;
-            if (y < height - 1 && densityVolume[x, y + 1, z] <= 0) return true;
-            if (z > 0 && densityVolume[x, y, z - 1] <= 0) return true;
-            if (z < depth - 1 && densityVolume[x, y, z + 1] <= 0) return true;
-
-            return false;
+            });
         }
 
         // Draw density colorbar

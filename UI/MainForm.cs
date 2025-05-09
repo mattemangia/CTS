@@ -4001,6 +4001,12 @@ namespace CTS
 
             Logger.Log($"[MainForm] Dataset updated: {width}x{height}x{depth}, PixelSize: {pixelSize}");
         }
+        public void UpdatePixelSize(double newPixelSize)
+        {
+            pixelSize = newPixelSize;
+            Logger.Log($"[MainForm] Pixel size updated to {pixelSize:0.000000e-6} µm");
+        }
+
         #endregion
         #region 3D interpolation
         private bool[,,] SmoothMask(bool[,,] mask, int kernelSize, double threshold)

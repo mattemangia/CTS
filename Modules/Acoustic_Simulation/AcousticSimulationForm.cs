@@ -88,6 +88,7 @@ namespace CTS
         private SimulationResults simulationResults;
         private KryptonNumericUpDown numYoungsModulus;
         private KryptonNumericUpDown numPoissonRatio;
+        private float[,,] cachedZWaveField;
         public bool UseVisualizer { get; set; }
 
         // A class to store simulation results
@@ -133,6 +134,7 @@ namespace CTS
 
         public AcousticSimulationForm(MainForm mainForm)
         {
+            // These basic assignments are safe in constructor
             this.mainForm = mainForm;
             tx = 0;
             tz = 0;
@@ -141,24 +143,98 @@ namespace CTS
             ry = 0;
             rz = 0;
             isInitializing = true;
+
             try
             {
+                // Set basic form properties
+                this.Text = "Acoustic Simulation";
+                this.Size = new Size(1000, 800);
+                this.StartPosition = FormStartPosition.CenterScreen;
+                this.BackColor = Color.FromArgb(45, 45, 48); // Dark background
+
+                // Call InitializeComponent - this sets up all controls but doesn't initialize data
                 InitializeComponent();
-                
-                // Set the initial view parameters
+
+                // Set up default view parameters
                 rotationX = 30;
                 rotationY = 30;
                 zoom = 1.0f;
                 pan = new PointF(0, 0);
 
-                // Set initialization flag to false after everything is set up
-                isInitializing = false;
+                // IMPORTANT: Move complex initialization to the Load event
+                // This ensures the window handle exists before we do any BeginInvoke
+                this.Load += AcousticSimulationForm_Load;
             }
             catch (Exception ex)
             {
                 Logger.Log($"[AcousticSimulationForm] Construction error: {ex.Message}\n{ex.StackTrace}");
                 MessageBox.Show($"Error initializing Acoustic Simulation form: {ex.Message}",
                     "Initialization Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+        private void AcousticSimulationForm_Load(object sender, EventArgs e)
+        {
+            try
+            {
+                // Now we can safely use BeginInvoke for background operations
+                BeginInvoke(new Action(() =>
+                {
+                    try
+                    {
+                        // Load materials
+                        LoadMaterials();
+                        EnsureCorrectMaterialSelected();
+
+                        // If we have materials, auto-select and initialize
+                        if (comboMaterials.Items.Count > 0)
+                        {
+                            comboMaterials.SelectedIndex = 0;
+                            if (selectedMaterial != null)
+                            {
+                                // Default density if not set
+                                if (baseDensity <= 0)
+                                {
+                                    baseDensity = 1000; // Default to water density (kg/m³)
+                                    selectedMaterial.Density = baseDensity;
+                                    UpdateMaterialInfo();
+                                }
+
+                                // Initialize the volume with adaptive sampling for large datasets
+                                InitializeHomogeneousDensityVolume();
+
+                                // Calculate initial zoom based on volume size
+                                CalculateInitialZoomAndPosition();
+                            }
+                        }
+
+                        // Initialize calibration components
+                        InitializeCalibrationComponents();
+
+                        // Finally, set initialization flag to false
+                        isInitializing = false;
+
+                        // Force a redraw after initialization
+                        this.Invalidate(true);
+                        if (pictureBoxVolume != null && !pictureBoxVolume.IsDisposed)
+                        {
+                            pictureBoxVolume.Invalidate();
+                        }
+                        if (pictureBoxSimulation != null && !pictureBoxSimulation.IsDisposed)
+                        {
+                            pictureBoxSimulation.Invalidate();
+                        }
+                    }
+                    catch (Exception innerEx)
+                    {
+                        Logger.Log($"[AcousticSimulationForm_Load] Error during initialization: {innerEx.Message}\n{innerEx.StackTrace}");
+                        MessageBox.Show($"Error completing initialization: {innerEx.Message}",
+                            "Initialization Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }));
+            }
+            catch (Exception loadEx)
+            {
+                Logger.Log($"[AcousticSimulationForm_Load] Error setting up load handler: {loadEx.Message}");
             }
         }
         private void InitializeComponent()
@@ -1301,6 +1377,40 @@ namespace CTS
         {
             try
             {
+                // First check if the source and destination are valid material points
+                if (mainForm == null || mainForm.volumeLabels == null)
+                {
+                    MessageBox.Show("Volume data not initialized.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                int width = mainForm.GetWidth();
+                int height = mainForm.GetHeight();
+                int depth = mainForm.GetDepth();
+
+                // Safety checks for coordinates
+                if (tx < 0 || tx >= width || ty < 0 || ty >= height || tz < 0 || tz >= depth ||
+                    rx < 0 || rx >= width || ry < 0 || ry >= height || rz < 0 || rz >= depth)
+                {
+                    MessageBox.Show("Invalid transmitter or receiver coordinates.",
+                        "Parameter Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                // Check if TX and RX are in the material
+                bool txInMaterial = (mainForm.volumeLabels[tx, ty, tz] == materialID);
+                bool rxInMaterial = (mainForm.volumeLabels[rx, ry, rz] == materialID);
+
+                if (!txInMaterial || !rxInMaterial)
+                {
+                    MessageBox.Show("Transmitter and/or receiver are not positioned within the selected material.",
+                        "Position Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+
+                    // Just create a straight line for visualization
+                    _pathPoints = CreateStraightLinePath(tx, ty, tz, rx, ry, rz, 50);
+                    return;
+                }
+
                 // Get volume labels
                 byte[,,] labels = GetVolumeLabelsArray();
 
@@ -1309,48 +1419,82 @@ namespace CTS
 
                 // Start calculation
                 Logger.Log($"[AcousticSimulationForm] Finding path from TX({tx},{ty},{tz}) to RX({rx},{ry},{rz})...");
-                _pathPoints = pathfinder.FindPath(tx, ty, tz, rx, ry, rz);
 
-                if (_pathPoints != null && _pathPoints.Count > 0)
+                // Use a task with proper error handling
+                Task.Run(() =>
                 {
-                    Logger.Log($"[AcousticSimulationForm] Path found with {_pathPoints.Count} points");
-
-                    // Log sample path points
-                    Logger.Log($"[AcousticSimulationForm] Path start: ({_pathPoints[0].X},{_pathPoints[0].Y},{_pathPoints[0].Z})");
-                    if (_pathPoints.Count > 2)
-                        Logger.Log($"[AcousticSimulationForm] Path middle: ({_pathPoints[_pathPoints.Count / 2].X},{_pathPoints[_pathPoints.Count / 2].Y},{_pathPoints[_pathPoints.Count / 2].Z})");
-                    Logger.Log($"[AcousticSimulationForm] Path end: ({_pathPoints[_pathPoints.Count - 1].X},{_pathPoints[_pathPoints.Count - 1].Y},{_pathPoints[_pathPoints.Count - 1].Z})");
-
-                    // Calculate path length
-                    double pathLength = 0;
-                    for (int i = 1; i < _pathPoints.Count; i++)
+                    try
                     {
-                        pathLength += Math.Sqrt(
-                            Math.Pow(_pathPoints[i].X - _pathPoints[i - 1].X, 2) +
-                            Math.Pow(_pathPoints[i].Y - _pathPoints[i - 1].Y, 2) +
-                            Math.Pow(_pathPoints[i].Z - _pathPoints[i - 1].Z, 2));
-                    }
+                        _pathPoints = pathfinder.FindPath(tx, ty, tz, rx, ry, rz);
 
-                    Logger.Log($"[AcousticSimulationForm] Path length: {pathLength:F1} pixels ({pathLength * mainForm.GetPixelSize() * 1000:F2} mm)");
-                }
-                else
-                {
-                    Logger.Log("[AcousticSimulationForm] No path found between TX and RX!");
-                    MessageBox.Show(
-                        "Could not find a continuous material path between TX and RX.\n" +
-                        "The simulation will not work correctly because the wave cannot propagate.",
-                        "Path Error",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Warning);
-                }
+                        if (_pathPoints != null && _pathPoints.Count > 0)
+                        {
+                            Logger.Log($"[AcousticSimulationForm] Path found with {_pathPoints.Count} points");
+
+                            // Log sample path points
+                            Logger.Log($"[AcousticSimulationForm] Path start: ({_pathPoints[0].X},{_pathPoints[0].Y},{_pathPoints[0].Z})");
+                            if (_pathPoints.Count > 2)
+                                Logger.Log($"[AcousticSimulationForm] Path middle: ({_pathPoints[_pathPoints.Count / 2].X},{_pathPoints[_pathPoints.Count / 2].Y},{_pathPoints[_pathPoints.Count / 2].Z})");
+                            Logger.Log($"[AcousticSimulationForm] Path end: ({_pathPoints[_pathPoints.Count - 1].X},{_pathPoints[_pathPoints.Count - 1].Y},{_pathPoints[_pathPoints.Count - 1].Z})");
+
+                            // Calculate path length
+                            double pathLength = 0;
+                            for (int i = 1; i < _pathPoints.Count; i++)
+                            {
+                                pathLength += Math.Sqrt(
+                                    Math.Pow(_pathPoints[i].X - _pathPoints[i - 1].X, 2) +
+                                    Math.Pow(_pathPoints[i].Y - _pathPoints[i - 1].Y, 2) +
+                                    Math.Pow(_pathPoints[i].Z - _pathPoints[i - 1].Z, 2));
+                            }
+
+                            Logger.Log($"[AcousticSimulationForm] Path length: {pathLength:F1} pixels ({pathLength * mainForm.GetPixelSize() * 1000:F2} mm)");
+
+                            // Update UI on the UI thread
+                            BeginInvoke(new Action(() => {
+                                pictureBoxSimulation.Invalidate();
+                            }));
+                        }
+                        else
+                        {
+                            Logger.Log("[AcousticSimulationForm] No path found between TX and RX!");
+
+                            // Create a fallback straight line path
+                            _pathPoints = CreateStraightLinePath(tx, ty, tz, rx, ry, rz, 50);
+
+                            BeginInvoke(new Action(() => {
+                                MessageBox.Show(
+                                    "Could not find a continuous material path between TX and RX.\n" +
+                                    "Using a straight line path instead, but this may not represent accurate wave propagation.",
+                                    "Path Warning",
+                                    MessageBoxButtons.OK,
+                                    MessageBoxIcon.Warning);
+
+                                pictureBoxSimulation.Invalidate();
+                            }));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[AcousticSimulationForm] Path calculation error: {ex.Message}");
+
+                        // Fallback to straight line
+                        _pathPoints = CreateStraightLinePath(tx, ty, tz, rx, ry, rz, 50);
+
+                        BeginInvoke(new Action(() => {
+                            MessageBox.Show($"Error calculating path: {ex.Message}\n\nUsing straight line path instead.",
+                                "Path Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+
+                            pictureBoxSimulation.Invalidate();
+                        }));
+                    }
+                });
             }
             catch (Exception ex)
             {
-                Logger.Log($"[AcousticSimulationForm] Error calculating path: {ex.Message}");
-                MessageBox.Show($"Error calculating path: {ex.Message}", "Path Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Logger.Log($"[AcousticSimulationForm] Error initializing path calculation: {ex.Message}");
+                MessageBox.Show($"Error initializing path calculation: {ex.Message}", "Path Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
-
         private void PictureBoxSimulation_MouseDown(object sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left || e.Button == MouseButtons.Right)
@@ -2361,100 +2505,101 @@ namespace CTS
         }
         private (double[,,] vx, double[,,] vy, double[,,] vz) GetWaveFieldSnapshot()
         {
-            // Try to get active simulator data
-            if (usingGpuSimulator && gpuSimulator != null)
+            try
             {
-                return gpuSimulator.GetWaveFieldSnapshot();
-            }
-            else if (cpuSimulator != null)
-            {
-                return cpuSimulator.GetWaveFieldSnapshot();
-            }
+                // Try to get active simulator data
+                if (usingGpuSimulator && gpuSimulator != null)
+                {
+                    return gpuSimulator.GetWaveFieldSnapshot();
+                }
+                else if (cpuSimulator != null)
+                {
+                    return cpuSimulator.GetWaveFieldSnapshot();
+                }
 
-            // Check if we have cached wave field data from a loaded file - THIS IS THE FIX
-            if (cachedPWaveField != null && cachedSWaveField != null)
-            {
-                // Convert cached float arrays back to double
-                int volumeWidth = mainForm.GetWidth();
-                int volumeHeight = mainForm.GetHeight();
-                int volumeDepth = mainForm.GetDepth();
+                // Check if we have cached wave field data from a loaded file
+                if (cachedPWaveField != null && cachedSWaveField != null)
+                {
+                    // Convert cached float arrays back to double
+                    int volumeWidth = mainForm.GetWidth();
+                    int volumeHeight = mainForm.GetHeight();
+                    int volumeDepth = mainForm.GetDepth();
 
-                double[,,] fieldVx = new double[volumeWidth, volumeHeight, volumeDepth];
-                double[,,] fieldVy = new double[volumeWidth, volumeHeight, volumeDepth];
-                double[,,] fieldVz = new double[volumeWidth, volumeHeight, volumeDepth];
+                    // Safety check for null mainForm
+                    if (volumeWidth <= 0 || volumeHeight <= 0 || volumeDepth <= 0)
+                    {
+                        Logger.Log("[GetWaveFieldSnapshot] WARNING: Invalid volume dimensions, using defaults");
+                        volumeWidth = cachedPWaveField.GetLength(0);
+                        volumeHeight = cachedPWaveField.GetLength(1);
+                        volumeDepth = cachedPWaveField.GetLength(2);
+                    }
 
-                // Copy data from cached fields
-                for (int z = 0; z < volumeDepth; z++)
-                    for (int y = 0; y < volumeHeight; y++)
-                        for (int x = 0; x < volumeWidth; x++)
-                        {
-                            if (x < cachedPWaveField.GetLength(0) &&
-                                y < cachedPWaveField.GetLength(1) &&
-                                z < cachedPWaveField.GetLength(2))
+                    // Create arrays with appropriate dimensions
+                    double[,,] fieldVx = new double[volumeWidth, volumeHeight, volumeDepth];
+                    double[,,] fieldVy = new double[volumeWidth, volumeHeight, volumeDepth];
+                    double[,,] fieldVz = new double[volumeWidth, volumeHeight, volumeDepth];
+
+                    // SAFE array copy - handles dimension mismatches
+                    int copyWidth = Math.Min(volumeWidth, cachedPWaveField.GetLength(0));
+                    int copyHeight = Math.Min(volumeHeight, cachedPWaveField.GetLength(1));
+                    int copyDepth = Math.Min(volumeDepth, cachedPWaveField.GetLength(2));
+
+                    // Copy data from cached fields with proper bounds checking
+                    for (int z = 0; z < copyDepth; z++)
+                        for (int y = 0; y < copyHeight; y++)
+                            for (int x = 0; x < copyWidth; x++)
                             {
                                 fieldVx[x, y, z] = cachedPWaveField[x, y, z];
-                            }
-
-                            if (x < cachedSWaveField.GetLength(0) &&
-                                y < cachedSWaveField.GetLength(1) &&
-                                z < cachedSWaveField.GetLength(2))
-                            {
                                 fieldVy[x, y, z] = cachedSWaveField[x, y, z];
+
+                                // FIX: Use cachedZWaveField if available, otherwise leave fieldVz as zero
+                                if (cachedZWaveField != null &&
+                                    x < cachedZWaveField.GetLength(0) &&
+                                    y < cachedZWaveField.GetLength(1) &&
+                                    z < cachedZWaveField.GetLength(2))
+                                {
+                                    fieldVz[x, y, z] = cachedZWaveField[x, y, z];
+                                }
                             }
-                            // fieldVz stays zero
-                        }
 
-                return (fieldVx, fieldVy, fieldVz);
-            }
+                    return (fieldVx, fieldVy, fieldVz);
+                }
 
-            // If no active simulator or cached data, create a simple wave field
-            int w = mainForm.GetWidth();
-            int h = mainForm.GetHeight();
-            int d = mainForm.GetDepth();
+                // If no active simulator or cached data, create a simple wave field
+                int w = 100, h = 100, d = 100;
 
-            double[,,] resultVx = new double[w, h, d];
-            double[,,] resultVy = new double[w, h, d];
-            double[,,] resultVz = new double[w, h, d];
-
-            // Create a wave field pattern focused around the path between TX and RX
-            Parallel.For(0, d, z => {
-                for (int y = 0; y < h; y++)
+                // Try to get actual dimensions safely
+                try
                 {
-                    for (int x = 0; x < w; x++)
+                    if (mainForm != null)
                     {
-                        // Skip voxels not in the material
-                        if (mainForm.volumeLabels[x, y, z] != selectedMaterialID)
-                            continue;
-
-                        // Calculate distance to TX-RX line
-                        double t = CalculateProjectionOnLine(tx, ty, tz, rx, ry, rz, x, y, z);
-                        t = Math.Max(0, Math.Min(1, t)); // Clamp to [0,1]
-
-                        double px = tx + t * (rx - tx);
-                        double py = ty + t * (ry - ty);
-                        double pz = tz + t * (rz - tz);
-
-                        double distToLine = Math.Sqrt(
-                            (x - px) * (x - px) + (y - py) * (y - py) + (z - pz) * (z - pz));
-
-                        // Create a wave-like pattern that decreases with distance from the line
-                        if (distToLine < 20)
-                        {
-                            double falloff = Math.Exp(-distToLine / 5.0);
-                            double wave = Math.Sin(t * 10) * falloff * 0.01;
-
-                            // For P-wave (vx), create a pattern along the TX-RX direction
-                            resultVx[x, y, z] = wave;
-
-                            // For S-wave (vy, vz), create patterns perpendicular to the TX-RX direction
-                            resultVy[x, y, z] = Math.Cos(t * 8) * falloff * 0.008;
-                            resultVz[x, y, z] = Math.Sin(t * 8) * falloff * 0.008;
-                        }
+                        w = Math.Max(10, mainForm.GetWidth());
+                        h = Math.Max(10, mainForm.GetHeight());
+                        d = Math.Max(10, mainForm.GetDepth());
                     }
                 }
-            });
+                catch (Exception ex)
+                {
+                    Logger.Log($"[GetWaveFieldSnapshot] Error getting volume dimensions: {ex.Message}");
+                }
 
-            return (resultVx, resultVy, resultVz);
+                double[,,] resultVx = new double[w, h, d];
+                double[,,] resultVy = new double[w, h, d];
+                double[,,] resultVz = new double[w, h, d];
+
+                // Return empty arrays - don't try to create wave patterns
+                // This is more stable for initialization
+                return (resultVx, resultVy, resultVz);
+            }
+            catch (Exception ex)
+            {
+                // Log error but don't crash
+                Logger.Log($"[GetWaveFieldSnapshot] Error: {ex.Message}");
+
+                // Return minimal valid result to avoid crashes
+                double[,,] emptyArray = new double[1, 1, 1];
+                return (emptyArray, emptyArray, emptyArray);
+            }
         }
         private void DrawWavePropagation(Graphics g, VolumeRenderer renderer)
         {
@@ -2659,166 +2804,246 @@ namespace CTS
         private bool simulationRenderedOnce = false;
         private void PictureBoxSimulation_Paint(object sender, PaintEventArgs e)
         {
-            // Skip any first, phantom paint while initializing
-            if (isInitializing && simulationRenderedOnce)
-                return;
-            simulationRenderedOnce = true;
-
-            // Clear the background
-            e.Graphics.Clear(Color.FromArgb(20, 20, 20));
-
-            if (simulationRenderer != null)
+            try
             {
-                // Sync the camera transform every frame
-                simulationRenderer.SetTransformation(simRotationX, simRotationY, simZoom, simPan);
+                // Clear the background
+                e.Graphics.Clear(Color.FromArgb(20, 20, 20));
 
-                if (simulationRunning && simulator != null)
+                // If initializing, show a loading message and return
+                if (isInitializing)
                 {
-                    // Simulation is running → draw JUST the waves
-                    DrawWavePropagation(e.Graphics, simulationRenderer);
+                    using (Font font = new Font("Segoe UI", 12))
+                    using (SolidBrush brush = new SolidBrush(Color.White))
+                    {
+                        string message = "Initializing simulation view...";
+                        SizeF textSize = e.Graphics.MeasureString(message, font);
+                        e.Graphics.DrawString(message, font, brush,
+                            (pictureBoxSimulation.Width - textSize.Width) / 2,
+                            (pictureBoxSimulation.Height - textSize.Height) / 2);
+                    }
+                    return;
+                }
+
+                if (simulationRenderer != null)
+                {
+                    // Sync the camera transform every frame
+                    simulationRenderer.SetTransformation(simRotationX, simRotationY, simZoom, simPan);
+
+                    if (simulationRunning && simulator != null)
+                    {
+                        try
+                        {
+                            // Simulation is running → draw JUST the waves
+                            DrawWavePropagation(e.Graphics, simulationRenderer);
+                        }
+                        catch (Exception wavesEx)
+                        {
+                            Logger.Log($"[PictureBoxSimulation_Paint] Error drawing waves: {wavesEx.Message}");
+                        }
+                    }
+                    else
+                    {
+                        try
+                        {
+                            // Not running → draw the static, density-colored mesh
+                            simulationRenderer.Render(
+                                e.Graphics,
+                                pictureBoxSimulation.Width,
+                                pictureBoxSimulation.Height
+                            );
+
+                            // If we have final results, overlay them
+                            if (simulationResults != null)
+                            {
+                                DrawSimulationResults(e.Graphics);
+                            }
+                        }
+                        catch (Exception renderEx)
+                        {
+                            Logger.Log($"[PictureBoxSimulation_Paint] Error rendering simulation: {renderEx.Message}");
+                        }
+                    }
+
+                    // Always draw the transducers + info on top
+                    try
+                    {
+                        DrawTransducers(e.Graphics, simulationRenderer);
+                        DrawSimulationInfo(e.Graphics);
+                    }
+                    catch (Exception overlayEx)
+                    {
+                        Logger.Log($"[PictureBoxSimulation_Paint] Error drawing overlays: {overlayEx.Message}");
+                    }
                 }
                 else
                 {
-                    // Not running → draw the static, density-colored mesh
-                    simulationRenderer.Render(
-                        e.Graphics,
-                        pictureBoxSimulation.Width,
-                        pictureBoxSimulation.Height
-                    );
-
-                    // If we have final results, overlay them
-                    if (simulationResults != null)
+                    // Fallback: should never happen now
+                    using (Font font = new Font("Segoe UI", 12, FontStyle.Regular))
+                    using (SolidBrush brush = new SolidBrush(Color.White))
                     {
-                        DrawSimulationResults(e.Graphics);
+                        string msg = "Simulation not initialized.";
+                        SizeF sz = e.Graphics.MeasureString(msg, font);
+                        e.Graphics.DrawString(
+                            msg,
+                            font,
+                            brush,
+                            (pictureBoxSimulation.Width - sz.Width) / 2f,
+                            (pictureBoxSimulation.Height - sz.Height) / 2f
+                        );
                     }
                 }
-
-                // Always draw the transducers + info on top
-                DrawTransducers(e.Graphics, simulationRenderer);
-                DrawSimulationInfo(e.Graphics);
             }
-            else
+            catch (Exception ex)
             {
-                // Fallback: should never happen now
-                using (Font font = new Font("Segoe UI", 12, FontStyle.Regular))
-                using (SolidBrush brush = new SolidBrush(Color.White))
+                // Log error but don't crash
+                Logger.Log($"[PictureBoxSimulation_Paint] Error: {ex.Message}");
+
+                // Draw error message
+                using (Font font = new Font("Segoe UI", 10))
+                using (SolidBrush brush = new SolidBrush(Color.Red))
                 {
-                    string msg = "Simulation not initialized.";
-                    SizeF sz = e.Graphics.MeasureString(msg, font);
-                    e.Graphics.DrawString(
-                        msg,
-                        font,
-                        brush,
-                        (pictureBoxSimulation.Width - sz.Width) / 2f,
-                        (pictureBoxSimulation.Height - sz.Height) / 2f
-                    );
+                    e.Graphics.DrawString($"Rendering error: {ex.Message}", font, brush, 10, 10);
                 }
             }
         }
         private void DrawTransducers(Graphics g, VolumeRenderer renderer)
         {
-            if (renderer == null) return;
-
-            // Use the instance variables without underscores
-            //Logger.Log($"[DrawTransducers] Using TX: ({tx},{ty},{tz}), RX: ({rx},{ry},{rz})");
-
-            // Check valid ranges for transducer coordinates
-            int width = mainForm.GetWidth();
-            int height = mainForm.GetHeight();
-            int depth = mainForm.GetDepth();
-
-            // Safety checks to prevent out-of-range coordinates
-            if (tx < 0 || tx >= width || ty < 0 || ty >= height || tz < 0 || tz >= depth ||
-                rx < 0 || rx >= width || ry < 0 || ry >= height || rz < 0 || rz >= depth)
+            try
             {
-                Logger.Log("[DrawTransducers] Warning: transducer coordinates out of range, using defaults");
+                if (renderer == null)
+                    return;
 
-                // If coordinates are invalid, use defaults
-                tx = Math.Min(width - 1, Math.Max(0, width / 4));
-                ty = Math.Min(height - 1, Math.Max(0, height / 2));
-                tz = Math.Min(depth - 1, Math.Max(0, depth / 2));
-                rx = Math.Min(width - 1, Math.Max(0, width * 3 / 4));
-                ry = Math.Min(height - 1, Math.Max(0, height / 2));
-                rz = Math.Min(depth - 1, Math.Max(0, depth / 2));
-            }
+                // Check valid ranges for transducer coordinates
+                int width = mainForm?.GetWidth() ?? 100;
+                int height = mainForm?.GetHeight() ?? 100;
+                int depth = mainForm?.GetDepth() ?? 100;
 
-            // Convert to screen coordinates - use the renderer's transformation
-            PointF transmitterScreen = renderer.ProjectToScreen(
-                tx, ty, tz,
-                pictureBoxSimulation.Width, pictureBoxSimulation.Height);
+                // Make local copies of coordinates for thread safety
+                int localTx = tx;
+                int localTy = ty;
+                int localTz = tz;
+                int localRx = rx;
+                int localRy = ry;
+                int localRz = rz;
 
-            PointF receiverScreen = renderer.ProjectToScreen(
-                rx, ry, rz,
-                pictureBoxSimulation.Width, pictureBoxSimulation.Height);
-
-            // Draw transmitter (yellow)
-            using (SolidBrush brush = new SolidBrush(Color.Yellow))
-            {
-                g.FillEllipse(brush, transmitterScreen.X - 8, transmitterScreen.Y - 8, 16, 16);
-
-                // Add a border for better visibility
-                using (Pen pen = new Pen(Color.Black, 1))
+                // Safety checks to prevent out-of-range coordinates
+                if (localTx < 0 || localTx >= width || localTy < 0 || localTy >= height || localTz < 0 || localTz >= depth ||
+                    localRx < 0 || localRx >= width || localRy < 0 || localRy >= height || localRz < 0 || localRz >= depth)
                 {
-                    g.DrawEllipse(pen, transmitterScreen.X - 8, transmitterScreen.Y - 8, 16, 16);
-                }
-            }
+                    Logger.Log("[DrawTransducers] Warning: transducer coordinates out of range, using defaults");
 
-            // Draw receiver (green)
-            using (SolidBrush brush = new SolidBrush(Color.Green))
-            {
-                g.FillEllipse(brush, receiverScreen.X - 8, receiverScreen.Y - 8, 16, 16);
-
-                // Add a border for better visibility
-                using (Pen pen = new Pen(Color.Black, 1))
-                {
-                    g.DrawEllipse(pen, receiverScreen.X - 8, receiverScreen.Y - 8, 16, 16);
-                }
-            }
-
-            // Draw a line connecting them
-            using (Pen pen = new Pen(Color.White, 1.5f))
-            {
-                pen.DashStyle = DashStyle.Dash;
-                g.DrawLine(pen, transmitterScreen, receiverScreen);
-            }
-
-            // Add labels to identify transmitter and receiver
-            using (Font font = new Font("Segoe UI", 9, FontStyle.Bold))
-            {
-                using (SolidBrush brush = new SolidBrush(Color.White))
-                {
-                    g.DrawString("T", font, brush, transmitterScreen.X - 4, transmitterScreen.Y - 22);
-                    g.DrawString("R", font, brush, receiverScreen.X - 4, receiverScreen.Y - 22);
-                }
-            }
-
-            // Draw the path points if available
-            if (_pathPoints != null && _pathPoints.Count > 1)
-            {
-                PointF[] pathScreenPoints = new PointF[_pathPoints.Count];
-
-                // Convert all path points to screen coordinates
-                for (int i = 0; i < _pathPoints.Count; i++)
-                {
-                    pathScreenPoints[i] = renderer.ProjectToScreen(
-                        _pathPoints[i].X, _pathPoints[i].Y, _pathPoints[i].Z,
-                        pictureBoxSimulation.Width, pictureBoxSimulation.Height);
+                    // If coordinates are invalid, use defaults
+                    localTx = Math.Min(width - 1, Math.Max(0, width / 4));
+                    localTy = Math.Min(height - 1, Math.Max(0, height / 2));
+                    localTz = Math.Min(depth - 1, Math.Max(0, depth / 2));
+                    localRx = Math.Min(width - 1, Math.Max(0, width * 3 / 4));
+                    localRy = Math.Min(height - 1, Math.Max(0, height / 2));
+                    localRz = Math.Min(depth - 1, Math.Max(0, depth / 2));
                 }
 
-                // Draw path with semi-transparent white line
-                using (Pen pathPen = new Pen(Color.FromArgb(180, 255, 255, 255), 1.5f))
-                {
-                    g.DrawLines(pathPen, pathScreenPoints);
+                // Convert to screen coordinates
+                PointF transmitterScreen = renderer.ProjectToScreen(
+                    localTx, localTy, localTz,
+                    pictureBoxSimulation.Width, pictureBoxSimulation.Height);
 
-                    // Draw small dots at each path point for better visibility
-                    using (SolidBrush pathPointBrush = new SolidBrush(Color.FromArgb(180, 255, 255, 255)))
+                PointF receiverScreen = renderer.ProjectToScreen(
+                    localRx, localRy, localRz,
+                    pictureBoxSimulation.Width, pictureBoxSimulation.Height);
+
+                // Draw transmitter (yellow)
+                using (SolidBrush brush = new SolidBrush(Color.Yellow))
+                {
+                    g.FillEllipse(brush, transmitterScreen.X - 8, transmitterScreen.Y - 8, 16, 16);
+
+                    // Add a border for better visibility
+                    using (Pen pen = new Pen(Color.Black, 1))
                     {
-                        foreach (var point in pathScreenPoints)
-                        {
-                            g.FillEllipse(pathPointBrush, point.X - 2, point.Y - 2, 4, 4);
-                        }
+                        g.DrawEllipse(pen, transmitterScreen.X - 8, transmitterScreen.Y - 8, 16, 16);
                     }
                 }
+
+                // Draw receiver (green)
+                using (SolidBrush brush = new SolidBrush(Color.Green))
+                {
+                    g.FillEllipse(brush, receiverScreen.X - 8, receiverScreen.Y - 8, 16, 16);
+
+                    // Add a border for better visibility
+                    using (Pen pen = new Pen(Color.Black, 1))
+                    {
+                        g.DrawEllipse(pen, receiverScreen.X - 8, receiverScreen.Y - 8, 16, 16);
+                    }
+                }
+
+                // Draw a line connecting them
+                using (Pen pen = new Pen(Color.White, 1.5f))
+                {
+                    pen.DashStyle = DashStyle.Dash;
+                    g.DrawLine(pen, transmitterScreen, receiverScreen);
+                }
+
+                // Add labels to identify transmitter and receiver
+                using (Font font = new Font("Segoe UI", 9, FontStyle.Bold))
+                {
+                    using (SolidBrush brush = new SolidBrush(Color.White))
+                    {
+                        g.DrawString("T", font, brush, transmitterScreen.X - 4, transmitterScreen.Y - 22);
+                        g.DrawString("R", font, brush, receiverScreen.X - 4, receiverScreen.Y - 22);
+                    }
+                }
+
+                // Draw the path points if available
+                if (_pathPoints != null && _pathPoints.Count > 1)
+                {
+                    try
+                    {
+                        PointF[] pathScreenPoints = new PointF[_pathPoints.Count];
+
+                        // Convert all path points to screen coordinates
+                        for (int i = 0; i < _pathPoints.Count; i++)
+                        {
+                            pathScreenPoints[i] = renderer.ProjectToScreen(
+                                _pathPoints[i].X, _pathPoints[i].Y, _pathPoints[i].Z,
+                                pictureBoxSimulation.Width, pictureBoxSimulation.Height);
+                        }
+
+                        // Draw path with semi-transparent white line
+                        using (Pen pathPen = new Pen(Color.FromArgb(180, 255, 255, 255), 1.5f))
+                        {
+                            // Use a more robust line drawing approach
+                            for (int i = 1; i < pathScreenPoints.Length; i++)
+                            {
+                                // Check for invalid/NaN coordinates that might cause crashes
+                                if (!float.IsNaN(pathScreenPoints[i - 1].X) && !float.IsNaN(pathScreenPoints[i - 1].Y) &&
+                                    !float.IsNaN(pathScreenPoints[i].X) && !float.IsNaN(pathScreenPoints[i].Y))
+                                {
+                                    g.DrawLine(pathPen, pathScreenPoints[i - 1], pathScreenPoints[i]);
+                                }
+                            }
+
+                            // Draw small dots at each path point for better visibility
+                            using (SolidBrush pathPointBrush = new SolidBrush(Color.FromArgb(180, 255, 255, 255)))
+                            {
+                                foreach (var point in pathScreenPoints)
+                                {
+                                    if (!float.IsNaN(point.X) && !float.IsNaN(point.Y))
+                                    {
+                                        g.FillEllipse(pathPointBrush, point.X - 2, point.Y - 2, 4, 4);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception pathEx)
+                    {
+                        // Log but don't crash
+                        Logger.Log($"[DrawTransducers] Error drawing path: {pathEx.Message}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log but don't crash
+                Logger.Log($"[DrawTransducers] Error: {ex.Message}");
             }
         }
         private void DrawSimulationInfo(Graphics g)
@@ -3580,7 +3805,6 @@ namespace CTS
                     Logger.Log("[AcousticSimulationForm] No valid material selected before volume initialization");
                     EnsureCorrectMaterialSelected();
 
-                    // If still no valid material, abort
                     if (selectedMaterial == null || selectedMaterialID <= 0)
                     {
                         Logger.Log("[AcousticSimulationForm] Aborting volume initialization - no valid material");
@@ -3591,6 +3815,17 @@ namespace CTS
                 int width = mainForm.GetWidth();
                 int height = mainForm.GetHeight();
                 int depth = mainForm.GetDepth();
+
+                // Calculate total volume size
+                long volumeSize = (long)width * height * depth;
+                Logger.Log($"[AcousticSimulationForm] Initializing volume of size: {width}x{height}x{depth} ({volumeSize:N0} voxels)");
+
+                // For extremely large datasets, use more aggressive optimization
+                bool isExtremelyLarge = volumeSize > 500_000_000; // ~500 million voxels
+                if (isExtremelyLarge)
+                {
+                    Logger.Log("[AcousticSimulationForm] Extremely large dataset detected - using optimized processing");
+                }
 
                 // Ensure we're using valid material ID (greater than 0)
                 byte materialID = selectedMaterialID;
@@ -3618,49 +3853,128 @@ namespace CTS
                     }
                 }
 
-                Logger.Log($"[AcousticSimulationForm] Initializing volume with material ID {materialID}");
-
-                // Build a homogeneous density volume
-                float[,,] homogeneousDensityVolume = new float[width, height, depth];
-                int materialVoxelCount = 0;
-
-                Parallel.For(0, depth, z =>
+                // For extremely large volumes, use an optimized approach 
+                // with sparse sampling and chunked processing
+                if (isExtremelyLarge)
                 {
-                    for (int y = 0; y < height; y++)
-                        for (int x = 0; x < width; x++)
+                    // Create lower resolution density volume for rendering
+                    int downsampleFactor = CalculateDownsampleFactor(width, height, depth);
+                    int downWidth = Math.Max(1, width / downsampleFactor);
+                    int downHeight = Math.Max(1, height / downsampleFactor);
+                    int downDepth = Math.Max(1, depth / downsampleFactor);
+
+                    Logger.Log($"[AcousticSimulationForm] Using downsampled volume: {downWidth}x{downHeight}x{downDepth} (factor: {downsampleFactor})");
+
+                    // Create downsampled volume
+                    densityVolume = new float[downWidth, downHeight, downDepth];
+                    int materialVoxelCount = 0;
+
+                    // Process in chunks to reduce memory pressure
+                    int chunkSize = 32;
+                    for (int zChunk = 0; zChunk < depth; zChunk += chunkSize)
+                    {
+                        int zEnd = Math.Min(zChunk + chunkSize, depth);
+
+                        Parallel.For(zChunk, zEnd, z =>
                         {
-                            if (mainForm.volumeLabels[x, y, z] == materialID)
+                            for (int y = 0; y < height; y += downsampleFactor)
                             {
-                                homogeneousDensityVolume[x, y, z] = (float)baseDensity;
-                                Interlocked.Increment(ref materialVoxelCount);
+                                for (int x = 0; x < width; x += downsampleFactor)
+                                {
+                                    // Check if this voxel or any in its neighborhood is material
+                                    bool foundMaterial = false;
+                                    float avgDensity = 0;
+                                    int countMaterial = 0;
+
+                                    // Sample the neighborhood
+                                    for (int sz = 0; sz < downsampleFactor && z + sz < depth; sz++)
+                                    {
+                                        for (int sy = 0; sy < downsampleFactor && y + sy < height; sy++)
+                                        {
+                                            for (int sx = 0; sx < downsampleFactor && x + sx < width; sx++)
+                                            {
+                                                if (mainForm.volumeLabels[x + sx, y + sy, z + sz] == materialID)
+                                                {
+                                                    foundMaterial = true;
+                                                    avgDensity += (float)baseDensity;
+                                                    countMaterial++;
+                                                    Interlocked.Increment(ref materialVoxelCount);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // If material found in this region, set average density
+                                    int dx = x / downsampleFactor;
+                                    int dy = y / downsampleFactor;
+                                    int dz = z / downsampleFactor;
+
+                                    if (dx < downWidth && dy < downHeight && dz < downDepth)
+                                    {
+                                        if (foundMaterial && countMaterial > 0)
+                                        {
+                                            densityVolume[dx, dy, dz] = avgDensity / countMaterial;
+                                        }
+                                        else
+                                        {
+                                            densityVolume[dx, dy, dz] = 0f;
+                                        }
+                                    }
+                                }
                             }
-                            else
+                        });
+                    }
+
+                    Logger.Log($"[AcousticSimulationForm] Downsampled volume initialized with {materialVoxelCount} material voxels");
+                }
+                else
+                {
+                    // Standard approach for regular-sized volumes
+                    // Build a homogeneous density volume
+                    densityVolume = new float[width, height, depth];
+                    int materialVoxelCount = 0;
+
+                    Parallel.For(0, depth, z =>
+                    {
+                        for (int y = 0; y < height; y++)
+                            for (int x = 0; x < width; x++)
                             {
-                                homogeneousDensityVolume[x, y, z] = 0f;
+                                if (mainForm.volumeLabels[x, y, z] == materialID)
+                                {
+                                    densityVolume[x, y, z] = (float)baseDensity;
+                                    Interlocked.Increment(ref materialVoxelCount);
+                                }
+                                else
+                                {
+                                    densityVolume[x, y, z] = 0f;
+                                }
                             }
-                        }
-                });
+                    });
 
-                Logger.Log($"[AcousticSimulationForm] Volume initialized with {materialVoxelCount} voxels");
-
-                // Store for later rendering
-                densityVolume = homogeneousDensityVolume;
+                    Logger.Log($"[AcousticSimulationForm] Volume initialized with {materialVoxelCount} voxels");
+                }
 
                 // Primary volumeRenderer (used on the Volume tab)
                 volumeRenderer = new VolumeRenderer(
                     densityVolume,
-                    width, height, depth,
+                    densityVolume.GetLength(0),
+                    densityVolume.GetLength(1),
+                    densityVolume.GetLength(2),
                     mainForm.GetPixelSize(),
                     materialID,
                     useFullVolumeRendering
                 );
+
+                // Set transformation
                 CalculateInitialZoomAndPosition();
                 volumeRenderer.SetTransformation(rotationX, rotationY, zoom, pan);
 
                 // Initialize simulationRenderer only when needed
                 simulationRenderer = new VolumeRenderer(
                     densityVolume,
-                    width, height, depth,
+                    densityVolume.GetLength(0),
+                    densityVolume.GetLength(1),
+                    densityVolume.GetLength(2),
                     mainForm.GetPixelSize(),
                     materialID,
                     useFullVolumeRendering
@@ -3670,8 +3984,11 @@ namespace CTS
                 hasDensityVariation = false;
                 CalculateVolumes();
 
-                if (!isInitializing)
+                // Force a render for visualization
+                if (!isInitializing && pictureBoxVolume != null && !pictureBoxVolume.IsDisposed)
+                {
                     pictureBoxVolume.Invalidate();
+                }
             }
             catch (Exception ex)
             {
@@ -3685,7 +4002,23 @@ namespace CTS
                 }
             }
         }
+        private int CalculateDownsampleFactor(int width, int height, int depth)
+        {
+            long voxelCount = (long)width * height * depth;
 
+            // Target reasonable size, about 50-100 million voxels
+            long targetSize = 75_000_000;
+
+            if (voxelCount <= targetSize)
+                return 1; // No downsampling needed
+
+            // Calculate downsample factor
+            double ratio = Math.Pow(voxelCount / (double)targetSize, 1.0 / 3.0);
+            int factor = (int)Math.Ceiling(ratio);
+
+            // Ensure factor is at least 2 and at most 8
+            return Math.Max(2, Math.Min(8, factor));
+        }
         private byte[,,] GetVolumeLabelsArray()
         {
             int width = mainForm.GetWidth();
@@ -4395,64 +4728,105 @@ namespace CTS
         private bool renderedOnce = false;
         private void PictureBoxVolume_Paint(object sender, PaintEventArgs e)
         {
-            // If we're still initializing and this isn't the first render, skip
-            if (isInitializing && e.ClipRectangle.Width > 0 && renderedOnce)
-                return;
-
-            renderedOnce = true;
-
-            // If we have a volume renderer, use it to render the volume
-            if (volumeRenderer != null)
+            try
             {
-                volumeRenderer.Render(e.Graphics, pictureBoxVolume.Width, pictureBoxVolume.Height);
+                // Clear background first
+                e.Graphics.Clear(Color.FromArgb(20, 20, 20));
 
-                // Draw additional information at the top
-                string densityInfo = hasDensityVariation
-                    ? "Variable Density Visualization"
-                    : "Homogeneous Density Visualization";
-
-                using (Font font = new Font("Segoe UI", 10, System.Drawing.FontStyle.Bold))
-                using (SolidBrush brush = new SolidBrush(Color.White))
+                // If we're still initializing, show a loading message
+                if (isInitializing)
                 {
-                    // Top info
-                    e.Graphics.DrawString(densityInfo, font, brush, 10, 10);
-                    e.Graphics.DrawString($"Material: {selectedMaterial.Name} (ID: {selectedMaterialID})", font, brush, 10, 30);
-                    e.Graphics.DrawString($"Density: {baseDensity:F1} kg/m³", font, brush, 10, 50);
+                    using (Font font = new Font("Segoe UI", 12))
+                    using (SolidBrush brush = new SolidBrush(Color.White))
+                    {
+                        string message = "Initializing volume visualization...";
+                        SizeF textSize = e.Graphics.MeasureString(message, font);
+                        e.Graphics.DrawString(message, font, brush,
+                            (pictureBoxVolume.Width - textSize.Width) / 2,
+                            (pictureBoxVolume.Height - textSize.Height) / 2);
+                    }
+                    return;
+                }
 
-                    // Bottom info - use pre-calculated values
-                    int bottomY = pictureBoxVolume.Height - 70;
-                    e.Graphics.DrawString($"Material Volume: {materialVolume:F2} {volumeUnit}", font, brush, 10, bottomY);
-                    e.Graphics.DrawString($"Total Volume: {totalMaterialVolume:F2} {volumeUnit}", font, brush, 10, bottomY + 20);
-                    e.Graphics.DrawString($"Volume Percentage: {volumePercentage:F2}%", font, brush, 10, bottomY + 40);
+                // If we have a volume renderer, use it to render the volume
+                if (volumeRenderer != null)
+                {
+                    // Set the latest transformation values
+                    volumeRenderer.SetTransformation(rotationX, rotationY, zoom, pan);
+
+                    // Render the volume
+                    volumeRenderer.Render(e.Graphics, pictureBoxVolume.Width, pictureBoxVolume.Height);
+
+                    // Draw additional information at the top
+                    string densityInfo = hasDensityVariation
+                        ? "Variable Density Visualization"
+                        : "Homogeneous Density Visualization";
+
+                    using (Font font = new Font("Segoe UI", 10, System.Drawing.FontStyle.Bold))
+                    using (SolidBrush brush = new SolidBrush(Color.White))
+                    {
+                        // Check if selectedMaterial is not null before using it
+                        if (selectedMaterial != null)
+                        {
+                            // Top info
+                            e.Graphics.DrawString(densityInfo, font, brush, 10, 10);
+                            e.Graphics.DrawString($"Material: {selectedMaterial.Name} (ID: {selectedMaterialID})", font, brush, 10, 30);
+                            e.Graphics.DrawString($"Density: {baseDensity:F1} kg/m³", font, brush, 10, 50);
+
+                            // Bottom info - use pre-calculated values
+                            int bottomY = pictureBoxVolume.Height - 70;
+                            e.Graphics.DrawString($"Material Volume: {materialVolume:F2} {volumeUnit}", font, brush, 10, bottomY);
+                            e.Graphics.DrawString($"Total Volume: {totalMaterialVolume:F2} {volumeUnit}", font, brush, 10, bottomY + 20);
+                            e.Graphics.DrawString($"Volume Percentage: {volumePercentage:F2}%", font, brush, 10, bottomY + 40);
+                        }
+                        else
+                        {
+                            // Display a message if no material is selected
+                            e.Graphics.DrawString("No material selected", font, brush, 10, 10);
+                        }
+                    }
+                }
+                else
+                {
+                    // Draw default message
+                    using (Font font = new Font("Segoe UI", 12))
+                    using (SolidBrush brush = new SolidBrush(Color.White))
+                    {
+                        string message;
+                        if (selectedMaterial == null)
+                        {
+                            message = "Please select a material";
+                        }
+                        else if (baseDensity <= 0)
+                        {
+                            message = "Please set material density";
+                        }
+                        else
+                        {
+                            message = "Initializing volume visualization...";
+                        }
+
+                        SizeF textSize = e.Graphics.MeasureString(message, font);
+                        e.Graphics.DrawString(message, font, brush,
+                            (pictureBoxVolume.Width - textSize.Width) / 2,
+                            (pictureBoxVolume.Height - textSize.Height) / 2);
+                    }
                 }
             }
-            else
+            catch (Exception ex)
             {
-                // Draw default message
-                using (Font font = new Font("Segoe UI", 12))
-                using (SolidBrush brush = new SolidBrush(Color.White))
-                {
-                    string message;
-                    if (selectedMaterial == null)
-                    {
-                        message = "Please select a material";
-                    }
-                    else if (baseDensity <= 0)
-                    {
-                        message = "Please set material density";
-                    }
-                    else
-                    {
-                        message = "Initializing volume visualization...";
-                    }
+                // Log error but don't crash
+                Logger.Log($"[PictureBoxVolume_Paint] Error: {ex.Message}");
 
-                    SizeF textSize = e.Graphics.MeasureString(message, font);
-                    e.Graphics.DrawString(message, font, brush,
-                        (pictureBoxVolume.Width - textSize.Width) / 2,
-                        (pictureBoxVolume.Height - textSize.Height) / 2);
+                // Draw error message
+                using (Font font = new Font("Segoe UI", 10))
+                using (SolidBrush brush = new SolidBrush(Color.Red))
+                {
+                    e.Graphics.DrawString($"Rendering error: {ex.Message}", font, brush, 10, 10);
                 }
             }
         }
+
         protected override void Dispose(bool disposing)
         {
             if (disposing)

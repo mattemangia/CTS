@@ -1094,11 +1094,21 @@ namespace CTS
             {
                 Progress<int> progress = new Progress<int>(percent =>
                 {
-                    progressBar.Value = percent;
+                    if (!IsDisposed && progressBar != null && !progressBar.IsDisposed)
+                        progressBar.Value = percent;
                 });
 
-                // Use stored values instead of accessing controls directly
-                bool useGpu = useGpuCheckBox.Checked;
+                // Cancel any existing operation
+                if (cts != null)
+                {
+                    try
+                    {
+                        cts.Cancel();
+                        cts.Dispose();
+                    }
+                    catch { /* Ignore any errors during cancellation */ }
+                }
+                cts = new CancellationTokenSource();
 
                 // Use the new generator class
                 using (PoreNetworkGenerator generator = new PoreNetworkGenerator())
@@ -1108,13 +1118,14 @@ namespace CTS
                         separationResult,
                         mainForm.pixelSize,
                         progress,
-                        useGpu,
+                        useGpuCheckBox.Checked,
                         maxThroatLengthFactor,  // Class field
                         minOverlapFactor,       // Class field
-                        enforceFlowPath);       // Class field
+                        enforceFlowPath,        // Class field
+                        cts.Token);             // Add cancellation token
                 }
 
-                // Update UI
+                // Update UI with results
                 UpdatePoreTable();
                 Render3DVisualization();
 
@@ -1124,7 +1135,12 @@ namespace CTS
                 simulateButton.Enabled = true;
 
                 statusLabel.Text = $"Generated network with {networkModel.Pores.Count} pores and " +
-                    $"{networkModel.Throats.Count} throats. Porosity: {networkModel.Porosity:P2}";
+                                  $"{networkModel.Throats.Count} throats. Porosity: {networkModel.Porosity:P2}";
+            }
+            catch (OperationCanceledException)
+            {
+                statusLabel.Text = "Network generation cancelled";
+                Logger.Log("[PoreNetworkModelingForm] Network generation was cancelled by user");
             }
             catch (Exception ex)
             {
@@ -1134,7 +1150,6 @@ namespace CTS
                 Logger.Log($"[PoreNetworkModelingForm] Error: {ex.Message}\n{ex.StackTrace}");
             }
         }
-
         private void UpdatePreviewImage()
         {
             try

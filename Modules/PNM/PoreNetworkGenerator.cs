@@ -2,8 +2,10 @@
 using ILGPU.Runtime;
 using ILGPU.Runtime.CPU;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace CTS
@@ -14,10 +16,16 @@ namespace CTS
         private Accelerator accelerator;
         private bool gpuInitialized = false;
         private bool disposed = false;
+        private readonly int _degreeOfParallelism;
 
         public PoreNetworkGenerator()
         {
-            InitializeGPU();
+            // Initialize with optimal thread count based on available processors
+            _degreeOfParallelism = Math.Max(1, Environment.ProcessorCount - 1);
+            Logger.Log($"[PoreNetworkGenerator] Initialized with {_degreeOfParallelism} worker threads");
+
+            // Initialize GPU in the background to avoid UI blocking
+            Task.Run(() => InitializeGPU());
         }
 
         private void InitializeGPU()
@@ -59,157 +67,251 @@ namespace CTS
         }
 
         public async Task<PoreNetworkModel> GenerateNetworkFromSeparationResult(
-    ParticleSeparator.SeparationResult separationResult,
-    double pixelSize,
-    IProgress<int> progress,
-    bool useGpu,
-    double maxThroatLengthFactor = 3.0,
-    double minOverlapFactor = 0.1,
-    bool enforceFlowPath = true)
+            ParticleSeparator.SeparationResult separationResult,
+            double pixelSize,
+            IProgress<int> progress,
+            bool useGpu,
+            double maxThroatLengthFactor = 3.0,
+            double minOverlapFactor = 0.1,
+            bool enforceFlowPath = true,
+            CancellationToken cancellationToken = default)
         {
+            // Report initial progress
+            progress?.Report(0);
+
             PoreNetworkModel model = new PoreNetworkModel();
             model.PixelSize = pixelSize;
 
             // Create a Random instance with a fixed seed for reproducible results
             Random random = new Random(42);
 
-            // Convert particles to pores
-            progress?.Report(10);
-            await Task.Run(() =>
+            try
             {
-                // Extract pores from particles with consistent calculation
-                foreach (var particle in separationResult.Particles)
+                // Step 1: Convert particles to pores (parallelized)
+                progress?.Report(5);
+
+                // Use ConcurrentBag for thread-safe collection
+                var pores = new ConcurrentBag<Pore>();
+
+                await Task.Run(() =>
                 {
-                    double volume = particle.VoxelCount * Math.Pow(pixelSize, 3); // m³
-                    double radius = Math.Pow(3 * volume / (4 * Math.PI), 1.0 / 3.0); // m
-
-                    // Use the CPU method for surface area for consistency
-                    double surfaceArea = CalculateSurfaceArea(particle, separationResult.LabelVolume, pixelSize);
-
-                    Pore pore = new Pore
-                    {
-                        Id = particle.Id,
-                        Volume = volume * 1e18, // Convert to µm³
-                        Area = surfaceArea * 1e12, // Convert to µm²
-                        Radius = radius * 1e6, // Convert to µm
-                        Center = new Point3D
+                    // Process particles in parallel
+                    Parallel.ForEach(
+                        separationResult.Particles,
+                        new ParallelOptions
                         {
-                            X = particle.Center.X * pixelSize * 1e6,
-                            Y = particle.Center.Y * pixelSize * 1e6,
-                            Z = particle.Center.Z * pixelSize * 1e6
+                            MaxDegreeOfParallelism = _degreeOfParallelism,
+                            CancellationToken = cancellationToken
+                        },
+                        particle =>
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+
+                            double volume = particle.VoxelCount * Math.Pow(pixelSize, 3); // m³
+                            double radius = Math.Pow(3 * volume / (4 * Math.PI), 1.0 / 3.0); // m
+
+                            // Use the CPU method for surface area for consistency
+                            double surfaceArea = CalculateSurfaceArea(particle, separationResult.LabelVolume, pixelSize);
+
+                            Pore pore = new Pore
+                            {
+                                Id = particle.Id,
+                                Volume = volume * 1e18, // Convert to µm³
+                                Area = surfaceArea * 1e12, // Convert to µm²
+                                Radius = radius * 1e6, // Convert to µm
+                                Center = new Point3D
+                                {
+                                    X = particle.Center.X * pixelSize * 1e6,
+                                    Y = particle.Center.Y * pixelSize * 1e6,
+                                    Z = particle.Center.Z * pixelSize * 1e6
+                                }
+                            };
+                            pores.Add(pore);
                         }
-                    };
-                    model.Pores.Add(pore);
+                    );
+                }, cancellationToken);
+
+                // Transfer from concurrent bag to model list
+                model.Pores = pores.ToList();
+                progress?.Report(30);
+
+                // Step 2: Calculate distance matrix and connectivity in parallel
+                var distances = new ConcurrentDictionary<(int, int), double>();
+                var canConnect = new ConcurrentDictionary<(int, int), bool>();
+
+                await Task.Run(() =>
+                {
+                    // Calculate average pore radius for scaling connections
+                    double avgPoreRadius = model.Pores.Count > 0 ? model.Pores.Average(p => p.Radius) : 10.0;
+                    // Maximum throat length based on petrophysical factor
+                    double maxThroatLength = avgPoreRadius * maxThroatLengthFactor;
+
+                    // Using partitioner for better load balancing
+                    var rangePartitioner = Partitioner.Create(0, model.Pores.Count);
+
+                    Parallel.ForEach(
+                        rangePartitioner,
+                        new ParallelOptions
+                        {
+                            MaxDegreeOfParallelism = _degreeOfParallelism,
+                            CancellationToken = cancellationToken
+                        },
+                        range =>
+                        {
+                            for (int i = range.Item1; i < range.Item2; i++)
+                            {
+                                cancellationToken.ThrowIfCancellationRequested();
+
+                                for (int j = i + 1; j < model.Pores.Count; j++)
+                                {
+                                    Pore pore1 = model.Pores[i];
+                                    Pore pore2 = model.Pores[j];
+
+                                    // Calculate center-to-center distance
+                                    double distance = Distance(pore1.Center, pore2.Center);
+                                    distances[(pore1.Id, pore2.Id)] = distance;
+
+                                    // Calculate if pores can connect based on petrophysical criteria
+                                    bool connectible = CanPoresConnect(pore1, pore2, distance, maxThroatLength, minOverlapFactor);
+                                    canConnect[(pore1.Id, pore2.Id)] = connectible;
+                                }
+                            }
+                        }
+                    );
+                }, cancellationToken);
+
+                progress?.Report(50);
+
+                // Step 3: Generate throats using calculated distances
+                var throats = new ConcurrentBag<Throat>();
+                var connectionCounts = new ConcurrentDictionary<int, int>();
+
+                await Task.Run(() =>
+                {
+                    int maxConnections = Math.Min(6, model.Pores.Count - 1);
+
+                    Parallel.ForEach(
+                        model.Pores,
+                        new ParallelOptions
+                        {
+                            MaxDegreeOfParallelism = _degreeOfParallelism,
+                            CancellationToken = cancellationToken
+                        },
+                        pore1 =>
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+
+                            // Get all potentially connected pores with their distances
+                            var connectiblePores = model.Pores
+                                .Where(p => p.Id != pore1.Id)
+                                .Select(p =>
+                                {
+                                    double distance;
+                                    bool canConnectValue;
+                                    var minId = Math.Min(pore1.Id, p.Id);
+                                    var maxId = Math.Max(pore1.Id, p.Id);
+                                    var key = (minId, maxId);
+
+                                    distances.TryGetValue(key, out distance);
+                                    canConnect.TryGetValue(key, out canConnectValue);
+
+                                    return new { Pore = p, Distance = distance, CanConnect = canConnectValue };
+                                })
+                                .Where(pair => pair.CanConnect)  // Only include pores that can connect petrophysically
+                                .OrderBy(pair => pair.Distance)
+                                .Take(maxConnections);
+
+                            foreach (var pair in connectiblePores)
+                            {
+                                Pore pore2 = pair.Pore;
+                                double distance = pair.Distance;
+
+                                // Avoid duplicate throats (only add if pore1.Id < pore2.Id)
+                                if (pore1.Id < pore2.Id)
+                                {
+                                    // Calculate throat properties
+                                    double radius = CalculateThroatRadius(pore1.Radius, pore2.Radius);
+                                    double length = Math.Max(0.1, distance - pore1.Radius - pore2.Radius);
+                                    double volume = Math.PI * radius * radius * length;
+
+                                    int throatId = 0;
+                                    lock (throats) // Need lock for ID generation
+                                    {
+                                        throatId = throats.Count + 1;
+                                    }
+
+                                    Throat throat = new Throat
+                                    {
+                                        Id = throatId,
+                                        PoreId1 = pore1.Id,
+                                        PoreId2 = pore2.Id,
+                                        Radius = radius,
+                                        Length = length,
+                                        Volume = volume
+                                    };
+
+                                    throats.Add(throat);
+
+                                    // Update connection counts
+                                    connectionCounts.AddOrUpdate(pore1.Id, 1, (key, count) => count + 1);
+                                    connectionCounts.AddOrUpdate(pore2.Id, 1, (key, count) => count + 1);
+                                }
+                            }
+                        }
+                    );
+                }, cancellationToken);
+
+                // Update connection counts in the model
+                foreach (var pore in model.Pores)
+                {
+                    int count;
+                    if (connectionCounts.TryGetValue(pore.Id, out count))
+                    {
+                        pore.ConnectionCount = count;
+                    }
+                    else
+                    {
+                        pore.ConnectionCount = 0;
+                    }
                 }
-            });
 
-            // Generate throats with consistent algorithm regardless of GPU setting
-            progress?.Report(50);
-            await Task.Run(() =>
+                // Transfer from concurrent bag to model list
+                model.Throats = throats.ToList();
+                progress?.Report(70);
+
+                // Step 4: When enforceFlowPath is enabled, ensure connectivity along main flow axis
+                if (enforceFlowPath && model.Pores.Count > 0)
+                {
+                    await Task.Run(() =>
+                    {
+                        EnsureFlowPathConnectivity(model, distances);
+                    }, cancellationToken);
+                }
+
+                progress?.Report(85);
+
+                // Step 5: Calculate network properties
+                await Task.Run(() =>
+                {
+                    CalculateNetworkProperties(model);
+
+                    // Calculate tortuosity for the network
+                    model.Tortuosity = CalculateTortuosity(model);
+                }, cancellationToken);
+            }
+            catch (OperationCanceledException)
             {
-                // Calculate average pore radius for scaling connections
-                double avgPoreRadius = model.Pores.Count > 0 ? model.Pores.Average(p => p.Radius) : 10.0;
-                // Maximum throat length based on petrophysical factor
-                double maxThroatLength = avgPoreRadius * maxThroatLengthFactor;
-
-                int maxConnections = Math.Min(6, model.Pores.Count - 1);
-                GeneratePetrophysicalThroats(model, maxConnections, random, maxThroatLength,
-                    minOverlapFactor, enforceFlowPath);
-
-                // Calculate network properties
-                CalculateNetworkProperties(model);
-
-                // Calculate tortuosity for the network
-                model.Tortuosity = CalculateTortuosity(model);
-            });
+                Logger.Log("[PoreNetworkGenerator] Generation was cancelled by user");
+                throw; // Re-throw to properly handle cancellation
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[PoreNetworkGenerator] Error generating network: {ex.Message}\n{ex.StackTrace}");
+                throw; // Re-throw to properly handle errors
+            }
 
             progress?.Report(100);
             return model;
-        }
-
-        private void GeneratePetrophysicalThroats(PoreNetworkModel model, int maxConnections, Random random,
-    double maxThroatLength, double minOverlapFactor, bool enforceFlowPath)
-        {
-            model.Throats.Clear();
-
-            // Skip if we have too few pores
-            if (model.Pores.Count < 2)
-                return;
-
-            // Calculate all pore distances once and store them
-            var distances = new Dictionary<(int, int), double>();
-            var canConnect = new Dictionary<(int, int), bool>();
-
-            for (int i = 0; i < model.Pores.Count; i++)
-            {
-                for (int j = i + 1; j < model.Pores.Count; j++)
-                {
-                    Pore pore1 = model.Pores[i];
-                    Pore pore2 = model.Pores[j];
-
-                    // Calculate center-to-center distance
-                    double distance = Distance(pore1.Center, pore2.Center);
-                    distances[(pore1.Id, pore2.Id)] = distance;
-
-                    // Calculate if pores can connect based on petrophysical criteria
-                    bool connectible = CanPoresConnect(pore1, pore2, distance, maxThroatLength, minOverlapFactor);
-                    canConnect[(pore1.Id, pore2.Id)] = connectible;
-                }
-            }
-
-            // For each pore, find valid connected neighbors
-            foreach (var pore1 in model.Pores)
-            {
-                // Get all potentially connected pores with their distances
-                var connectiblePores = model.Pores
-                    .Where(p => p.Id != pore1.Id)
-                    .Select(p => (
-                        Pore: p,
-                        Distance: distances.ContainsKey((Math.Min(pore1.Id, p.Id), Math.Max(pore1.Id, p.Id))) ?
-                            distances[(Math.Min(pore1.Id, p.Id), Math.Max(pore1.Id, p.Id))] :
-                            distances[(Math.Max(pore1.Id, p.Id), Math.Min(pore1.Id, p.Id))],
-                        CanConnect: canConnect.ContainsKey((Math.Min(pore1.Id, p.Id), Math.Max(pore1.Id, p.Id))) ?
-                            canConnect[(Math.Min(pore1.Id, p.Id), Math.Max(pore1.Id, p.Id))] :
-                            canConnect[(Math.Max(pore1.Id, p.Id), Math.Min(pore1.Id, p.Id))]
-                    ))
-                    .Where(pair => pair.CanConnect)  // Only include pores that can connect petrophysically
-                    .OrderBy(pair => pair.Distance)
-                    .Take(maxConnections);
-
-                foreach (var (pore2, distance, _) in connectiblePores)
-                {
-                    // Avoid duplicate throats (only add if pore1.Id < pore2.Id)
-                    if (pore1.Id < pore2.Id)
-                    {
-                        // Calculate throat properties
-                        double radius = CalculateThroatRadius(pore1.Radius, pore2.Radius);
-                        double length = Math.Max(0.1, distance - pore1.Radius - pore2.Radius);
-                        double volume = Math.PI * radius * radius * length;
-
-                        Throat throat = new Throat
-                        {
-                            Id = model.Throats.Count + 1,
-                            PoreId1 = pore1.Id,
-                            PoreId2 = pore2.Id,
-                            Radius = radius,
-                            Length = length,
-                            Volume = volume
-                        };
-
-                        model.Throats.Add(throat);
-
-                        // Update connection counts
-                        pore1.ConnectionCount++;
-                        pore2.ConnectionCount++;
-                    }
-                }
-            }
-
-            // When enforceFlowPath is enabled, ensure connectivity along main flow axis
-            if (enforceFlowPath && model.Pores.Count > 0)
-            {
-                EnsureFlowPathConnectivity(model, distances);
-            }
         }
 
         private bool CanPoresConnect(Pore pore1, Pore pore2, double distance, double maxThroatLength, double minOverlapFactor)
@@ -227,7 +329,7 @@ namespace CTS
             return overlapFactor >= minOverlapFactor;
         }
 
-        private void EnsureFlowPathConnectivity(PoreNetworkModel model, Dictionary<(int, int), double> distances)
+        private void EnsureFlowPathConnectivity(PoreNetworkModel model, ConcurrentDictionary<(int, int), double> distances)
         {
             // Sort pores by Z coordinate (typical flow direction)
             var sortedPores = model.Pores.OrderBy(p => p.Center.Z).ToList();
@@ -255,17 +357,21 @@ namespace CTS
             var inletPores = sortedPores.Take(boundaryCount).ToList();
             var outletPores = sortedPores.Skip(sortedPores.Count - boundaryCount).ToList();
 
-            // Check if any inlet pore can reach any outlet pore
+            // Check if any inlet pore can reach any outlet pore using parallel BFS
             bool isConnected = false;
+
+            // Check connectivity using BFS from each inlet pore
             foreach (var inlet in inletPores)
             {
+                if (isConnected) break; // Skip if already found a path
+
                 // Simple BFS to check connectivity
                 HashSet<int> visited = new HashSet<int>();
                 Queue<int> queue = new Queue<int>();
                 queue.Enqueue(inlet.Id);
                 visited.Add(inlet.Id);
 
-                while (queue.Count > 0)
+                while (queue.Count > 0 && !isConnected)
                 {
                     int current = queue.Dequeue();
 
@@ -286,9 +392,6 @@ namespace CTS
                         }
                     }
                 }
-
-                if (isConnected)
-                    break;
             }
 
             // If not connected, create necessary connections
@@ -339,7 +442,7 @@ namespace CTS
         }
 
         // Connects the largest clusters to ensure flow path
-        private void ConnectLargestClusters(PoreNetworkModel model, List<List<int>> clusters, Dictionary<(int, int), double> distances)
+        private void ConnectLargestClusters(PoreNetworkModel model, List<List<int>> clusters, ConcurrentDictionary<(int, int), double> distances)
         {
             // Need at least 2 clusters to connect
             if (clusters.Count < 2)
@@ -353,6 +456,7 @@ namespace CTS
             Pore bestPore1 = null;
             Pore bestPore2 = null;
 
+            // Find closest pair
             foreach (int id1 in largestCluster)
             {
                 Pore pore1 = model.Pores.First(p => p.Id == id1);
@@ -362,9 +466,11 @@ namespace CTS
                     Pore pore2 = model.Pores.First(p => p.Id == id2);
 
                     var key = (Math.Min(id1, id2), Math.Max(id1, id2));
-                    if (distances.ContainsKey(key) && distances[key] < minDistance)
+                    double distance;
+
+                    if (distances.TryGetValue(key, out distance) && distance < minDistance)
                     {
-                        minDistance = distances[key];
+                        minDistance = distance;
                         bestPore1 = pore1;
                         bestPore2 = pore2;
                     }
@@ -450,12 +556,12 @@ namespace CTS
                 graph[throat.PoreId2].Add((throat.PoreId1, distance));
             }
 
-            // We'll calculate tortuosity along all three principal axes and average them
+            // We'll calculate tortuosity along all three principal axes
             double tortuosityX = CalculateAxisTortuosity(model, graph, axis: "X");
             double tortuosityY = CalculateAxisTortuosity(model, graph, axis: "Y");
             double tortuosityZ = CalculateAxisTortuosity(model, graph, axis: "Z");
 
-            // Average the three tortuosity values (geometric mean would also be reasonable)
+            // Average the three tortuosity values
             double averageTortuosity = (tortuosityX + tortuosityY + tortuosityZ) / 3.0;
 
             Logger.Log($"[PoreNetworkGenerator] Calculated tortuosity: X={tortuosityX:F3}, Y={tortuosityY:F3}, Z={tortuosityZ:F3}, Avg={averageTortuosity:F3}");
@@ -580,8 +686,11 @@ namespace CTS
                 processed.Add(currentId);
 
                 // Process each neighbor
-                foreach (var (neighborId, edgeDistance) in graph[currentId])
+                foreach (var neighbor in graph[currentId])
                 {
+                    int neighborId = neighbor.poreId;
+                    double edgeDistance = neighbor.distance;
+
                     // Skip already processed neighbors
                     if (processed.Contains(neighborId))
                         continue;
@@ -601,220 +710,6 @@ namespace CTS
             }
 
             return distances;
-        }
-
-        private void GenerateConsistentThroats(PoreNetworkModel model, int maxConnections, Random random)
-        {
-            model.Throats.Clear();
-
-            // Skip if we have too few pores
-            if (model.Pores.Count < 2)
-                return;
-
-            // Calculate all pore distances once and store them
-            var distances = new Dictionary<(int, int), double>();
-
-            for (int i = 0; i < model.Pores.Count; i++)
-            {
-                for (int j = i + 1; j < model.Pores.Count; j++)
-                {
-                    Pore pore1 = model.Pores[i];
-                    Pore pore2 = model.Pores[j];
-                    double distance = Distance(pore1.Center, pore2.Center);
-                    distances[(pore1.Id, pore2.Id)] = distance;
-                }
-            }
-
-            // For each pore, find closest neighbors
-            foreach (var pore1 in model.Pores)
-            {
-                // Get all other pores with their distances
-                var otherPores = model.Pores
-                    .Where(p => p.Id != pore1.Id)
-                    .Select(p => (
-                        Pore: p,
-                        Distance: distances.ContainsKey((Math.Min(pore1.Id, p.Id), Math.Max(pore1.Id, p.Id))) ?
-                            distances[(Math.Min(pore1.Id, p.Id), Math.Max(pore1.Id, p.Id))] :
-                            distances[(Math.Max(pore1.Id, p.Id), Math.Min(pore1.Id, p.Id))]
-                    ))
-                    .OrderBy(pair => pair.Distance)
-                    .Take(maxConnections);
-
-                foreach (var (pore2, distance) in otherPores)
-                {
-                    // Avoid duplicate throats (only add if pore1.Id < pore2.Id)
-                    if (pore1.Id < pore2.Id)
-                    {
-                        // Calculate throat properties
-                        double radius = (pore1.Radius + pore2.Radius) * 0.25; // 25% of average
-                        double length = Math.Max(0.1, distance - pore1.Radius - pore2.Radius);
-                        double volume = Math.PI * radius * radius * length;
-
-                        Throat throat = new Throat
-                        {
-                            Id = model.Throats.Count + 1,
-                            PoreId1 = pore1.Id,
-                            PoreId2 = pore2.Id,
-                            Radius = radius,
-                            Length = length,
-                            Volume = volume
-                        };
-
-                        model.Throats.Add(throat);
-
-                        // Update connection counts
-                        pore1.ConnectionCount++;
-                        pore2.ConnectionCount++;
-                    }
-                }
-            }
-        }
-
-        /// <summary>
-        /// Calculates the surface area of a particle using GPU acceleration if available
-        /// </summary>
-        /// <param name="particle">The particle to calculate the surface area for</param>
-        /// <param name="labelVolume">The 3D volume containing labeled particles</param>
-        /// <param name="pixelSize">The size of each voxel in meters</param>
-        /// <returns>Surface area in square meters</returns>
-        private double CalculateSurfaceAreaGPU(ParticleSeparator.Particle particle, int[,,] labelVolume, double pixelSize)
-        {
-            // Fall back to CPU method if GPU isn't initialized
-            if (!gpuInitialized)
-            {
-                Logger.Log("[PoreNetworkGenerator] GPU not initialized, using CPU for surface area calculation");
-                return CalculateSurfaceArea(particle, labelVolume, pixelSize);
-            }
-
-            try
-            {
-                // Get dimensions of the volume
-                int width = labelVolume.GetLength(0);
-                int height = labelVolume.GetLength(1);
-                int depth = labelVolume.GetLength(2);
-
-                // Define bounding box for processing (only process the particle's region)
-                int minX = Math.Max(0, particle.Bounds.MinX);
-                int minY = Math.Max(0, particle.Bounds.MinY);
-                int minZ = Math.Max(0, particle.Bounds.MinZ);
-                int maxX = Math.Min(width - 1, particle.Bounds.MaxX);
-                int maxY = Math.Min(height - 1, particle.Bounds.MaxY);
-                int maxZ = Math.Min(depth - 1, particle.Bounds.MaxZ);
-
-                // Calculate dimensions of the subvolume
-                int boxWidth = maxX - minX + 1;
-                int boxHeight = maxY - minY + 1;
-                int boxDepth = maxZ - minZ + 1;
-
-                // If the bounding box is too small, use the CPU method (avoids overhead)
-                if (boxWidth * boxHeight * boxDepth < 1000)
-                {
-                    return CalculateSurfaceArea(particle, labelVolume, pixelSize);
-                }
-
-                // Extract the subvolume to a 1D array for GPU processing
-                int[] flatSubvolume = new int[boxWidth * boxHeight * boxDepth];
-                int idx = 0;
-
-                // Copy data from 3D volume to 1D array
-                for (int z = minZ; z <= maxZ; z++)
-                {
-                    for (int y = minY; y <= maxY; y++)
-                    {
-                        for (int x = minX; x <= maxX; x++)
-                        {
-                            flatSubvolume[idx++] = labelVolume[x, y, z];
-                        }
-                    }
-                }
-
-                // Store bounding box offsets for kernel processing
-                int[] boxOffsets = new int[] { minX, minY, minZ };
-
-                // Create device arrays
-                using (var deviceSubvolume = accelerator.Allocate1D(flatSubvolume))
-                using (var deviceResult = accelerator.Allocate1D<int>(1))
-                using (var deviceOffsets = accelerator.Allocate1D(boxOffsets))
-                {
-                    // Initialize result to zero with a kernel
-                    var initKernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
-                        (index, result) => { result[index] = 0; });
-
-                    initKernel(new Index1D(1), deviceResult.View);
-
-                    // Define kernel to count boundary voxels
-                    var countBoundaryKernel = accelerator.LoadAutoGroupedStreamKernel<
-                        Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>, int, int, int, int>(
-                        (index, volume, result, offsets, w, h, d, targetLabel) =>
-                        {
-                            // Skip if out of range
-                            if (index >= volume.Length)
-                                return;
-
-                            // Convert flat index to 3D coordinates within the box
-                            int x = index % w;
-                            int y = (index / w) % h;
-                            int z = index / (w * h);
-
-                            // Get value at this position
-                            int value = volume[index];
-
-                            // Only process voxels that belong to our target particle
-                            if (value == targetLabel)
-                            {
-                                bool isBoundary = false;
-
-                                // Check 6-connected neighbors
-                                // -X neighbor
-                                if (x > 0 && volume[(z * h + y) * w + (x - 1)] != targetLabel)
-                                    isBoundary = true;
-                                // +X neighbor
-                                else if (x < w - 1 && volume[(z * h + y) * w + (x + 1)] != targetLabel)
-                                    isBoundary = true;
-                                // -Y neighbor
-                                else if (y > 0 && volume[(z * h + (y - 1)) * w + x] != targetLabel)
-                                    isBoundary = true;
-                                // +Y neighbor
-                                else if (y < h - 1 && volume[(z * h + (y + 1)) * w + x] != targetLabel)
-                                    isBoundary = true;
-                                // -Z neighbor
-                                else if (z > 0 && volume[((z - 1) * h + y) * w + x] != targetLabel)
-                                    isBoundary = true;
-                                // +Z neighbor
-                                else if (z < d - 1 && volume[((z + 1) * h + y) * w + x] != targetLabel)
-                                    isBoundary = true;
-
-                                // If this is a boundary voxel, increment counter
-                                if (isBoundary)
-                                {
-                                    Atomic.Add(ref result[0], 1);
-                                }
-                            }
-                        });
-
-                    // Execute kernel
-                    countBoundaryKernel(flatSubvolume.Length, deviceSubvolume.View, deviceResult.View, deviceOffsets.View,
-                        boxWidth, boxHeight, boxDepth, particle.Id);
-
-                    // Get result
-                    int[] resultArray = deviceResult.GetAsArray1D();
-                    int boundaryVoxelCount = resultArray[0];
-
-                    // Calculate surface area (average of 1.5 faces per boundary voxel)
-                    double surfaceArea = boundaryVoxelCount * 1.5 * pixelSize * pixelSize;
-
-                    Logger.Log($"[PoreNetworkGenerator] GPU calculated surface area: {boundaryVoxelCount} boundary voxels, {surfaceArea} m²");
-                    return surfaceArea;
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Log($"[PoreNetworkGenerator] GPU surface area calculation failed: {ex.Message}");
-                Logger.Log($"[PoreNetworkGenerator] Stack trace: {ex.StackTrace}");
-
-                // Fall back to CPU method
-                return CalculateSurfaceArea(particle, labelVolume, pixelSize);
-            }
         }
 
         /// <summary>
@@ -861,336 +756,7 @@ namespace CTS
 
             // Calculate surface area using the correct pixel size
             double surfaceArea = boundaryVoxelCount * 1.5 * pixelSize * pixelSize;
-            Logger.Log($"[PoreNetworkGenerator] CPU calculated surface area: {boundaryVoxelCount} boundary voxels, {surfaceArea} m²");
             return surfaceArea;
-        }
-
-        private void GenerateThroatsCPU(PoreNetworkModel model)
-        {
-            model.Throats.Clear();
-
-            // Skip if we have too few pores
-            if (model.Pores.Count < 2)
-                return;
-
-            // For each pore, find closest neighbors to create throats
-            int maxConnections = Math.Min(6, model.Pores.Count - 1);
-
-            // Calculate distance between pores more efficiently
-            Dictionary<(int, int), double> distanceCache = new Dictionary<(int, int), double>();
-
-            for (int i = 0; i < model.Pores.Count; i++)
-            {
-                Pore pore1 = model.Pores[i];
-
-                // Find closest pores using cached distances
-                List<(Pore pore, double distance)> sortedPores = new List<(Pore, double)>();
-
-                for (int j = 0; j < model.Pores.Count; j++)
-                {
-                    if (i == j) continue;
-
-                    Pore pore2 = model.Pores[j];
-
-                    // Use or calculate distance
-                    double distance;
-                    var key = (Math.Min(pore1.Id, pore2.Id), Math.Max(pore1.Id, pore2.Id));
-
-                    if (!distanceCache.TryGetValue(key, out distance))
-                    {
-                        distance = Distance(pore1.Center, pore2.Center);
-                        distanceCache[key] = distance;
-                    }
-
-                    sortedPores.Add((pore2, distance));
-                }
-
-                // Get closest pores
-                var closestPores = sortedPores.OrderBy(p => p.distance).Take(maxConnections).Select(p => p.pore);
-
-                foreach (var pore2 in closestPores)
-                {
-                    // Avoid duplicate throats (only add if pore1.Id < pore2.Id)
-                    if (pore1.Id < pore2.Id)
-                    {
-                        // Calculate throat radius as weighted average of pore radii
-                        double radius = (pore1.Radius + pore2.Radius) * 0.25; // 25% of average
-
-                        // Calculate throat length
-                        double distance = distanceCache[(Math.Min(pore1.Id, pore2.Id), Math.Max(pore1.Id, pore2.Id))];
-                        double length = Math.Max(0.1, distance - pore1.Radius - pore2.Radius);
-
-                        // Calculate throat volume (cylinder approximation)
-                        double volume = Math.PI * radius * radius * length;
-
-                        Throat throat = new Throat
-                        {
-                            Id = model.Throats.Count + 1,
-                            PoreId1 = pore1.Id,
-                            PoreId2 = pore2.Id,
-                            Radius = radius,
-                            Length = length,
-                            Volume = volume
-                        };
-
-                        model.Throats.Add(throat);
-
-                        // Update connection counts
-                        pore1.ConnectionCount++;
-                        pore2.ConnectionCount++;
-                    }
-                }
-            }
-        }
-
-        private void GenerateThroatsGPU(PoreNetworkModel model)
-        {
-            if (!gpuInitialized)
-            {
-                Logger.Log("[PoreNetworkGenerator] GPU not initialized, falling back to CPU");
-                GenerateThroatsCPU(model);
-                return;
-            }
-
-            try
-            {
-                // Log detailed GPU info for debugging
-                Logger.Log($"[PoreNetworkGenerator] Using GPU: {accelerator.Name}");
-                Logger.Log($"[PoreNetworkGenerator] Processing {model.Pores.Count} pores");
-
-                model.Throats.Clear();
-
-                // Skip if we have too few pores
-                if (model.Pores.Count < 2)
-                    return;
-
-                int poreCount = model.Pores.Count;
-                int maxConnections = Math.Min(6, poreCount - 1);
-
-                // Create arrays for distance calculation
-                float[] positions = new float[poreCount * 3]; // x, y, z for each pore
-                float[] radii = new float[poreCount];
-                int[] ids = new int[poreCount];
-
-                for (int i = 0; i < poreCount; i++)
-                {
-                    Pore pore = model.Pores[i];
-                    positions[i * 3] = (float)pore.Center.X;
-                    positions[i * 3 + 1] = (float)pore.Center.Y;
-                    positions[i * 3 + 2] = (float)pore.Center.Z;
-                    radii[i] = (float)pore.Radius;
-                    ids[i] = pore.Id;
-                }
-
-                // Use simpler approach: calculate distances on CPU
-                float[,] distances = new float[poreCount, poreCount];
-
-                for (int i = 0; i < poreCount; i++)
-                {
-                    for (int j = 0; j < poreCount; j++)
-                    {
-                        if (i == j)
-                            distances[i, j] = float.MaxValue;
-                        else
-                        {
-                            float dx = positions[i * 3] - positions[j * 3];
-                            float dy = positions[i * 3 + 1] - positions[j * 3 + 1];
-                            float dz = positions[i * 3 + 2] - positions[j * 3 + 2];
-                            distances[i, j] = (float)Math.Sqrt(dx * dx + dy * dy + dz * dz);
-                        }
-                    }
-                }
-
-                // Find closest pores per each pore
-                List<(int, int, float)> connections = new List<(int, int, float)>();
-                HashSet<(int, int)> processedPairs = new HashSet<(int, int)>();
-
-                for (int i = 0; i < poreCount; i++)
-                {
-                    // Create list of (index, distance) pairs
-                    List<(int, float)> neighbors = new List<(int, float)>();
-                    for (int j = 0; j < poreCount; j++)
-                    {
-                        if (i != j)
-                            neighbors.Add((j, distances[i, j]));
-                    }
-
-                    // Sort by distance and take closest
-                    var closest = neighbors.OrderBy(n => n.Item2).Take(maxConnections);
-
-                    foreach (var (j, dist) in closest)
-                    {
-                        int id1 = Math.Min(ids[i], ids[j]);
-                        int id2 = Math.Max(ids[i], ids[j]);
-                        var pair = (id1, id2);
-
-                        if (!processedPairs.Contains(pair))
-                        {
-                            connections.Add((i, j, dist));
-                            processedPairs.Add(pair);
-                        }
-                    }
-                }
-
-                // Create throats from connections
-                foreach (var (i, j, dist) in connections)
-                {
-                    Pore pore1 = model.Pores.First(p => p.Id == ids[i]);
-                    Pore pore2 = model.Pores.First(p => p.Id == ids[j]);
-
-                    // Calculate throat properties
-                    double radius = (pore1.Radius + pore2.Radius) * 0.25;
-                    double length = Math.Max(0.1, dist - pore1.Radius - pore2.Radius);
-                    double volume = Math.PI * radius * radius * length;
-
-                    // Create throat
-                    Throat throat = new Throat
-                    {
-                        Id = model.Throats.Count + 1,
-                        PoreId1 = pore1.Id,
-                        PoreId2 = pore2.Id,
-                        Radius = radius,
-                        Length = length,
-                        Volume = volume
-                    };
-
-                    model.Throats.Add(throat);
-
-                    // Update connection counts
-                    pore1.ConnectionCount++;
-                    pore2.ConnectionCount++;
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Log($"[PoreNetworkGenerator] GPU throat generation failed: {ex.Message}");
-                Logger.Log($"[PoreNetworkGenerator] Stack trace: {ex.StackTrace}");
-
-                // Fall back to CPU implementation
-                GenerateThroatsCPU(model);
-            }
-        }
-
-        // Helper method to process connections from GPU results
-        private void ProcessConnections(PoreNetworkModel model, int[] connections, float[] distanceMatrix,
-                                      int poreCount, int maxConnections)
-        {
-            HashSet<(int, int)> processedPairs = new HashSet<(int, int)>();
-
-            for (int i = 0; i < poreCount; i++)
-            {
-                Pore pore1 = model.Pores[i];
-
-                for (int j = 0; j < maxConnections; j++)
-                {
-                    int connIdx = i * maxConnections + j;
-                    if (connIdx >= connections.Length)
-                        continue;
-
-                    int otherIdx = connections[connIdx];
-
-                    // Skip invalid indices
-                    if (otherIdx < 0 || otherIdx >= poreCount)
-                        continue;
-
-                    Pore pore2 = model.Pores[otherIdx];
-
-                    // Use smaller ID first to avoid duplicates
-                    int id1 = Math.Min(pore1.Id, pore2.Id);
-                    int id2 = Math.Max(pore1.Id, pore2.Id);
-
-                    var pair = (id1, id2);
-                    if (processedPairs.Contains(pair))
-                        continue;
-
-                    processedPairs.Add(pair);
-
-                    // Calculate throat properties
-                    float dist = distanceMatrix[i * poreCount + otherIdx];
-                    double radius = (pore1.Radius + pore2.Radius) * 0.25;
-                    double length = Math.Max(0.1, dist - pore1.Radius - pore2.Radius);
-                    double volume = Math.PI * radius * radius * length;
-
-                    // Create throat
-                    Throat throat = new Throat
-                    {
-                        Id = model.Throats.Count + 1,
-                        PoreId1 = id1,
-                        PoreId2 = id2,
-                        Radius = radius,
-                        Length = length,
-                        Volume = volume
-                    };
-
-                    model.Throats.Add(throat);
-
-                    // Update connection counts
-                    pore1.ConnectionCount++;
-                    pore2.ConnectionCount++;
-                }
-            }
-        }
-
-        // Pure CPU processing as another fallback
-        private void ProcessConnectionsCPU(PoreNetworkModel model, float[] distanceMatrix, int poreCount, int maxConnections)
-        {
-            Logger.Log("[PoreNetworkGenerator] Using CPU fallback for neighbor finding");
-
-            HashSet<(int, int)> processedPairs = new HashSet<(int, int)>();
-
-            for (int i = 0; i < poreCount; i++)
-            {
-                Pore pore1 = model.Pores[i];
-
-                // Sort distances for this pore
-                List<(int idx, float dist)> neighbors = new List<(int, float)>();
-                for (int j = 0; j < poreCount; j++)
-                {
-                    if (i != j)
-                    {
-                        neighbors.Add((j, distanceMatrix[i * poreCount + j]));
-                    }
-                }
-
-                // Sort and take closest
-                var closest = neighbors.OrderBy(n => n.dist).Take(maxConnections);
-
-                foreach (var (j, dist) in closest)
-                {
-                    Pore pore2 = model.Pores[j];
-
-                    int id1 = Math.Min(pore1.Id, pore2.Id);
-                    int id2 = Math.Max(pore1.Id, pore2.Id);
-
-                    var pair = (id1, id2);
-                    if (processedPairs.Contains(pair))
-                        continue;
-
-                    processedPairs.Add(pair);
-
-                    // Calculate throat properties
-                    double radius = (pore1.Radius + pore2.Radius) * 0.25;
-                    double length = Math.Max(0.1, dist - pore1.Radius - pore2.Radius);
-                    double volume = Math.PI * radius * radius * length;
-
-                    // Create throat
-                    Throat throat = new Throat
-                    {
-                        Id = model.Throats.Count + 1,
-                        PoreId1 = id1,
-                        PoreId2 = id2,
-                        Radius = radius,
-                        Length = length,
-                        Volume = volume
-                    };
-
-                    model.Throats.Add(throat);
-
-                    // Update connection counts
-                    pore1.ConnectionCount++;
-                    pore2.ConnectionCount++;
-                }
-            }
         }
 
         private void CalculateNetworkProperties(PoreNetworkModel model)

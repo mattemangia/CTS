@@ -458,10 +458,10 @@ namespace CTS
                     return false;
                 }
 
-                // Calculate new dimensions
-                int newWidth = (int)(width * factor);
-                int newHeight = (int)(height * factor);
-                int newDepth = (int)(depth * factor);
+                // Calculate new dimensions - ensure they're at least 1
+                int newWidth = Math.Max(1, (int)(width * factor));
+                int newHeight = Math.Max(1, (int)(height * factor));
+                int newDepth = Math.Max(1, (int)(depth * factor));
 
                 Logger.Log($"[IntegrateResampleForm] Volume dimensions: {width}x{height}x{depth} -> {newWidth}x{newHeight}x{newDepth}");
 
@@ -498,145 +498,326 @@ namespace CTS
                 return false;
             }
         }
-
         private bool ResampleGPU(int width, int height, int depth, int newWidth, int newHeight, int newDepth)
         {
+            // Ensure all dimensions are at least 1
+            newWidth = Math.Max(1, newWidth);
+            newHeight = Math.Max(1, newHeight);
+            newDepth = Math.Max(1, newDepth);
+
             Logger.Log("[IntegrateResampleForm] Performing GPU resampling");
+            Logger.Log($"[IntegrateResampleForm] Dimensions: {width}x{height}x{depth} -> {newWidth}x{newHeight}x{newDepth}");
+
+            // Calculate sizes using long to avoid integer overflow
+            long inputSizeLong = (long)width * (long)height * (long)depth;
+            long outputSizeLong = (long)newWidth * (long)newHeight * (long)newDepth;
+
+            Logger.Log($"[IntegrateResampleForm] Input size (bytes): {inputSizeLong}, Output size (bytes): {outputSizeLong}");
+
+            // Check if the volume is too large for a single array (> 2GB)
+            if (inputSizeLong >= int.MaxValue || outputSizeLong >= int.MaxValue)
+            {
+                Logger.Log("[IntegrateResampleForm] Volume too large for single-pass GPU processing, using slice-by-slice approach");
+                return ResampleLargeVolumeGPU(width, height, depth, newWidth, newHeight, newDepth);
+            }
 
             // Update status
             this.Invoke((MethodInvoker)delegate
             {
                 if (!this.IsDisposed)
                 {
-                    lblStatus.Text = "Status: Copying data to GPU...";
+                    lblStatus.Text = "Status: Preparing data...";
                     progressBar.Value = 10;
                 }
             });
 
             try
             {
-                // For GPU processing, we need to flatten the chunked volume to arrays
-                var totalInputSize = width * height * depth;
-                var totalOutputSize = newWidth * newHeight * newDepth;
+                // We can safely cast to int now because we checked above
+                int totalInputSize = (int)inputSizeLong;
+                int totalOutputSize = (int)outputSizeLong;
 
-                // Create memory buffers for input and output
-                using (var inputMemory = accelerator.Allocate1D<byte>(totalInputSize))
-                using (var outputMemory = accelerator.Allocate1D<byte>(totalOutputSize))
+                // Create a new ChunkedVolume with the resampled dimensions
+                int chunkDim = 256; // Default chunk size
+                if (newWidth < 256 || newHeight < 256 || newDepth < 256)
                 {
-                    // Copy input data to a flat array
-                    byte[] flatVolume = new byte[totalInputSize];
+                    // For smaller volumes, use smaller chunk size
+                    chunkDim = 64;
+                }
 
-                    this.Invoke((MethodInvoker)delegate
+                this.Invoke((MethodInvoker)delegate
+                {
+                    if (!this.IsDisposed)
                     {
-                        if (!this.IsDisposed)
-                        {
-                            lblStatus.Text = "Status: Preparing volume data...";
-                            progressBar.Value = 20;
-                        }
-                    });
+                        lblStatus.Text = "Status: Creating new volume...";
+                        progressBar.Value = 20;
+                    }
+                });
 
-                    // Flatten the ChunkedVolume to a 1D array
-                    for (int z = 0; z < depth; z++)
+                // Create the new chunked volume for output
+                ChunkedVolume newVolume = new ChunkedVolume(newWidth, newHeight, newDepth, chunkDim);
+
+                this.Invoke((MethodInvoker)delegate
+                {
+                    if (!this.IsDisposed)
                     {
-                        for (int y = 0; y < height; y++)
-                        {
-                            for (int x = 0; x < width; x++)
-                            {
-                                flatVolume[z * width * height + y * width + x] = mainForm.volumeData[x, y, z];
-                            }
-                        }
+                        lblStatus.Text = "Status: Processing data...";
+                        progressBar.Value = 30;
+                    }
+                });
 
-                        if (z % 10 == 0)
-                        {
-                            int progress = 20 + (z * 10 / depth);
-                            this.Invoke((MethodInvoker)delegate
-                            {
-                                if (!this.IsDisposed)
-                                {
-                                    progressBar.Value = progress;
-                                }
-                            });
-                        }
+                // Calculate scale factors - ensure we don't divide by zero
+                float scaleX = width > 1 ? (width - 1.0f) / Math.Max(1.0f, newWidth - 1.0f) : 0;
+                float scaleY = height > 1 ? (height - 1.0f) / Math.Max(1.0f, newHeight - 1.0f) : 0;
+                float scaleZ = depth > 1 ? (depth - 1.0f) / Math.Max(1.0f, newDepth - 1.0f) : 0;
 
-                        if (processingCancelled)
-                            return false;
+                // Process in 2D slices to avoid memory issues
+                Parallel.For(0, newDepth, z =>
+                {
+                    if (processingCancelled)
+                        return;
+
+                    float srcZ = z * scaleZ;
+                    int z0 = (int)Math.Floor(srcZ);
+                    z0 = Math.Max(0, Math.Min(z0, depth - 1)); // Ensure z0 is within bounds
+                    int z1 = Math.Min(z0 + 1, depth - 1);
+                    float zFrac = srcZ - z0;
+
+                    for (int y = 0; y < newHeight; y++)
+                    {
+                        float srcY = y * scaleY;
+                        int y0 = (int)Math.Floor(srcY);
+                        y0 = Math.Max(0, Math.Min(y0, height - 1)); // Ensure y0 is within bounds
+                        int y1 = Math.Min(y0 + 1, height - 1);
+                        float yFrac = srcY - y0;
+
+                        for (int x = 0; x < newWidth; x++)
+                        {
+                            float srcX = x * scaleX;
+                            int x0 = (int)Math.Floor(srcX);
+                            x0 = Math.Max(0, Math.Min(x0, width - 1)); // Ensure x0 is within bounds
+                            int x1 = Math.Min(x0 + 1, width - 1);
+                            float xFrac = srcX - x0;
+
+                            // Directly access from chunked volume instead of flattening
+                            float c000 = mainForm.volumeData[x0, y0, z0];
+                            float c001 = mainForm.volumeData[x0, y0, z1];
+                            float c010 = mainForm.volumeData[x0, y1, z0];
+                            float c011 = mainForm.volumeData[x0, y1, z1];
+                            float c100 = mainForm.volumeData[x1, y0, z0];
+                            float c101 = mainForm.volumeData[x1, y0, z1];
+                            float c110 = mainForm.volumeData[x1, y1, z0];
+                            float c111 = mainForm.volumeData[x1, y1, z1];
+
+                            // Trilinear interpolation
+                            float c00 = c000 * (1 - xFrac) + c100 * xFrac;
+                            float c01 = c001 * (1 - xFrac) + c101 * xFrac;
+                            float c10 = c010 * (1 - xFrac) + c110 * xFrac;
+                            float c11 = c011 * (1 - xFrac) + c111 * xFrac;
+
+                            float c0 = c00 * (1 - yFrac) + c10 * yFrac;
+                            float c1 = c01 * (1 - yFrac) + c11 * yFrac;
+
+                            float result = c0 * (1 - zFrac) + c1 * zFrac;
+
+                            // Write directly to chunked volume
+                            newVolume[x, y, z] = (byte)Math.Round(result);
+                        }
                     }
 
+                    // Progress update (thread-safe)
+                    if (z % 5 == 0 || z == newDepth - 1)
+                    {
+                        int progress = 30 + (z * 60 / newDepth);
+                        this.Invoke((MethodInvoker)delegate
+                        {
+                            if (!this.IsDisposed)
+                            {
+                                progressBar.Value = progress;
+                                lblStatus.Text = $"Status: Processing slice {z}/{newDepth}...";
+                            }
+                        });
+                    }
+                });
+
+                if (processingCancelled)
+                    return false;
+
+                // Update the volume in the main form
+                this.Invoke((MethodInvoker)delegate
+                {
+                    if (!this.IsDisposed)
+                    {
+                        try
+                        {
+                            // Handle labels if they exist
+                            if (mainForm.volumeLabels != null)
+                            {
+                                this.lblStatus.Text = "Status: Resampling labels...";
+                                progressBar.Value = 90;
+
+                                // Create a new label volume with the resampled dimensions
+                                ChunkedLabelVolume newLabels = new ChunkedLabelVolume(
+                                    newWidth, newHeight, newDepth, chunkDim,
+                                    false); // In-memory, not memory-mapped
+
+                                // Fill the new label volume using nearest-neighbor resampling
+                                Parallel.For(0, newDepth, z =>
+                                {
+                                    if (processingCancelled)
+                                        return;
+
+                                    int origZ = Math.Min((int)Math.Floor(z / ResampleFactor), depth - 1);
+                                    origZ = Math.Max(0, origZ); // Ensure non-negative
+
+                                    for (int y = 0; y < newHeight; y++)
+                                    {
+                                        int origY = Math.Min((int)Math.Floor(y / ResampleFactor), height - 1);
+                                        origY = Math.Max(0, origY); // Ensure non-negative
+
+                                        for (int x = 0; x < newWidth; x++)
+                                        {
+                                            int origX = Math.Min((int)Math.Floor(x / ResampleFactor), width - 1);
+                                            origX = Math.Max(0, origX); // Ensure non-negative
+
+                                            newLabels[x, y, z] = mainForm.volumeLabels[origX, origY, origZ];
+                                        }
+                                    }
+                                });
+
+                                // Update the label volume
+                                mainForm.volumeLabels = newLabels;
+                            }
+
+                            // Update the main form's volume data
+                            mainForm.volumeData = newVolume;
+
+                            // IMPORTANT: Update the pixel size based on resample factor
+                            double currentPixelSize = mainForm.pixelSize;
+                            double newPixelSize = currentPixelSize / ResampleFactor;
+                            mainForm.UpdatePixelSize(newPixelSize);
+
+                            Logger.Log($"[IntegrateResampleForm] Pixel size updated from {currentPixelSize:0.000000e-6} µm to {newPixelSize:0.000000e-6} µm");
+
+                            // Notify MainForm that dimensions have changed
+                            mainForm.OnDatasetChanged();
+
+                            lblStatus.Text = "Status: Complete!";
+                            progressBar.Value = 100;
+                            Logger.Log("[IntegrateResampleForm] GPU resampling completed");
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[IntegrateResampleForm] Error updating volume: {ex.Message}");
+                            MessageBox.Show($"Error updating volume: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
+                    }
+                });
+
+                // Export BMP files if requested
+                if (ExportAsBMP && !string.IsNullOrEmpty(ExportPath))
+                {
                     this.Invoke((MethodInvoker)delegate
                     {
                         if (!this.IsDisposed)
                         {
-                            lblStatus.Text = "Status: Copying to GPU...";
-                            progressBar.Value = 30;
+                            lblStatus.Text = "Status: Exporting BMP stack...";
+                            progressBar.Value = 95;
                         }
                     });
 
-                    // Copy data to GPU
-                    inputMemory.CopyFromCPU(flatVolume);
+                    ExportBMPStack(newWidth, newHeight, newDepth);
+                }
 
-                    // Calculate scale factors
-                    float scaleX = (width - 1.0f) / (newWidth - 1.0f);
-                    float scaleY = (height - 1.0f) / (newHeight - 1.0f);
-                    float scaleZ = (depth - 1.0f) / (newDepth - 1.0f);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[IntegrateResampleForm] GPU resampling error: {ex.Message}");
+                throw;
+            }
+        }
+
+        private bool ResampleLargeVolumeGPU(int width, int height, int depth, int newWidth, int newHeight, int newDepth)
+        {
+            try
+            {
+                Logger.Log("[IntegrateResampleForm] Using slice-by-slice processing for large volume");
+
+                // Calculate scale factors with boundary checking
+                float scaleX = width > 1 ? (width - 1.0f) / Math.Max(1.0f, newWidth - 1.0f) : 0;
+                float scaleY = height > 1 ? (height - 1.0f) / Math.Max(1.0f, newHeight - 1.0f) : 0;
+                float scaleZ = depth > 1 ? (depth - 1.0f) / Math.Max(1.0f, newDepth - 1.0f) : 0;
+
+                this.Invoke((MethodInvoker)delegate
+                {
+                    if (!this.IsDisposed)
+                    {
+                        lblStatus.Text = "Status: Initializing...";
+                        progressBar.Value = 5;
+                    }
+                });
+
+                // Create a new chunked volume for output
+                int chunkDim = 256;
+                ChunkedVolume newVolume = new ChunkedVolume(newWidth, newHeight, newDepth, chunkDim);
+
+                // Process in Z-slices to minimize memory usage
+                int batchSize = 10; // Process this many slices at once
+
+                for (int batchStart = 0; batchStart < newDepth; batchStart += batchSize)
+                {
+                    if (processingCancelled)
+                        return false;
+
+                    int batchEnd = Math.Min(batchStart + batchSize, newDepth);
 
                     this.Invoke((MethodInvoker)delegate
                     {
                         if (!this.IsDisposed)
                         {
-                            lblStatus.Text = "Status: Processing on GPU...";
-                            progressBar.Value = 40;
+                            lblStatus.Text = $"Status: Processing slices {batchStart}-{batchEnd - 1} of {newDepth}...";
+                            progressBar.Value = 5 + (batchStart * 85 / newDepth);
                         }
                     });
 
-                    // For ILGPU 1.5.1, we need to use a different approach to create and run kernels
-                    // We'll use the CPU for the actual interpolation in this version
-
-                    byte[] resampledVolume = new byte[totalOutputSize];
-
-                    // Simulate GPU processing with CPU processing in chunks
-                    Parallel.For(0, newDepth, z =>
+                    // Process each slice in the batch
+                    Parallel.For(batchStart, batchEnd, z =>
                     {
                         if (processingCancelled)
                             return;
 
                         float srcZ = z * scaleZ;
-                        int z0 = (int)srcZ;
+                        int z0 = (int)Math.Floor(srcZ);
+                        z0 = Math.Max(0, Math.Min(z0, depth - 1)); // Ensure z0 is within bounds
                         int z1 = Math.Min(z0 + 1, depth - 1);
                         float zFrac = srcZ - z0;
 
                         for (int y = 0; y < newHeight; y++)
                         {
                             float srcY = y * scaleY;
-                            int y0 = (int)srcY;
+                            int y0 = (int)Math.Floor(srcY);
+                            y0 = Math.Max(0, Math.Min(y0, height - 1)); // Ensure y0 is within bounds
                             int y1 = Math.Min(y0 + 1, height - 1);
                             float yFrac = srcY - y0;
 
                             for (int x = 0; x < newWidth; x++)
                             {
                                 float srcX = x * scaleX;
-                                int x0 = (int)srcX;
+                                int x0 = (int)Math.Floor(srcX);
+                                x0 = Math.Max(0, Math.Min(x0, width - 1)); // Ensure x0 is within bounds
                                 int x1 = Math.Min(x0 + 1, width - 1);
                                 float xFrac = srcX - x0;
 
-                                // Calculate indices in the flat array
-                                int idx000 = z0 * width * height + y0 * width + x0;
-                                int idx001 = z1 * width * height + y0 * width + x0;
-                                int idx010 = z0 * width * height + y1 * width + x0;
-                                int idx011 = z1 * width * height + y1 * width + x0;
-                                int idx100 = z0 * width * height + y0 * width + x1;
-                                int idx101 = z1 * width * height + y0 * width + x1;
-                                int idx110 = z0 * width * height + y1 * width + x1;
-                                int idx111 = z1 * width * height + y1 * width + x1;
-
-                                // Grab values from flat array
-                                float c000 = flatVolume[idx000];
-                                float c001 = flatVolume[idx001];
-                                float c010 = flatVolume[idx010];
-                                float c011 = flatVolume[idx011];
-                                float c100 = flatVolume[idx100];
-                                float c101 = flatVolume[idx101];
-                                float c110 = flatVolume[idx110];
-                                float c111 = flatVolume[idx111];
+                                // Direct access from chunked volume
+                                float c000 = mainForm.volumeData[x0, y0, z0];
+                                float c001 = mainForm.volumeData[x0, y0, z1];
+                                float c010 = mainForm.volumeData[x0, y1, z0];
+                                float c011 = mainForm.volumeData[x0, y1, z1];
+                                float c100 = mainForm.volumeData[x1, y0, z0];
+                                float c101 = mainForm.volumeData[x1, y0, z1];
+                                float c110 = mainForm.volumeData[x1, y1, z0];
+                                float c111 = mainForm.volumeData[x1, y1, z1];
 
                                 // Trilinear interpolation
                                 float c00 = c000 * (1 - xFrac) + c100 * xFrac;
@@ -649,122 +830,96 @@ namespace CTS
 
                                 float result = c0 * (1 - zFrac) + c1 * zFrac;
 
-                                // Store in output array
-                                resampledVolume[z * newWidth * newHeight + y * newWidth + x] = (byte)Math.Round(result);
-                            }
-                        }
-
-                        // Progress update (thread-safe)
-                        int progress = 40 + (z * 40 / newDepth);
-                        this.Invoke((MethodInvoker)delegate
-                        {
-                            if (!this.IsDisposed)
-                            {
-                                progressBar.Value = progress;
-                            }
-                        });
-                    });
-
-                    if (processingCancelled)
-                        return false;
-
-                    this.Invoke((MethodInvoker)delegate
-                    {
-                        if (!this.IsDisposed)
-                        {
-                            lblStatus.Text = "Status: Creating new volume...";
-                            progressBar.Value = 85;
-                        }
-                    });
-
-                    // Create a new ChunkedVolume with the resampled dimensions
-                    // We'll use the default chunk size from current volume
-                    int chunkDim = 256; // Default chunk size
-
-                    // Create the new chunked volume
-                    ChunkedVolume newVolume = new ChunkedVolume(newWidth, newHeight, newDepth, chunkDim);
-
-                    // Fill the new volume from our resampled flat array
-                    for (int z = 0; z < newDepth; z++)
-                    {
-                        for (int y = 0; y < newHeight; y++)
-                        {
-                            for (int x = 0; x < newWidth; x++)
-                            {
-                                newVolume[x, y, z] = resampledVolume[z * newWidth * newHeight + y * newWidth + x];
-                            }
-                        }
-
-                        int progress = 85 + (z * 15 / newDepth);
-                        this.Invoke((MethodInvoker)delegate
-                        {
-                            if (!this.IsDisposed)
-                            {
-                                progressBar.Value = progress;
-                            }
-                        });
-
-                        if (processingCancelled)
-                            return false;
-                    }
-
-                    // Update the volume in the main form
-                    this.Invoke((MethodInvoker)delegate
-                    {
-                        if (!this.IsDisposed)
-                        {
-                            try
-                            {
-                                // Handle labels if they exist
-                                if (mainForm.volumeLabels != null)
-                                {
-                                    // Create a new label volume with the resampled dimensions
-                                    // We're using nearest-neighbor interpolation for labels
-                                    ChunkedLabelVolume newLabels = new ChunkedLabelVolume(
-                                        newWidth, newHeight, newDepth, chunkDim,
-                                        false); // In-memory, not memory-mapped
-
-                                    // Fill the new label volume using nearest-neighbor resampling
-                                    for (int z = 0; z < newDepth; z++)
-                                    {
-                                        int origZ = Math.Min((int)(z / ResampleFactor), depth - 1);
-                                        for (int y = 0; y < newHeight; y++)
-                                        {
-                                            int origY = Math.Min((int)(y / ResampleFactor), height - 1);
-                                            for (int x = 0; x < newWidth; x++)
-                                            {
-                                                int origX = Math.Min((int)(x / ResampleFactor), width - 1);
-                                                newLabels[x, y, z] = mainForm.volumeLabels[origX, origY, origZ];
-                                            }
-                                        }
-                                    }
-
-                                    // Update the label volume
-                                    mainForm.volumeLabels = newLabels;
-                                }
-
-                                // Update the main form's volume data
-                                mainForm.volumeData = newVolume;
-
-                                // Update the current slice position
-                                mainForm.CurrentSlice = Math.Min(mainForm.CurrentSlice, newDepth - 1);
-
-                                // Update rendering
-                                mainForm.RenderViews();
-                                mainForm.RenderOrthoViewsAsync().ConfigureAwait(false);
-
-                                lblStatus.Text = "Status: Complete!";
-                                progressBar.Value = 100;
-                                Logger.Log("[IntegrateResampleForm] GPU resampling completed");
-                            }
-                            catch (Exception ex)
-                            {
-                                Logger.Log($"[IntegrateResampleForm] Error updating volume: {ex.Message}");
-                                MessageBox.Show($"Error updating volume: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                                // Write directly to the new volume
+                                newVolume[x, y, z] = (byte)Math.Round(result);
                             }
                         }
                     });
                 }
+
+                if (processingCancelled)
+                    return false;
+
+                // Handle labels if they exist
+                this.Invoke((MethodInvoker)delegate
+                {
+                    if (!this.IsDisposed)
+                    {
+                        lblStatus.Text = "Status: Finalizing...";
+                        progressBar.Value = 90;
+
+                        try
+                        {
+                            // Handle labels if they exist
+                            if (mainForm.volumeLabels != null)
+                            {
+                                lblStatus.Text = "Status: Resampling labels...";
+
+                                // Create a new label volume with the resampled dimensions
+                                ChunkedLabelVolume newLabels = new ChunkedLabelVolume(
+                                    newWidth, newHeight, newDepth, chunkDim,
+                                    false); // In-memory, not memory-mapped
+
+                                // Process labels in batches too
+                                for (int batchStart = 0; batchStart < newDepth; batchStart += batchSize)
+                                {
+                                    if (processingCancelled)
+                                        return;
+
+                                    int batchEnd = Math.Min(batchStart + batchSize, newDepth);
+
+                                    Parallel.For(batchStart, batchEnd, z =>
+                                    {
+                                        int origZ = Math.Min((int)Math.Floor(z / ResampleFactor), depth - 1);
+                                        origZ = Math.Max(0, origZ); // Ensure non-negative
+
+                                        for (int y = 0; y < newHeight; y++)
+                                        {
+                                            int origY = Math.Min((int)Math.Floor(y / ResampleFactor), height - 1);
+                                            origY = Math.Max(0, origY); // Ensure non-negative
+
+                                            for (int x = 0; x < newWidth; x++)
+                                            {
+                                                int origX = Math.Min((int)Math.Floor(x / ResampleFactor), width - 1);
+                                                origX = Math.Max(0, origX); // Ensure non-negative
+
+                                                newLabels[x, y, z] = mainForm.volumeLabels[origX, origY, origZ];
+                                            }
+                                        }
+                                    });
+                                }
+
+                                // Update the label volume
+                                mainForm.volumeLabels = newLabels;
+                            }
+
+                            // Update the main form's volume data
+                            mainForm.volumeData = newVolume;
+
+                            // IMPORTANT: Update the pixel size based on resample factor
+                            double currentPixelSize = mainForm.pixelSize;
+                            double newPixelSize = currentPixelSize / ResampleFactor;
+                            mainForm.UpdatePixelSize(newPixelSize);
+
+                            Logger.Log($"[IntegrateResampleForm] Pixel size updated from {currentPixelSize:0.000000e-6} µm to {newPixelSize:0.000000e-6} µm");
+
+                            // Notify MainForm that dimensions have changed
+                            mainForm.OnDatasetChanged();
+
+                            lblStatus.Text = "Status: Complete!";
+                            progressBar.Value = 100;
+                            Logger.Log("[IntegrateResampleForm] Large volume GPU resampling completed");
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[IntegrateResampleForm] Error updating volume: {ex.Message}");
+                            MessageBox.Show($"Error updating volume: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            throw;
+                        }
+                    }
+                });
+
+                // Export BMP files if requested
                 if (ExportAsBMP && !string.IsNullOrEmpty(ExportPath))
                 {
                     this.Invoke((MethodInvoker)delegate
@@ -776,105 +931,130 @@ namespace CTS
                         }
                     });
 
-                    try
-                    {
-                        // Create directory if it doesn't exist
-                        if (!Directory.Exists(ExportPath))
-                        {
-                            Directory.CreateDirectory(ExportPath);
-                        }
-
-                        // Get volume dimensions from mainForm.volumeData (already updated)
-                        int exportWidth = mainForm.volumeData.Width;
-                        int exportHeight = mainForm.volumeData.Height;
-                        int exportDepth = mainForm.volumeData.Depth;
-
-                        // Export each slice as a BMP
-                        Parallel.For(0, exportDepth, z =>
-                        {
-                            if (processingCancelled)
-                                return;
-
-                            // Create a bitmap for this slice
-                            using (Bitmap sliceBmp = new Bitmap(exportWidth, exportHeight, PixelFormat.Format8bppIndexed))
-                            {
-                                // Set up a grayscale palette
-                                ColorPalette palette = sliceBmp.Palette;
-                                for (int i = 0; i < 256; i++)
-                                {
-                                    palette.Entries[i] = Color.FromArgb(255, i, i, i);
-                                }
-                                sliceBmp.Palette = palette;
-
-                                // Lock the bitmap for fast access
-                                BitmapData bmpData = sliceBmp.LockBits(
-                                    new Rectangle(0, 0, exportWidth, exportHeight),
-                                    ImageLockMode.WriteOnly,
-                                    PixelFormat.Format8bppIndexed);
-
-                                // Copy data from our volume to the bitmap
-                                unsafe
-                                {
-                                    byte* scanLine = (byte*)bmpData.Scan0;
-                                    for (int y = 0; y < exportHeight; y++)
-                                    {
-                                        for (int x = 0; x < exportWidth; x++)
-                                        {
-                                            scanLine[x + y * bmpData.Stride] = mainForm.volumeData[x, y, z];
-                                        }
-                                    }
-                                }
-
-                                // Unlock and save the bitmap
-                                sliceBmp.UnlockBits(bmpData);
-
-                                // Generate a zero-padded filename
-                                string filename = Path.Combine(ExportPath, $"slice_{z:D5}.bmp");
-                                sliceBmp.Save(filename, ImageFormat.Bmp);
-                            }
-                        });
-
-                        this.Invoke((MethodInvoker)delegate
-                        {
-                            if (!this.IsDisposed)
-                            {
-                                MessageBox.Show($"BMP stack exported to: {ExportPath}",
-                                    "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                            }
-                        });
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Log($"[IntegrateResampleForm] Error exporting BMP stack: {ex.Message}");
-                        this.Invoke((MethodInvoker)delegate
-                        {
-                            if (!this.IsDisposed)
-                            {
-                                MessageBox.Show($"Error exporting BMP stack: {ex.Message}",
-                                    "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                            }
-                        });
-                    }
+                    ExportBMPStack(newWidth, newHeight, newDepth);
                 }
+
                 return true;
             }
             catch (Exception ex)
             {
-                Logger.Log($"[IntegrateResampleForm] GPU resampling error: {ex.Message}");
+                Logger.Log($"[IntegrateResampleForm] Large volume GPU resampling error: {ex.Message}");
                 throw;
             }
         }
 
+
+        private bool ExportBMPStack(int width, int height, int depth)
+        {
+            try
+            {
+                // Create directory if it doesn't exist
+                if (!Directory.Exists(ExportPath))
+                {
+                    Directory.CreateDirectory(ExportPath);
+                }
+
+                // Export each slice as a BMP
+                Parallel.For(0, depth, z =>
+                {
+                    if (processingCancelled)
+                        return;
+
+                    try
+                    {
+                        // Create a bitmap for this slice
+                        using (Bitmap sliceBmp = new Bitmap(width, height, PixelFormat.Format8bppIndexed))
+                        {
+                            // Set up a grayscale palette
+                            ColorPalette palette = sliceBmp.Palette;
+                            for (int i = 0; i < 256; i++)
+                            {
+                                palette.Entries[i] = Color.FromArgb(255, i, i, i);
+                            }
+                            sliceBmp.Palette = palette;
+
+                            // Lock the bitmap for fast access
+                            BitmapData bmpData = sliceBmp.LockBits(
+                                new Rectangle(0, 0, width, height),
+                                ImageLockMode.WriteOnly,
+                                PixelFormat.Format8bppIndexed);
+
+                            // Copy data from our volume to the bitmap
+                            unsafe
+                            {
+                                byte* scanLine = (byte*)bmpData.Scan0;
+                                for (int y = 0; y < height; y++)
+                                {
+                                    for (int x = 0; x < width; x++)
+                                    {
+                                        // Get the direct index into the bitmap data
+                                        int bmpIndex = x + y * bmpData.Stride;
+
+                                        // Ensure index is in range
+                                        if (bmpIndex < bmpData.Stride * height)
+                                        {
+                                            scanLine[bmpIndex] = mainForm.volumeData[x, y, z];
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Unlock and save the bitmap
+                            sliceBmp.UnlockBits(bmpData);
+
+                            // Generate a zero-padded filename
+                            string filename = Path.Combine(ExportPath, $"slice_{z:D5}.bmp");
+                            sliceBmp.Save(filename, ImageFormat.Bmp);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[IntegrateResampleForm] Error exporting slice {z}: {ex.Message}");
+                    }
+                });
+
+                this.Invoke((MethodInvoker)delegate
+                {
+                    if (!this.IsDisposed)
+                    {
+                        MessageBox.Show($"BMP stack exported to: {ExportPath}",
+                            "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                });
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[IntegrateResampleForm] Error exporting BMP stack: {ex.Message}");
+                this.Invoke((MethodInvoker)delegate
+                {
+                    if (!this.IsDisposed)
+                    {
+                        MessageBox.Show($"Error exporting BMP stack: {ex.Message}",
+                            "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                });
+                return false;
+            }
+        }
         private bool ResampleCPU(int width, int height, int depth, int newWidth, int newHeight, int newDepth)
         {
             Logger.Log("[IntegrateResampleForm] Performing CPU resampling");
+            Logger.Log($"[IntegrateResampleForm] Dimensions: {width}x{height}x{depth} -> {newWidth}x{newHeight}x{newDepth}");
+
+            // Calculate sizes using long to avoid integer overflow
+            long inputSizeLong = (long)width * (long)height * (long)depth;
+            long outputSizeLong = (long)newWidth * (long)newHeight * (long)newDepth;
+
+            Logger.Log($"[IntegrateResampleForm] Input size (bytes): {inputSizeLong}, Output size (bytes): {outputSizeLong}");
 
             try
             {
-                // Calculate scale factors
-                float scaleX = (float)(width - 1) / (newWidth - 1);
-                float scaleY = (float)(height - 1) / (newHeight - 1);
-                float scaleZ = (float)(depth - 1) / (newDepth - 1);
+                // Calculate scale factors with boundary checking
+                float scaleX = width > 1 ? (width - 1.0f) / Math.Max(1.0f, newWidth - 1.0f) : 0;
+                float scaleY = height > 1 ? (height - 1.0f) / Math.Max(1.0f, newHeight - 1.0f) : 0;
+                float scaleZ = depth > 1 ? (depth - 1.0f) / Math.Max(1.0f, newDepth - 1.0f) : 0;
 
                 this.Invoke((MethodInvoker)delegate
                 {
@@ -886,7 +1066,13 @@ namespace CTS
                 });
 
                 // Create a new ChunkedVolume with the resampled dimensions
-                int chunkDim = 256; // Default chunk size, use the same as original if known
+                int chunkDim = 256; // Default chunk size
+                if (newWidth < 256 || newHeight < 256 || newDepth < 256)
+                {
+                    // For smaller volumes, use smaller chunk size
+                    chunkDim = 64;
+                }
+
                 ChunkedVolume newVolume = new ChunkedVolume(newWidth, newHeight, newDepth, chunkDim);
 
                 this.Invoke((MethodInvoker)delegate
@@ -898,67 +1084,81 @@ namespace CTS
                     }
                 });
 
-                // Process each slice to show progress
-                for (int z = 0; z < newDepth; z++)
+                // Process in batches to show progress and reduce memory pressure
+                int batchSize = 10; // Process this many slices at once
+
+                for (int batchStart = 0; batchStart < newDepth; batchStart += batchSize)
                 {
                     if (processingCancelled)
                         return false;
 
-                    float srcZ = z * scaleZ;
-                    int z0 = (int)srcZ;
-                    int z1 = Math.Min(z0 + 1, depth - 1);
-                    float zFrac = srcZ - z0;
+                    int batchEnd = Math.Min(batchStart + batchSize, newDepth);
 
-                    for (int y = 0; y < newHeight; y++)
+                    // Process each slice in the batch
+                    Parallel.For(batchStart, batchEnd, z =>
                     {
-                        float srcY = y * scaleY;
-                        int y0 = (int)srcY;
-                        int y1 = Math.Min(y0 + 1, height - 1);
-                        float yFrac = srcY - y0;
+                        if (processingCancelled)
+                            return;
 
-                        for (int x = 0; x < newWidth; x++)
+                        float srcZ = z * scaleZ;
+                        int z0 = (int)Math.Floor(srcZ);
+                        z0 = Math.Max(0, Math.Min(z0, depth - 1)); // Ensure z0 is within bounds
+                        int z1 = Math.Min(z0 + 1, depth - 1);
+                        float zFrac = srcZ - z0;
+
+                        for (int y = 0; y < newHeight; y++)
                         {
-                            float srcX = x * scaleX;
-                            int x0 = (int)srcX;
-                            int x1 = Math.Min(x0 + 1, width - 1);
-                            float xFrac = srcX - x0;
+                            float srcY = y * scaleY;
+                            int y0 = (int)Math.Floor(srcY);
+                            y0 = Math.Max(0, Math.Min(y0, height - 1)); // Ensure y0 is within bounds
+                            int y1 = Math.Min(y0 + 1, height - 1);
+                            float yFrac = srcY - y0;
 
-                            // Get the values of the eight surrounding voxels from the chunked volume
-                            float c000 = mainForm.volumeData[x0, y0, z0];
-                            float c001 = mainForm.volumeData[x0, y0, z1];
-                            float c010 = mainForm.volumeData[x0, y1, z0];
-                            float c011 = mainForm.volumeData[x0, y1, z1];
-                            float c100 = mainForm.volumeData[x1, y0, z0];
-                            float c101 = mainForm.volumeData[x1, y0, z1];
-                            float c110 = mainForm.volumeData[x1, y1, z0];
-                            float c111 = mainForm.volumeData[x1, y1, z1];
+                            for (int x = 0; x < newWidth; x++)
+                            {
+                                float srcX = x * scaleX;
+                                int x0 = (int)Math.Floor(srcX);
+                                x0 = Math.Max(0, Math.Min(x0, width - 1)); // Ensure x0 is within bounds
+                                int x1 = Math.Min(x0 + 1, width - 1);
+                                float xFrac = srcX - x0;
 
-                            // Interpolate along x
-                            float c00 = c000 * (1 - xFrac) + c100 * xFrac;
-                            float c01 = c001 * (1 - xFrac) + c101 * xFrac;
-                            float c10 = c010 * (1 - xFrac) + c110 * xFrac;
-                            float c11 = c011 * (1 - xFrac) + c111 * xFrac;
+                                // Get the values of the eight surrounding voxels from the chunked volume
+                                float c000 = mainForm.volumeData[x0, y0, z0];
+                                float c001 = mainForm.volumeData[x0, y0, z1];
+                                float c010 = mainForm.volumeData[x0, y1, z0];
+                                float c011 = mainForm.volumeData[x0, y1, z1];
+                                float c100 = mainForm.volumeData[x1, y0, z0];
+                                float c101 = mainForm.volumeData[x1, y0, z1];
+                                float c110 = mainForm.volumeData[x1, y1, z0];
+                                float c111 = mainForm.volumeData[x1, y1, z1];
 
-                            // Interpolate along y
-                            float c0 = c00 * (1 - yFrac) + c10 * yFrac;
-                            float c1 = c01 * (1 - yFrac) + c11 * yFrac;
+                                // Interpolate along x
+                                float c00 = c000 * (1 - xFrac) + c100 * xFrac;
+                                float c01 = c001 * (1 - xFrac) + c101 * xFrac;
+                                float c10 = c010 * (1 - xFrac) + c110 * xFrac;
+                                float c11 = c011 * (1 - xFrac) + c111 * xFrac;
 
-                            // Interpolate along z
-                            float result = c0 * (1 - zFrac) + c1 * zFrac;
+                                // Interpolate along y
+                                float c0 = c00 * (1 - yFrac) + c10 * yFrac;
+                                float c1 = c01 * (1 - yFrac) + c11 * yFrac;
 
-                            // Store the result in the new chunked volume
-                            newVolume[x, y, z] = (byte)Math.Round(result);
+                                // Interpolate along z
+                                float result = c0 * (1 - zFrac) + c1 * zFrac;
+
+                                // Store the result in the new chunked volume
+                                newVolume[x, y, z] = (byte)Math.Round(result);
+                            }
                         }
-                    }
+                    });
 
                     // Update progress
-                    int progress = 10 + (int)(z * 80 / (float)newDepth);
+                    int progress = 10 + (batchEnd * 80 / newDepth);
                     this.Invoke((MethodInvoker)delegate
                     {
                         if (!this.IsDisposed)
                         {
                             progressBar.Value = progress;
-                            lblStatus.Text = $"Status: Processing {progress}%...";
+                            lblStatus.Text = $"Status: Processing slices {batchStart}-{batchEnd - 1} of {newDepth}...";
                         }
                     });
                 }
@@ -967,65 +1167,78 @@ namespace CTS
                 {
                     if (!this.IsDisposed)
                     {
-                        lblStatus.Text = "Status: Updating volume data...";
+                        lblStatus.Text = "Status: Finalizing...";
                         progressBar.Value = 90;
-                    }
-                });
 
-                // Update the main form on the UI thread
-                this.Invoke((MethodInvoker)delegate
-                {
-                    try
-                    {
-                        // Handle labels if they exist
-                        if (mainForm.volumeLabels != null)
+                        try
                         {
-                            // Create a new label volume with the resampled dimensions
-                            // We're using nearest-neighbor interpolation for labels
-                            ChunkedLabelVolume newLabels = new ChunkedLabelVolume(
-                                newWidth, newHeight, newDepth, chunkDim,
-                                false); // In-memory, not memory-mapped
-
-                            // Fill the new label volume using nearest-neighbor resampling
-                            for (int z = 0; z < newDepth; z++)
+                            // Handle labels if they exist
+                            if (mainForm.volumeLabels != null)
                             {
-                                int origZ = Math.Min((int)(z / ResampleFactor), depth - 1);
-                                for (int y = 0; y < newHeight; y++)
+                                lblStatus.Text = "Status: Resampling labels...";
+
+                                // Create a new label volume with the resampled dimensions
+                                ChunkedLabelVolume newLabels = new ChunkedLabelVolume(
+                                    newWidth, newHeight, newDepth, chunkDim,
+                                    false); // In-memory, not memory-mapped
+
+                                // Process labels in batches too
+                                for (int batchStart = 0; batchStart < newDepth; batchStart += batchSize)
                                 {
-                                    int origY = Math.Min((int)(y / ResampleFactor), height - 1);
-                                    for (int x = 0; x < newWidth; x++)
+                                    int batchEnd = Math.Min(batchStart + batchSize, newDepth);
+
+                                    Parallel.For(batchStart, batchEnd, z =>
                                     {
-                                        int origX = Math.Min((int)(x / ResampleFactor), width - 1);
-                                        newLabels[x, y, z] = mainForm.volumeLabels[origX, origY, origZ];
-                                    }
+                                        int origZ = Math.Min((int)Math.Floor(z / ResampleFactor), depth - 1);
+                                        origZ = Math.Max(0, origZ); // Ensure non-negative
+
+                                        for (int y = 0; y < newHeight; y++)
+                                        {
+                                            int origY = Math.Min((int)Math.Floor(y / ResampleFactor), height - 1);
+                                            origY = Math.Max(0, origY); // Ensure non-negative
+
+                                            for (int x = 0; x < newWidth; x++)
+                                            {
+                                                int origX = Math.Min((int)Math.Floor(x / ResampleFactor), width - 1);
+                                                origX = Math.Max(0, origX); // Ensure non-negative
+
+                                                newLabels[x, y, z] = mainForm.volumeLabels[origX, origY, origZ];
+                                            }
+                                        }
+                                    });
                                 }
+
+                                // Update the label volume
+                                mainForm.volumeLabels = newLabels;
                             }
 
-                            // Update the label volume
-                            mainForm.volumeLabels = newLabels;
+                            // Update the main form's volume data
+                            mainForm.volumeData = newVolume;
+
+                            // IMPORTANT: Update the pixel size based on resample factor
+                            double currentPixelSize = mainForm.pixelSize;
+                            double newPixelSize = currentPixelSize / ResampleFactor;
+                            mainForm.UpdatePixelSize(newPixelSize);
+
+                            Logger.Log($"[IntegrateResampleForm] Pixel size updated from {currentPixelSize:0.000000e-6} µm to {newPixelSize:0.000000e-6} µm");
+
+                            // Notify MainForm that dimensions have changed
+                            mainForm.OnDatasetChanged();
+
+                            lblStatus.Text = "Status: Complete!";
+                            progressBar.Value = 100;
+                            Logger.Log("[IntegrateResampleForm] CPU resampling completed successfully");
                         }
-
-                        // Update the main form's volume data
-                        mainForm.volumeData = newVolume;
-
-                        // Update the current slice position
-                        mainForm.CurrentSlice = Math.Min(mainForm.CurrentSlice, newDepth - 1);
-
-                        // Update rendering
-                        mainForm.RenderViews();
-                        mainForm.RenderOrthoViewsAsync().ConfigureAwait(false);
-
-                        lblStatus.Text = "Status: Complete!";
-                        progressBar.Value = 100;
-                        Logger.Log("[IntegrateResampleForm] CPU resampling completed successfully");
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Log($"[IntegrateResampleForm] Error updating volume data: {ex.Message}");
-                        MessageBox.Show($"Error updating volume data: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        throw;
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[IntegrateResampleForm] Error updating volume data: {ex.Message}");
+                            MessageBox.Show($"Error updating volume data: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            throw;
+                        }
                     }
                 });
+
+                // Export BMP files if requested
                 if (ExportAsBMP && !string.IsNullOrEmpty(ExportPath))
                 {
                     this.Invoke((MethodInvoker)delegate
@@ -1037,81 +1250,9 @@ namespace CTS
                         }
                     });
 
-                    try
-                    {
-                        // Create directory if it doesn't exist
-                        if (!Directory.Exists(ExportPath))
-                        {
-                            Directory.CreateDirectory(ExportPath);
-                        }
-
-                        // Export each slice as a BMP
-                        Parallel.For(0, newDepth, z =>
-                        {
-                            if (processingCancelled)
-                                return;
-
-                            // Create a bitmap for this slice
-                            using (Bitmap sliceBmp = new Bitmap(newWidth, newHeight, PixelFormat.Format8bppIndexed))
-                            {
-                                // Set up a grayscale palette
-                                ColorPalette palette = sliceBmp.Palette;
-                                for (int i = 0; i < 256; i++)
-                                {
-                                    palette.Entries[i] = Color.FromArgb(255, i, i, i);
-                                }
-                                sliceBmp.Palette = palette;
-
-                                // Lock the bitmap for fast access
-                                BitmapData bmpData = sliceBmp.LockBits(
-                                    new Rectangle(0, 0, newWidth, newHeight),
-                                    ImageLockMode.WriteOnly,
-                                    PixelFormat.Format8bppIndexed);
-
-                                // Copy data from our volume to the bitmap
-                                unsafe
-                                {
-                                    byte* scanLine = (byte*)bmpData.Scan0;
-                                    for (int y = 0; y < newHeight; y++)
-                                    {
-                                        for (int x = 0; x < newWidth; x++)
-                                        {
-                                            scanLine[x + y * bmpData.Stride] = newVolume[x, y, z];
-                                        }
-                                    }
-                                }
-
-                                // Unlock and save the bitmap
-                                sliceBmp.UnlockBits(bmpData);
-
-                                // Generate a zero-padded filename
-                                string filename = Path.Combine(ExportPath, $"slice_{z:D5}.bmp");
-                                sliceBmp.Save(filename, ImageFormat.Bmp);
-                            }
-                        });
-
-                        this.Invoke((MethodInvoker)delegate
-                        {
-                            if (!this.IsDisposed)
-                            {
-                                MessageBox.Show($"BMP stack exported to: {ExportPath}",
-                                    "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                            }
-                        });
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Log($"[IntegrateResampleForm] Error exporting BMP stack: {ex.Message}");
-                        this.Invoke((MethodInvoker)delegate
-                        {
-                            if (!this.IsDisposed)
-                            {
-                                MessageBox.Show($"Error exporting BMP stack: {ex.Message}",
-                                    "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                            }
-                        });
-                    }
+                    ExportBMPStack(newWidth, newHeight, newDepth);
                 }
+
                 return true;
             }
             catch (Exception ex)
@@ -1120,6 +1261,7 @@ namespace CTS
                 throw;
             }
         }
+
 
         private void EnableControls(bool enable)
         {

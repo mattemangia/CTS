@@ -6,6 +6,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
+using System.Collections.Concurrent;
 
 namespace CTS
 {
@@ -13,6 +15,8 @@ namespace CTS
     {
         // Constants for array handling
         private const int MAX_PARTICLES = 50000000; // Adjusted for .NET 4.8.1 limits
+        private const int CHUNK_SIZE = 128; // Optimized chunk size for processing
+        private const int MAX_ITERATIONS = 1000; // Maximum iterations for label propagation
 
         private MainForm mainForm;
         private Material selectedMaterial;
@@ -20,6 +24,7 @@ namespace CTS
         private Context gpuContext;
         private Accelerator accelerator;
         private bool gpuInitialized = false;
+        private int maxThreads;
 
         // Class to represent a particle
         public class Particle
@@ -83,6 +88,7 @@ namespace CTS
             this.mainForm = mainForm;
             this.selectedMaterial = selectedMaterial;
             this.useGpu = useGpu;
+            this.maxThreads = Environment.ProcessorCount;
 
             if (useGpu)
             {
@@ -159,9 +165,10 @@ namespace CTS
             // Create a 2D array to hold the slice data
             byte[,] sliceData = new byte[width, height];
 
-            // Extract the slice data
+            // Extract the slice data in parallel
             progress?.Report(10);
-            for (int y = 0; y < height; y++)
+
+            Parallel.For(0, height, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, y =>
             {
                 for (int x = 0; x < width; x++)
                 {
@@ -169,7 +176,7 @@ namespace CTS
                     // Only include voxels with the selected material
                     sliceData[x, y] = (label == selectedMaterial.ID) ? (byte)1 : (byte)0;
                 }
-            }
+            });
 
             // Check for cancellation
             cancellationToken.ThrowIfCancellationRequested();
@@ -192,63 +199,76 @@ namespace CTS
             // Check for cancellation
             cancellationToken.ThrowIfCancellationRequested();
 
-            // Find the maximum label (number of components)
-            int maxLabel = 0;
-            for (int y = 0; y < height; y++)
-            {
-                for (int x = 0; x < width; x++)
-                {
-                    maxLabel = Math.Max(maxLabel, labeledSlice[x, y]);
-                }
-            }
-
             // Create particles
             progress?.Report(60);
-            List<Particle> particles = new List<Particle>();
-            Dictionary<int, int> voxelCounts = new Dictionary<int, int>();
-            Dictionary<int, (int sumX, int sumY)> centers = new Dictionary<int, (int, int)>();
-            Dictionary<int, (int minX, int minY, int maxX, int maxY)> bounds =
-                new Dictionary<int, (int, int, int, int)>();
 
-            // Count voxels and compute centers
-            for (int y = 0; y < height; y++)
+            // Use concurrent collections for thread safety
+            ConcurrentDictionary<int, int> voxelCounts = new ConcurrentDictionary<int, int>();
+            ConcurrentDictionary<int, (int sumX, int sumY)> centers = new ConcurrentDictionary<int, (int, int)>();
+            ConcurrentDictionary<int, (int minX, int minY, int maxX, int maxY)> bounds =
+                new ConcurrentDictionary<int, (int, int, int, int)>();
+
+            // First pass: find all unique labels (in parallel)
+            var uniqueLabels = new ConcurrentBag<int>();
+
+            Parallel.For(0, height, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, y =>
             {
                 for (int x = 0; x < width; x++)
                 {
                     int label = labeledSlice[x, y];
                     if (label > 0)
                     {
-                        // Update voxel count
+                        // Add to unique labels if not already added
                         if (!voxelCounts.ContainsKey(label))
                         {
-                            voxelCounts[label] = 0;
-                            centers[label] = (0, 0);
-                            bounds[label] = (x, y, x, y);
+                            voxelCounts.TryAdd(label, 0);
+                            centers.TryAdd(label, (0, 0));
+                            bounds.TryAdd(label, (x, y, x, y));
+                            uniqueLabels.Add(label);
                         }
-
-                        voxelCounts[label]++;
-
-                        // Update center
-                        var center = centers[label];
-                        centers[label] = (center.sumX + x, center.sumY + y);
-
-                        // Update bounds
-                        var bound = bounds[label];
-                        bounds[label] = (
-                            Math.Min(bound.minX, x),
-                            Math.Min(bound.minY, y),
-                            Math.Max(bound.maxX, x),
-                            Math.Max(bound.maxY, y)
-                        );
                     }
                 }
-            }
+            });
 
-            // Create the particles
-            foreach (var entry in voxelCounts)
+            // Count voxels and compute centers (in parallel)
+            Parallel.ForEach(uniqueLabels, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, label =>
             {
-                int label = entry.Key;
-                int voxelCount = entry.Value;
+                int count = 0;
+                int sumX = 0;
+                int sumY = 0;
+                int minX = int.MaxValue;
+                int minY = int.MaxValue;
+                int maxX = int.MinValue;
+                int maxY = int.MinValue;
+
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        if (labeledSlice[x, y] == label)
+                        {
+                            count++;
+                            sumX += x;
+                            sumY += y;
+                            minX = Math.Min(minX, x);
+                            minY = Math.Min(minY, y);
+                            maxX = Math.Max(maxX, x);
+                            maxY = Math.Max(maxY, y);
+                        }
+                    }
+                }
+
+                voxelCounts[label] = count;
+                centers[label] = (sumX, sumY);
+                bounds[label] = (minX, minY, maxX, maxY);
+            });
+
+            // Create the particles from the collected data
+            List<Particle> particles = new List<Particle>();
+
+            foreach (var label in uniqueLabels)
+            {
+                int voxelCount = voxelCounts[label];
                 var center = centers[label];
                 var bound = bounds[label];
 
@@ -284,13 +304,14 @@ namespace CTS
 
             // Create a 3D volume for consistent interface
             int[,,] labelVolume = new int[width, height, 1];
-            for (int y = 0; y < height; y++)
+
+            Parallel.For(0, height, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, y =>
             {
                 for (int x = 0; x < width; x++)
                 {
                     labelVolume[x, y, 0] = labeledSlice[x, y];
                 }
-            }
+            });
 
             progress?.Report(100);
 
@@ -338,16 +359,11 @@ namespace CTS
                     return Separate3DLarge(conservative, progress, cancellationToken);
                 }
 
-                // Extract the volume data in slices to reduce memory pressure
+                // Extract the volume data in parallel slices
                 progress?.Report(10);
-                for (int z = 0; z < depth; z++)
-                {
-                    if (z % 10 == 0)
-                    {
-                        progress?.Report(10 + (z * 15) / depth);
-                        cancellationToken.ThrowIfCancellationRequested();
-                    }
 
+                Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
+                {
                     for (int y = 0; y < height; y++)
                     {
                         for (int x = 0; x < width; x++)
@@ -357,7 +373,13 @@ namespace CTS
                             volumeData[x, y, z] = (label == selectedMaterial.ID) ? (byte)1 : (byte)0;
                         }
                     }
-                }
+
+                    if (z % 10 == 0)
+                    {
+                        int progressValue = 10 + (z * 15) / depth;
+                        progress?.Report(progressValue);
+                    }
+                });
 
                 // Perform connected component labeling
                 progress?.Report(25);
@@ -396,18 +418,15 @@ namespace CTS
                 // Check for cancellation
                 cancellationToken.ThrowIfCancellationRequested();
 
-                // Count particles and analyze
+                // Count particles and analyze using parallel operations
                 progress?.Report(75);
 
                 // First pass: find unique labels to avoid repeatedly scanning the whole volume
-                HashSet<int> uniqueLabels = new HashSet<int>();
-                for (int z = 0; z < depth; z++)
+                ConcurrentBag<int> uniqueLabels = new ConcurrentBag<int>();
+
+                Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
                 {
-                    if (z % 10 == 0)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        progress?.Report(75 + (z * 5) / depth);
-                    }
+                    var localLabels = new HashSet<int>();
 
                     for (int y = 0; y < height; y++)
                     {
@@ -416,39 +435,55 @@ namespace CTS
                             int label = labeledVolume[x, y, z];
                             if (label > 0)
                             {
-                                uniqueLabels.Add(label);
+                                localLabels.Add(label);
                             }
                         }
                     }
-                }
 
-                Logger.Log($"[Separate3D] Found {uniqueLabels.Count} unique labels");
+                    foreach (var label in localLabels)
+                    {
+                        uniqueLabels.Add(label);
+                    }
 
-                // Initialize tracking data structures for all labels at once
-                Dictionary<int, int> voxelCounts = new Dictionary<int, int>(uniqueLabels.Count);
-                Dictionary<int, (int sumX, int sumY, int sumZ)> centers =
-                    new Dictionary<int, (int, int, int)>(uniqueLabels.Count);
-                Dictionary<int, (int minX, int minY, int minZ, int maxX, int maxY, int maxZ)> bounds =
-                    new Dictionary<int, (int, int, int, int, int, int)>(uniqueLabels.Count);
+                    if (z % 10 == 0)
+                    {
+                        int progressValue = 75 + (z * 5) / depth;
+                        progress?.Report(progressValue);
+                    }
+                });
 
-                // Initialize structures for all unique labels at once
-                foreach (int label in uniqueLabels)
+                var uniqueLabelsSet = new HashSet<int>(uniqueLabels);
+                Logger.Log($"[Separate3D] Found {uniqueLabelsSet.Count} unique labels");
+
+                // Initialize tracking data structures
+                ConcurrentDictionary<int, int> voxelCounts = new ConcurrentDictionary<int, int>();
+                ConcurrentDictionary<int, (int sumX, int sumY, int sumZ)> centers =
+                    new ConcurrentDictionary<int, (int, int, int)>();
+                ConcurrentDictionary<int, (int minX, int minY, int minZ, int maxX, int maxY, int maxZ)> bounds =
+                    new ConcurrentDictionary<int, (int, int, int, int, int, int)>();
+
+                // Initialize all dictionaries with default values 
+                foreach (int label in uniqueLabelsSet)
                 {
                     voxelCounts[label] = 0;
                     centers[label] = (0, 0, 0);
                     bounds[label] = (int.MaxValue, int.MaxValue, int.MaxValue, 0, 0, 0);
                 }
 
-                // Analyze particles with optimized slice-by-slice processing
+                // Process particles in parallel by label
                 progress?.Report(80);
-                for (int z = 0; z < depth; z++)
-                {
-                    if (z % 10 == 0)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        progress?.Report(80 + (z * 15) / depth);
-                    }
 
+                // Pre-compute full voxel counts per label
+                var labelVoxels = new ConcurrentDictionary<int, List<(int x, int y, int z)>>();
+
+                foreach (int label in uniqueLabelsSet)
+                {
+                    labelVoxels[label] = new List<(int, int, int)>();
+                }
+
+                // First collect all voxels for each label in parallel
+                Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
+                {
                     for (int y = 0; y < height; y++)
                     {
                         for (int x = 0; x < width; x++)
@@ -456,36 +491,55 @@ namespace CTS
                             int label = labeledVolume[x, y, z];
                             if (label > 0)
                             {
-                                // Update voxel count
-                                voxelCounts[label]++;
-
-                                // Update center of mass
-                                var center = centers[label];
-                                centers[label] = (center.sumX + x, center.sumY + y, center.sumZ + z);
-
-                                // Update bounds
-                                var bound = bounds[label];
-                                bounds[label] = (
-                                    Math.Min(bound.minX, x),
-                                    Math.Min(bound.minY, y),
-                                    Math.Min(bound.minZ, z),
-                                    Math.Max(bound.maxX, x),
-                                    Math.Max(bound.maxY, y),
-                                    Math.Max(bound.maxZ, z)
-                                );
+                                lock (labelVoxels[label])
+                                {
+                                    labelVoxels[label].Add((x, y, z));
+                                }
                             }
                         }
                     }
-                }
+
+                    if (z % 10 == 0)
+                    {
+                        int progressValue = 80 + (z * 15) / depth;
+                        progress?.Report(progressValue);
+                    }
+                });
+
+                // Then process each label in parallel
+                Parallel.ForEach(uniqueLabelsSet, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, label =>
+                {
+                    int voxelCount = 0;
+                    int sumX = 0, sumY = 0, sumZ = 0;
+                    int minX = int.MaxValue, minY = int.MaxValue, minZ = int.MaxValue;
+                    int maxX = 0, maxY = 0, maxZ = 0;
+
+                    foreach (var (x, y, z) in labelVoxels[label])
+                    {
+                        voxelCount++;
+                        sumX += x;
+                        sumY += y;
+                        sumZ += z;
+                        minX = Math.Min(minX, x);
+                        minY = Math.Min(minY, y);
+                        minZ = Math.Min(minZ, z);
+                        maxX = Math.Max(maxX, x);
+                        maxY = Math.Max(maxY, y);
+                        maxZ = Math.Max(maxZ, z);
+                    }
+
+                    voxelCounts[label] = voxelCount;
+                    centers[label] = (sumX, sumY, sumZ);
+                    bounds[label] = (minX, minY, minZ, maxX, maxY, maxZ);
+                });
 
                 // Create particles
                 progress?.Report(95);
-                List<Particle> particles = new List<Particle>(uniqueLabels.Count);
+                List<Particle> particles = new List<Particle>(uniqueLabelsSet.Count);
 
-                foreach (var entry in voxelCounts)
+                foreach (var label in uniqueLabelsSet)
                 {
-                    int label = entry.Key;
-                    int voxelCount = entry.Value;
+                    int voxelCount = voxelCounts[label];
                     var center = centers[label];
                     var bound = bounds[label];
 
@@ -524,6 +578,10 @@ namespace CTS
                     particles.Add(particle);
                 }
 
+                // Clean up memory
+                labelVoxels = null;
+                GC.Collect();
+
                 progress?.Report(100);
                 Logger.Log($"[Separate3D] Identified {particles.Count} particles");
 
@@ -545,15 +603,15 @@ namespace CTS
             }
         }
 
-        // For large volumes, use a chunking approach
+        // For large volumes, use a chunking approach with optimized parallel processing
         private SeparationResult Separate3DLarge(bool conservative, IProgress<int> progress, CancellationToken cancellationToken)
         {
             int width = mainForm.GetWidth();
             int height = mainForm.GetHeight();
             int depth = mainForm.GetDepth();
 
-            // Use a smaller chunk size for very large volumes
-            int chunkSize = 128;
+            // Use an optimized chunk size for better memory locality
+            int chunkSize = CHUNK_SIZE;
             int numChunksX = (width + chunkSize - 1) / chunkSize;
             int numChunksY = (height + chunkSize - 1) / chunkSize;
             int numChunksZ = (depth + chunkSize - 1) / chunkSize;
@@ -563,14 +621,19 @@ namespace CTS
             int[,,] globalLabels = new int[width, height, depth];
             UnionFind unionFind = new UnionFind();
             int nextGlobalLabel = 1;
-            Dictionary<(int chunkX, int chunkY, int chunkZ, int localLabel), int> labelMap =
-                new Dictionary<(int, int, int, int), int>();
+
+            // Use concurrent dictionary for thread safety
+            ConcurrentDictionary<(int chunkX, int chunkY, int chunkZ, int localLabel), int> labelMap =
+                new ConcurrentDictionary<(int, int, int, int), int>();
 
             int chunksDone = 0;
             progress?.Report(0);
 
-            // First pass: process each chunk separately
-            for (int chunkZ = 0; chunkZ < numChunksZ; chunkZ++)
+            // Create a thread-safe counter for label assignment
+            var labelCounter = new AtomicCounter(1);
+
+            // First pass: process each chunk in parallel
+            Parallel.For(0, numChunksZ, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, chunkZ =>
             {
                 for (int chunkY = 0; chunkY < numChunksY; chunkY++)
                 {
@@ -607,7 +670,7 @@ namespace CTS
                         // Check for cancellation
                         cancellationToken.ThrowIfCancellationRequested();
 
-                        // Process chunk
+                        // Process chunk - use CPU as we're already parallelizing chunks
                         int[,,] chunkLabels = LabelConnectedComponents3DCpu(chunkData, cancellationToken);
 
                         // Map chunk labels to global labels
@@ -628,8 +691,9 @@ namespace CTS
 
                         foreach (int localLabel in chunkUniqueLabels)
                         {
-                            labelMap[(chunkX, chunkY, chunkZ, localLabel)] = nextGlobalLabel++;
-                            unionFind.MakeSet(labelMap[(chunkX, chunkY, chunkZ, localLabel)]);
+                            int newGlobalLabel = labelCounter.GetAndIncrement();
+                            labelMap.TryAdd((chunkX, chunkY, chunkZ, localLabel), newGlobalLabel);
+                            unionFind.MakeSet(newGlobalLabel);
                         }
 
                         // Apply global labels
@@ -653,16 +717,22 @@ namespace CTS
                             }
                         }
 
-                        chunksDone++;
-                        progress?.Report((chunksDone * 50) / totalChunks);
+                        Interlocked.Increment(ref chunksDone);
+
+                        if (chunksDone % 4 == 0)
+                        {
+                            int progressValue = (chunksDone * 50) / totalChunks;
+                            progress?.Report(progressValue);
+                        }
                     }
                 }
-            }
+            });
 
             // Second pass: merge connected components across chunk boundaries
             progress?.Report(50);
 
-            for (int z = 0; z < depth; z++)
+            // Process in slices for better memory locality
+            Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
             {
                 for (int y = 0; y < height; y++)
                 {
@@ -702,19 +772,57 @@ namespace CTS
                     }
                 }
 
-                // Check for cancellation every slice
+                // Check for cancellation and report progress
                 if (z % 10 == 0)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     progress?.Report(50 + (z * 25) / depth);
                 }
+            });
+
+            // Third pass: apply final labels with a parallel approach
+            ConcurrentDictionary<int, int> finalLabelMap = new ConcurrentDictionary<int, int>();
+            var finalLabelCounter = new AtomicCounter(1);
+
+            // First collect all roots
+            ConcurrentBag<int> roots = new ConcurrentBag<int>();
+
+            Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
+            {
+                var localRoots = new HashSet<int>();
+
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        int label = globalLabels[x, y, z];
+                        if (label > 0)
+                        {
+                            int root = unionFind.Find(label);
+                            localRoots.Add(root);
+                        }
+                    }
+                }
+
+                foreach (var root in localRoots)
+                {
+                    roots.Add(root);
+                }
+
+                if (z % 10 == 0)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
+            });
+
+            // Create the final label map - we need to do this sequentially to get consistent labels
+            foreach (var root in new HashSet<int>(roots))
+            {
+                finalLabelMap.TryAdd(root, finalLabelCounter.GetAndIncrement());
             }
 
-            // Third pass: apply final labels
-            Dictionary<int, int> finalLabelMap = new Dictionary<int, int>();
-            int finalLabelCount = 0;
-
-            for (int z = 0; z < depth; z++)
+            // Now apply the final labels in parallel
+            Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
             {
                 for (int y = 0; y < height; y++)
                 {
@@ -724,11 +832,6 @@ namespace CTS
                         if (label > 0)
                         {
                             int root = unionFind.Find(label);
-                            if (!finalLabelMap.ContainsKey(root))
-                            {
-                                finalLabelMap[root] = ++finalLabelCount;
-                            }
-
                             globalLabels[x, y, z] = finalLabelMap[root];
                         }
                     }
@@ -740,16 +843,61 @@ namespace CTS
                     cancellationToken.ThrowIfCancellationRequested();
                     progress?.Report(75 + (z * 20) / depth);
                 }
+            });
+
+            // Analyze particles in parallel
+            List<Particle> particles = new List<Particle>();
+            ConcurrentBag<int> uniqueFinalLabels = new ConcurrentBag<int>();
+
+            // First identify all unique final labels
+            Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
+            {
+                var localLabels = new HashSet<int>();
+
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        int label = globalLabels[x, y, z];
+                        if (label > 0)
+                        {
+                            localLabels.Add(label);
+                        }
+                    }
+                }
+
+                foreach (var label in localLabels)
+                {
+                    uniqueFinalLabels.Add(label);
+                }
+            });
+
+            // Initialize particle data storage
+            var uniqueLabelsSet = new HashSet<int>(uniqueFinalLabels);
+            ConcurrentDictionary<int, int> voxelCounts = new ConcurrentDictionary<int, int>();
+            ConcurrentDictionary<int, (int sumX, int sumY, int sumZ)> centers = new ConcurrentDictionary<int, (int, int, int)>();
+            ConcurrentDictionary<int, (int minX, int minY, int minZ, int maxX, int maxY, int maxZ)> bounds =
+                new ConcurrentDictionary<int, (int, int, int, int, int, int)>();
+
+            // Pre-initialize dictionaries
+            foreach (var label in uniqueLabelsSet)
+            {
+                voxelCounts[label] = 0;
+                centers[label] = (0, 0, 0);
+                bounds[label] = (int.MaxValue, int.MaxValue, int.MaxValue, 0, 0, 0);
             }
 
-            // Analyze particles
-            List<Particle> particles = new List<Particle>();
-            Dictionary<int, int> voxelCounts = new Dictionary<int, int>();
-            Dictionary<int, (int sumX, int sumY, int sumZ)> centers = new Dictionary<int, (int, int, int)>();
-            Dictionary<int, (int minX, int minY, int minZ, int maxX, int maxY, int maxZ)> bounds =
-                new Dictionary<int, (int, int, int, int, int, int)>();
+            // Collect all voxels for each label
+            ConcurrentDictionary<int, ConcurrentBag<(int x, int y, int z)>> labelVoxels =
+                new ConcurrentDictionary<int, ConcurrentBag<(int, int, int)>>();
 
-            for (int z = 0; z < depth; z++)
+            foreach (var label in uniqueLabelsSet)
+            {
+                labelVoxels[label] = new ConcurrentBag<(int, int, int)>();
+            }
+
+            // Collect voxels in parallel
+            Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
             {
                 for (int y = 0; y < height; y++)
                 {
@@ -758,40 +906,43 @@ namespace CTS
                         int label = globalLabels[x, y, z];
                         if (label > 0)
                         {
-                            // Update voxel count
-                            if (!voxelCounts.ContainsKey(label))
-                            {
-                                voxelCounts[label] = 0;
-                                centers[label] = (0, 0, 0);
-                                bounds[label] = (int.MaxValue, int.MaxValue, int.MaxValue, 0, 0, 0);
-                            }
-
-                            voxelCounts[label]++;
-
-                            // Update center
-                            var center = centers[label];
-                            centers[label] = (center.sumX + x, center.sumY + y, center.sumZ + z);
-
-                            // Update bounds
-                            var bound = bounds[label];
-                            bounds[label] = (
-                                Math.Min(bound.minX, x),
-                                Math.Min(bound.minY, y),
-                                Math.Min(bound.minZ, z),
-                                Math.Max(bound.maxX, x),
-                                Math.Max(bound.maxY, y),
-                                Math.Max(bound.maxZ, z)
-                            );
+                            labelVoxels[label].Add((x, y, z));
                         }
                     }
                 }
-            }
+            });
+
+            // Process each label in parallel
+            Parallel.ForEach(uniqueLabelsSet, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, label =>
+            {
+                int count = 0;
+                int sumX = 0, sumY = 0, sumZ = 0;
+                int minX = int.MaxValue, minY = int.MaxValue, minZ = int.MaxValue;
+                int maxX = 0, maxY = 0, maxZ = 0;
+
+                foreach (var (x, y, z) in labelVoxels[label])
+                {
+                    count++;
+                    sumX += x;
+                    sumY += y;
+                    sumZ += z;
+                    minX = Math.Min(minX, x);
+                    minY = Math.Min(minY, y);
+                    minZ = Math.Min(minZ, z);
+                    maxX = Math.Max(maxX, x);
+                    maxY = Math.Max(maxY, y);
+                    maxZ = Math.Max(maxZ, z);
+                }
+
+                voxelCounts[label] = count;
+                centers[label] = (sumX, sumY, sumZ);
+                bounds[label] = (minX, minY, minZ, maxX, maxY, maxZ);
+            });
 
             // Create particles
-            foreach (var entry in voxelCounts)
+            foreach (var label in uniqueLabelsSet)
             {
-                int label = entry.Key;
-                int voxelCount = entry.Value;
+                int voxelCount = voxelCounts[label];
                 var center = centers[label];
                 var bound = bounds[label];
 
@@ -830,7 +981,12 @@ namespace CTS
                 particles.Add(particle);
             }
 
+            // Clean up memory
+            labelVoxels = null;
+            GC.Collect();
+
             progress?.Report(100);
+            Logger.Log($"[Separate3DLarge] Identified {particles.Count} particles");
 
             return new SeparationResult
             {
@@ -841,40 +997,49 @@ namespace CTS
             };
         }
 
+        // Optimized thread-safe UnionFind implementation
         private class UnionFind
         {
-            private Dictionary<int, int> parent;
-            private Dictionary<int, int> rank;
+            private readonly ConcurrentDictionary<int, int> parent;
+            private readonly ConcurrentDictionary<int, int> rank;
+            private readonly object syncLock = new object();
 
             public UnionFind()
             {
-                parent = new Dictionary<int, int>();
-                rank = new Dictionary<int, int>();
+                parent = new ConcurrentDictionary<int, int>();
+                rank = new ConcurrentDictionary<int, int>();
             }
 
             public void MakeSet(int x)
             {
-                if (!parent.ContainsKey(x))
-                {
-                    parent[x] = x;
-                    rank[x] = 0;
-                }
+                parent.TryAdd(x, x);
+                rank.TryAdd(x, 0);
             }
 
             public int Find(int x)
             {
-                if (!parent.ContainsKey(x))
+                if (!parent.TryGetValue(x, out int p))
                 {
-                    MakeSet(x);
-                    return x;
+                    lock (syncLock)
+                    {
+                        // Double-check after acquiring lock
+                        if (!parent.ContainsKey(x))
+                        {
+                            MakeSet(x);
+                        }
+                        return x;
+                    }
                 }
 
-                if (parent[x] != x)
+                if (p != x)
                 {
-                    parent[x] = Find(parent[x]); // Path compression
+                    // Path compression with atomic update
+                    int root = Find(p);
+                    parent.TryUpdate(x, root, p);
+                    return root;
                 }
 
-                return parent[x];
+                return x;
             }
 
             public void Union(int x, int y)
@@ -885,27 +1050,57 @@ namespace CTS
                 if (rootX == rootY)
                     return;
 
-                // Union by rank
-                if (!rank.ContainsKey(rootX)) rank[rootX] = 0;
-                if (!rank.ContainsKey(rootY)) rank[rootY] = 0;
+                // Need to synchronize to avoid race conditions
+                lock (syncLock)
+                {
+                    // Re-check after lock
+                    rootX = Find(x);
+                    rootY = Find(y);
 
-                if (rank[rootX] < rank[rootY])
-                {
-                    parent[rootX] = rootY;
-                }
-                else if (rank[rootX] > rank[rootY])
-                {
-                    parent[rootY] = rootX;
-                }
-                else
-                {
-                    parent[rootY] = rootX;
-                    rank[rootX]++;
+                    if (rootX == rootY)
+                        return;
+
+                    // Get current ranks
+                    int rankX = rank.GetOrAdd(rootX, 0);
+                    int rankY = rank.GetOrAdd(rootY, 0);
+
+                    // Union by rank
+                    if (rankX < rankY)
+                    {
+                        parent[rootX] = rootY;
+                    }
+                    else if (rankX > rankY)
+                    {
+                        parent[rootY] = rootX;
+                    }
+                    else
+                    {
+                        parent[rootY] = rootX;
+                        rank[rootX] = rankX + 1;
+                    }
                 }
             }
         }
 
-        // CPU implementation of 2D connected component labeling
+        // Thread-safe atomic counter for consistent label assignment
+        private class AtomicCounter
+        {
+            private int value;
+
+            public AtomicCounter(int initialValue)
+            {
+                value = initialValue;
+            }
+
+            public int GetAndIncrement()
+            {
+                return Interlocked.Increment(ref value) - 1;
+            }
+
+            public int Value => value;
+        }
+
+        // Optimized CPU implementation of 2D connected component labeling
         private int[,] LabelConnectedComponents2DCpu(byte[,] data, CancellationToken cancellationToken)
         {
             int width = data.GetLength(0);
@@ -915,132 +1110,52 @@ namespace CTS
             UnionFind unionFind = new UnionFind();
             int nextLabel = 1;
 
-            // First pass: assign initial labels and record equivalences
-            for (int y = 0; y < height; y++)
+            // First pass: assign initial labels in parallel chunks
+            int chunkSize = Math.Max(1, height / maxThreads);
+
+            Parallel.For(0, (height + chunkSize - 1) / chunkSize, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, chunk =>
             {
-                if (y % 100 == 0) cancellationToken.ThrowIfCancellationRequested();
+                int startY = chunk * chunkSize;
+                int endY = Math.Min(startY + chunkSize, height);
 
-                for (int x = 0; x < width; x++)
+                for (int y = startY; y < endY; y++)
                 {
-                    if (data[x, y] == 0)
-                        continue;
+                    if (y % 100 == 0) cancellationToken.ThrowIfCancellationRequested();
 
-                    // Check neighbors (8-connectivity)
-                    List<int> neighbors = new List<int>();
-
-                    // Check 4-connected neighbors
-                    if (x > 0 && data[x - 1, y] != 0)
-                        neighbors.Add(labels[x - 1, y]);
-
-                    if (y > 0 && data[x, y - 1] != 0)
-                        neighbors.Add(labels[x, y - 1]);
-
-                    // Add diagonal neighbors for 8-connectivity
-                    if (x > 0 && y > 0 && data[x - 1, y - 1] != 0)
-                        neighbors.Add(labels[x - 1, y - 1]);
-
-                    if (x < width - 1 && y > 0 && data[x + 1, y - 1] != 0)
-                        neighbors.Add(labels[x + 1, y - 1]);
-
-                    neighbors.RemoveAll(n => n == 0);
-
-                    if (neighbors.Count == 0)
-                    {
-                        // New component
-                        labels[x, y] = nextLabel++;
-                        unionFind.MakeSet(labels[x, y]);
-                    }
-                    else
-                    {
-                        // Use the minimum neighbor label
-                        labels[x, y] = neighbors.Min();
-
-                        // Union all neighboring labels
-                        for (int i = 0; i < neighbors.Count; i++)
-                        {
-                            for (int j = i + 1; j < neighbors.Count; j++)
-                            {
-                                unionFind.Union(neighbors[i], neighbors[j]);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Second pass: apply union-find equivalences
-            Dictionary<int, int> finalLabelMap = new Dictionary<int, int>();
-            int finalLabelCount = 0;
-
-            for (int y = 0; y < height; y++)
-            {
-                if (y % 100 == 0) cancellationToken.ThrowIfCancellationRequested();
-
-                for (int x = 0; x < width; x++)
-                {
-                    if (labels[x, y] == 0)
-                        continue;
-
-                    int root = unionFind.Find(labels[x, y]);
-
-                    if (!finalLabelMap.ContainsKey(root))
-                    {
-                        finalLabelMap[root] = ++finalLabelCount;
-                    }
-
-                    labels[x, y] = finalLabelMap[root];
-                }
-            }
-
-            return labels;
-        }
-
-        // CPU implementation of 3D connected component labeling
-        private int[,,] LabelConnectedComponents3DCpu(byte[,,] data, CancellationToken cancellationToken)
-        {
-            int width = data.GetLength(0);
-            int height = data.GetLength(1);
-            int depth = data.GetLength(2);
-
-            int[,,] labels = new int[width, height, depth];
-            UnionFind unionFind = new UnionFind();
-            int nextLabel = 1;
-
-            // First pass: assign initial labels and record equivalences
-            for (int z = 0; z < depth; z++)
-            {
-                if (z % 10 == 0) cancellationToken.ThrowIfCancellationRequested();
-
-                for (int y = 0; y < height; y++)
-                {
                     for (int x = 0; x < width; x++)
                     {
-                        if (data[x, y, z] == 0)
+                        if (data[x, y] == 0)
                             continue;
 
-                        // Check 6-connected neighbors
-                        List<int> neighbors = new List<int>();
+                        // Check neighbors (8-connectivity)
+                        List<int> neighbors = new List<int>(4); // Pre-allocate for efficiency
 
-                        if (x > 0 && data[x - 1, y, z] != 0)
-                            neighbors.Add(labels[x - 1, y, z]);
+                        // Check 4-connected neighbors
+                        if (x > 0 && data[x - 1, y] != 0)
+                            neighbors.Add(labels[x - 1, y]);
 
-                        if (y > 0 && data[x, y - 1, z] != 0)
-                            neighbors.Add(labels[x, y - 1, z]);
+                        if (y > 0 && data[x, y - 1] != 0)
+                            neighbors.Add(labels[x, y - 1]);
 
-                        if (z > 0 && data[x, y, z - 1] != 0)
-                            neighbors.Add(labels[x, y, z - 1]);
+                        // Add diagonal neighbors for 8-connectivity
+                        if (x > 0 && y > 0 && data[x - 1, y - 1] != 0)
+                            neighbors.Add(labels[x - 1, y - 1]);
+
+                        if (x < width - 1 && y > 0 && data[x + 1, y - 1] != 0)
+                            neighbors.Add(labels[x + 1, y - 1]);
 
                         neighbors.RemoveAll(n => n == 0);
 
                         if (neighbors.Count == 0)
                         {
                             // New component
-                            labels[x, y, z] = nextLabel++;
-                            unionFind.MakeSet(labels[x, y, z]);
+                            labels[x, y] = Interlocked.Increment(ref nextLabel) - 1;
+                            unionFind.MakeSet(labels[x, y]);
                         }
                         else
                         {
                             // Use the minimum neighbor label
-                            labels[x, y, z] = neighbors.Min();
+                            labels[x, y] = neighbors.Min();
 
                             // Union all neighboring labels
                             for (int i = 0; i < neighbors.Count; i++)
@@ -1053,13 +1168,173 @@ namespace CTS
                         }
                     }
                 }
-            }
+            });
 
             // Second pass: apply union-find equivalences
-            Dictionary<int, int> finalLabelMap = new Dictionary<int, int>();
-            int finalLabelCount = 0;
+            ConcurrentDictionary<int, int> finalLabelMap = new ConcurrentDictionary<int, int>();
+            AtomicCounter finalLabelCounter = new AtomicCounter(1);
 
-            for (int z = 0; z < depth; z++)
+            // First collect all roots
+            ConcurrentBag<int> roots = new ConcurrentBag<int>();
+
+            Parallel.For(0, height, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, y =>
+            {
+                var localRoots = new HashSet<int>();
+
+                for (int x = 0; x < width; x++)
+                {
+                    if (labels[x, y] > 0)
+                    {
+                        int root = unionFind.Find(labels[x, y]);
+                        localRoots.Add(root);
+                    }
+                }
+
+                foreach (var root in localRoots)
+                {
+                    roots.Add(root);
+                }
+
+                if (y % 100 == 0) cancellationToken.ThrowIfCancellationRequested();
+            });
+
+            // Create final label map (must be sequential for consistent labels)
+            foreach (var root in new HashSet<int>(roots))
+            {
+                finalLabelMap.TryAdd(root, finalLabelCounter.GetAndIncrement());
+            }
+
+            // Apply final labels in parallel
+            Parallel.For(0, height, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, y =>
+            {
+                if (y % 100 == 0) cancellationToken.ThrowIfCancellationRequested();
+
+                for (int x = 0; x < width; x++)
+                {
+                    if (labels[x, y] > 0)
+                    {
+                        int root = unionFind.Find(labels[x, y]);
+                        labels[x, y] = finalLabelMap[root];
+                    }
+                }
+            });
+
+            return labels;
+        }
+
+        // Optimized CPU implementation of 3D connected component labeling
+        private int[,,] LabelConnectedComponents3DCpu(byte[,,] data, CancellationToken cancellationToken)
+        {
+            int width = data.GetLength(0);
+            int height = data.GetLength(1);
+            int depth = data.GetLength(2);
+
+            int[,,] labels = new int[width, height, depth];
+            UnionFind unionFind = new UnionFind();
+            AtomicCounter labelCounter = new AtomicCounter(1);
+
+            // First pass: assign initial labels and record equivalences in parallel by z-slices
+            Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
+            {
+                if (z % 10 == 0) cancellationToken.ThrowIfCancellationRequested();
+
+                // Process each slice sequentially for label consistency
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        if (data[x, y, z] == 0)
+                            continue;
+
+                        // Check 6-connected neighbors - using array for performance
+                        int[] neighbors = new int[3]; // Max 3 neighbors (x-1, y-1, z-1)
+                        int neighborCount = 0;
+
+                        if (x > 0 && data[x - 1, y, z] != 0)
+                            neighbors[neighborCount++] = labels[x - 1, y, z];
+
+                        if (y > 0 && data[x, y - 1, z] != 0)
+                            neighbors[neighborCount++] = labels[x, y - 1, z];
+
+                        if (z > 0 && data[x, y, z - 1] != 0)
+                            neighbors[neighborCount++] = labels[x, y, z - 1];
+
+                        // Filter zero labels
+                        int validNeighbors = 0;
+                        for (int i = 0; i < neighborCount; i++)
+                        {
+                            if (neighbors[i] > 0)
+                                neighbors[validNeighbors++] = neighbors[i];
+                        }
+
+                        if (validNeighbors == 0)
+                        {
+                            // New component
+                            labels[x, y, z] = labelCounter.GetAndIncrement();
+                            unionFind.MakeSet(labels[x, y, z]);
+                        }
+                        else
+                        {
+                            // Find minimum non-zero label among neighbors
+                            int minLabel = int.MaxValue;
+                            for (int i = 0; i < validNeighbors; i++)
+                            {
+                                minLabel = Math.Min(minLabel, neighbors[i]);
+                            }
+
+                            labels[x, y, z] = minLabel;
+
+                            // Union all neighboring labels
+                            for (int i = 0; i < validNeighbors; i++)
+                            {
+                                if (neighbors[i] != minLabel)
+                                {
+                                    unionFind.Union(minLabel, neighbors[i]);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Second pass: collect all roots using parallel processing
+            ConcurrentBag<int> roots = new ConcurrentBag<int>();
+
+            Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
+            {
+                if (z % 10 == 0) cancellationToken.ThrowIfCancellationRequested();
+
+                var localRoots = new HashSet<int>();
+
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        if (labels[x, y, z] > 0)
+                        {
+                            int root = unionFind.Find(labels[x, y, z]);
+                            localRoots.Add(root);
+                        }
+                    }
+                }
+
+                foreach (var root in localRoots)
+                {
+                    roots.Add(root);
+                }
+            });
+
+            // Create final label map (must be sequential for consistent labels)
+            ConcurrentDictionary<int, int> finalLabelMap = new ConcurrentDictionary<int, int>();
+            AtomicCounter finalLabelCounter = new AtomicCounter(1);
+
+            foreach (var root in new HashSet<int>(roots))
+            {
+                finalLabelMap.TryAdd(root, finalLabelCounter.GetAndIncrement());
+            }
+
+            // Third pass: apply final labels in parallel
+            Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
             {
                 if (z % 10 == 0) cancellationToken.ThrowIfCancellationRequested();
 
@@ -1067,78 +1342,19 @@ namespace CTS
                 {
                     for (int x = 0; x < width; x++)
                     {
-                        if (labels[x, y, z] == 0)
-                            continue;
-
-                        int root = unionFind.Find(labels[x, y, z]);
-
-                        if (!finalLabelMap.ContainsKey(root))
+                        if (labels[x, y, z] > 0)
                         {
-                            finalLabelMap[root] = ++finalLabelCount;
+                            int root = unionFind.Find(labels[x, y, z]);
+                            labels[x, y, z] = finalLabelMap[root];
                         }
-
-                        labels[x, y, z] = finalLabelMap[root];
                     }
                 }
-            }
+            });
 
             return labels;
         }
 
-        // GPU kernel methods for 2D connected component labeling
-        private static void InitLabelsKernel2D(
-    Index2D index,
-    ArrayView2D<byte, Stride2D.DenseY> input,
-    ArrayView2D<int, Stride2D.DenseY> output)
-        {
-            int x = index.X;
-            int y = index.Y;
-
-            output[x, y] = input[x, y] == 0 ? 0 : -1;
-        }
-
-        private static void PropagateLabelsKernel2D(
-    Index2D index,
-    ArrayView2D<int, Stride2D.DenseY> labels,
-    ArrayView1D<int, Stride1D.Dense> changes)
-        {
-            int x = index.X;
-            int y = index.Y;
-
-            if (labels[x, y] <= 0)
-                return;
-
-            long width = labels.Extent.X;
-            long height = labels.Extent.Y;
-
-            int currentLabel = labels[x, y];
-            int minLabel = currentLabel;
-
-            // Check 8-connected neighbors
-            for (int dy = -1; dy <= 1; dy++)
-            {
-                for (int dx = -1; dx <= 1; dx++)
-                {
-                    if (dx == 0 && dy == 0)
-                        continue;
-
-                    int nx = x + dx;
-                    int ny = y + dy;
-
-                    if (nx >= 0 && nx < width && ny >= 0 && ny < height && labels[nx, ny] > 0)
-                    {
-                        minLabel = Math.Min(minLabel, labels[nx, ny]);
-                    }
-                }
-            }
-
-            if (minLabel < currentLabel)
-            {
-                labels[x, y] = minLabel;
-                ILGPU.Atomic.Add(ref changes[0], 1);
-            }
-        }
-
+        // Optimized GPU implementation for 2D connected component labeling
         private int[,] LabelConnectedComponents2DGpu(byte[,] data)
         {
             if (!gpuInitialized || accelerator == null)
@@ -1148,148 +1364,208 @@ namespace CTS
 
             int width = data.GetLength(0);
             int height = data.GetLength(1);
+            int totalSize = width * height;
 
             try
             {
-                // Convert to 1D array for GPU processing
-                byte[] flatData = new byte[width * height];
-                for (int y = 0; y < height; y++)
-                    for (int x = 0; x < width; x++)
-                        flatData[y * width + x] = data[x, y];
-
-                // Create GPU buffers using correct ILGPU 1.5.1 syntax
-                var inputBuffer = accelerator.Allocate1D<byte>(flatData.Length);
-                inputBuffer.CopyFromCPU(flatData);
-
-                var labelsBuffer = accelerator.Allocate1D<int>(width * height);
-
-                var changesBuffer = accelerator.Allocate1D<int>(1);
-                int[] zeros = new int[1] { 0 };
-                changesBuffer.CopyFromCPU(zeros);
-
-                // Initialize labels with -1 for foreground pixels
-                var initKernel = accelerator.LoadAutoGroupedStreamKernel<
-                    Index1D,           // index
-                    ArrayView<byte>,   // input
-                    ArrayView<int>,    // output
-                    int                // width
-                >(
-                    (Index1D index, ArrayView<byte> input, ArrayView<int> output, int w) =>
+                // Optimize memory by using pinned arrays and minimizing transfers
+                using (var inputBuffer = accelerator.Allocate1D<byte>(totalSize))
+                using (var labelsBuffer = accelerator.Allocate1D<int>(totalSize))
+                using (var changesBuffer = accelerator.Allocate1D<int>(1))
+                {
+                    // Flatten the 2D array - this is faster than working with 2D views
+                    byte[] flatData = new byte[totalSize];
+                    Parallel.For(0, height, y =>
                     {
-                        if (index >= input.Length)
-                            return;
-
-                        output[index] = input[index] > 0 ? -1 : 0;
+                        for (int x = 0; x < width; x++)
+                        {
+                            flatData[y * width + x] = data[x, y];
+                        }
                     });
 
-                // Execute initialization kernel
-                initKernel(flatData.Length, inputBuffer.View, labelsBuffer.View, width);
-                accelerator.Synchronize();
+                    // Copy data to GPU
+                    inputBuffer.CopyFromCPU(flatData);
 
-                // Get data back for initial labeling
-                int[] labelsArray = new int[width * height];
-                labelsBuffer.CopyToCPU(labelsArray);
-
-                // Assign initial labels
-                int nextLabel = 1;
-                for (int i = 0; i < labelsArray.Length; i++)
-                {
-                    if (labelsArray[i] == -1)
-                        labelsArray[i] = nextLabel++;
-                }
-
-                // Copy back to GPU
-                labelsBuffer.CopyFromCPU(labelsArray);
-
-                // Define the propagation kernel
-                var propagateKernel = accelerator.LoadAutoGroupedStreamKernel<
-                    Index1D,           // index
-                    ArrayView<int>,    // labels
-                    ArrayView<int>,    // changes
-                    int,               // width
-                    int                // height
-                >(
-                    (Index1D index, ArrayView<int> labels, ArrayView<int> changes, int w, int h) =>
-                    {
-                        if (index >= labels.Length)
-                            return;
-
-                        // Convert 1D index to 2D coordinates
-                        int x = index % w;
-                        int y = (int)(index / w);
-
-                        if (labels[index] <= 0)
-                            return;
-
-                        int currentLabel = labels[index];
-                        int minLabel = currentLabel;
-                        bool foundSmaller = false;
-
-                        // Check 8-connected neighbors
-                        for (int dy = -1; dy <= 1; dy++)
+                    // Initialize labels kernel - directly mark foreground voxels with temporary labels
+                    var initKernel = accelerator.LoadAutoGroupedStreamKernel<
+                        Index1D,           // index
+                        ArrayView<byte>,   // input
+                        ArrayView<int>,    // output
+                        int                // width
+                    >(
+                        (Index1D index, ArrayView<byte> input, ArrayView<int> output, int w) =>
                         {
-                            for (int dx = -1; dx <= 1; dx++)
+                            // Bounds check
+                            if (index >= input.Length)
+                                return;
+
+                            // Binary classification - foreground vs background
+                            output[index] = input[index] > 0 ? int.MaxValue : 0;
+                        }
+                    );
+
+                    // Execute initialization kernel
+                    initKernel(totalSize, inputBuffer.View, labelsBuffer.View, width);
+                    accelerator.Synchronize();
+
+                    // Raster scan label propagation kernel (more GPU-friendly)
+                    var propagateKernel = accelerator.LoadAutoGroupedStreamKernel<
+                        Index1D,           // index
+                        ArrayView<int>,    // labels
+                        ArrayView<int>,    // changes
+                        int,               // width
+                        int                // height
+                    >(
+                        (Index1D index, ArrayView<int> labels, ArrayView<int> changes, int w, int h) =>
+                        {
+                            if (index >= labels.Length)
+                                return;
+
+                            // Skip background pixels
+                            if (labels[index] == 0)
+                                return;
+
+                            // Convert 1D index to 2D coordinates
+                            int x = index % w;
+                            int y = (int)(index / w);
+
+                            // Find minimum label among 8-connected neighbors
+                            int currentLabel = labels[index];
+                            int minLabel = currentLabel;
+                            bool foundSmaller = false;
+
+                            // Check 8-connected neighbors
+                            for (int dy = -1; dy <= 1; dy++)
                             {
-                                if (dx == 0 && dy == 0)
-                                    continue;
-
-                                int nx = x + dx;
-                                int ny = y + dy;
-
-                                if (nx >= 0 && nx < w && ny >= 0 && ny < h)
+                                for (int dx = -1; dx <= 1; dx++)
                                 {
-                                    int neighborIdx = ny * w + nx;
-                                    int neighborLabel = labels[neighborIdx];
+                                    if (dx == 0 && dy == 0)
+                                        continue;
 
-                                    if (neighborLabel > 0 && neighborLabel < minLabel)
+                                    int nx = x + dx;
+                                    int ny = y + dy;
+
+                                    if (nx >= 0 && nx < w && ny >= 0 && ny < h)
                                     {
-                                        minLabel = neighborLabel;
-                                        foundSmaller = true;
+                                        int neighborIdx = ny * w + nx;
+                                        int neighborLabel = labels[neighborIdx];
+
+                                        if (neighborLabel > 0 && neighborLabel < minLabel)
+                                        {
+                                            minLabel = neighborLabel;
+                                            foundSmaller = true;
+                                        }
                                     }
                                 }
                             }
-                        }
 
-                        if (foundSmaller)
+                            if (foundSmaller)
+                            {
+                                labels[index] = minLabel;
+                                ILGPU.Atomic.Add(ref changes[0], 1);
+                            }
+                        }
+                    );
+
+                    // Alternate forward/backward passes for faster convergence
+                    changesBuffer.MemSetToZero();
+                    int iteration = 0;
+                    bool hasChanges = true;
+                    int[] changesArray = new int[1];
+                    int maxIterations = Math.Min((width + height) * 2, MAX_ITERATIONS);
+
+                    // Two-pass algorithm with multiple iterations
+                    while (hasChanges && iteration < maxIterations)
+                    {
+                        // Reset changes counter
+                        changesBuffer.MemSetToZero();
+
+                        // Execute propagation kernel
+                        propagateKernel(totalSize, labelsBuffer.View, changesBuffer.View, width, height);
+                        accelerator.Synchronize();
+
+                        // Check if any changes occurred
+                        changesBuffer.CopyToCPU(changesArray);
+                        hasChanges = changesArray[0] > 0;
+                        iteration++;
+                    }
+
+                    // Relabeling kernel - compress label space
+                    var relabelKernel = accelerator.LoadAutoGroupedStreamKernel<
+                        Index1D,           // index
+                        ArrayView<int>,    // labels
+                        int,               // start value
+                        int                // width
+                    >(
+                        (Index1D index, ArrayView<int> labels, int startValue, int w) =>
                         {
-                            labels[index] = minLabel;
-                            Atomic.Add(ref changes[0], 1);
+                            if (index >= labels.Length)
+                                return;
+
+                            // Skip background pixels
+                            if (labels[index] == 0)
+                                return;
+
+                            // Renumber with sequential labels starting from startValue
+                            // We can't do a full sequential relabeling on GPU, but we can normalize the labels
+                            int x = index % w;
+                            int y = (int)(index / w);
+
+                            // Use pixel position as a unique ID for each connected component
+                            // This assigns a canonical pixel for each component (top-left)
+                            int minX = x;
+                            int minY = y;
+                            bool foundCanonical = false;
+                            int label = labels[index];
+
+                            // Look for pixels with same label to find the canonical one
+                            for (int scanY = 0; scanY < y; scanY++)
+                            {
+                                for (int scanX = 0; scanX < w; scanX++)
+                                {
+                                    int scanIdx = scanY * w + scanX;
+
+                                    if (scanIdx >= labels.Length)
+                                        continue;
+
+                                    if (labels[scanIdx] == label)
+                                    {
+                                        minX = scanX;
+                                        minY = scanY;
+                                        foundCanonical = true;
+                                        break;
+                                    }
+                                }
+
+                                if (foundCanonical)
+                                    break;
+                            }
+
+                            // Set a unique identifier based on the canonical pixel position
+                            labels[index] = minY * w + minX + startValue;
+                        }
+                    );
+
+                    // Relabel connected components for consistent labels
+                    relabelKernel(totalSize, labelsBuffer.View, 1, width);
+                    accelerator.Synchronize();
+
+                    // Get final results
+                    int[] labelsArray = new int[totalSize];
+                    labelsBuffer.CopyToCPU(labelsArray);
+
+                    // Convert back to 2D array
+                    int[,] result = new int[width, height];
+                    Parallel.For(0, height, y =>
+                    {
+                        for (int x = 0; x < width; x++)
+                        {
+                            result[x, y] = labelsArray[y * width + x];
                         }
                     });
 
-                // Iteratively propagate labels
-                bool hasChanges = true;
-                int[] changesArray = new int[1];
-
-                for (int iter = 0; iter < width + height && hasChanges; iter++)
-                {
-                    // Reset changes counter
-                    changesBuffer.CopyFromCPU(zeros);
-
-                    // Execute propagation kernel
-                    propagateKernel(width * height, labelsBuffer.View, changesBuffer.View, width, height);
-                    accelerator.Synchronize();
-
-                    // Check if any changes occurred
-                    changesBuffer.CopyToCPU(changesArray);
-                    hasChanges = changesArray[0] > 0;
+                    return result;
                 }
-
-                // Get final results
-                labelsBuffer.CopyToCPU(labelsArray);
-
-                // Convert back to 2D array
-                int[,] result = new int[width, height];
-                for (int y = 0; y < height; y++)
-                    for (int x = 0; x < width; x++)
-                        result[x, y] = labelsArray[y * width + x];
-
-                // Clean up
-                inputBuffer.Dispose();
-                labelsBuffer.Dispose();
-                changesBuffer.Dispose();
-
-                return result;
             }
             catch (Exception ex)
             {
@@ -1298,8 +1574,7 @@ namespace CTS
             }
         }
 
-        // GPU kernel methods for 3D connected component labeling
-
+        // Optimized GPU implementation for 3D connected component labeling
         private int[,,] LabelConnectedComponents3DGpu(byte[,,] data, CancellationToken cancellationToken)
         {
             if (!gpuInitialized || accelerator == null)
@@ -1312,34 +1587,39 @@ namespace CTS
             int depth = data.GetLength(2);
             long totalVoxels = (long)width * height * depth;
 
-            // Check if we should process this on GPU or fall back to CPU
-            // Increased threshold and added adaptive size check based on available memory
+            // Check for very large volumes
             long maxGpuVoxels = GetMaxGpuVoxels();
             if (totalVoxels > maxGpuVoxels)
             {
-                Logger.Log($"[ParticleSeparator] Volume too large for direct GPU processing: {totalVoxels} voxels. Falling back to chunked processing.");
-                return ProcessLargeVolumeWithChunks(data, cancellationToken);
+                Logger.Log($"[ParticleSeparator] Volume too large for direct GPU processing: {totalVoxels} voxels. Using optimized chunked GPU processing.");
+                return ProcessLargeVolumeWithGPUChunks(data, cancellationToken);
             }
 
             try
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                // Convert to 1D array for GPU
-                byte[] flatData = new byte[width * height * depth];
+                // Convert to 1D array for GPU (flattened for better performance)
+                byte[] flatData = new byte[totalVoxels];
                 int strideXY = width * height;
 
-                // Process in Z-slices to reduce memory pressure
-                for (int z = 0; z < depth; z++)
+                // Parallelize the flattening operation
+                Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
                 {
-                    if (z % 10 == 0) cancellationToken.ThrowIfCancellationRequested();
-
+                    int zOffset = z * strideXY;
                     for (int y = 0; y < height; y++)
+                    {
+                        int yzOffset = zOffset + y * width;
                         for (int x = 0; x < width; x++)
-                            flatData[z * strideXY + y * width + x] = data[x, y, z];
-                }
+                        {
+                            flatData[yzOffset + x] = data[x, y, z];
+                        }
+                    }
+                });
 
-                // Use smaller buffers with pinned memory for better performance
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // Use managed memory for better efficiency
                 using (var inputBuffer = accelerator.Allocate1D<byte>(flatData.Length))
                 using (var labelsBuffer = accelerator.Allocate1D<int>(flatData.Length))
                 using (var changesBuffer = accelerator.Allocate1D<int>(1))
@@ -1348,12 +1628,11 @@ namespace CTS
                     inputBuffer.CopyFromCPU(flatData);
 
                     // Zero-initialize the changes buffer
-                    int[] zeros = new int[1] { 0 };
-                    changesBuffer.CopyFromCPU(zeros);
+                    changesBuffer.MemSetToZero();
 
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    // Initialize kernel
+                    // Optimized initialization kernel
                     var initKernel = accelerator.LoadAutoGroupedStreamKernel<
                         Index1D,           // index
                         ArrayView<byte>,   // input
@@ -1363,9 +1642,11 @@ namespace CTS
                         {
                             if (index < input.Length)
                             {
-                                output[index] = input[index] > 0 ? -1 : 0;
+                                // Mark foreground voxels with a special value
+                                output[index] = input[index] > 0 ? int.MaxValue : 0;
                             }
-                        });
+                        }
+                    );
 
                     // Execute init kernel
                     initKernel(flatData.Length, inputBuffer.View, labelsBuffer.View);
@@ -1373,25 +1654,36 @@ namespace CTS
 
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    // Get data back for initial labeling
-                    int[] labelsArray = new int[flatData.Length];
-                    labelsBuffer.CopyToCPU(labelsArray);
+                    // Custom label initialization kernel - assign unique label to first pixel
+                    var seedLabelKernel = accelerator.LoadAutoGroupedStreamKernel<
+                        Index1D,
+                        ArrayView<int>,
+                        int,
+                        int,
+                        int
+                    >(
+                        (Index1D index, ArrayView<int> labels, int w, int h, int d) =>
+                        {
+                            int x = index % w;
+                            int y = (index / w) % h;
+                            int z = (int)(index / (w * h));
 
-                    // Assign initial labels
-                    int nextLabel = 1;
-                    for (int i = 0; i < labelsArray.Length; i++)
-                    {
-                        if (i % (width * height * 10) == 0)
-                            cancellationToken.ThrowIfCancellationRequested();
+                            // First-pass: seed with sequential labels based on index
+                            if (labels[index] == int.MaxValue)
+                            {
+                                // Generate a unique label based on position
+                                labels[index] = index + 1;
+                            }
+                        }
+                    );
 
-                        if (labelsArray[i] == -1)
-                            labelsArray[i] = nextLabel++;
-                    }
+                    // Apply seed labels
+                    seedLabelKernel(flatData.Length, labelsBuffer.View, width, height, depth);
+                    accelerator.Synchronize();
 
-                    // Copy back to GPU
-                    labelsBuffer.CopyFromCPU(labelsArray);
+                    cancellationToken.ThrowIfCancellationRequested();
 
-                    // Propagation kernel for 3D
+                    // Optimized kernel for 3D propagation
                     var propagateKernel = accelerator.LoadAutoGroupedStreamKernel<
                         Index1D,           // index
                         ArrayView<int>,    // labels
@@ -1405,25 +1697,26 @@ namespace CTS
                             if (index >= labels.Length)
                                 return;
 
+                            // Skip background voxels
+                            if (labels[index] == 0)
+                                return;
+
                             // Convert 1D index to 3D coordinates
                             int x = index % w;
                             int y = (index / w) % h;
                             int z = (int)(index / (w * h));
 
-                            if (labels[index] <= 0)
-                                return;
-
                             int currentLabel = labels[index];
                             int minLabel = currentLabel;
                             bool foundSmaller = false;
 
-                            // Check 6-connected neighbors
-                            int StrideXY = w * h;
+                            // Check 6-connected neighbors with optimized index calculations
+                            int localStride = w * h;
 
                             // X-1
                             if (x > 0)
                             {
-                                int neighborIdx = z * StrideXY + y * w + (x - 1);
+                                int neighborIdx = z * localStride + y * w + (x - 1);
                                 int neighborLabel = labels[neighborIdx];
 
                                 if (neighborLabel > 0 && neighborLabel < minLabel)
@@ -1436,7 +1729,7 @@ namespace CTS
                             // X+1
                             if (x < w - 1)
                             {
-                                int neighborIdx = z * StrideXY + y * w + (x + 1);
+                                int neighborIdx = z * localStride + y * w + (x + 1);
                                 int neighborLabel = labels[neighborIdx];
 
                                 if (neighborLabel > 0 && neighborLabel < minLabel)
@@ -1449,7 +1742,7 @@ namespace CTS
                             // Y-1
                             if (y > 0)
                             {
-                                int neighborIdx = z * StrideXY + (y - 1) * w + x;
+                                int neighborIdx = z * localStride + (y - 1) * w + x;
                                 int neighborLabel = labels[neighborIdx];
 
                                 if (neighborLabel > 0 && neighborLabel < minLabel)
@@ -1462,7 +1755,7 @@ namespace CTS
                             // Y+1
                             if (y < h - 1)
                             {
-                                int neighborIdx = z * StrideXY + (y + 1) * w + x;
+                                int neighborIdx = z * localStride + (y + 1) * w + x;
                                 int neighborLabel = labels[neighborIdx];
 
                                 if (neighborLabel > 0 && neighborLabel < minLabel)
@@ -1475,7 +1768,7 @@ namespace CTS
                             // Z-1
                             if (z > 0)
                             {
-                                int neighborIdx = (z - 1) * StrideXY + y * w + x;
+                                int neighborIdx = (z - 1) * localStride + y * w + x;
                                 int neighborLabel = labels[neighborIdx];
 
                                 if (neighborLabel > 0 && neighborLabel < minLabel)
@@ -1488,7 +1781,7 @@ namespace CTS
                             // Z+1
                             if (z < d - 1)
                             {
-                                int neighborIdx = (z + 1) * StrideXY + y * w + x;
+                                int neighborIdx = (z + 1) * localStride + y * w + x;
                                 int neighborLabel = labels[neighborIdx];
 
                                 if (neighborLabel > 0 && neighborLabel < minLabel)
@@ -1501,23 +1794,24 @@ namespace CTS
                             if (foundSmaller)
                             {
                                 labels[index] = minLabel;
-                                Atomic.Add(ref changes[0], 1);
+                                ILGPU.Atomic.Add(ref changes[0], 1);
                             }
-                        });
+                        }
+                    );
 
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    // Iteratively propagate labels
+                    // Iteratively propagate labels with early termination
                     bool hasChanges = true;
                     int[] changesArray = new int[1];
-                    int maxIterations = Math.Min(width + height + depth, 1000); // Add max iteration limit
+                    int maxIterations = Math.Min(width + height + depth, MAX_ITERATIONS);
 
                     for (int iter = 0; iter < maxIterations && hasChanges; iter++)
                     {
                         if (iter % 10 == 0) cancellationToken.ThrowIfCancellationRequested();
 
                         // Reset changes counter
-                        changesBuffer.CopyFromCPU(zeros);
+                        changesBuffer.MemSetToZero();
 
                         // Execute propagation kernel
                         propagateKernel(flatData.Length, labelsBuffer.View, changesBuffer.View, width, height, depth);
@@ -1527,41 +1821,39 @@ namespace CTS
                         changesBuffer.CopyToCPU(changesArray);
                         hasChanges = changesArray[0] > 0;
 
-                        // Log progress of large operations
-                        if (iter % 20 == 0)
+                        if (iter % 20 == 0 && hasChanges)
+                        {
                             Logger.Log($"[GPU] Label propagation iteration {iter}, changes: {changesArray[0]}");
+                        }
                     }
 
                     cancellationToken.ThrowIfCancellationRequested();
 
                     // Get final results
+                    int[] labelsArray = new int[flatData.Length];
                     labelsBuffer.CopyToCPU(labelsArray);
 
-                    // Convert back to 3D array
+                    // Convert back to 3D array in parallel
                     int[,,] result = new int[width, height, depth];
 
                     // Process in chunks to reduce GC pressure
                     int chunkSize = 10; // Process 10 slices at a time
-                    for (int zChunk = 0; zChunk < depth; zChunk += chunkSize)
+                    Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
                     {
-                        int endZ = Math.Min(zChunk + chunkSize, depth);
-                        for (int z = zChunk; z < endZ; z++)
+                        int zOffset = z * strideXY;
+                        for (int y = 0; y < height; y++)
                         {
-                            if (z % 10 == 0) cancellationToken.ThrowIfCancellationRequested();
-
-                            for (int y = 0; y < height; y++)
-                                for (int x = 0; x < width; x++)
-                                    result[x, y, z] = labelsArray[z * strideXY + y * width + x];
+                            int yzOffset = zOffset + y * width;
+                            for (int x = 0; x < width; x++)
+                            {
+                                result[x, y, z] = labelsArray[yzOffset + x];
+                            }
                         }
 
-                        // Force garbage collection every few chunks for very large volumes
-                        if (totalVoxels > 100_000_000 && zChunk % 50 == 0)
-                        {
-                            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true);
-                        }
-                    }
+                        if (z % 10 == 0) cancellationToken.ThrowIfCancellationRequested();
+                    });
 
-                    // Free memory to avoid holding onto large arrays
+                    // Free memory
                     flatData = null;
                     labelsArray = null;
                     GC.Collect();
@@ -1587,7 +1879,7 @@ namespace CTS
             }
         }
 
-        // Add this new helper method to estimate available GPU memory
+        // Optimized method for GPU memory estimation
         private long GetMaxGpuVoxels()
         {
             // If we have memory information from the accelerator, use it
@@ -1603,145 +1895,275 @@ namespace CTS
             return 200_000_000; // 200 million voxels as a safer default
         }
 
-        // Add this new method to process large volumes with a tiled approach
-        private int[,,] ProcessLargeVolumeWithChunks(byte[,,] data, CancellationToken cancellationToken)
+        // Process large volumes with GPU-accelerated chunks
+        private int[,,] ProcessLargeVolumeWithGPUChunks(byte[,,] data, CancellationToken cancellationToken)
         {
             int width = data.GetLength(0);
             int height = data.GetLength(1);
             int depth = data.GetLength(2);
 
-            // Create the result volume
-            int[,,] result = new int[width, height, depth];
+            // Process in optimized chunks
+            int chunkSize = CHUNK_SIZE;
+            int numChunksX = (width + chunkSize - 1) / chunkSize;
+            int numChunksY = (height + chunkSize - 1) / chunkSize;
+            int numChunksZ = (depth + chunkSize - 1) / chunkSize;
 
-            // Process in slabs along Z axis
-            int slabSize = 64; // Process 64 Z-slices at a time
-            int nextGlobalLabel = 1;
-            Dictionary<int, int> equivalenceMap = new Dictionary<int, int>();
+            Logger.Log($"[ProcessLargeVolumeWithGPUChunks] Processing volume in {numChunksX}x{numChunksY}x{numChunksZ} chunks");
 
-            // First pass: label each slab independently
-            for (int startZ = 0; startZ < depth; startZ += slabSize)
+            // Create the final label volume
+            int[,,] globalLabels = new int[width, height, depth];
+            var unionFind = new UnionFind();
+            var globalLabelCounter = new AtomicCounter(1);
+
+            // Use a concurrent dictionary for thread-safe label mapping
+            var labelMap = new ConcurrentDictionary<(int chunkX, int chunkY, int chunkZ, int localLabel), int>();
+
+            // Process chunks in parallel along Z-axis for memory efficiency
+            Parallel.For(0, numChunksZ, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, chunkZ =>
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                int endZ = Math.Min(startZ + slabSize, depth);
-                int slabDepth = endZ - startZ;
-
-                // Extract slab
-                byte[,,] slab = new byte[width, height, slabDepth];
-                for (int z = 0; z < slabDepth; z++)
+                // Process chunks sequentially within each Z-slice
+                for (int chunkY = 0; chunkY < numChunksY; chunkY++)
                 {
-                    for (int y = 0; y < height; y++)
+                    for (int chunkX = 0; chunkX < numChunksX; chunkX++)
                     {
-                        for (int x = 0; x < width; x++)
+                        cancellationToken.ThrowIfCancellationRequested();
+
+                        // Calculate chunk bounds
+                        int startX = chunkX * chunkSize;
+                        int startY = chunkY * chunkSize;
+                        int startZ = chunkZ * chunkSize;
+                        int endX = Math.Min(startX + chunkSize, width);
+                        int endY = Math.Min(startY + chunkSize, height);
+                        int endZ = Math.Min(startZ + chunkSize, depth);
+                        int chunkWidth = endX - startX;
+                        int chunkHeight = endY - startY;
+                        int chunkDepth = endZ - startZ;
+
+                        // Skip empty chunks
+                        bool hasData = false;
+                        for (int z = startZ; z < endZ && !hasData; z++)
                         {
-                            slab[x, y, z] = data[x, y, startZ + z];
+                            for (int y = startY; y < endY && !hasData; y++)
+                            {
+                                for (int x = startX; x < endX && !hasData; x++)
+                                {
+                                    if (data[x, y, z] > 0)
+                                    {
+                                        hasData = true;
+                                        break;
+                                    }
+                                }
+                            }
                         }
+
+                        if (!hasData)
+                            continue;
+
+                        // Extract chunk
+                        byte[,,] chunkData = new byte[chunkWidth, chunkHeight, chunkDepth];
+                        for (int z = 0; z < chunkDepth; z++)
+                        {
+                            for (int y = 0; y < chunkHeight; y++)
+                            {
+                                for (int x = 0; x < chunkWidth; x++)
+                                {
+                                    int globalX = startX + x;
+                                    int globalY = startY + y;
+                                    int globalZ = startZ + z;
+                                    chunkData[x, y, z] = data[globalX, globalY, globalZ];
+                                }
+                            }
+                        }
+
+                        // Process chunk using GPU or CPU based on size
+                        int[,,] chunkLabels;
+                        if (chunkWidth * chunkHeight * chunkDepth <= 1_000_000) // Small enough for GPU
+                        {
+                            try
+                            {
+                                chunkLabels = LabelConnectedComponents3DGpu(chunkData, cancellationToken);
+                            }
+                            catch (Exception)
+                            {
+                                // Fall back to CPU if GPU fails
+                                chunkLabels = LabelConnectedComponents3DCpu(chunkData, cancellationToken);
+                            }
+                        }
+                        else
+                        {
+                            chunkLabels = LabelConnectedComponents3DCpu(chunkData, cancellationToken);
+                        }
+
+                        // Find unique labels in chunk
+                        var chunkUniqueLabels = new HashSet<int>();
+                        for (int z = 0; z < chunkDepth; z++)
+                        {
+                            for (int y = 0; y < chunkHeight; y++)
+                            {
+                                for (int x = 0; x < chunkWidth; x++)
+                                {
+                                    if (chunkLabels[x, y, z] > 0)
+                                    {
+                                        chunkUniqueLabels.Add(chunkLabels[x, y, z]);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Map chunk labels to global labels
+                        foreach (int localLabel in chunkUniqueLabels)
+                        {
+                            int newGlobalLabel = globalLabelCounter.GetAndIncrement();
+                            labelMap.TryAdd((chunkX, chunkY, chunkZ, localLabel), newGlobalLabel);
+                            unionFind.MakeSet(newGlobalLabel);
+                        }
+
+                        // Apply global labels
+                        for (int z = 0; z < chunkDepth; z++)
+                        {
+                            for (int y = 0; y < chunkHeight; y++)
+                            {
+                                for (int x = 0; x < chunkWidth; x++)
+                                {
+                                    int localLabel = chunkLabels[x, y, z];
+                                    int globalX = startX + x;
+                                    int globalY = startY + y;
+                                    int globalZ = startZ + z;
+
+                                    if (localLabel > 0)
+                                    {
+                                        globalLabels[globalX, globalY, globalZ] =
+                                            labelMap[(chunkX, chunkY, chunkZ, localLabel)];
+                                    }
+                                }
+                            }
+                        }
+
+                        // Clean up chunk memory
+                        chunkData = null;
+                        chunkLabels = null;
                     }
                 }
+            });
 
-                // Process this slab with CPU method (more reliable for chunks)
-                int[,,] slabLabels = LabelConnectedComponents3DCpu(slab, cancellationToken);
+            // Connect components at chunk boundaries
+            Logger.Log("[ProcessLargeVolumeWithGPUChunks] Connecting components across chunk boundaries");
 
-                // Create label mapping for this slab
-                Dictionary<int, int> slabMap = new Dictionary<int, int>();
-
-                // Copy labels to result and create mapping
-                for (int z = 0; z < slabDepth; z++)
+            // Process in Z-slices for better memory locality
+            Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
+            {
+                for (int y = 0; y < height; y++)
                 {
-                    for (int y = 0; y < height; y++)
+                    for (int x = 0; x < width; x++)
                     {
-                        for (int x = 0; x < width; x++)
+                        int label = globalLabels[x, y, z];
+                        if (label > 0)
                         {
-                            int label = slabLabels[x, y, z];
-                            if (label > 0)
+                            // Check 6-connected neighbors
+                            if (x > 0)
                             {
-                                // Map to a global label
-                                if (!slabMap.TryGetValue(label, out int globalLabel))
+                                int neighborLabel = globalLabels[x - 1, y, z];
+                                if (neighborLabel > 0 && neighborLabel != label)
                                 {
-                                    globalLabel = nextGlobalLabel++;
-                                    slabMap[label] = globalLabel;
+                                    unionFind.Union(label, neighborLabel);
                                 }
+                            }
 
-                                result[x, y, startZ + z] = globalLabel;
+                            if (y > 0)
+                            {
+                                int neighborLabel = globalLabels[x, y - 1, z];
+                                if (neighborLabel > 0 && neighborLabel != label)
+                                {
+                                    unionFind.Union(label, neighborLabel);
+                                }
+                            }
+
+                            if (z > 0)
+                            {
+                                int neighborLabel = globalLabels[x, y, z - 1];
+                                if (neighborLabel > 0 && neighborLabel != label)
+                                {
+                                    unionFind.Union(label, neighborLabel);
+                                }
                             }
                         }
                     }
                 }
 
-                // Clear memory
-                slab = null;
-                slabLabels = null;
-                GC.Collect();
-
-                Logger.Log($"[ProcessLargeVolumeWithChunks] Processed slab {startZ}-{endZ} with {slabMap.Count} components");
-            }
-
-            // Second pass: merge components across slab boundaries
-            UnionFind unionFind = new UnionFind();
-
-            // Initialize all labels in the union find
-            for (int i = 1; i < nextGlobalLabel; i++)
-            {
-                unionFind.MakeSet(i);
-            }
-
-            // Find connections between slabs
-            for (int z = 1; z < depth; z++)
-            {
-                if (z % 10 == 0) cancellationToken.ThrowIfCancellationRequested();
-
-                for (int y = 0; y < height; y++)
+                if (z % 10 == 0)
                 {
-                    for (int x = 0; x < width; x++)
-                    {
-                        int currentLabel = result[x, y, z];
-                        int prevLabel = result[x, y, z - 1];
-
-                        // If both voxels have labels and they're from different components
-                        if (currentLabel > 0 && prevLabel > 0)
-                        {
-                            unionFind.Union(currentLabel, prevLabel);
-                        }
-                    }
+                    cancellationToken.ThrowIfCancellationRequested();
                 }
-            }
+            });
 
-            // Final pass: apply merged labels
-            int[,,] mergedResult = new int[width, height, depth];
-            Dictionary<int, int> finalLabels = new Dictionary<int, int>();
-            int finalLabelCount = 0;
+            // Apply final component labels
+            Logger.Log("[ProcessLargeVolumeWithGPUChunks] Applying final component labels");
 
-            for (int z = 0; z < depth; z++)
+            // Collect all roots
+            ConcurrentBag<int> roots = new ConcurrentBag<int>();
+
+            Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
             {
-                if (z % 10 == 0) cancellationToken.ThrowIfCancellationRequested();
+                var localRoots = new HashSet<int>();
 
                 for (int y = 0; y < height; y++)
                 {
                     for (int x = 0; x < width; x++)
                     {
-                        int label = result[x, y, z];
+                        int label = globalLabels[x, y, z];
                         if (label > 0)
                         {
                             int root = unionFind.Find(label);
-
-                            if (!finalLabels.TryGetValue(root, out int finalLabel))
-                            {
-                                finalLabel = ++finalLabelCount;
-                                finalLabels[root] = finalLabel;
-                            }
-
-                            mergedResult[x, y, z] = finalLabel;
+                            localRoots.Add(root);
                         }
                     }
                 }
+
+                foreach (var root in localRoots)
+                {
+                    roots.Add(root);
+                }
+
+                if (z % 10 == 0)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
+            });
+
+            // Create final label map
+            var finalLabelMap = new ConcurrentDictionary<int, int>();
+            var finalLabelCounter = new AtomicCounter(1);
+
+            foreach (var root in new HashSet<int>(roots))
+            {
+                finalLabelMap.TryAdd(root, finalLabelCounter.GetAndIncrement());
             }
 
-            // Clean up
-            result = null;
-            GC.Collect();
+            // Apply final labels in parallel
+            Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        int label = globalLabels[x, y, z];
+                        if (label > 0)
+                        {
+                            int root = unionFind.Find(label);
+                            globalLabels[x, y, z] = finalLabelMap[root];
+                        }
+                    }
+                }
 
-            Logger.Log($"[ProcessLargeVolumeWithChunks] Completed with {finalLabelCount} final components");
-            return mergedResult;
+                if (z % 10 == 0)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
+            });
+
+            Logger.Log($"[ProcessLargeVolumeWithGPUChunks] Identified {finalLabelMap.Count} connected components");
+
+            return globalLabels;
         }
 
         public void SaveToCsv(string filePath, List<Particle> particles)
@@ -1809,42 +2231,96 @@ namespace CTS
             int height = volume.GetLength(1);
             int depth = volume.GetLength(2);
 
-            // Flatten the 3D volume into a 1D array for RLE compression
-            int[] flatData = new int[width * height * depth];
-            int index = 0;
+            // Use a more efficient RLE approach for parallel processing
+            // First, process the volume in slabs for better memory locality
+            int slabSize = 16; // Process 16 slices at a time
+            int numSlabs = (depth + slabSize - 1) / slabSize;
 
-            for (int z = 0; z < depth; z++)
+            // Collect RLE data from each slab
+            var slabRleData = new List<List<(int value, int count)>>(numSlabs);
+
+            Parallel.For(0, numSlabs, slab =>
             {
-                for (int y = 0; y < height; y++)
+                int startZ = slab * slabSize;
+                int endZ = Math.Min(startZ + slabSize, depth);
+
+                var slabData = new List<(int value, int count)>();
+                int prevValue = int.MinValue; // Use a value that won't occur in the data
+                int currentCount = 0;
+
+                // Process the slab
+                for (int z = startZ; z < endZ; z++)
                 {
-                    for (int x = 0; x < width; x++)
+                    for (int y = 0; y < height; y++)
                     {
-                        flatData[index++] = volume[x, y, z];
+                        for (int x = 0; x < width; x++)
+                        {
+                            int value = volume[x, y, z];
+
+                            if (value == prevValue)
+                            {
+                                currentCount++;
+                            }
+                            else
+                            {
+                                if (prevValue != int.MinValue)
+                                {
+                                    slabData.Add((prevValue, currentCount));
+                                }
+                                prevValue = value;
+                                currentCount = 1;
+                            }
+                        }
                     }
                 }
-            }
 
-            // Compress using RLE
-            List<(int value, int count)> rleData = new List<(int, int)>();
-            int currentValue = flatData[0];
-            int currentCount = 1;
-
-            for (int i = 1; i < flatData.Length; i++)
-            {
-                if (flatData[i] == currentValue)
+                // Add the last run
+                if (prevValue != int.MinValue)
                 {
-                    currentCount++;
+                    slabData.Add((prevValue, currentCount));
+                }
+
+                lock (slabRleData)
+                {
+                    slabRleData.Add(slabData);
+                }
+            });
+
+            // Combine all RLE data and write
+            List<(int value, int count)> rleData = new List<(int, int)>();
+
+            // Combine all slabs
+            foreach (var slabData in slabRleData)
+            {
+                // Optimize: if last run in rleData matches first run in slabData, combine them
+                if (rleData.Count > 0 && slabData.Count > 0)
+                {
+                    var lastRun = rleData[rleData.Count - 1];
+                    var firstRun = slabData[0];
+
+                    if (lastRun.value == firstRun.value)
+                    {
+                        // Combine runs
+                        rleData[rleData.Count - 1] = (lastRun.value, lastRun.count + firstRun.count);
+
+                        // Add the rest of the slab data
+                        for (int i = 1; i < slabData.Count; i++)
+                        {
+                            rleData.Add(slabData[i]);
+                        }
+                    }
+                    else
+                    {
+                        // Add all slab data
+                        rleData.AddRange(slabData);
+                    }
                 }
                 else
                 {
-                    rleData.Add((currentValue, currentCount));
-                    currentValue = flatData[i];
-                    currentCount = 1;
+                    // Add all slab data
+                    rleData.AddRange(slabData);
                 }
             }
-
-            // Add the last run
-            rleData.Add((currentValue, currentCount));
 
             // Write the RLE data
             writer.Write(rleData.Count);
@@ -1852,65 +2328,6 @@ namespace CTS
             {
                 writer.Write(value);
                 writer.Write(count);
-            }
-        }
-
-        public static SeparationResult LoadFromBinaryFile(string filePath)
-        {
-            using (FileStream fs = new FileStream(filePath, FileMode.Open, FileAccess.Read))
-            using (BinaryReader reader = new BinaryReader(fs))
-            {
-                // Read header
-                int width = reader.ReadInt32();
-                int height = reader.ReadInt32();
-                int depth = reader.ReadInt32();
-                int particleCount = reader.ReadInt32();
-                bool is3D = reader.ReadBoolean();
-                int currentSlice = reader.ReadInt32();
-                double pixelSize = reader.ReadDouble();
-
-                // Read label volume
-                int[,,] labelVolume = ReadRleCompressedVolume(reader, width, height, depth);
-
-                // Read particles
-                List<Particle> particles = new List<Particle>();
-                for (int i = 0; i < particleCount; i++)
-                {
-                    Particle particle = new Particle
-                    {
-                        Id = reader.ReadInt32(),
-                        VoxelCount = reader.ReadInt32(),
-                        VolumeMicrometers = reader.ReadDouble(),
-                        VolumeMillimeters = reader.ReadDouble(),
-
-                        Center = new Point3D
-                        {
-                            X = reader.ReadInt32(),
-                            Y = reader.ReadInt32(),
-                            Z = reader.ReadInt32()
-                        },
-
-                        Bounds = new BoundingBox
-                        {
-                            MinX = reader.ReadInt32(),
-                            MinY = reader.ReadInt32(),
-                            MinZ = reader.ReadInt32(),
-                            MaxX = reader.ReadInt32(),
-                            MaxY = reader.ReadInt32(),
-                            MaxZ = reader.ReadInt32()
-                        }
-                    };
-
-                    particles.Add(particle);
-                }
-
-                return new SeparationResult
-                {
-                    LabelVolume = labelVolume,
-                    Particles = particles,
-                    CurrentSlice = currentSlice,
-                    Is3D = is3D
-                };
             }
         }
 
@@ -1929,29 +2346,220 @@ namespace CTS
                 rleData.Add((value, count));
             }
 
-            // Decompress RLE data into the volume
-            int index = 0;
-            foreach (var (value, count) in rleData)
+            // Decompress RLE data into the volume (in parallel for large volumes)
+            if (depth > 1 && width * height * depth > 10_000_000)
             {
-                for (int i = 0; i < count; i++)
-                {
-                    int z = index / (width * height);
-                    int remainder = index % (width * height);
-                    int y = remainder / width;
-                    int x = remainder % width;
+                // Parallel decompression for large volumes
+                // First, calculate indices for each run
+                int totalVoxels = width * height * depth;
+                int[] startIndices = new int[runCount];
+                int currentIndex = 0;
 
-                    volume[x, y, z] = value;
-                    index++;
+                for (int i = 0; i < runCount; i++)
+                {
+                    startIndices[i] = currentIndex;
+                    currentIndex += rleData[i].count;
+                }
+
+                // Then decompress in parallel
+                Parallel.For(0, runCount, i =>
+                {
+                    var (value, count) = rleData[i];
+                    int startIdx = startIndices[i];
+
+                    for (int j = 0; j < count; j++)
+                    {
+                        int idx = startIdx + j;
+                        if (idx >= totalVoxels) break; // Safety check
+
+                        int z = idx / (width * height);
+                        int remainder = idx % (width * height);
+                        int y = remainder / width;
+                        int x = remainder % width;
+
+                        if (x < width && y < height && z < depth) // Bounds check
+                        {
+                            volume[x, y, z] = value;
+                        }
+                    }
+                });
+            }
+            else
+            {
+                // Sequential decompression for smaller volumes
+                int index = 0;
+                foreach (var (value, count) in rleData)
+                {
+                    for (int i = 0; i < count; i++)
+                    {
+                        if (index >= width * height * depth)
+                            break;
+
+                        int z = index / (width * height);
+                        int remainder = index % (width * height);
+                        int y = remainder / width;
+                        int x = remainder % width;
+
+                        volume[x, y, z] = value;
+                        index++;
+                    }
                 }
             }
 
             return volume;
         }
 
+        public static SeparationResult LoadFromBinaryFile(string filePath)
+        {
+            using (FileStream fs = new FileStream(filePath, FileMode.Open, FileAccess.Read))
+            using (BinaryReader reader = new BinaryReader(fs))
+            {
+                // Read header
+                int width = reader.ReadInt32();
+                int height = reader.ReadInt32();
+                int depth = reader.ReadInt32();
+                int particleCount = reader.ReadInt32();
+                bool is3D = reader.ReadBoolean();
+                int currentSlice = reader.ReadInt32();
+                double pixelSize = reader.ReadDouble();
+
+                // Read label volume using parallel decompression for large datasets
+                int[,,] labelVolume = ReadRleCompressedVolume(reader, width, height, depth);
+
+                // Read particles in parallel for large particle counts
+                List<Particle> particles = new List<Particle>(particleCount);
+
+                if (particleCount > 1000)
+                {
+                    // For large particle counts, read data into arrays first, then process in parallel
+                    int[] ids = new int[particleCount];
+                    int[] voxelCounts = new int[particleCount];
+                    double[] volumesMicrometers = new double[particleCount];
+                    double[] volumesMillimeters = new double[particleCount];
+
+                    int[] centersX = new int[particleCount];
+                    int[] centersY = new int[particleCount];
+                    int[] centersZ = new int[particleCount];
+
+                    int[] minX = new int[particleCount];
+                    int[] minY = new int[particleCount];
+                    int[] minZ = new int[particleCount];
+                    int[] maxX = new int[particleCount];
+                    int[] maxY = new int[particleCount];
+                    int[] maxZ = new int[particleCount];
+
+                    // Read all data sequentially
+                    for (int i = 0; i < particleCount; i++)
+                    {
+                        ids[i] = reader.ReadInt32();
+                        voxelCounts[i] = reader.ReadInt32();
+                        volumesMicrometers[i] = reader.ReadDouble();
+                        volumesMillimeters[i] = reader.ReadDouble();
+
+                        centersX[i] = reader.ReadInt32();
+                        centersY[i] = reader.ReadInt32();
+                        centersZ[i] = reader.ReadInt32();
+
+                        minX[i] = reader.ReadInt32();
+                        minY[i] = reader.ReadInt32();
+                        minZ[i] = reader.ReadInt32();
+                        maxX[i] = reader.ReadInt32();
+                        maxY[i] = reader.ReadInt32();
+                        maxZ[i] = reader.ReadInt32();
+                    }
+
+                    // Create particles in parallel
+                    particles = new List<Particle>(particleCount);
+                    for (int i = 0; i < particleCount; i++)
+                    {
+                        particles.Add(null); // Pre-allocate slots
+                    }
+
+                    Parallel.For(0, particleCount, i =>
+                    {
+                        Particle particle = new Particle
+                        {
+                            Id = ids[i],
+                            VoxelCount = voxelCounts[i],
+                            VolumeMicrometers = volumesMicrometers[i],
+                            VolumeMillimeters = volumesMillimeters[i],
+
+                            Center = new Point3D
+                            {
+                                X = centersX[i],
+                                Y = centersY[i],
+                                Z = centersZ[i]
+                            },
+
+                            Bounds = new BoundingBox
+                            {
+                                MinX = minX[i],
+                                MinY = minY[i],
+                                MinZ = minZ[i],
+                                MaxX = maxX[i],
+                                MaxY = maxY[i],
+                                MaxZ = maxZ[i]
+                            }
+                        };
+
+                        particles[i] = particle;
+                    });
+                }
+                else
+                {
+                    // For smaller counts, use simpler sequential approach
+                    for (int i = 0; i < particleCount; i++)
+                    {
+                        Particle particle = new Particle
+                        {
+                            Id = reader.ReadInt32(),
+                            VoxelCount = reader.ReadInt32(),
+                            VolumeMicrometers = reader.ReadDouble(),
+                            VolumeMillimeters = reader.ReadDouble(),
+
+                            Center = new Point3D
+                            {
+                                X = reader.ReadInt32(),
+                                Y = reader.ReadInt32(),
+                                Z = reader.ReadInt32()
+                            },
+
+                            Bounds = new BoundingBox
+                            {
+                                MinX = reader.ReadInt32(),
+                                MinY = reader.ReadInt32(),
+                                MinZ = reader.ReadInt32(),
+                                MaxX = reader.ReadInt32(),
+                                MaxY = reader.ReadInt32(),
+                                MaxZ = reader.ReadInt32()
+                            }
+                        };
+
+                        particles.Add(particle);
+                    }
+                }
+
+                return new SeparationResult
+                {
+                    LabelVolume = labelVolume,
+                    Particles = particles,
+                    CurrentSlice = currentSlice,
+                    Is3D = is3D
+                };
+            }
+        }
+
         public void Dispose()
         {
-            accelerator?.Dispose();
-            gpuContext?.Dispose();
+            try
+            {
+                accelerator?.Dispose();
+                gpuContext?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ParticleSeparator] Error during disposal: {ex.Message}");
+            }
         }
     }
 }

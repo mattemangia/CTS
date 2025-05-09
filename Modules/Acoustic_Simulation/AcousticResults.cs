@@ -3739,23 +3739,33 @@ namespace CTS
                               MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
-       
-       
+
+
         private double CalculateProjectionOnLine(int x1, int y1, int z1, int x2, int y2, int z2, int px, int py, int pz)
         {
-            double dx = x2 - x1;
-            double dy = y2 - y1;
-            double dz = z2 - z1;
-            double lengthSq = dx * dx + dy * dy + dz * dz;
+            // Calculate vector from point 1 to point 2
+            double vx = x2 - x1;
+            double vy = y2 - y1;
+            double vz = z2 - z1;
 
-            if (lengthSq < 1e-10) return 0; // Avoid division by zero
+            // Calculate vector from point 1 to the test point
+            double wx = px - x1;
+            double wy = py - y1;
+            double wz = pz - z1;
 
-            // Calculate the projection parameter t
-            double t = ((px - x1) * dx + (py - y1) * dy + (pz - z1) * dz) / lengthSq;
+            // Calculate dot product
+            double dot = wx * vx + wy * vy + wz * vz;
 
-            return t;
+            // Calculate squared length of v
+            double lenSq = vx * vx + vy * vy + vz * vz;
+
+            // Avoid division by zero
+            if (lenSq < 0.0001)
+                return 0.0;
+
+            // Calculate the projection parameter
+            return dot / lenSq;
         }
-
         public virtual void UpdateResultsDisplay()
         {
             if (simulationResults == null)
@@ -3852,7 +3862,6 @@ namespace CTS
                               MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
-
         public bool LoadSimulationFromFile(string filePath)
         {
             try
@@ -3919,10 +3928,12 @@ namespace CTS
                         SWaveTravelTime = sWaveTravelTime
                     };
 
-                    // Store wave field data for visualization - THIS IS THE KEY FIX
+                    // Store wave field data for visualization - FIX: Store all components
                     cachedPWaveField = ConvertToFloat(vxData);
                     cachedSWaveField = ConvertToFloat(vyData);
-                    cachedTotalTimeSteps = pWaveTravelTime + sWaveTravelTime;
+                    cachedZWaveField = ConvertToFloat(vzData); // Add this line to store z-component
+                    cachedTotalTimeSteps = Math.Max(pWaveTravelTime + sWaveTravelTime,
+                                                   pWaveTravelTime * 2); // Ensure sufficient steps
 
                     // Enable the visualizer button
                     foreach (ToolStripItem item in toolStrip.Items)
@@ -3934,11 +3945,22 @@ namespace CTS
                         }
                     }
 
+                    // Switch to the results tab to show the loaded data
+                    tabControl.SelectedTab = resultsDetailsTab;
+
                     // Update UI with loaded results
                     UpdateResultsDisplay();
 
                     // Initialize velocity field for visualization
                     InitializeVelocityField();
+
+                    // Force refresh of all visualizations
+                    if (waveformPictureBox != null && !waveformPictureBox.IsDisposed)
+                        waveformPictureBox.Invalidate();
+                    if (tomographyPictureBox != null && !tomographyPictureBox.IsDisposed)
+                        tomographyPictureBox.Invalidate();
+                    if (histogramPictureBox != null && !histogramPictureBox.IsDisposed)
+                        histogramPictureBox.Invalidate();
 
                     MessageBox.Show("Simulation loaded successfully.", "Load Complete",
                                   MessageBoxButtons.OK, MessageBoxIcon.Information);

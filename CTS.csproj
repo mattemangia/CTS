@@ -181,6 +181,9 @@
     <Compile Include="Modules\BugSubmission\BugSubmissionForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="Modules\CoreExtraction\CoreExtractionForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Modules\PNM\PoreNetworkButtonIcons.cs" />
     <Compile Include="Modules\StressAnalysis\AcousticVelocitySimulation.cs" />
     <Compile Include="Modules\StressAnalysis\DensityVisualizationForm.cs">

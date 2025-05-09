@@ -2705,21 +2705,162 @@ namespace CTS
 
             RenderViews(ViewType.XY);
         }
+        /// <summary>
+        /// Adds voxels whose grayscale is in [<paramref name="minVal"/>,<paramref name="maxVal"/>]
+        /// to <paramref name="materialID"/> **asynchronously** using the optimized implementation.  
+        /// </summary>
+        public async Task AddThresholdSelectionAsync(byte minVal, byte maxVal, byte materialID)
+        {
+            // Check if operation is already in progress
+            lock (_operationLock)
+            {
+                if (_isOperationInProgress)
+                {
+                    Logger.Log("[MainForm] Operation already in progress, skipping duplicate request.");
+                    return;
+                }
+                _isOperationInProgress = true;
+            }
 
+            try
+            {
+                if (volumeData == null || volumeLabels == null || MaterialOps == null)
+                    return;
+
+                Logger.Log($"[MainForm] Starting to add voxels to material {materialID} (threshold {minVal}-{maxVal})...");
+
+                // Run the operation in a background thread
+                await Task.Run(() =>
+                {
+                    MaterialOps.AddVoxelsByThreshold(
+                        volumeData, materialID, minVal, maxVal);
+                });
+
+                Logger.Log($"[MainForm] Completed adding voxels to material {materialID}");
+                RenderViews(ViewType.All);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[MainForm] Error adding voxels: {ex.Message}");
+                MessageBox.Show($"Error adding voxels: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                // Always reset the flag when done
+                lock (_operationLock)
+                {
+                    _isOperationInProgress = false;
+                }
+            }
+        }
+        private bool _isOperationInProgress = false;
+        private readonly object _operationLock = new object();
         public void AddThresholdSelection(byte minVal, byte maxVal, byte materialID)
         {
-            if (volumeData == null || volumeLabels == null || MaterialOps == null) return;
+            // Check if an operation is already in progress
+            lock (_operationLock)
+            {
+                if (_isOperationInProgress)
+                {
+                    Logger.Log("[MainForm] Threshold operation already in progress - ignoring duplicate request");
+                    return;
+                }
+            }
 
-            MaterialOps.AddVoxelsByThreshold(volumeData, materialID, minVal, maxVal);
-            RenderViews(ViewType.All);
+            // Start the async operation
+            var task = AddThresholdSelectionAsync(minVal, maxVal, materialID);
+
+            // Wait for the task to complete, but continue to process UI messages
+            // This prevents deadlocks while waiting
+            while (!task.IsCompleted)
+            {
+                Application.DoEvents();
+                System.Threading.Thread.Sleep(50);  // Small delay to prevent CPU spinning
+            }
+
+            // Handle any exceptions
+            if (task.IsFaulted && task.Exception != null)
+            {
+                Logger.Log($"[MainForm] Error in AddThresholdSelection: {task.Exception.InnerException?.Message}");
+            }
         }
+        /// <summary>
+        /// Removes voxels belonging to <paramref name="materialID"/> that lie in the
+        /// grayscale range [<paramref name="minVal"/>,<paramref name="maxVal"/>] **asynchronously**
+        /// using the optimized implementation.
+        /// </summary>
+        public async Task RemoveThresholdSelectionAsync(byte minVal, byte maxVal, byte materialID)
+        {
+            // Check if operation is already in progress
+            lock (_operationLock)
+            {
+                if (_isOperationInProgress)
+                {
+                    Logger.Log("[MainForm] Operation already in progress, skipping duplicate request.");
+                    return;
+                }
+                _isOperationInProgress = true;
+            }
 
+            try
+            {
+                if (volumeData == null || volumeLabels == null || MaterialOps == null)
+                    return;
+
+                Logger.Log($"[MainForm] Starting to remove voxels from material {materialID} (threshold {minVal}-{maxVal})...");
+
+                // Run the operation in a background thread
+                await Task.Run(() =>
+                {
+                    MaterialOps.RemoveVoxelsByThreshold(
+                        volumeData, materialID, minVal, maxVal);
+                });
+
+                Logger.Log($"[MainForm] Completed removing voxels from material {materialID}");
+                RenderViews(ViewType.All);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[MainForm] Error removing voxels: {ex.Message}");
+                MessageBox.Show($"Error removing voxels: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                // Always reset the flag when done
+                lock (_operationLock)
+                {
+                    _isOperationInProgress = false;
+                }
+            }
+        }
         public void RemoveThresholdSelection(byte minVal, byte maxVal, byte materialID)
         {
-            if (volumeData == null || volumeLabels == null || MaterialOps == null) return;
+            // Check if an operation is already in progress
+            lock (_operationLock)
+            {
+                if (_isOperationInProgress)
+                {
+                    Logger.Log("[MainForm] Threshold operation already in progress - ignoring duplicate request");
+                    return;
+                }
+            }
 
-            MaterialOps.RemoveVoxelsByThreshold(volumeData, materialID, minVal, maxVal);
-            RenderViews(ViewType.All);
+            // Start the async operation
+            var task = RemoveThresholdSelectionAsync(minVal, maxVal, materialID);
+
+            // Wait for the task to complete, but continue to process UI messages
+            // This prevents deadlocks while waiting
+            while (!task.IsCompleted)
+            {
+                Application.DoEvents();
+                System.Threading.Thread.Sleep(50);  // Small delay to prevent CPU spinning
+            }
+
+            // Handle any exceptions
+            if (task.IsFaulted && task.Exception != null)
+            {
+                Logger.Log($"[MainForm] Error in RemoveThresholdSelection: {task.Exception.InnerException?.Message}");
+            }
         }
 
         public void ApplyCurrentSelection()

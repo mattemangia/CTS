@@ -674,7 +674,31 @@ namespace CTS
                     MessageBox.Show($"Error opening Transform Dataset form: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             };
+            ToolStripMenuItem coreExtractionMenuItem = new ToolStripMenuItem("Core Extraction");
+            coreExtractionMenuItem.Click += (s, e) =>
+            {
+                if (mainForm.volumeData == null)
+                {
+                    MessageBox.Show("Please load a dataset first.", "No Data",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
 
+                try
+                {
+                    // Create and show the core extraction form
+                    CoreExtractionForm coreExtractionForm = new CoreExtractionForm(mainForm);
+                    coreExtractionForm.Show();
+                    Logger.Log("[ControlForm] Opened Core Extraction form");
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Error opening Core Extraction form: {ex.Message}",
+                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    Logger.Log($"[ControlForm] Error opening Core Extraction form: {ex.Message}");
+                }
+            };
+            toolsMenu.DropDownItems.Add(coreExtractionMenuItem);
             // Filter Manager
             ToolStripMenuItem filterManagerMenuItem = new ToolStripMenuItem("Filter Manager");
             filterManagerMenuItem.Click += (s, e) =>
@@ -1064,62 +1088,10 @@ namespace CTS
             };
 
             btnAddSelection = new Button { Text = "+", Width = 50, Height = 25 };
-            btnAddSelection.Click += (s, e) =>
-            {
-                int idx = lstMaterials.SelectedIndex;
-                if (idx <= 0 || idx >= mainForm.Materials.Count)
-                {
-                    MessageBox.Show("Select a valid material (not the Exterior).");
-                    return;
-                }
-                Material mat = mainForm.Materials[idx];
-
-                // If the current tool is Brush, then apply the 2D (current slice) selection.
-                if (mainForm.currentTool == SegmentationTool.Brush)
-                {
-                    mainForm.ApplyCurrentSelection();
-                    mainForm.ApplyOrthoSelections(); // Also apply selections from orthoviews if needed.
-                }
-                // Otherwise, if an interpolated (full volume) mask is available, apply that.
-                else if (mainForm.interpolatedMask != null)
-                {
-                    mainForm.ApplyInterpolatedSelection(mat.ID);
-                }
-                // Otherwise, fallback to the threshold-based selection.
-                else
-                {
-                    mainForm.AddThresholdSelection(mat.Min, mat.Max, mat.ID);
-                }
-                mainForm.SaveLabelsChk();
-            };
-
             btnSubSelection = new Button { Text = "-", Width = 50, Height = 25 };
-            btnSubSelection.Click += (s, e) =>
-            {
-                int idx = lstMaterials.SelectedIndex;
-                if (idx <= 0 || idx >= mainForm.Materials.Count)
-                {
-                    MessageBox.Show("Select a valid material (not the Exterior).");
-                    return;
-                }
-                Material mat = mainForm.Materials[idx];
-
-                if (mainForm.currentTool == SegmentationTool.Brush)
-                {
-                    mainForm.SubtractCurrentSelection();
-                    mainForm.SubtractOrthoSelections();
-                }
-                else if (mainForm.interpolatedMask != null)
-                {
-                    mainForm.SubtractInterpolatedSelection(mat.ID);
-                }
-                else
-                {
-                    mainForm.RemoveThresholdSelection(mat.Min, mat.Max, mat.ID);
-                }
-                mainForm.SaveLabelsChk();
-            };
-
+            
+            btnAddSelection.Click += OnAddSelectionAsync;
+            btnSubSelection.Click += OnSubSelectionAsync;
             Button btnClearSelection = new Button { Text = "Clear", Width = 50, Height = 25 };
             btnClearSelection.Click += (s, e) =>
             {
@@ -1684,6 +1656,69 @@ namespace CTS
                     }
                 }
             }
+        }
+        /// <summary>
+        /// Handles the “＋” button – routes the action through the new asynchronous
+        /// path in <see cref="MainForm"/>.
+        /// </summary>
+        private async void OnAddSelectionAsync(object sender, EventArgs e)
+        {
+            int idx = lstMaterials.SelectedIndex;
+            if (idx <= 0 || idx >= mainForm.Materials.Count)
+            {
+                MessageBox.Show("Select a valid (non-Exterior) material.");
+                return;
+            }
+
+            Material mat = mainForm.Materials[idx];
+
+            if (mainForm.currentTool == SegmentationTool.Brush)
+            {
+                mainForm.ApplyCurrentSelection();
+                mainForm.ApplyOrthoSelections();
+            }
+            else if (mainForm.interpolatedMask != null)
+            {
+                mainForm.ApplyInterpolatedSelection(mat.ID);
+            }
+            else
+            {
+                await mainForm.AddThresholdSelectionAsync(mat.Min, mat.Max, mat.ID);
+            }
+
+            mainForm.SaveLabelsChk();
+        }
+
+        /// <summary>
+        /// Handles the “－” button – routes the action through the new asynchronous
+        /// path in <see cref="MainForm"/>.
+        /// </summary>
+        private async void OnSubSelectionAsync(object sender, EventArgs e)
+        {
+            int idx = lstMaterials.SelectedIndex;
+            if (idx <= 0 || idx >= mainForm.Materials.Count)
+            {
+                MessageBox.Show("Select a valid (non-Exterior) material.");
+                return;
+            }
+
+            Material mat = mainForm.Materials[idx];
+
+            if (mainForm.currentTool == SegmentationTool.Brush)
+            {
+                mainForm.SubtractCurrentSelection();
+                mainForm.SubtractOrthoSelections();
+            }
+            else if (mainForm.interpolatedMask != null)
+            {
+                mainForm.SubtractInterpolatedSelection(mat.ID);
+            }
+            else
+            {
+                await mainForm.RemoveThresholdSelectionAsync(mat.Min, mat.Max, mat.ID);
+            }
+
+            mainForm.SaveLabelsChk();
         }
 
         private void OnAddMaterial()

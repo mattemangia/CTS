@@ -18,6 +18,7 @@ using Font = System.Drawing.Font;
 using Point = System.Drawing.Point;
 using Rectangle = System.Drawing.Rectangle;
 using Task = System.Threading.Tasks.Task;
+using CTS.NodeEditor;
 
 namespace CTS
 {
@@ -4229,6 +4230,82 @@ namespace CTS
 
             // Refresh all views so the change is visible immediately
             RenderViews(ViewType.All);
+        }
+        #endregion
+        #region NodeEditor
+        public void OpenNodeEditor()
+        {
+            Logger.Log("[MainForm] Opening Node Editor");
+
+            try
+            {
+                // Create the node editor form
+                var nodeEditor = new CTS.NodeEditor.NodeEditorForm(this) { Dock = DockStyle.Fill };
+
+                // Create a new KryptonPage for the node editor
+                var page = new KryptonPage
+                {
+                    Text = "Node Editor",
+                    TextTitle = "Node Editor",
+                    MinimumSize = new Size(700, 645)
+                };
+
+                // Set page flags to match the ControlForm pattern
+                page.ClearFlags(KryptonPageFlags.DockingAllowClose);
+                page.SetFlags(KryptonPageFlags.DockingAllowFloating |
+                             KryptonPageFlags.DockingAllowDocked);
+
+                // Add the node editor to the page
+                page.Controls.Add(nodeEditor);
+
+                // Add the page to the docking manager
+                if (_dockingManager != null)
+                {
+                    try
+                    {
+                        // Add to the same dockspace as ControlForm
+                        var dockElem = _dockingManager.AddDockspace(
+                            "MainHost",
+                            DockingEdge.Right,
+                            new[] { page });
+
+                        // Set width of the dockspace
+                        if (dockElem?.DockspaceControl != null)
+                        {
+                            dockElem.DockspaceControl.Width = 700;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[MainForm] Error adding to dockspace: {ex.Message}");
+                        MessageBox.Show($"Error creating docked editor: {ex.Message}",
+                                       "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+                }
+                else
+                {
+                    Logger.Log("[MainForm] Warning: No docking manager found. Creating as regular dialog.");
+                    // Fallback to showing as a regular dialog if docking is not available
+                    //nodeEditor.TopLevel = true;
+                    //nodeEditor.FormBorderStyle = FormBorderStyle.Sizable;
+                    nodeEditor.Size = new Size(700, 645);
+                    //nodeEditor.StartPosition = FormStartPosition.CenterParent;
+                    //nodeEditor.Show(this);
+                    return;
+                }
+
+                // Show the node editor
+                nodeEditor.Show();
+
+                Logger.Log("[MainForm] Node Editor opened successfully");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[MainForm] Error opening Node Editor: {ex.Message}");
+                MessageBox.Show($"Error opening Node Editor: {ex.Message}",
+                               "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
         #endregion
     }

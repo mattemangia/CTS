@@ -503,6 +503,17 @@ namespace CTS
             // Separator
             ToolStripSeparator toolsSeparator = new ToolStripSeparator();
             toolsMenu.DropDownItems.Add(toolsSeparator);
+            ToolStripMenuItem nodeEditorMenuItem = new ToolStripMenuItem("Node Editor");
+            nodeEditorMenuItem.Click += (s, e) =>
+            {
+                if (mainForm != null)
+                {
+                    mainForm.OpenNodeEditor();
+                }
+            };
+            toolsMenu.DropDownItems.Add(nodeEditorMenuItem);
+            ToolStripSeparator toolsSeparator2 = new ToolStripSeparator();
+            toolsMenu.DropDownItems.Add(toolsSeparator2);
 
             // Brightness/Contrast
             AddBrightnessContrastMenu();

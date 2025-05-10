@@ -15,9 +15,18 @@ namespace CTS
     public class CalibrationPoint
     {
         // Known measured values from real CT data
+        public enum CalibrationType
+        {
+            VpVsRatio,      // Only Vp/Vs ratio provided
+            SeparateValues  // Both Vp and Vs provided
+        }
+        public CalibrationType InputType { get; set; }
         public double KnownVpVsRatio { get; set; }
         public double MeasuredDensity { get; set; }
         public double MeasuredVolume { get; set; }
+        public double ConfiningPressureMPa { get; set; }
+        public double KnownVp { get; set; }     // m/s
+        public double KnownVs { get; set; }     // m/s
         [System.Xml.Serialization.XmlIgnore]
         public double Density
         {
@@ -63,13 +72,32 @@ namespace CTS
 
         // Constructor with most common parameters
         public CalibrationPoint(string materialName, byte materialID, double knownVpVsRatio,
-                               double measuredDensity, double youngModulus, double poissonRatio,
-                               double avgGrayValue = 0)
+                          double measuredDensity, double confiningPressure,
+                          double youngModulus, double poissonRatio, double avgGrayValue = 0)
         {
+            InputType = CalibrationType.VpVsRatio;
             MaterialName = materialName;
             MaterialID = materialID;
             KnownVpVsRatio = knownVpVsRatio;
             MeasuredDensity = measuredDensity;
+            ConfiningPressureMPa = confiningPressure;
+            YoungsModulus = youngModulus;
+            PoissonRatio = poissonRatio;
+            AvgGrayValue = avgGrayValue;
+            CalibrationDate = DateTime.Now;
+        }
+        public CalibrationPoint(string materialName, byte materialID, double knownVp, double knownVs,
+                          double measuredDensity, double confiningPressure,
+                          double youngModulus, double poissonRatio, double avgGrayValue = 0)
+        {
+            InputType = CalibrationType.SeparateValues;
+            MaterialName = materialName;
+            MaterialID = materialID;
+            KnownVp = knownVp;
+            KnownVs = knownVs;
+            KnownVpVsRatio = knownVp / knownVs;
+            MeasuredDensity = measuredDensity;
+            ConfiningPressureMPa = confiningPressure;
             YoungsModulus = youngModulus;
             PoissonRatio = poissonRatio;
             AvgGrayValue = avgGrayValue;
@@ -78,7 +106,10 @@ namespace CTS
 
         public override string ToString()
         {
-            return $"{MaterialName}: VpVs={KnownVpVsRatio:F3}, ρ={MeasuredDensity:F1} kg/m³";
+            if (InputType == CalibrationType.VpVsRatio)
+                return $"{MaterialName}: VpVs={KnownVpVsRatio:F3}, ρ={MeasuredDensity:F1} kg/m³, P={ConfiningPressureMPa:F1} MPa";
+            else
+                return $"{MaterialName}: Vp={KnownVp:F0} m/s, Vs={KnownVs:F0} m/s, ρ={MeasuredDensity:F1} kg/m³, P={ConfiningPressureMPa:F1} MPa";
         }
     }
 
@@ -95,8 +126,15 @@ namespace CTS
         public DateTime LastModifiedDate { get; set; }
         public List<CalibrationPoint> CalibrationPoints { get; set; }
 
-        // Calibration relationship models
+        // Calibration relationship models (organized by confining pressure)
         [XmlIgnore] // Don't serialize these - they're computed
+        public Dictionary<double, CalibrationModel> DensityToYoungsModulusModelsByPressure { get; set; }
+
+        [XmlIgnore]
+        public Dictionary<double, CalibrationModel> VpVsToPoissonRatioModelsByPressure { get; set; }
+
+        // Legacy models for backward compatibility
+        [XmlIgnore]
         public CalibrationModel DensityToYoungsModulusModel { get; set; }
 
         [XmlIgnore]
@@ -108,6 +146,8 @@ namespace CTS
             CreationDate = DateTime.Now;
             LastModifiedDate = DateTime.Now;
             Name = "New Calibration Set";
+            DensityToYoungsModulusModelsByPressure = new Dictionary<double, CalibrationModel>();
+            VpVsToPoissonRatioModelsByPressure = new Dictionary<double, CalibrationModel>();
         }
 
         /// <summary>
@@ -119,10 +159,7 @@ namespace CTS
             LastModifiedDate = DateTime.Now;
 
             // Recalculate calibration models if we have enough points
-            if (CalibrationPoints.Count >= 2)
-            {
-                RecalculateCalibrationModels();
-            }
+            RecalculateCalibrationModels();
         }
 
         /// <summary>
@@ -134,16 +171,7 @@ namespace CTS
             LastModifiedDate = DateTime.Now;
 
             // Recalculate calibration models if we still have enough points
-            if (CalibrationPoints.Count >= 2)
-            {
-                RecalculateCalibrationModels();
-            }
-            else
-            {
-                // Not enough points for calibration
-                DensityToYoungsModulusModel = null;
-                VpVsToPoissonRatioModel = null;
-            }
+            RecalculateCalibrationModels();
         }
 
         /// <summary>
@@ -152,19 +180,77 @@ namespace CTS
         public void RecalculateCalibrationModels()
         {
             if (CalibrationPoints.Count < 2)
+            {
+                // Reset all models
+                DensityToYoungsModulusModelsByPressure.Clear();
+                VpVsToPoissonRatioModelsByPressure.Clear();
+                DensityToYoungsModulusModel = null;
+                VpVsToPoissonRatioModel = null;
                 return;
+            }
 
-            // Create model for density-to-Young's modulus relationship
-            var densityYoungPoints = CalibrationPoints
-                .Select(p => new Tuple<double, double>(p.MeasuredDensity, p.YoungsModulus))
-                .ToList();
-            DensityToYoungsModulusModel = CalculateLinearModel(densityYoungPoints);
+            // Clear existing models
+            DensityToYoungsModulusModelsByPressure.Clear();
+            VpVsToPoissonRatioModelsByPressure.Clear();
 
-            // Create model for VpVs-to-Poisson's ratio relationship
-            var vpvsPoissonPoints = CalibrationPoints
-                .Select(p => new Tuple<double, double>(p.KnownVpVsRatio, p.PoissonRatio))
+            // Group calibration points by confining pressure (round to nearest 0.1 MPa)
+            var pressureGroups = CalibrationPoints
+                .GroupBy(p => Math.Round(p.ConfiningPressureMPa, 1))
                 .ToList();
-            VpVsToPoissonRatioModel = CalculateLinearModel(vpvsPoissonPoints);
+
+            Logger.Log($"[CalibrationDataset] Processing {pressureGroups.Count} pressure groups");
+
+            // Create models for each pressure group
+            foreach (var group in pressureGroups)
+            {
+                if (group.Count() < 2)
+                {
+                    Logger.Log($"[CalibrationDataset] Skipping pressure {group.Key} MPa - only {group.Count()} point(s)");
+                    continue;
+                }
+
+                double pressure = group.Key;
+                var points = group.ToList();
+
+                Logger.Log($"[CalibrationDataset] Creating models for pressure {pressure} MPa with {points.Count} points");
+
+                // Create model for density-to-Young's modulus relationship at this pressure
+                var densityYoungPoints = points
+                    .Where(p => p.YoungsModulus > 0) // Filter out invalid values
+                    .Select(p => new Tuple<double, double>(p.MeasuredDensity, p.YoungsModulus))
+                    .ToList();
+
+                if (densityYoungPoints.Count >= 2)
+                {
+                    DensityToYoungsModulusModelsByPressure[pressure] = CalculateLinearModel(densityYoungPoints);
+                }
+
+                // Create model for VpVs-to-Poisson's ratio relationship at this pressure
+                var vpvsPoissonPoints = points
+                    .Where(p => p.PoissonRatio > 0 && p.KnownVpVsRatio > 0) // Filter out invalid values
+                    .Select(p => new Tuple<double, double>(p.KnownVpVsRatio, p.PoissonRatio))
+                    .ToList();
+
+                if (vpvsPoissonPoints.Count >= 2)
+                {
+                    VpVsToPoissonRatioModelsByPressure[pressure] = CalculateLinearModel(vpvsPoissonPoints);
+                }
+            }
+
+            // For backward compatibility, keep the main models using the largest pressure group
+            if (pressureGroups.Count > 0)
+            {
+                var largestGroup = pressureGroups.OrderByDescending(g => g.Count()).First();
+                double pressure = largestGroup.Key;
+
+                Logger.Log($"[CalibrationDataset] Using pressure {pressure} MPa for main models (largest group)");
+
+                if (DensityToYoungsModulusModelsByPressure.ContainsKey(pressure))
+                    DensityToYoungsModulusModel = DensityToYoungsModulusModelsByPressure[pressure];
+
+                if (VpVsToPoissonRatioModelsByPressure.ContainsKey(pressure))
+                    VpVsToPoissonRatioModel = VpVsToPoissonRatioModelsByPressure[pressure];
+            }
         }
 
         /// <summary>
@@ -172,7 +258,7 @@ namespace CTS
         /// </summary>
         private CalibrationModel CalculateLinearModel(List<Tuple<double, double>> points)
         {
-            if (points.Count < 2)
+            if (points == null || points.Count < 2)
                 return null;
 
             int n = points.Count;
@@ -189,10 +275,19 @@ namespace CTS
                 sumX2 += x * x;
             }
 
-            double slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+            double denominator = n * sumX2 - sumX * sumX;
+            if (Math.Abs(denominator) < 1e-10)
+            {
+                Logger.Log("[CalibrationDataset] Linear regression failed - denominator too small");
+                return null;
+            }
+
+            double slope = (n * sumXY - sumX * sumY) / denominator;
             double intercept = (sumY - slope * sumX) / n;
 
             double r2 = CalculateR2(points, slope, intercept);
+
+            Logger.Log($"[CalibrationDataset] Linear model: y = {slope:F6}x + {intercept:F6}, R² = {r2:F4}");
 
             return new CalibrationModel { Slope = slope, Intercept = intercept, R2 = r2 };
         }
@@ -202,9 +297,15 @@ namespace CTS
         /// </summary>
         private double CalculateR2(List<Tuple<double, double>> points, double slope, double intercept)
         {
+            if (points == null || points.Count == 0)
+                return 0.0;
+
             double yMean = points.Average(p => p.Item2);
             double ssTot = points.Sum(p => Math.Pow(p.Item2 - yMean, 2));
             double ssRes = points.Sum(p => Math.Pow(p.Item2 - (slope * p.Item1 + intercept), 2));
+
+            if (Math.Abs(ssTot) < 1e-10)
+                return 0.0;
 
             return 1 - (ssRes / ssTot);
         }
@@ -212,56 +313,120 @@ namespace CTS
         /// <summary>
         /// Calculate Young's modulus based on material density using the calibration model
         /// </summary>
-        public double PredictYoungsModulus(double density)
+        public double PredictYoungsModulus(double density, double confiningPressure = 0.0)
         {
-            if (DensityToYoungsModulusModel == null)
+            // Find model for the closest pressure
+            var model = FindClosestPressureModel(DensityToYoungsModulusModelsByPressure, confiningPressure);
+
+            if (model == null)
                 return 0.0;
 
-            return DensityToYoungsModulusModel.Slope * density + DensityToYoungsModulusModel.Intercept;
+            double predicted = model.Slope * density + model.Intercept;
+            Logger.Log($"[CalibrationDataset] Predicted Young's modulus: {predicted:F2} MPa for density {density:F1} kg/m³");
+            return predicted;
         }
 
         /// <summary>
         /// Calculate Poisson's ratio based on known Vp/Vs ratio using the calibration model
         /// </summary>
-        public double PredictPoissonRatio(double vpVsRatio)
+        public double PredictPoissonRatio(double vpVsRatio, double confiningPressure = 0.0)
         {
-            if (VpVsToPoissonRatioModel == null)
+            // Find model for the closest pressure
+            var model = FindClosestPressureModel(VpVsToPoissonRatioModelsByPressure, confiningPressure);
+
+            if (model == null)
                 return 0.25; // Default value
 
-            return VpVsToPoissonRatioModel.Slope * vpVsRatio + VpVsToPoissonRatioModel.Intercept;
+            double predicted = model.Slope * vpVsRatio + model.Intercept;
+
+            // Ensure Poisson's ratio is within physically valid range
+            predicted = Math.Max(0.0, Math.Min(0.5, predicted));
+
+            Logger.Log($"[CalibrationDataset] Predicted Poisson's ratio: {predicted:F4} for Vp/Vs {vpVsRatio:F3}");
+            return predicted;
+        }
+
+        /// <summary>
+        /// Find the calibration model for the closest confining pressure
+        /// </summary>
+        private CalibrationModel FindClosestPressureModel(Dictionary<double, CalibrationModel> models, double targetPressure)
+        {
+            if (models == null || models.Count == 0)
+                return null;
+
+            // Find exact match first
+            if (models.ContainsKey(targetPressure))
+                return models[targetPressure];
+
+            // Find closest pressure
+            var closestPressure = models.Keys
+                .OrderBy(p => Math.Abs(p - targetPressure))
+                .FirstOrDefault();
+
+            if (models.ContainsKey(closestPressure))
+            {
+                Logger.Log($"[CalibrationDataset] Using calibration model for {closestPressure} MPa (closest to {targetPressure} MPa)");
+                return models[closestPressure];
+            }
+
+            return null;
         }
 
         /// <summary>
         /// Predict the Vp/Vs ratio based on the material density using calibration models
         /// </summary>
-        public double PredictVpVsRatio(double density, double poissonRatio = 0.0)
+        public double PredictVpVsRatio(double density, double confiningPressure = 0.0, double poissonRatio = 0.0)
         {
-            if (DensityToYoungsModulusModel == null || VpVsToPoissonRatioModel == null)
-                return 0.0;
-
-            // If poisson ratio not specified, calculate based on density correlation
-            if (poissonRatio <= 0.0)
+            // First approach: Direct prediction from density if models exist
+            if (VpVsToPoissonRatioModelsByPressure.Count > 0)
             {
-                // Use theoretical relation for Vp/Vs from Poisson's ratio
-                // Vp/Vs = sqrt((2*(1-v))/(1-2*v))
-
-                // First we need a reliable Poisson's ratio estimate
-                // We'll use either our calibration or a default
-                poissonRatio = 0.25; // Default value
-
-                // Find the nearest calibration point by density
-                var closestPoint = CalibrationPoints
+                // Find the nearest calibration point by density and pressure
+                var candidatePoints = CalibrationPoints
+                    .Where(p => Math.Abs(p.ConfiningPressureMPa - confiningPressure) <= 1.0)
                     .OrderBy(p => Math.Abs(p.MeasuredDensity - density))
-                    .FirstOrDefault();
+                    .Take(2)
+                    .ToList();
 
-                if (closestPoint != null)
+                if (candidatePoints.Count > 0)
                 {
-                    poissonRatio = closestPoint.PoissonRatio;
+                    if (candidatePoints.Count == 1)
+                    {
+                        return candidatePoints[0].KnownVpVsRatio;
+                    }
+                    else
+                    {
+                        // Linear interpolation between two closest points
+                        var p1 = candidatePoints[0];
+                        var p2 = candidatePoints[1];
+
+                        double t = (density - p1.MeasuredDensity) / (p2.MeasuredDensity - p1.MeasuredDensity);
+                        t = Math.Max(0.0, Math.Min(1.0, t)); // Clamp to [0,1]
+
+                        return p1.KnownVpVsRatio + t * (p2.KnownVpVsRatio - p1.KnownVpVsRatio);
+                    }
                 }
             }
 
-            // Calculate Vp/Vs from Poisson's ratio
-            return Math.Sqrt((2 * (1 - poissonRatio)) / (1 - 2 * poissonRatio));
+            // Fallback to theoretical relationship if models don't exist
+            if (poissonRatio <= 0.0)
+            {
+                // Use default Poisson's ratio
+                poissonRatio = 0.25;
+
+                // Try to predict Poisson's ratio from density
+                var model = FindClosestPressureModel(VpVsToPoissonRatioModelsByPressure, confiningPressure);
+                if (model != null)
+                {
+                    // This is a bit circular, but we need some estimate
+                    poissonRatio = 0.25; // Use default for now
+                }
+            }
+
+            // Calculate Vp/Vs from Poisson's ratio (theoretical relationship)
+            double vpVsTheoretical = Math.Sqrt((2 * (1 - poissonRatio)) / (1 - 2 * poissonRatio));
+
+            Logger.Log($"[CalibrationDataset] No direct calibration model found, using theoretical Vp/Vs: {vpVsTheoretical:F3}");
+            return vpVsTheoretical;
         }
 
         /// <summary>
@@ -270,19 +435,62 @@ namespace CTS
         public string GetCalibrationSummary()
         {
             if (CalibrationPoints.Count < 2)
-                return "Insufficient calibration points. At least 2 points are required.";
+                return "Insufficient calibration points. At least 2 points are required for each pressure level.";
 
             string summary = $"Calibration Dataset: {Name}\n";
-            summary += $"Points: {CalibrationPoints.Count}\n";
+            summary += $"Total Points: {CalibrationPoints.Count}\n";
+            summary += $"Created: {CreationDate:yyyy-MM-dd}, Modified: {LastModifiedDate:yyyy-MM-dd}\n\n";
 
-            if (DensityToYoungsModulusModel != null)
+            // Group by material
+            var materialGroups = CalibrationPoints
+                .GroupBy(p => p.MaterialName)
+                .OrderBy(g => g.Key)
+                .ToList();
+
+            summary += "Points by Material:\n";
+            foreach (var group in materialGroups)
             {
-                summary += $"Density to Young's Modulus: E = {DensityToYoungsModulusModel.Slope:F2} × ρ + {DensityToYoungsModulusModel.Intercept:F2} MPa (R² = {DensityToYoungsModulusModel.R2:F3})\n";
+                summary += $"  {group.Key}: {group.Count()} points\n";
             }
 
-            if (VpVsToPoissonRatioModel != null)
+            // Group by pressure
+            var pressureGroups = CalibrationPoints
+                .GroupBy(p => Math.Round(p.ConfiningPressureMPa, 1))
+                .OrderBy(g => g.Key)
+                .ToList();
+
+            summary += "\nPoints by Confining Pressure:\n";
+            foreach (var group in pressureGroups)
             {
-                summary += $"Vp/Vs to Poisson's Ratio: ν = {VpVsToPoissonRatioModel.Slope:F4} × (Vp/Vs) + {VpVsToPoissonRatioModel.Intercept:F4} (R² = {VpVsToPoissonRatioModel.R2:F3})\n";
+                summary += $"  {group.Key:F1} MPa: {group.Count()} points\n";
+
+                if (DensityToYoungsModulusModelsByPressure?.ContainsKey(group.Key) == true)
+                {
+                    var eModel = DensityToYoungsModulusModelsByPressure[group.Key];
+                    summary += $"    E = {eModel.Slope:F2} × ρ + {eModel.Intercept:F2} MPa (R² = {eModel.R2:F3})\n";
+                }
+
+                if (VpVsToPoissonRatioModelsByPressure?.ContainsKey(group.Key) == true)
+                {
+                    var nuModel = VpVsToPoissonRatioModelsByPressure[group.Key];
+                    summary += $"    ν = {nuModel.Slope:F4} × (Vp/Vs) + {nuModel.Intercept:F4} (R² = {nuModel.R2:F3})\n";
+                }
+            }
+
+            // Overall statistics
+            summary += "\nCalibration Ranges:\n";
+            if (CalibrationPoints.Count > 0)
+            {
+                double minDensity = CalibrationPoints.Min(p => p.MeasuredDensity);
+                double maxDensity = CalibrationPoints.Max(p => p.MeasuredDensity);
+                double minVpVs = CalibrationPoints.Min(p => p.KnownVpVsRatio);
+                double maxVpVs = CalibrationPoints.Max(p => p.KnownVpVsRatio);
+                double minPressure = CalibrationPoints.Min(p => p.ConfiningPressureMPa);
+                double maxPressure = CalibrationPoints.Max(p => p.ConfiningPressureMPa);
+
+                summary += $"  Density: {minDensity:F1} - {maxDensity:F1} kg/m³\n";
+                summary += $"  Vp/Vs: {minVpVs:F3} - {maxVpVs:F3}\n";
+                summary += $"  Pressure: {minPressure:F1} - {maxPressure:F1} MPa\n";
             }
 
             return summary;
@@ -339,6 +547,97 @@ namespace CTS
 
             return point;
         }
+        /// <summary>
+        /// Add calibration point using Vp/Vs ratio
+        /// </summary>
+        public void AddCurrentSimulationAsCalibrationPoint(double knownVpVsRatio,
+                                                          double simulatedVp, double simulatedVs,
+                                                          double confiningPressure)
+        {
+            var point = CreateCalibrationPointFromCurrentSimulation(
+                knownVpVsRatio, 0, 0, confiningPressure);
+
+            if (point == null)
+                return;
+
+            // Update with simulation results
+            point.SimulatedVp = simulatedVp;
+            point.SimulatedVs = simulatedVs;
+            point.SimulatedVpVsRatio = simulatedVp / simulatedVs;
+
+            // Add to calibration dataset
+            CurrentCalibration.AddCalibrationPoint(point);
+
+            Logger.Log($"[CalibrationManager] Added new calibration point: {point.MaterialName}, " +
+                      $"VpVs={point.KnownVpVsRatio:F3}, Density={point.MeasuredDensity:F1}, P={confiningPressure:F1} MPa");
+        }
+        /// <summary>
+        /// Add calibration point using separate Vp and Vs values
+        /// </summary>
+        public void AddCurrentSimulationAsCalibrationPoint(double knownVp, double knownVs,
+                                                          double simulatedVp, double simulatedVs,
+                                                          double confiningPressure)
+        {
+            var point = CreateCalibrationPointFromCurrentSimulation(
+                0, knownVp, knownVs, confiningPressure);
+
+            if (point == null)
+                return;
+
+            // Update with simulation results
+            point.SimulatedVp = simulatedVp;
+            point.SimulatedVs = simulatedVs;
+            point.SimulatedVpVsRatio = simulatedVp / simulatedVs;
+
+            // Add to calibration dataset
+            CurrentCalibration.AddCalibrationPoint(point);
+
+            Logger.Log($"[CalibrationManager] Added new calibration point: {point.MaterialName}, " +
+                      $"Vp={knownVp:F0}, Vs={knownVs:F0}, Density={point.MeasuredDensity:F1}, P={confiningPressure:F1} MPa");
+        }
+        /// <summary>
+        /// Create a new calibration point from the current simulation parameters and results
+        /// </summary>
+        private CalibrationPoint CreateCalibrationPointFromCurrentSimulation(double knownVpVsRatio,
+                                                                           double knownVp = 0,
+                                                                           double knownVs = 0,
+                                                                           double confiningPressure = 0)
+        {
+            if (simulationForm == null || simulationForm.SelectedMaterial == null)
+                return null;
+
+            CalibrationPoint point;
+
+            if (knownVp > 0 && knownVs > 0)
+            {
+                // Using separate Vp and Vs values
+                point = new CalibrationPoint(
+                    simulationForm.SelectedMaterial.Name,
+                    simulationForm.SelectedMaterial.ID,
+                    knownVp,
+                    knownVs,
+                    simulationForm.SelectedMaterial.Density,
+                    confiningPressure,
+                    (double)simulationForm.GetYoungsModulus(),
+                    (double)simulationForm.GetPoissonRatio(),
+                    CalculateAverageGrayValue());
+            }
+            else
+            {
+                // Using Vp/Vs ratio
+                point = new CalibrationPoint(
+                    simulationForm.SelectedMaterial.Name,
+                    simulationForm.SelectedMaterial.ID,
+                    knownVpVsRatio,
+                    simulationForm.SelectedMaterial.Density,
+                    confiningPressure,
+                    (double)simulationForm.GetYoungsModulus(),
+                    (double)simulationForm.GetPoissonRatio(),
+                    CalculateAverageGrayValue());
+            }
+
+            return point;
+        }
 
         /// <summary>
         /// Calculate average gray value for the current material - used for density calibration
@@ -372,9 +671,11 @@ namespace CTS
         }
 
         /// <summary>
-        /// Apply calibration to the current simulation based on material density
+        /// Apply calibration to the current simulation based on material density and confining pressure
         /// </summary>
-        public void ApplyCalibrationToCurrentSimulation(bool applyYoungsModulus = true, bool applyPoissonRatio = true)
+        public void ApplyCalibrationToCurrentSimulation(bool applyYoungsModulus = true,
+                                                        bool applyPoissonRatio = true,
+                                                        double confiningPressure = 0)
         {
             if (simulationForm == null || simulationForm.SelectedMaterial == null)
                 return;
@@ -388,34 +689,85 @@ namespace CTS
 
             double density = simulationForm.SelectedMaterial.Density;
 
+            // Find calibration points with matching confining pressure (or closest)
+            var matchingPoints = CurrentCalibration.CalibrationPoints
+                .Where(p => Math.Abs(p.ConfiningPressureMPa - confiningPressure) < 0.1)
+                .ToList();
+
+            if (matchingPoints.Count == 0)
+            {
+                // Find closest confining pressure if no exact match
+                var closestPressure = CurrentCalibration.CalibrationPoints
+                    .OrderBy(p => Math.Abs(p.ConfiningPressureMPa - confiningPressure))
+                    .FirstOrDefault();
+
+                if (closestPressure != null)
+                {
+                    matchingPoints = CurrentCalibration.CalibrationPoints
+                        .Where(p => Math.Abs(p.ConfiningPressureMPa - closestPressure.ConfiningPressureMPa) < 0.1)
+                        .ToList();
+                }
+            }
+
+            if (matchingPoints.Count == 0)
+            {
+                MessageBox.Show("No calibration points found for the specified confining pressure.",
+                    "Calibration Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // Use the calibration points to predict properties
             if (applyYoungsModulus)
             {
-                double predictedE = CurrentCalibration.PredictYoungsModulus(density);
+                double predictedE = PredictProperty(matchingPoints, density, "E");
                 simulationForm.SetYoungsModulus((decimal)predictedE);
                 Logger.Log($"[CalibrationManager] Applied calibrated Young's modulus: {predictedE:F2} MPa " +
-                          $"for density {density:F1} kg/m³");
+                          $"for density {density:F1} kg/m³ at P={confiningPressure:F1} MPa");
             }
 
             if (applyPoissonRatio)
             {
-                // For Poisson's ratio, we use our known Vp/Vs relationship
-                // In a real case, we might need to estimate the Vp/Vs from other properties
-                // But here we'll use the theoretical relationship based on the nearest material
-
-                var closestPoint = CurrentCalibration.CalibrationPoints
-                    .OrderBy(p => Math.Abs(p.MeasuredDensity - density))
-                    .FirstOrDefault();
-
-                if (closestPoint != null)
-                {
-                    double predictedPoissonRatio = CurrentCalibration.PredictPoissonRatio(closestPoint.KnownVpVsRatio);
-                    simulationForm.SetPoissonRatio((decimal)predictedPoissonRatio);
-                    Logger.Log($"[CalibrationManager] Applied calibrated Poisson's ratio: {predictedPoissonRatio:F4} " +
-                              $"based on nearest material {closestPoint.MaterialName}");
-                }
+                double predictedNu = PredictProperty(matchingPoints, density, "Nu");
+                simulationForm.SetPoissonRatio((decimal)predictedNu);
+                Logger.Log($"[CalibrationManager] Applied calibrated Poisson's ratio: {predictedNu:F4} " +
+                          $"for density {density:F1} kg/m³ at P={confiningPressure:F1} MPa");
             }
         }
+        private double PredictProperty(List<CalibrationPoint> points, double density, string property)
+        {
+            // Simple linear interpolation based on density
+            if (points.Count == 1)
+            {
+                return property == "E" ? points[0].YoungsModulus : points[0].PoissonRatio;
+            }
 
+            // Sort by density
+            points = points.OrderBy(p => p.MeasuredDensity).ToList();
+
+            // Find the two closest density points
+            var lower = points.LastOrDefault(p => p.MeasuredDensity <= density);
+            var upper = points.FirstOrDefault(p => p.MeasuredDensity >= density);
+
+            if (lower == null) lower = points.First();
+            if (upper == null) upper = points.Last();
+
+            if (lower == upper)
+            {
+                return property == "E" ? lower.YoungsModulus : lower.PoissonRatio;
+            }
+
+            // Linear interpolation
+            double t = (density - lower.MeasuredDensity) / (upper.MeasuredDensity - lower.MeasuredDensity);
+
+            if (property == "E")
+            {
+                return lower.YoungsModulus + t * (upper.YoungsModulus - lower.YoungsModulus);
+            }
+            else
+            {
+                return lower.PoissonRatio + t * (upper.PoissonRatio - lower.PoissonRatio);
+            }
+        }
         /// <summary>
         /// Save calibration data to a file
         /// </summary>

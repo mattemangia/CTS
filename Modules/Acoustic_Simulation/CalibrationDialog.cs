@@ -18,7 +18,12 @@ namespace CTS
         private KryptonLabel lblCalibrationSummary;
         private KryptonTextBox txtNote;
         private KryptonNumericUpDown numKnownVpVs;
-
+        private KryptonRadioButton rbVpVsRatio;
+        private KryptonRadioButton rbSeparateValues;
+        private KryptonNumericUpDown numKnownVp;
+        private KryptonNumericUpDown numKnownVs;
+        private KryptonNumericUpDown numConfiningPressure;
+        private KryptonPanel pnlInputMethod;
         public CalibrationDialog(CalibrationManager manager, AcousticSimulationForm form,
                                  double vp, double vs, double vpVsRatio)
         {
@@ -57,10 +62,10 @@ namespace CTS
             {
                 // Form settings
                 this.Text = "Acoustic Simulator Calibration";
-                this.Size = new Size(600, 700);
+                this.Size = new Size(800, 800);
                 this.StartPosition = FormStartPosition.CenterParent;
                 this.BackColor = Color.FromArgb(45, 45, 48); // Dark background
-                this.Icon=Properties.Resources.favicon; // Set the icon from resources
+                this.Icon = Properties.Resources.favicon; // Set the icon from resources
 
                 // Create main layout panel
                 KryptonPanel mainPanel = new KryptonPanel();
@@ -73,8 +78,8 @@ namespace CTS
                 layout.Dock = DockStyle.Fill;
                 layout.RowCount = 2;
                 layout.ColumnCount = 1;
-                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 60F));
-                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 40F));
+                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
                 mainPanel.Controls.Add(layout);
 
                 // === Existing Calibration Points Section ===
@@ -132,7 +137,7 @@ namespace CTS
                 lblCalibrationSummary = new KryptonLabel();
                 lblCalibrationSummary.Name = "lblCalibrationSummary";
                 lblCalibrationSummary.Dock = DockStyle.Bottom;
-                lblCalibrationSummary.Height = 60;
+                lblCalibrationSummary.Height = 80;
                 lblCalibrationSummary.StateCommon.ShortText.Color1 = Color.LightGreen;
                 lblCalibrationSummary.StateCommon.ShortText.Font = new Font("Segoe UI", 9, FontStyle.Regular);
                 lblCalibrationSummary.Text = "No calibration data available. Add at least 2 calibration points.";
@@ -236,44 +241,130 @@ namespace CTS
                 lblPoissonValue.Text = $"{poissonRatio:F4}";
                 addPointPanel.Controls.Add(lblPoissonValue);
 
-                // Known Vp/Vs ratio input
+                // Input method selection panel
+                pnlInputMethod = new KryptonPanel();
+                pnlInputMethod.Location = new Point(400, 20);
+                pnlInputMethod.Width = 350;
+                pnlInputMethod.Height = 250;
+                pnlInputMethod.StateCommon.Color1 = Color.FromArgb(45, 45, 48);
+                pnlInputMethod.StateCommon.Color2 = Color.FromArgb(45, 45, 48);
+                addPointPanel.Controls.Add(pnlInputMethod);
+
+                // Header for input method
+                KryptonLabel lblInputMethod = new KryptonLabel();
+                lblInputMethod.Text = "Calibration Input Method:";
+                lblInputMethod.Location = new Point(10, 5);
+                lblInputMethod.StateCommon.ShortText.Color1 = Color.LightGray;
+                lblInputMethod.StateCommon.ShortText.Font = new Font("Segoe UI", 10, FontStyle.Bold);
+                pnlInputMethod.Controls.Add(lblInputMethod);
+
+                // Radio buttons for input type
+                rbVpVsRatio = new KryptonRadioButton();
+                rbVpVsRatio.Text = "Enter Vp/Vs Ratio";
+                rbVpVsRatio.Location = new Point(10, 30);
+                rbVpVsRatio.Width = 200;
+                rbVpVsRatio.Checked = true;
+                rbVpVsRatio.CheckedChanged += RbInputType_CheckedChanged;
+                pnlInputMethod.Controls.Add(rbVpVsRatio);
+
+                rbSeparateValues = new KryptonRadioButton();
+                rbSeparateValues.Text = "Enter Vp and Vs separately";
+                rbSeparateValues.Location = new Point(10, 55);
+                rbSeparateValues.Width = 200;
+                rbSeparateValues.CheckedChanged += RbInputType_CheckedChanged;
+                pnlInputMethod.Controls.Add(rbSeparateValues);
+
+                // Vp/Vs ratio input
                 KryptonLabel lblKnownVpVs = new KryptonLabel();
                 lblKnownVpVs.Text = "Known Vp/Vs Ratio:";
-                lblKnownVpVs.Location = new Point(300, 50);
+                lblKnownVpVs.Location = new Point(10, 85);
                 lblKnownVpVs.StateCommon.ShortText.Color1 = Color.White;
-                addPointPanel.Controls.Add(lblKnownVpVs);
+                pnlInputMethod.Controls.Add(lblKnownVpVs);
 
                 numKnownVpVs = new KryptonNumericUpDown();
                 numKnownVpVs.Name = "numKnownVpVs";
-                numKnownVpVs.Location = new Point(450, 50);
+                numKnownVpVs.Location = new Point(160, 85);
                 numKnownVpVs.Width = 100;
                 numKnownVpVs.DecimalPlaces = 3;
-                numKnownVpVs.Minimum = 0.0m;  // Allow zero
+                numKnownVpVs.Minimum = 0.0m;
                 numKnownVpVs.Maximum = 4.0m;
-                // Make sure the value is valid
                 numKnownVpVs.Value = Math.Max(0.0m, Math.Min(4.0m, (decimal)simulatedVpVsRatio));
                 numKnownVpVs.Increment = 0.001m;
-                addPointPanel.Controls.Add(numKnownVpVs);
+                pnlInputMethod.Controls.Add(numKnownVpVs);
+
+                // Separate Vp and Vs inputs
+                KryptonLabel lblKnownVp = new KryptonLabel();
+                lblKnownVp.Text = "Known Vp (m/s):";
+                lblKnownVp.Location = new Point(10, 115);
+                lblKnownVp.StateCommon.ShortText.Color1 = Color.White;
+                pnlInputMethod.Controls.Add(lblKnownVp);
+
+                numKnownVp = new KryptonNumericUpDown();
+                numKnownVp.Name = "numKnownVp";
+                numKnownVp.Location = new Point(160, 115);
+                numKnownVp.Width = 100;
+                numKnownVp.DecimalPlaces = 0;
+                numKnownVp.Minimum = 0;
+                numKnownVp.Maximum = 10000;
+                numKnownVp.Value = 5000;
+                numKnownVp.Visible = false;
+                pnlInputMethod.Controls.Add(numKnownVp);
+
+                KryptonLabel lblKnownVs = new KryptonLabel();
+                lblKnownVs.Text = "Known Vs (m/s):";
+                lblKnownVs.Location = new Point(10, 145);
+                lblKnownVs.StateCommon.ShortText.Color1 = Color.White;
+                pnlInputMethod.Controls.Add(lblKnownVs);
+
+                numKnownVs = new KryptonNumericUpDown();
+                numKnownVs.Name = "numKnownVs";
+                numKnownVs.Location = new Point(160, 145);
+                numKnownVs.Width = 100;
+                numKnownVs.DecimalPlaces = 0;
+                numKnownVs.Minimum = 0;
+                numKnownVs.Maximum = 10000;
+                numKnownVs.Value = 3000;
+                numKnownVs.Visible = false;
+                pnlInputMethod.Controls.Add(numKnownVs);
+
+                // Confining Pressure input
+                KryptonLabel lblConfining = new KryptonLabel();
+                lblConfining.Text = "Confining Pressure (MPa):";
+                lblConfining.Location = new Point(10, 175);
+                lblConfining.StateCommon.ShortText.Color1 = Color.White;
+                pnlInputMethod.Controls.Add(lblConfining);
+
+                numConfiningPressure = new KryptonNumericUpDown();
+                numConfiningPressure.Name = "numConfiningPressure";
+                numConfiningPressure.Location = new Point(160, 175);
+                numConfiningPressure.Width = 100;
+                numConfiningPressure.DecimalPlaces = 1;
+                numConfiningPressure.Minimum = 0;
+                numConfiningPressure.Maximum = 1000;
+                numConfiningPressure.Value = 1.0m;
+                pnlInputMethod.Controls.Add(numConfiningPressure);
 
                 // Calibration note
                 KryptonLabel lblNote = new KryptonLabel();
-                lblNote.Text = "Note:";
-                lblNote.Location = new Point(300, 80);
+                lblNote.Text = "Notes (optional):";
+                lblNote.Location = new Point(10, 175);
                 lblNote.StateCommon.ShortText.Color1 = Color.White;
                 addPointPanel.Controls.Add(lblNote);
 
                 txtNote = new KryptonTextBox();
                 txtNote.Name = "txtNote";
-                txtNote.Location = new Point(450, 80);
-                txtNote.Width = 120;
+                txtNote.Location = new Point(10, 195);
+                txtNote.Width = 380;
                 txtNote.Height = 60;
+                txtNote.Multiline = true;
                 addPointPanel.Controls.Add(txtNote);
 
                 // Add Calibration button
                 KryptonButton btnAddCalibration = new KryptonButton();
                 btnAddCalibration.Text = "Add Calibration Point";
-                btnAddCalibration.Location = new Point(350, 140);
+                btnAddCalibration.Location = new Point(10, 270);
                 btnAddCalibration.Width = 200;
+                btnAddCalibration.Height = 35;
                 btnAddCalibration.Click += BtnAddCalibration_Click;
                 addPointPanel.Controls.Add(btnAddCalibration);
 
@@ -281,7 +372,7 @@ namespace CTS
                 KryptonButton btnClose = new KryptonButton();
                 btnClose.Text = "Close";
                 btnClose.Dock = DockStyle.Bottom;
-                btnClose.Height = 30;
+                btnClose.Height = 40;
                 btnClose.DialogResult = DialogResult.OK;
                 this.Controls.Add(btnClose);
                 this.Controls.Add(mainPanel);
@@ -292,7 +383,32 @@ namespace CTS
                     "Control Initialization Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
+        private void RbInputType_CheckedChanged(object sender, EventArgs e)
+        {
+            if (rbVpVsRatio.Checked)
+            {
+                numKnownVpVs.Visible = true;
+                numKnownVp.Visible = false;
+                numKnownVs.Visible = false;
+            }
+            else
+            {
+                numKnownVpVs.Visible = false;
+                numKnownVp.Visible = true;
+                numKnownVs.Visible = true;
 
+                // Auto-calculate Vp/Vs when Vp or Vs changes
+                numKnownVp.ValueChanged += UpdateVpVsRatio;
+                numKnownVs.ValueChanged += UpdateVpVsRatio;
+            }
+        }
+        private void UpdateVpVsRatio(object sender, EventArgs e)
+        {
+            if (numKnownVs.Value > 0)
+            {
+                numKnownVpVs.Value = numKnownVp.Value / numKnownVs.Value;
+            }
+        }
         // Use discrete methods for event handling instead of lambdas
         private void BtnRemovePoint_Click(object sender, EventArgs e)
         {
@@ -364,13 +480,26 @@ namespace CTS
         {
             try
             {
-                if (numKnownVpVs == null || calibrationManager == null)
+                if (calibrationManager == null)
                     return;
 
-                double knownVpVs = (double)numKnownVpVs.Value;
+                double confiningPressure = (double)numConfiningPressure.Value;
 
-                // Create and add the calibration point
-                calibrationManager.AddCurrentSimulationAsCalibrationPoint(knownVpVs, simulatedVp, simulatedVs);
+                if (rbVpVsRatio.Checked)
+                {
+                    // Using Vp/Vs ratio
+                    double knownVpVs = (double)numKnownVpVs.Value;
+                    calibrationManager.AddCurrentSimulationAsCalibrationPoint(
+                        knownVpVs, simulatedVp, simulatedVs, confiningPressure);
+                }
+                else
+                {
+                    // Using separate Vp and Vs values
+                    double knownVp = (double)numKnownVp.Value;
+                    double knownVs = (double)numKnownVs.Value;
+                    calibrationManager.AddCurrentSimulationAsCalibrationPoint(
+                        knownVp, knownVs, simulatedVp, simulatedVs, confiningPressure);
+                }
 
                 // Add notes if provided
                 if (txtNote != null && !string.IsNullOrEmpty(txtNote.Text) &&
@@ -395,7 +524,6 @@ namespace CTS
                     "Add Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
-
         private void PopulateExistingCalibrationPoints()
         {
             try

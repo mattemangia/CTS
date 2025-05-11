@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Microsoft.VisualBasic;
 
 namespace CTS
 {
@@ -25,6 +26,10 @@ namespace CTS
         private ToolStripMenuItem eraserMenuItem;
         private ToolStripMenuItem brushMenuItem;
         private ToolStripMenuItem thresholdingMenuItem;
+
+        private ToolStripMenuItem measurementMenuItem;
+        private MeasurementManager measurementManager;
+        private MeasurementForm measurementForm;
 
         // New UI elements in the left panel.
         private Button btnInterpolate;
@@ -109,6 +114,8 @@ namespace CTS
                 System.Diagnostics.Process.GetCurrentProcess().Kill();
             };
             mainForm.AnnotationMgr = sharedAnnotationManager;
+            measurementManager = new MeasurementManager(form);
+            mainForm.SetMeasurementManager(measurementManager);
             InitializeComponent();
             PaletteMode = PaletteMode.Office2010Black;
             MakeEverythingDark(this);
@@ -483,18 +490,20 @@ namespace CTS
             panMenuItem = new ToolStripMenuItem("Pan") { CheckOnClick = true, Checked = true };
             eraserMenuItem = new ToolStripMenuItem("Eraser") { CheckOnClick = true };
             brushMenuItem = new ToolStripMenuItem("Brush") { CheckOnClick = true };
+            measurementMenuItem = new ToolStripMenuItem("Measurement") { CheckOnClick = true };
             thresholdingMenuItem = new ToolStripMenuItem("Thresholding") { CheckOnClick = true };
 
             // Attach a common click handler
             panMenuItem.Click += ToolsMenuItem_Click;
             eraserMenuItem.Click += ToolsMenuItem_Click;
             brushMenuItem.Click += ToolsMenuItem_Click;
+            measurementMenuItem.Click += ToolsMenuItem_Click;
             thresholdingMenuItem.Click += ToolsMenuItem_Click;
 
             // Add basic tools to menu
             toolsMenu.DropDownItems.AddRange(new ToolStripItem[]
             {
-        panMenuItem, eraserMenuItem, brushMenuItem, thresholdingMenuItem
+        panMenuItem, eraserMenuItem, brushMenuItem, measurementMenuItem, thresholdingMenuItem
             });
 
             // Add statistics submenu
@@ -1360,6 +1369,7 @@ namespace CTS
             panMenuItem.Checked = false;
             eraserMenuItem.Checked = false;
             brushMenuItem.Checked = false;
+            measurementMenuItem.Checked = false;
             thresholdingMenuItem.Checked = false;
 
             // Check the clicked item.
@@ -1379,7 +1389,38 @@ namespace CTS
                 mainForm.RenderViews();
                 _ = mainForm.RenderOrthoViewsAsync();
             }
+            if (item == measurementMenuItem)
+            {
+                currentTool = SegmentationTool.Measurement;
+                toolSizeSlider.Enabled = false;
+                thresholdRangeSlider.Enabled = false;
+                numThresholdMin.Enabled = false;
+                numThresholdMax.Enabled = false;
+                btnInterpolate.Enabled = false;
 
+                // Show measurement form if not already shown
+                if (measurementForm == null || measurementForm.IsDisposed)
+                {
+                    measurementForm = new MeasurementForm(mainForm, measurementManager);
+                }
+
+                if (!measurementForm.Visible)
+                {
+                    measurementForm.Show();
+                }
+                else
+                {
+                    measurementForm.BringToFront();
+                }
+            }
+            else
+            {
+                // Hide measurement form for other tools
+                if (measurementForm != null && measurementForm.Visible)
+                {
+                    measurementForm.Hide();
+                }
+            }
             // Set the tool and enable/disable UI controls accordingly.
             if (item == panMenuItem)
             {

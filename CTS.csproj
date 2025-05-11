@@ -60,7 +60,7 @@
     <OutputPath>bin\x64\Debug\</OutputPath>
     <DefineConstants>DEBUG;TRACE</DefineConstants>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <DebugType>full</DebugType>
+    <DebugType>portable</DebugType>
     <PlatformTarget>x64</PlatformTarget>
     <LangVersion>7.3</LangVersion>
     <ErrorReport>prompt</ErrorReport>
@@ -84,6 +84,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="Microsoft.CSharp" />
+    <Reference Include="Microsoft.VisualBasic" />
     <Reference Include="PresentationCore" />
     <Reference Include="PresentationFramework" />
     <Reference Include="System" />
@@ -111,6 +112,12 @@
     <None Include="Ruleset.ruleset" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="3DViewer\Meshing\MeshExportDialog.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="3DViewer\Meshing\ProducerConsumerFileWriter.cs" />
+    <Compile Include="3DViewer\Meshing\FastOBJWriter.cs" />
+    <Compile Include="3DViewer\Meshing\FastSTLWriter.cs" />
     <Compile Include="Interfaces\IMaterialDensityProvider.cs" />
     <Compile Include="Interfaces\IMaterialOperations.cs" />
     <Compile Include="MaterialOperations\MaterialOperations.cs" />
@@ -184,6 +191,11 @@
     <Compile Include="Modules\CoreExtraction\CoreExtractionForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="Modules\MeasurementTool\Measurement.cs" />
+    <Compile Include="Modules\MeasurementTool\MeasurementForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Modules\MeasurementTool\MeasurementManager.cs" />
     <Compile Include="Modules\NodeEditor\BaseNode.cs" />
     <Compile Include="Modules\NodeEditor\NodeEditorForm.cs" />
     <Compile Include="Modules\NMRSimulation\MaterialNMRPropertiesdialog.cs">
@@ -231,6 +243,7 @@
     <Compile Include="Modules\Triaxial_Simulation\TriaxialSimulationForm_calibration.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Properties\Resources.Designer.cs">
       <AutoGen>True</AutoGen>
       <DesignTime>True</DesignTime>
@@ -298,12 +311,14 @@
     <Compile Include="Modules\BandDetection\VarianceKernels.cs" />
     <Compile Include="3DViewer\Renderer\VolumeRendererSharpDX.cs" />
     <Compile Include="3DViewer\Meshing\VoxelMeshExporter.cs" />
+    <None Include="Resources\sharpdx_logo.png" />
     <None Include="Resources\UNF_Logo_100pr_pos.png" />
     <None Include="Resources\onnxruntime.png" />
     <None Include="Resources\pngfind.com-now-open-png-1474777.png" />
     <None Include="Resources\Microsoft-DirectX-Logo-wordmark.png" />
     <None Include="Resources\ILGPU.png" />
     <None Include="Resources\Krypton.png" />
+    <None Include="Resources\61501509.png" />
     <Content Include="Resources\logo2.png" />
     <None Include="Resources\favicon.ico" />
     <None Include="Resources\logo.png" />

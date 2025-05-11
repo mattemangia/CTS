@@ -39,6 +39,23 @@ namespace CTS
         public string CurrentPath { get; private set; } = "";
         private bool useMemoryMapping = true;
 
+        private MeasurementManager measurementManager;
+        private bool isDrawingMeasurement = false;
+        private Point measurementStartPoint;
+        private Point measurementCurrentPoint;
+        private bool isXyMeasurementDrawing = false;
+        private Point xyMeasurementStart;
+        private Point xyMeasurementCurrent;
+
+        private bool isXzMeasurementDrawing = false;
+        private Point xzMeasurementStart;
+        private Point xzMeasurementCurrent;
+
+        private bool isYzMeasurementDrawing = false;
+        private Point yzMeasurementStart;
+        private Point yzMeasurementCurrent;
+
+
         // Materials: index 0 is reserved for the exterior.
         public List<Material> Materials = new List<Material>();
         public IMaterialOperations MaterialOps { get; private set; }
@@ -83,6 +100,7 @@ namespace CTS
         }
 
         private int xzSliceY;
+
         public int XzSliceY
         {
             get => xzSliceY;
@@ -116,6 +134,10 @@ namespace CTS
             }
         }
 
+        public void SetMeasurementManager(MeasurementManager manager)
+        {
+            measurementManager = manager;
+        }
 
         // Render options
         public bool ShowMask { get; set; } = false;
@@ -2029,7 +2051,73 @@ namespace CTS
         {
             ScrollablePictureBox view = GetViewForType(viewType);
             if (view == null) return;
+            if (currentTool == SegmentationTool.Measurement)
+            {
+                if (e.Button == MouseButtons.Left)
+                {
+                    // Start drawing measurement
+                    switch (viewType)
+                    {
+                        case ViewType.XY:
+                            isXyMeasurementDrawing = true;
+                            xyMeasurementStart = e.Location;
+                            xyMeasurementCurrent = e.Location;
+                            break;
 
+                        case ViewType.XZ:
+                            isXzMeasurementDrawing = true;
+                            xzMeasurementStart = e.Location;
+                            xzMeasurementCurrent = e.Location;
+                            break;
+
+                        case ViewType.YZ:
+                            isYzMeasurementDrawing = true;
+                            yzMeasurementStart = e.Location;
+                            yzMeasurementCurrent = e.Location;
+                            break;
+                    }
+                }
+                else if (e.Button == MouseButtons.Right)
+                {
+                    // Try to select/delete an existing measurement
+                    if (measurementManager != null)
+                    {
+                        // Get the slice index based on view
+                        int sliceIndex = 0;
+                        switch (viewType)
+                        {
+                            case ViewType.XY:
+                                sliceIndex = CurrentSlice;
+                                break;
+                            case ViewType.XZ:
+                                sliceIndex = XzSliceY;
+                                break;
+                            case ViewType.YZ:
+                                sliceIndex = YzSliceX;
+                                break;
+                        }
+
+                        // Find measurement near click point
+                        var measurement = measurementManager.FindMeasurementNearPoint(e.Location, (CTS.ViewType)viewType, sliceIndex);
+                        if (measurement != null)
+                        {
+                            // Show context menu for measurement
+                            ContextMenuStrip contextMenu = new ContextMenuStrip();
+
+                            var deleteItem = new ToolStripMenuItem("Delete Measurement");
+                            deleteItem.Click += (s, args) =>
+                            {
+                                measurementManager.RemoveMeasurement(measurement.ID);
+                                RenderViews(viewType);
+                            };
+
+                            contextMenu.Items.Add(deleteItem);
+                            contextMenu.Show(view, e.Location);
+                        }
+                    }
+                }
+                return; // Don't process other tools when measurement is active
+            }
             if (e.Button == MouseButtons.Middle)
             {
                 // Pan with middle mouse button
@@ -2151,7 +2239,36 @@ namespace CTS
 
                 view.Invalidate();
             }
+            if (currentTool == SegmentationTool.Measurement)
+            {
+                switch (viewType)
+                {
+                    case ViewType.XY:
+                        if (isXyMeasurementDrawing)
+                        {
+                            xyMeasurementCurrent = e.Location;
+                            view.Invalidate();
+                        }
+                        break;
 
+                    case ViewType.XZ:
+                        if (isXzMeasurementDrawing)
+                        {
+                            xzMeasurementCurrent = e.Location;
+                            view.Invalidate();
+                        }
+                        break;
+
+                    case ViewType.YZ:
+                        if (isYzMeasurementDrawing)
+                        {
+                            yzMeasurementCurrent = e.Location;
+                            view.Invalidate();
+                        }
+                        break;
+                }
+                return; // Don't process other tools when measurement is active
+            }
             // Handle panning - now supports both middle mouse button and left mouse button (for non-brush tools)
             if ((e.Button == MouseButtons.Middle ||
                 (e.Button == MouseButtons.Left && currentTool != SegmentationTool.Brush))
@@ -2271,7 +2388,91 @@ namespace CTS
             {
                 view.Tag = null;
             }
+            if (currentTool == SegmentationTool.Measurement)
+            {
+                if (e.Button == MouseButtons.Left && measurementManager != null)
+                {
+                    Point start = Point.Empty;
+                    Point end = e.Location;
+                    int sliceIndex = 0;
+                    bool addMeasurement = false;
 
+                    switch (viewType)
+                    {
+                        case ViewType.XY:
+                            if (isXyMeasurementDrawing)
+                            {
+                                start = xyMeasurementStart;
+                                sliceIndex = CurrentSlice;
+                                addMeasurement = true;
+                                isXyMeasurementDrawing = false;
+                            }
+                            break;
+
+                        case ViewType.XZ:
+                            if (isXzMeasurementDrawing)
+                            {
+                                start = xzMeasurementStart;
+                                sliceIndex = XzSliceY;
+                                addMeasurement = true;
+                                isXzMeasurementDrawing = false;
+                            }
+                            break;
+
+                        case ViewType.YZ:
+                            if (isYzMeasurementDrawing)
+                            {
+                                start = yzMeasurementStart;
+                                sliceIndex = YzSliceX;
+                                addMeasurement = true;
+                                isYzMeasurementDrawing = false;
+                            }
+                            break;
+                    }
+
+                    if (addMeasurement && start != end)
+                    {
+                        // Convert screen coordinates to image coordinates
+                        float zoom;
+                        PointF pan;
+
+                        switch (viewType)
+                        {
+                            case ViewType.XY:
+                                zoom = xyZoom;
+                                pan = xyPan;
+                                break;
+                            case ViewType.XZ:
+                                zoom = xzZoom;
+                                pan = xzPan;
+                                break;
+                            case ViewType.YZ:
+                                zoom = yzZoom;
+                                pan = yzPan;
+                                break;
+                            default:
+                                return;
+                        }
+
+                        Point imageStart = new Point(
+                            (int)((start.X - pan.X) / zoom),
+                            (int)((start.Y - pan.Y) / zoom)
+                        );
+
+                        Point imageEnd = new Point(
+                            (int)((end.X - pan.X) / zoom),
+                            (int)((end.Y - pan.Y) / zoom)
+                        );
+
+                        // Add the measurement
+                        measurementManager.AddMeasurement((CTS.ViewType)viewType, imageStart, imageEnd, sliceIndex);
+                        RenderViews(viewType);
+                    }
+
+                    view.Invalidate();
+                }
+                return; // Don't process other tools when measurement is active
+            }
             // Handle box drawing completion
             if (e.Button == MouseButtons.Right)
             {
@@ -2470,8 +2671,162 @@ namespace CTS
                 g.DrawImage(bitmap, destRect);
             }
 
+            // Draw measurements
+            if (measurementManager != null)
+            {
+                int sliceIndex = 0;
+                switch (viewType)
+                {
+                    case ViewType.XY:
+                        sliceIndex = CurrentSlice;
+                        break;
+                    case ViewType.XZ:
+                        sliceIndex = XzSliceY;
+                        break;
+                    case ViewType.YZ:
+                        sliceIndex = YzSliceX;
+                        break;
+                }
+
+                var measurements = measurementManager.GetMeasurementsForView((CTS.ViewType)viewType, sliceIndex);
+
+                foreach (var measurement in measurements)
+                {
+                    // Convert image coordinates to screen coordinates
+                    float startX = measurement.StartPoint.X * zoom + pan.X;
+                    float startY = measurement.StartPoint.Y * zoom + pan.Y;
+                    float endX = measurement.EndPoint.X * zoom + pan.X;
+                    float endY = measurement.EndPoint.Y * zoom + pan.Y;
+
+                    // Draw measurement line
+                    using (Pen pen = new Pen(measurement.LineColor, 2))
+                    {
+                        g.DrawLine(pen, startX, startY, endX, endY);
+
+                        // Draw endpoints
+                        g.DrawEllipse(pen, startX - 3, startY - 3, 6, 6);
+                        g.DrawEllipse(pen, endX - 3, endY - 3, 6, 6);
+                    }
+
+                    // Draw measurement label
+                    string label = $"{measurement.ID}: {measurement.DistanceDisplayText}";
+                    float labelX = (startX + endX) / 2;
+                    float labelY = (startY + endY) / 2 - 20;
+
+                    // Draw background for label
+                    using (Font font = new Font("Arial", 8, FontStyle.Bold))
+                    {
+                        SizeF labelSize = g.MeasureString(label, font);
+                        RectangleF labelBg = new RectangleF(
+                            labelX - labelSize.Width / 2 - 2,
+                            labelY - 2,
+                            labelSize.Width + 4,
+                            labelSize.Height + 4
+                        );
+
+                        using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(200, Color.Black)))
+                        {
+                            g.FillRectangle(bgBrush, labelBg);
+                        }
+
+                        using (SolidBrush textBrush = new SolidBrush(measurement.LineColor))
+                        {
+                            g.DrawString(label, font, textBrush, labelX - labelSize.Width / 2, labelY);
+                        }
+                    }
+                }
+            }
+
+            // Draw currently drawing measurement
+            if (currentTool == SegmentationTool.Measurement)
+            {
+                Point start = Point.Empty;
+                Point current = Point.Empty;
+                bool isDrawing = false;
+
+                switch (viewType)
+                {
+                    case ViewType.XY:
+                        if (isXyMeasurementDrawing)
+                        {
+                            start = xyMeasurementStart;
+                            current = xyMeasurementCurrent;
+                            isDrawing = true;
+                        }
+                        break;
+
+                    case ViewType.XZ:
+                        if (isXzMeasurementDrawing)
+                        {
+                            start = xzMeasurementStart;
+                            current = xzMeasurementCurrent;
+                            isDrawing = true;
+                        }
+                        break;
+
+                    case ViewType.YZ:
+                        if (isYzMeasurementDrawing)
+                        {
+                            start = yzMeasurementStart;
+                            current = yzMeasurementCurrent;
+                            isDrawing = true;
+                        }
+                        break;
+                }
+
+                if (isDrawing)
+                {
+                    // Draw preview line
+                    using (Pen pen = new Pen(Color.Yellow, 2))
+                    {
+                        g.DrawLine(pen, start, current);
+
+                        // Show live measurement
+                        Point imgStart = new Point(
+                            (int)((start.X - pan.X) / zoom),
+                            (int)((start.Y - pan.Y) / zoom)
+                        );
+
+                        Point imgCurrent = new Point(
+                            (int)((current.X - pan.X) / zoom),
+                            (int)((current.Y - pan.Y) / zoom)
+                        );
+
+                        double distance = Measurement.CalculateDistance(imgStart, imgCurrent, (CTS.ViewType)viewType, pixelSize);
+                        string label = "";
+
+                        if (distance < 1e-3)
+                            label = $"{distance * 1e6:0.00} µm";
+                        else if (distance < 1.0)
+                            label = $"{distance * 1e3:0.00} mm";
+                        else
+                            label = $"{distance:0.000} m";
+
+                        float labelX = (start.X + current.X) / 2;
+                        float labelY = (start.Y + current.Y) / 2 - 15;
+
+                        using (Font font = new Font("Arial", 8, FontStyle.Bold))
+                        using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(200, Color.Black)))
+                        using (SolidBrush textBrush = new SolidBrush(Color.Yellow))
+                        {
+                            SizeF labelSize = g.MeasureString(label, font);
+                            RectangleF labelBg = new RectangleF(
+                                labelX - labelSize.Width / 2 - 2,
+                                labelY - 2,
+                                labelSize.Width + 4,
+                                labelSize.Height + 4
+                            );
+
+                            g.FillRectangle(bgBrush, labelBg);
+                            g.DrawString(label, font, textBrush, labelX - labelSize.Width / 2, labelY);
+                        }
+                    }
+                }
+            }
+
             // Draw the scale bar
             DrawScaleBar(g, view.ClientRectangle, zoom);
+
 
             // Draw view-specific overlays
             switch (viewType)
@@ -2584,7 +2939,22 @@ namespace CTS
                     break;
             }
         }
-
+        public void JumpToMeasurement(Measurement measurement)
+        {
+            switch (measurement.ViewType)
+            {
+                case (CTS.ViewType)ViewType.XY:
+                    CurrentSlice = measurement.SliceIndex;
+                    break;
+                case (CTS.ViewType)ViewType.XZ:
+                    XzSliceY = measurement.SliceIndex;
+                    break;
+                case (CTS.ViewType)ViewType.YZ:
+                    YzSliceX = measurement.SliceIndex;
+                    break;
+            }
+            RenderViews();
+        }
         private ScrollablePictureBox GetViewForType(ViewType viewType)
         {
             switch (viewType)
@@ -3856,7 +4226,10 @@ namespace CTS
                     _dockingManager.Dispose();
                     _dockingManager = null;
                 }
-
+                if (measurementManager != null)
+                {
+                    measurementManager = null;
+                }
                 if (_dock != null)
                 {
                     _dock.Dispose();

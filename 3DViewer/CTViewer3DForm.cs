@@ -21,7 +21,10 @@ namespace CTS.SharpDXIntegration
         private DateTime lastRenderTime = DateTime.MinValue;
         private int renderFailCount = 0;
         private const int MAX_FAILURES = 3;
-
+        private bool clippingPlaneEnabled = false;
+        private SharpDX.Vector3 clippingPlaneNormal = SharpDX.Vector3.UnitX;
+        private float clippingPlaneDistance = 0.5f;
+        private bool clippingPlaneMirror = false;
         private bool measurementMode = false;
 
         private bool isDrawingMeasurement = false;
@@ -678,14 +681,49 @@ namespace CTS.SharpDXIntegration
 
         // Called by control panel for "Export Model" (OBJ or STL)
         public async Task ExportModelAsync(bool exportLabels, bool exportGrayscaleSurface,
-                                   string filePath, float isoLevel, IProgress<int> progress = null)
+                               string filePath, float isoLevel, IProgress<int> progress = null)
         {
             try
             {
                 Logger.Log("[SharpDXViewerForm] Starting model export...");
                 this.Enabled = false;
 
-                await Task.Run(() =>
+                // Create export options with clipping plane
+                var exportOptions = new MeshExportOptions
+                {
+                    Mode = exportGrayscaleSurface ? MeshExportMode.SurfaceMesh : MeshExportMode.VoxelMesh,
+                    ExportGrayscale = exportGrayscaleSurface,
+                    ExportMaterials = exportLabels,
+                    ExcludeExterior = true,
+                    SurfaceFacetCount = 50000, // Default value
+                    MinParticleRadius = 5.0f, // Default value
+                    UseClippingPlane = clippingPlaneEnabled,
+                    ClippingPlaneNormal = clippingPlaneNormal,
+                    ClippingPlaneDistance = clippingPlaneDistance,
+                    ClippingPlaneMirror = clippingPlaneMirror,
+                    // Include existing cutting plane state
+                    CutXEnabled = volumeRenderer.CutXEnabled,
+                    CutYEnabled = volumeRenderer.CutYEnabled,
+                    CutZEnabled = volumeRenderer.CutZEnabled,
+                    CutXDirection = volumeRenderer.CutXDirection,
+                    CutYDirection = volumeRenderer.CutYDirection,
+                    CutZDirection = volumeRenderer.CutZDirection,
+                    CutXPosition = volumeRenderer.CutXPosition,
+                    CutYPosition = volumeRenderer.CutYPosition,
+                    CutZPosition = volumeRenderer.CutZPosition,
+                    ApplyPlaneCut = true
+                };
+
+                // Ask user for export options
+                using (var exportDialog = new MeshExportDialog(exportOptions))
+                {
+                    if (exportDialog.ShowDialog(this) != DialogResult.OK)
+                        return;
+
+                    exportOptions = exportDialog.GetOptions();
+                }
+
+                await Task.Run(async () =>
                 {
                     bool[] labelVisibility = volumeRenderer.GetLabelVisibilityArray();
 
@@ -696,56 +734,19 @@ namespace CTS.SharpDXIntegration
                         Logger.Log($"[SharpDXViewerForm] Export progress: {percent}%");
                     };
 
-                    // Check if any cutting planes are active
-                    bool anyCuttingPlaneEnabled = volumeRenderer.CutXEnabled ||
-                                                 volumeRenderer.CutYEnabled ||
-                                                 volumeRenderer.CutZEnabled;
-
-                    bool applyPlaneCut = true; // Default to visible part only
-
-                    // If any cutting plane is enabled, ask the user what to export
-                    if (anyCuttingPlaneEnabled)
-                    {
-                        // Must invoke on UI thread since we're in a Task
-                        var dialogResult = DialogResult.Yes; // Default value
-                        this.Invoke((Action)(() =>
-                        {
-                            dialogResult = MessageBox.Show(
-                                "One or more cutting planes are active. What would you like to export?\n\n" +
-                                "Yes - Export only the visible part (after cuts)\n" +
-                                "No - Export the entire volume (ignore cuts)",
-                                "Export Options",
-                                MessageBoxButtons.YesNo,
-                                MessageBoxIcon.Question);
-                        }));
-
-                        // Set flag based on user's choice
-                        applyPlaneCut = (dialogResult == DialogResult.Yes);
-                    }
-
-                    VoxelMeshExporter.ExportVisibleVoxels(
+                    // Use the new async export method
+                    await VoxelMeshExporter.ExportVisibleVoxelsAsync(
                         filePath,
                         grayVol: (ChunkedVolume)mainForm.volumeData,
-                        labelVol: (ChunkedLabelVolume)(exportLabels ? mainForm.volumeLabels : null),
+                        labelVol: (ChunkedLabelVolume)(exportOptions.ExportMaterials ? mainForm.volumeLabels : null),
                         minThreshold: volumeRenderer.MinThreshold,
                         maxThreshold: volumeRenderer.MaxThreshold,
-                        showGrayscale: volumeRenderer.ShowGrayscale,
                         labelVisibility: labelVisibility,
                         sliceX: volumeRenderer.SliceX,
                         sliceY: volumeRenderer.SliceY,
                         sliceZ: volumeRenderer.SliceZ,
                         showSlices: volumeRenderer.ShowOrthoslices,
-                        // Add cutting plane parameters
-                        cutXEnabled: volumeRenderer.CutXEnabled,
-                        cutYEnabled: volumeRenderer.CutYEnabled,
-                        cutZEnabled: volumeRenderer.CutZEnabled,
-                        cutXDirection: volumeRenderer.CutXDirection,
-                        cutYDirection: volumeRenderer.CutYDirection,
-                        cutZDirection: volumeRenderer.CutZDirection,
-                        cutXPosition: volumeRenderer.CutXPosition,
-                        cutYPosition: volumeRenderer.CutYPosition,
-                        cutZPosition: volumeRenderer.CutZPosition,
-                        applyPlaneCut: applyPlaneCut,
+                        options: exportOptions,
                         progressCallback: progressCallback
                     );
                 });
@@ -763,7 +764,6 @@ namespace CTS.SharpDXIntegration
                 this.Enabled = true;
             }
         }
-
         public async Task ApplyDownsampling(int downsampleFactor, IProgress<int> progress = null)
         {
             if (volumeRenderer == null || mainForm == null)
@@ -921,7 +921,30 @@ namespace CTS.SharpDXIntegration
                 Logger.Log($"[SharpDXViewerForm] Streaming renderer {(enabled ? "enabled" : "disabled")}");
             }
         }
+        public void SetClippingPlaneEnabled(bool enabled)
+        {
+            clippingPlaneEnabled = enabled;
+            if (volumeRenderer != null)
+            {
+                volumeRenderer.ClippingPlaneEnabled = enabled;
+                volumeRenderer.NeedsRender = true;
+            }
+        }
 
+        public void SetClippingPlane(SharpDX.Vector3 normal, float distance, bool mirror)
+        {
+            clippingPlaneNormal = normal;
+            clippingPlaneDistance = distance;
+            clippingPlaneMirror = mirror;
+
+            if (volumeRenderer != null)
+            {
+                volumeRenderer.ClippingPlaneNormal = normal;
+                volumeRenderer.ClippingPlaneDistance = distance;
+                volumeRenderer.ClippingPlaneMirror = mirror;
+                volumeRenderer.NeedsRender = true;
+            }
+        }
         // Called by control panel for screenshot
         public void TakeScreenshot(string filePath)
         {

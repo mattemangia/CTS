@@ -27,7 +27,10 @@ namespace CTS
         private MainForm mainForm;
         private Panel renderPanel;
         private SharpDXControlPanel controlPanel;
-
+        private bool clippingPlaneEnabled = false;
+        private Vector3 clippingPlaneNormal = Vector3.UnitX;
+        private float clippingPlaneDistance = 0.5f;
+        private bool clippingPlaneMirror = false;
         public void SetControlPanel(SharpDXControlPanel panel)
         {
             controlPanel = panel;
@@ -341,22 +344,58 @@ namespace CTS
             public Matrix InvViewMatrix;
             public Vector4 Thresholds;  // x=min, y=max, z=stepSize, w=showGrayscale
             public Vector4 Dimensions;  // xyz=volume dimensions, w=unused
-
-            // Modified: SliceCoords.w now contains a bit field for slice visibility:
-            // bit 0 (0x1) = X slice, bit 1 (0x2) = Y slice, bit 2 (0x4) = Z slice
             public Vector4 SliceCoords; // xyz=slice positions, w=slice visibility flags
-
             public Vector4 CameraPosition; // Camera position for ray origin calculation
             public Vector4 ColorMapParams; // x=colorMapIndex, y=slice border thickness, z,w=unused
             public Vector4 CutPlaneX; // x=enabled, y=direction, z=position, w=unused
             public Vector4 CutPlaneY; // x=enabled, y=direction, z=position, w=unused
-            public Vector4 CutPlaneZ; // x=enabled, y=direction, z=position, w=unused
+            public Vector4 CutPlaneZ; // x=enabled, y=direction, z=position, w=unused                                    
+            public Vector4 ClippingPlane1; // x=enabled, yzw=normal
+            public Vector4 ClippingPlane2; // x=distance, y=mirror, z,w=unused
         }
 
         #endregion Fields
 
         #region Properties
+        public bool ClippingPlaneEnabled
+        {
+            get { return clippingPlaneEnabled; }
+            set
+            {
+                clippingPlaneEnabled = value;
+                NeedsRender = true;
+            }
+        }
 
+        public Vector3 ClippingPlaneNormal
+        {
+            get { return clippingPlaneNormal; }
+            set
+            {
+                clippingPlaneNormal = value;
+                NeedsRender = true;
+            }
+        }
+
+        public float ClippingPlaneDistance
+        {
+            get { return clippingPlaneDistance; }
+            set
+            {
+                clippingPlaneDistance = value;
+                NeedsRender = true;
+            }
+        }
+
+        public bool ClippingPlaneMirror
+        {
+            get { return clippingPlaneMirror; }
+            set
+            {
+                clippingPlaneMirror = value;
+                NeedsRender = true;
+            }
+        }
         public bool DebugMode
         {
             get { return debugMode; }
@@ -883,16 +922,8 @@ namespace CTS
 
         private string LoadVolumeRenderingShader()
         {
-            // Load the updated shader code from the artifact
             return @"
-// Volume rendering shader with support for:
-// - Grayscale volume visualization with multiple color maps
-// - Material/label visualization with colors
-// - Orthogonal slicing planes with colored borders
-// - Thresholding
-// - Dataset cutting along each axis
-
-// Constant buffer with rendering parameters
+// Volume rendering shader with clipping plane support
 cbuffer ConstantBuffer : register(b0)
 {
     matrix worldViewProj;        // World-view-projection matrix
@@ -905,6 +936,8 @@ cbuffer ConstantBuffer : register(b0)
     float4 cutPlaneX;            // x=enabled, y=direction(1=forward,-1=backward), z=position, w=unused
     float4 cutPlaneY;            // x=enabled, y=direction(1=forward,-1=backward), z=position, w=unused
     float4 cutPlaneZ;            // x=enabled, y=direction(1=forward,-1=backward), z=position, w=unused
+    float4 clippingPlane1;       // x=enabled, yzw=normal
+    float4 clippingPlane2;       // x=distance, y=mirror, z,w=unused
 };
 
 // Material properties
@@ -1052,6 +1085,37 @@ bool IsCutByPlane(float3 pos)
     return false;
 }
 
+// Check if a point is cut by the clipping plane
+bool IsCutByClippingPlane(float3 pos)
+{
+    // Check if clipping plane is enabled
+    if (clippingPlane1.x < 0.5) return false;
+
+    // Get plane normal and distance
+    float3 normal = clippingPlane1.yzw;
+    float distance = clippingPlane2.x;
+    bool mirror = clippingPlane2.y > 0.5;
+
+    // Convert position to normalized coordinates [0,1]
+    float3 normalizedPos = pos / dimensions.xyz;
+
+    // Calculate distance from point to plane
+    // Plane equation: n·(p - p0) = 0
+    // Where n is the normal, p is the point, p0 is a point on the plane
+    float3 planePoint = normal * distance;
+    float distanceToPlane = dot(normal, normalizedPos - planePoint);
+
+    // Check which side of the plane the point is on
+    if (mirror)
+    {
+        return distanceToPlane < 0; // Cut the negative side
+    }
+    else
+    {
+        return distanceToPlane > 0; // Cut the positive side
+    }
+}
+
 // Get color from the selected color map
 float4 ApplyColorMap(float intensity, float minThreshold, float maxThreshold, int mapIndex)
 {
@@ -1164,6 +1228,13 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
         // Check if this point is cut by any cutting plane
         if (IsCutByPlane(pos))
+        {
+            t += stepSize;
+            continue;
+        }
+
+        // Check if this point is cut by the clipping plane
+        if (IsCutByClippingPlane(pos))
         {
             t += stepSize;
             continue;
@@ -1305,6 +1376,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
     return accumulatedColor;
 }";
         }
+
 
         private void CreateCubeGeometry()
         {
@@ -3060,35 +3132,42 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     InvViewMatrix = invViewMatrix,
                     Thresholds = new Vector4(minThresholdNorm, maxThresholdNorm, actualStepSize, showGrayscale ? 1.0f : 0.0f),
                     Dimensions = new Vector4(volW, volH, volD, 0),
-
-                    // Update to pass individual slice visibility in the w component as a bit field
-                    // Bits: 0x1 = X slice, 0x2 = Y slice, 0x4 = Z slice
                     SliceCoords = new Vector4(
-                (float)sliceX / volW,
-                (float)sliceY / volH,
-                (float)sliceZ / volD,
-                (showXSlice ? 1.0f : 0.0f) +
-                (showYSlice ? 2.0f : 0.0f) +
-                (showZSlice ? 4.0f : 0.0f)),
-
+                    (float)sliceX / volW,
+                    (float)sliceY / volH,
+                    (float)sliceZ / volD,
+                    (showXSlice ? 1.0f : 0.0f) +
+                    (showYSlice ? 2.0f : 0.0f) +
+                    (showZSlice ? 4.0f : 0.0f)),
                     CameraPosition = new Vector4(cameraPosition, 1.0f),
                     ColorMapParams = new Vector4(colorMapIndex, sliceBorderThickness, 0, 0),
                     // Add cutting plane data
                     CutPlaneX = new Vector4(
-                        cutXEnabled ? 1.0f : 0.0f,  // enabled
-                        cutXDirection,               // direction
-                        cutXPosition,                // position
-                        0.0f),                       // unused
+                    cutXEnabled ? 1.0f : 0.0f,  // enabled
+                    cutXDirection,               // direction
+                    cutXPosition,                // position
+                    0.0f),                       // unused
                     CutPlaneY = new Vector4(
-                        cutYEnabled ? 1.0f : 0.0f,
-                        cutYDirection,
-                        cutYPosition,
-                        0.0f),
+                    cutYEnabled ? 1.0f : 0.0f,
+                    cutYDirection,
+                    cutYPosition,
+                    0.0f),
                     CutPlaneZ = new Vector4(
-                        cutZEnabled ? 1.0f : 0.0f,
-                        cutZDirection,
-                        cutZPosition,
-                        0.0f)
+                    cutZEnabled ? 1.0f : 0.0f,
+                    cutZDirection,
+                    cutZPosition,
+                    0.0f),
+                    // Add clipping plane data
+                    ClippingPlane1 = new Vector4(
+                    clippingPlaneEnabled ? 1.0f : 0.0f,  // enabled
+                    clippingPlaneNormal.X,               // normal.x
+                    clippingPlaneNormal.Y,               // normal.y
+                    clippingPlaneNormal.Z),              // normal.z
+                    ClippingPlane2 = new Vector4(
+                    clippingPlaneDistance,               // distance
+                    clippingPlaneMirror ? 1.0f : 0.0f,  // mirror
+                    0.0f,                                // unused
+                    0.0f)                                // unused
                 };
 
                 // Update the constant buffer
@@ -3096,7 +3175,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
                 if (frameCount % 60 == 0)
                 {
-                    Logger.Log("[SharpDXVolumeRenderer] Updated constant buffer");
+                    //Logger.Log("[SharpDXVolumeRenderer] Updated constant buffer");
                 }
             }
             catch (Exception ex)

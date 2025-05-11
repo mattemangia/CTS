@@ -28,7 +28,7 @@ namespace CTS.UI
             this.TopMost = true;
             // Make sure we're centered
             this.StartPosition = FormStartPosition.CenterScreen;
-
+            this.labelVersion.Text = $"Version: {Assembly.GetExecutingAssembly().GetName().Version}";
             // Disable close button
             this.ControlBox = false;
         }

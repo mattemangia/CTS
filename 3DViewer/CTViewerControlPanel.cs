@@ -22,6 +22,21 @@ namespace CTS.SharpDXIntegration
         private bool thresholdUpdatePending = false;
         private bool isThresholdUpdating = false;
 
+        private TabPage tabClippingPlane;
+        private CheckBox chkEnableClippingPlane;
+        private RadioButton radClippingXY, radClippingXZ, radClippingYZ;
+        private TrackBar trkClippingAngle;
+        private TrackBar trkClippingPosition;
+        private CheckBox chkClippingMirror;
+        private Label lblClippingAngle;
+        private Label lblClippingPosition;
+        
+        private TrackBar trkRotationX, trkRotationY, trkRotationZ; // Pitch, Yaw, Roll
+        
+        private Label lblRotationX, lblRotationY, lblRotationZ;
+     
+        private Panel panelPlanePreview;
+
         // UI elements
         private TrackBar trkMinThreshold;
 
@@ -98,7 +113,7 @@ namespace CTS.SharpDXIntegration
             // Initialize debouncing timers
             InitializeOpacityTimer();
             InitializeThresholdTimer();
-
+            InitializeClippingPlaneTab();
             InitializeRenderingTab();
             InitializeMaterialsTab();
             InitializeSlicesTab();
@@ -125,11 +140,15 @@ namespace CTS.SharpDXIntegration
             tabSlices = new TabPage("Slices");
             tabCutting = new TabPage("Cutting");
             tabInfo = new TabPage("Info");
-
+            tabClippingPlane = new TabPage("Clipping Plane");
+            
+          
+            
             tabControl.TabPages.Add(tabRendering);
             tabControl.TabPages.Add(tabMaterials);
             tabControl.TabPages.Add(tabSlices);
             tabControl.TabPages.Add(tabCutting);
+            tabControl.TabPages.Add(tabClippingPlane);
             tabControl.TabPages.Add(tabInfo);
             tabMeasurements = new TabPage("Measurements");
             tabControl.TabPages.Add(tabMeasurements);
@@ -1677,7 +1696,400 @@ namespace CTS.SharpDXIntegration
                 Logger.Log($"[SharpDXControlPanel] Error updating measurement UI: {ex.Message}");
             }
         }
+        #region Clipping plane
+        private void InitializeClippingPlaneTab()
+        {
+            // Create panel to hold controls
+            FlowLayoutPanel panel = new FlowLayoutPanel();
+            panel.Dock = DockStyle.Fill;
+            panel.FlowDirection = FlowDirection.TopDown;
+            panel.AutoScroll = true;
+            panel.Padding = new Padding(10);
+            panel.WrapContents = false;
 
+            // Add title label
+            Label lblTitle = new Label();
+            lblTitle.Text = "Rotating Clipping Plane";
+            lblTitle.Font = new Font(lblTitle.Font.FontFamily, 10, FontStyle.Bold);
+            lblTitle.AutoSize = true;
+            lblTitle.Margin = new Padding(0, 0, 0, 10);
+            panel.Controls.Add(lblTitle);
+
+            // Enable/disable clipping plane
+            chkEnableClippingPlane = new CheckBox();
+            chkEnableClippingPlane.Text = "Enable Clipping Plane";
+            chkEnableClippingPlane.CheckedChanged += (s, e) =>
+            {
+                bool enabled = chkEnableClippingPlane.Checked;
+                viewerForm.SetClippingPlaneEnabled(enabled);
+
+                // Enable/disable other controls
+                trkRotationX.Enabled = enabled;
+                trkRotationY.Enabled = enabled;
+                trkRotationZ.Enabled = enabled;
+                trkClippingPosition.Enabled = enabled;
+                chkClippingMirror.Enabled = enabled;
+                lblRotationX.Enabled = enabled;
+                lblRotationY.Enabled = enabled;
+                lblRotationZ.Enabled = enabled;
+                lblClippingPosition.Enabled = enabled;
+                panelPlanePreview.Enabled = enabled;
+
+                UpdateClippingPlane();
+            };
+            panel.Controls.Add(chkEnableClippingPlane);
+
+            // Orientation controls - 3D rotation
+            Label lblOrientation = new Label();
+            lblOrientation.Text = "Plane Orientation (Euler Angles):";
+            lblOrientation.AutoSize = true;
+            lblOrientation.Margin = new Padding(0, 15, 0, 5);
+            panel.Controls.Add(lblOrientation);
+
+            // X rotation (Pitch)
+            Label lblXRot = new Label();
+            lblXRot.Text = "Pitch (X-axis rotation):";
+            lblXRot.AutoSize = true;
+            lblXRot.Margin = new Padding(0, 5, 0, 0);
+            panel.Controls.Add(lblXRot);
+
+            trkRotationX = new TrackBar();
+            trkRotationX.Minimum = 0;
+            trkRotationX.Maximum = 360;
+            trkRotationX.Value = 0;
+            trkRotationX.TickFrequency = 45;
+            trkRotationX.Width = 300;
+            trkRotationX.Enabled = false;
+            trkRotationX.Scroll += (s, e) =>
+            {
+                lblRotationX.Text = $"Pitch: {trkRotationX.Value}°";
+                UpdateClippingPlane();
+            };
+            panel.Controls.Add(trkRotationX);
+
+            lblRotationX = new Label();
+            lblRotationX.Text = "Pitch: 0°";
+            lblRotationX.AutoSize = true;
+            lblRotationX.Enabled = false;
+            panel.Controls.Add(lblRotationX);
+
+            // Y rotation (Yaw)
+            Label lblYRot = new Label();
+            lblYRot.Text = "Yaw (Y-axis rotation):";
+            lblYRot.AutoSize = true;
+            lblYRot.Margin = new Padding(0, 10, 0, 0);
+            panel.Controls.Add(lblYRot);
+
+            trkRotationY = new TrackBar();
+            trkRotationY.Minimum = 0;
+            trkRotationY.Maximum = 360;
+            trkRotationY.Value = 0;
+            trkRotationY.TickFrequency = 45;
+            trkRotationY.Width = 300;
+            trkRotationY.Enabled = false;
+            trkRotationY.Scroll += (s, e) =>
+            {
+                lblRotationY.Text = $"Yaw: {trkRotationY.Value}°";
+                UpdateClippingPlane();
+            };
+            panel.Controls.Add(trkRotationY);
+
+            lblRotationY = new Label();
+            lblRotationY.Text = "Yaw: 0°";
+            lblRotationY.AutoSize = true;
+            lblRotationY.Enabled = false;
+            panel.Controls.Add(lblRotationY);
+
+            // Z rotation (Roll)
+            Label lblZRot = new Label();
+            lblZRot.Text = "Roll (Z-axis rotation):";
+            lblZRot.AutoSize = true;
+            lblZRot.Margin = new Padding(0, 10, 0, 0);
+            panel.Controls.Add(lblZRot);
+
+            trkRotationZ = new TrackBar();
+            trkRotationZ.Minimum = 0;
+            trkRotationZ.Maximum = 360;
+            trkRotationZ.Value = 0;
+            trkRotationZ.TickFrequency = 45;
+            trkRotationZ.Width = 300;
+            trkRotationZ.Enabled = false;
+            trkRotationZ.Scroll += (s, e) =>
+            {
+                lblRotationZ.Text = $"Roll: {trkRotationZ.Value}°";
+                UpdateClippingPlane();
+            };
+            panel.Controls.Add(trkRotationZ);
+
+            lblRotationZ = new Label();
+            lblRotationZ.Text = "Roll: 0°";
+            lblRotationZ.AutoSize = true;
+            lblRotationZ.Enabled = false;
+            panel.Controls.Add(lblRotationZ);
+
+            // Position along normal
+            Label lblPosition = new Label();
+            lblPosition.Text = "Position along normal (0-100%):";
+            lblPosition.AutoSize = true;
+            lblPosition.Margin = new Padding(0, 15, 0, 5);
+            panel.Controls.Add(lblPosition);
+
+            trkClippingPosition = new TrackBar();
+            trkClippingPosition.Minimum = 0;
+            trkClippingPosition.Maximum = 100;
+            trkClippingPosition.Value = 50;
+            trkClippingPosition.TickFrequency = 10;
+            trkClippingPosition.Width = 300;
+            trkClippingPosition.Enabled = false;
+            trkClippingPosition.Scroll += (s, e) =>
+            {
+                lblClippingPosition.Text = $"Position: {trkClippingPosition.Value}%";
+                UpdateClippingPlane();
+            };
+            panel.Controls.Add(trkClippingPosition);
+
+            lblClippingPosition = new Label();
+            lblClippingPosition.Text = "Position: 50%";
+            lblClippingPosition.AutoSize = true;
+            lblClippingPosition.Enabled = false;
+            panel.Controls.Add(lblClippingPosition);
+
+            // Mirror option
+            chkClippingMirror = new CheckBox();
+            chkClippingMirror.Text = "Mirror Clipping (cut other side)";
+            chkClippingMirror.Enabled = false;
+            chkClippingMirror.CheckedChanged += (s, e) =>
+            {
+                UpdateClippingPlane();
+            };
+            panel.Controls.Add(chkClippingMirror);
+
+            // Add visual preview panel
+            GroupBox grpPreview = new GroupBox();
+            grpPreview.Text = "Plane Orientation Preview";
+            grpPreview.Width = 330;
+            grpPreview.Height = 150;
+            grpPreview.Margin = new Padding(0, 15, 0, 5);
+
+            panelPlanePreview = new Panel();
+            panelPlanePreview.Dock = DockStyle.Fill;
+            panelPlanePreview.BackColor = Color.Black;
+            panelPlanePreview.Paint += PanelPlanePreview_Paint;
+            grpPreview.Controls.Add(panelPlanePreview);
+
+            panel.Controls.Add(grpPreview);
+
+            // Add some preset buttons for common orientations
+            Label lblPresets = new Label();
+            lblPresets.Text = "Quick Presets:";
+            lblPresets.AutoSize = true;
+            lblPresets.Margin = new Padding(0, 10, 0, 5);
+            panel.Controls.Add(lblPresets);
+
+            FlowLayoutPanel presetPanel = new FlowLayoutPanel();
+            presetPanel.FlowDirection = FlowDirection.LeftToRight;
+            presetPanel.Height = 30;
+            presetPanel.Width = 330;
+
+            Button btnXY = new Button();
+            btnXY.Text = "XY";
+            btnXY.Width = 40;
+            btnXY.Click += (s, e) => SetPresetOrientation(0, 0, 0);
+            presetPanel.Controls.Add(btnXY);
+
+            Button btnXZ = new Button();
+            btnXZ.Text = "XZ";
+            btnXZ.Width = 40;
+            btnXZ.Click += (s, e) => SetPresetOrientation(90, 0, 0);
+            presetPanel.Controls.Add(btnXZ);
+
+            Button btnYZ = new Button();
+            btnYZ.Text = "YZ";
+            btnYZ.Width = 40;
+            btnYZ.Click += (s, e) => SetPresetOrientation(0, 90, 0);
+            presetPanel.Controls.Add(btnYZ);
+
+            Button btnDiagonal = new Button();
+            btnDiagonal.Text = "Diagonal";
+            btnDiagonal.Width = 60;
+            btnDiagonal.Click += (s, e) => SetPresetOrientation(45, 45, 0);
+            presetPanel.Controls.Add(btnDiagonal);
+
+            Button btnReset = new Button();
+            btnReset.Text = "Reset";
+            btnReset.Width = 50;
+            btnReset.Click += (s, e) => SetPresetOrientation(0, 0, 0);
+            presetPanel.Controls.Add(btnReset);
+
+            panel.Controls.Add(presetPanel);
+
+            // Add visual guide
+            Label lblGuide = new Label();
+            lblGuide.Text = "Rotate plane freely in 3D using Pitch (X), Yaw (Y), Roll (Z).\n" +
+                           "Preview shows current orientation.";
+            lblGuide.AutoSize = false;
+            lblGuide.Width = 330;
+            lblGuide.Height = 35; // Fixed height to prevent truncation
+            lblGuide.Margin = new Padding(0, 15, 0, 10);
+            lblGuide.Font = new Font(lblGuide.Font, FontStyle.Italic);
+            lblGuide.ForeColor = Color.DarkGray;
+            panel.Controls.Add(lblGuide);
+
+            tabClippingPlane.Controls.Add(panel);
+        }
+        private void SetPresetOrientation(int pitch, int yaw, int roll)
+        {
+            trkRotationX.Value = pitch;
+            trkRotationY.Value = yaw;
+            trkRotationZ.Value = roll;
+            lblRotationX.Text = $"Pitch: {pitch}°";
+            lblRotationY.Text = $"Yaw: {yaw}°";
+            lblRotationZ.Text = $"Roll: {roll}°";
+            UpdateClippingPlane();
+        }
+        private void PanelPlanePreview_Paint(object sender, PaintEventArgs e)
+        {
+            if (!chkEnableClippingPlane.Checked)
+                return;
+
+            Graphics g = e.Graphics;
+            int centerX = panelPlanePreview.Width / 2;
+            int centerY = panelPlanePreview.Height / 2;
+            int size = Math.Min(panelPlanePreview.Width, panelPlanePreview.Height) - 20;
+
+            // Clear background
+            g.Clear(Color.Black);
+
+            // Draw coordinate axes
+            using (Pen axisPen = new Pen(Color.DarkGray, 1))
+            {
+                // X axis (red)
+                g.DrawLine(new Pen(Color.Red, 1), centerX - size / 3, centerY, centerX + size / 3, centerY);
+                // Y axis (green)
+                g.DrawLine(new Pen(Color.Green, 1), centerX, centerY - size / 3, centerX, centerY + size / 3);
+                // Z axis (blue) - simulated as diagonal
+                g.DrawLine(new Pen(Color.Blue, 1), centerX - size / 4, centerY + size / 4, centerX + size / 4, centerY - size / 4);
+            }
+
+            // Calculate normal vector from current rotation
+            float pitchRad = trkRotationX.Value * (float)Math.PI / 180.0f;
+            float yawRad = trkRotationY.Value * (float)Math.PI / 180.0f;
+            float rollRad = trkRotationZ.Value * (float)Math.PI / 180.0f;
+
+            // Create rotation matrices
+            var rotX = SharpDX.Matrix.RotationX(pitchRad);
+            var rotY = SharpDX.Matrix.RotationY(yawRad);
+            var rotZ = SharpDX.Matrix.RotationZ(rollRad);
+            var rotation = rotX * rotY * rotZ;
+
+            // Apply rotation to the normal vector (initially pointing along Z axis)
+            var normal = SharpDX.Vector3.TransformNormal(SharpDX.Vector3.UnitZ, rotation);
+
+            // Draw the plane as a circle with the normal as an arrow
+            using (Pen planePen = new Pen(Color.Yellow, 2))
+            {
+                // Draw circle representing the plane
+                int radius = size / 3;
+                g.DrawEllipse(planePen, centerX - radius, centerY - radius, radius * 2, radius * 2);
+
+                // Draw normal arrow
+                int arrowLength = size / 2;
+                int endX = centerX + (int)(normal.X * arrowLength);
+                int endY = centerY - (int)(normal.Y * arrowLength); // Invert Y for screen coordinates
+
+                using (Pen arrowPen = new Pen(Color.Cyan, 2))
+                {
+                    g.DrawLine(arrowPen, centerX, centerY, endX, endY);
+
+                    // Draw arrowhead
+                    double angle = Math.Atan2(endY - centerY, endX - centerX);
+                    int arrowSize = 8;
+                    PointF[] arrowHead = new PointF[3];
+                    arrowHead[0] = new PointF(endX, endY);
+                    arrowHead[1] = new PointF(
+                        endX - arrowSize * (float)Math.Cos(angle - Math.PI / 6),
+                        endY - arrowSize * (float)Math.Sin(angle - Math.PI / 6));
+                    arrowHead[2] = new PointF(
+                        endX - arrowSize * (float)Math.Cos(angle + Math.PI / 6),
+                        endY - arrowSize * (float)Math.Sin(angle + Math.PI / 6));
+                    g.FillPolygon(new SolidBrush(Color.Cyan), arrowHead);
+                }
+            }
+
+            // Add labels
+            using (var font = new Font("Arial", 8))
+            {
+                g.DrawString("Normal", font, Brushes.Cyan, centerX + 5, centerY - 15);
+                g.DrawString($"P:{trkRotationX.Value}° Y:{trkRotationY.Value}° R:{trkRotationZ.Value}°",
+                             font, Brushes.White, 5, 5);
+            }
+        }
+
+        private void UpdateClippingPlaneOrientation(object sender, EventArgs e)
+        {
+            if (!((RadioButton)sender).Checked) return;
+            UpdateClippingPlane();
+        }
+
+        private void UpdateClippingPlane()
+        {
+            if (!chkEnableClippingPlane.Checked) return;
+
+            // Convert angles to radians
+            float pitchRad = trkRotationX.Value * (float)Math.PI / 180.0f;
+            float yawRad = trkRotationY.Value * (float)Math.PI / 180.0f;
+            float rollRad = trkRotationZ.Value * (float)Math.PI / 180.0f;
+
+            // Create rotation matrices
+            var rotX = SharpDX.Matrix.RotationX(pitchRad);
+            var rotY = SharpDX.Matrix.RotationY(yawRad);
+            var rotZ = SharpDX.Matrix.RotationZ(rollRad);
+            var rotation = rotX * rotY * rotZ;
+
+            // Apply rotation to the normal vector (initially pointing along Z axis)
+            var normal = SharpDX.Vector3.TransformNormal(SharpDX.Vector3.UnitZ, rotation);
+            normal.Normalize();
+
+            // Get position (0-1)
+            float position = trkClippingPosition.Value / 100.0f;
+
+            // Update the viewer
+            viewerForm.SetClippingPlane(normal, position, chkClippingMirror.Checked);
+
+            // Refresh the preview
+            panelPlanePreview.Invalidate();
+        }
+
+
+        private SharpDX.Vector3 RotateNormal(SharpDX.Vector3 normal, float angle)
+        {
+            // Create rotation matrix
+            // For simplicity, rotate around the Y axis for YZ and XY planes
+            // and around the X axis for XZ plane
+            SharpDX.Matrix rotation;
+
+            if (radClippingXY.Checked)
+            {
+                // Rotate around Y axis
+                rotation = SharpDX.Matrix.RotationY(angle);
+            }
+            else if (radClippingXZ.Checked)
+            {
+                // Rotate around X axis for XZ plane
+                rotation = SharpDX.Matrix.RotationX(angle);
+            }
+            else // YZ plane
+            {
+                // Rotate around Z axis
+                rotation = SharpDX.Matrix.RotationZ(angle);
+            }
+
+            // Apply rotation
+            var rotated = SharpDX.Vector3.TransformNormal(normal, rotation);
+            rotated.Normalize();
+            return rotated;
+        }
+        #endregion
         private void InitializeThresholdTimer()
         {
             thresholdUpdateTimer = new Timer();

@@ -186,22 +186,22 @@
     </Compile>
     <Compile Include="Modules\NodeEditor\BaseNode.cs" />
     <Compile Include="Modules\NodeEditor\NodeEditorForm.cs" />
-    <Compile Include="Modules\NRMSimulation\MaterialNMRPropertiesdialog.cs">
+    <Compile Include="Modules\NMRSimulation\MaterialNMRPropertiesdialog.cs">
       <SubType>Form</SubType>
     </Compile>
-    <Compile Include="Modules\NRMSimulation\NMRHelpers.cs">
+    <Compile Include="Modules\NMRSimulation\NMRHelpers.cs">
       <SubType>Form</SubType>
     </Compile>
-    <Compile Include="Modules\NRMSimulation\NRMCalibration.cs" />
-    <Compile Include="Modules\NRMSimulation\NRMCalibrationDialog.cs">
+    <Compile Include="Modules\NMRSimulation\NMRCalibration.cs" />
+    <Compile Include="Modules\NMRSimulation\NMRCalibrationDialog.cs">
       <SubType>Form</SubType>
     </Compile>
-    <Compile Include="Modules\NRMSimulation\NRMGPUDirectCompute.cs" />
-    <Compile Include="Modules\NRMSimulation\NRMSimulation.cs" />
-    <Compile Include="Modules\NRMSimulation\NRMSimulationForm.cs">
+    <Compile Include="Modules\NMRSimulation\NMRGPUDirectCompute.cs" />
+    <Compile Include="Modules\NMRSimulation\NMRSimulation.cs" />
+    <Compile Include="Modules\NMRSimulation\NMRSimulationForm.cs">
       <SubType>Form</SubType>
     </Compile>
-    <Compile Include="Modules\NRMSimulation\NRMSimulationPlotter.cs" />
+    <Compile Include="Modules\NMRSimulation\NMRSimulationPlotter.cs" />
     <Compile Include="Modules\PNM\PoreNetworkButtonIcons.cs" />
     <Compile Include="Modules\StressAnalysis\AcousticVelocitySimulation.cs" />
     <Compile Include="Modules\StressAnalysis\DensityVisualizationForm.cs">

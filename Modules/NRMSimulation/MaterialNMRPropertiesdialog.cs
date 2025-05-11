@@ -44,82 +44,144 @@ namespace CTS.Modules.Simulation.NMR
             this.StartPosition = FormStartPosition.CenterParent;
             this.MaximizeBox = false;
             this.MinimizeBox = false;
+            this.BackColor = Color.Black;
 
             var mainPanel = new KryptonPanel
             {
                 Dock = DockStyle.Fill,
                 Padding = new Padding(10)
             };
+            //mainPanel.StateCommon.Back.Color1 = Color.Black;
+            //mainPanel.StateCommon.Back.Color2 = Color.Black;
 
             var layout = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 2,
-                Padding = new Padding(5)
+                Padding = new Padding(5),
+                BackColor = Color.Black
             };
 
             // Material Name
-            layout.Controls.Add(new KryptonLabel { Text = "Material Name:" }, 0, 0);
-            txtMaterialName = new KryptonTextBox { Dock = DockStyle.Fill, ReadOnly = true, BackColor = Color.LightGray };
+            layout.Controls.Add(new KryptonLabel
+            {
+                Text = "Material Name:",
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            }, 0, 0);
+            txtMaterialName = new KryptonTextBox
+            {
+                Dock = DockStyle.Fill,
+                ReadOnly = true,
+                StateCommon = {
+                    Back = { Color1 = Color.FromArgb(40, 40, 40) },
+                    Content = { Color1 = Color.LightGray },
+                    Border = { Color1 = Color.DarkGray }
+                }
+            };
             layout.Controls.Add(txtMaterialName, 1, 0);
 
             // Relaxation Time
-            layout.Controls.Add(new KryptonLabel { Text = "T2 Relaxation Time (ms):" }, 0, 1);
+            layout.Controls.Add(new KryptonLabel
+            {
+                Text = "T2 Relaxation Time (ms):",
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            }, 0, 1);
             numRelaxationTime = new KryptonNumericUpDown
             {
                 Dock = DockStyle.Fill,
                 Minimum = 0.01M,
                 Maximum = 10000M,
                 DecimalPlaces = 2,
-                Increment = 10
+                Increment = 10,
+                StateCommon = {
+                    Back = { Color1 = Color.Black },
+                    Content = { Color1 = Color.White },
+                    Border = { Color1 = Color.DarkGray }
+                }
             };
             layout.Controls.Add(numRelaxationTime, 1, 1);
 
             // Density
-            layout.Controls.Add(new KryptonLabel { Text = "Hydrogen Density:" }, 0, 2);
+            layout.Controls.Add(new KryptonLabel
+            {
+                Text = "Hydrogen Density:",
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            }, 0, 2);
             numDensity = new KryptonNumericUpDown
             {
                 Dock = DockStyle.Fill,
                 Minimum = 0M,
                 Maximum = 2M,
                 DecimalPlaces = 3,
-                Increment = 0.01M
+                Increment = 0.01M,
+                StateCommon = {
+                    Back = { Color1 = Color.Black },
+                    Content = { Color1 = Color.White },
+                    Border = { Color1 = Color.DarkGray }
+                }
             };
             layout.Controls.Add(numDensity, 1, 2);
 
             // Tortuosity
-            layout.Controls.Add(new KryptonLabel { Text = "Tortuosity:" }, 0, 3);
+            layout.Controls.Add(new KryptonLabel
+            {
+                Text = "Tortuosity:",
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            }, 0, 3);
             numTortuosity = new KryptonNumericUpDown
             {
                 Dock = DockStyle.Fill,
                 Minimum = 1M,
                 Maximum = 10M,
                 DecimalPlaces = 2,
-                Increment = 0.1M
+                Increment = 0.1M,
+                StateCommon = {
+                    Back = { Color1 = Color.Black },
+                    Content = { Color1 = Color.White },
+                    Border = { Color1 = Color.DarkGray }
+                }
             };
             layout.Controls.Add(numTortuosity, 1, 3);
 
             // Relaxation Strength
-            layout.Controls.Add(new KryptonLabel { Text = "Relaxation Strength:" }, 0, 4);
+            layout.Controls.Add(new KryptonLabel
+            {
+                Text = "Relaxation Strength:",
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            }, 0, 4);
             numRelaxationStrength = new KryptonNumericUpDown
             {
                 Dock = DockStyle.Fill,
                 Minimum = 0.1M,
                 Maximum = 5M,
                 DecimalPlaces = 2,
-                Increment = 0.1M
+                Increment = 0.1M,
+                StateCommon = {
+                    Back = { Color1 = Color.Black },
+                    Content = { Color1 = Color.White },
+                    Border = { Color1 = Color.DarkGray }
+                }
             };
             layout.Controls.Add(numRelaxationStrength, 1, 4);
 
             // Porosity Effect
-            layout.Controls.Add(new KryptonLabel { Text = "Porosity Effect:" }, 0, 5);
+            layout.Controls.Add(new KryptonLabel
+            {
+                Text = "Porosity Effect:",
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            }, 0, 5);
             numPorosityEffect = new KryptonNumericUpDown
             {
                 Dock = DockStyle.Fill,
                 Minimum = 0.1M,
                 Maximum = 5M,
                 DecimalPlaces = 2,
-                Increment = 0.1M
+                Increment = 0.1M,
+                StateCommon = {
+                    Back = { Color1 = Color.Black },
+                    Content = { Color1 = Color.White },
+                    Border = { Color1 = Color.DarkGray }
+                }
             };
             layout.Controls.Add(numPorosityEffect, 1, 5);
 
@@ -130,26 +192,38 @@ namespace CTS.Modules.Simulation.NMR
                 Dock = DockStyle.Fill,
                 Height = 200
             };
+            helpGroup.StateCommon.Back.Color1 = Color.Black;
+            helpGroup.StateCommon.Back.Color2 = Color.Black;
+            helpGroup.StateCommon.Border.Color1 = Color.DarkGray;
+            helpGroup.StateCommon.Border.Color2 = Color.DarkGray;
+            //helpGroup.StateCommon.Header.Content.ShortText.Color1 = Color.White;
 
             var helpLayout = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 2,
-                RowCount = 1
+                RowCount = 1,
+                BackColor = Color.Black
             };
 
             pbHelpImage = new PictureBox
             {
                 Dock = DockStyle.Fill,
                 SizeMode = PictureBoxSizeMode.Zoom,
-                Image = CreateHelpDiagram()
+                Image = CreateHelpDiagram(),
+                BackColor = Color.Black
             };
 
             var helpText = new KryptonRichTextBox
             {
                 Dock = DockStyle.Fill,
                 ReadOnly = true,
-                Text = GetHelpText()
+                Text = GetHelpText(),
+                StateCommon = {
+                    Back = { Color1 = Color.Black },
+                    Content = { Color1 = Color.White },
+                    Border = { Color1 = Color.DarkGray }
+                }
             };
 
             helpLayout.Controls.Add(pbHelpImage, 0, 0);
@@ -162,11 +236,20 @@ namespace CTS.Modules.Simulation.NMR
             layout.SetColumnSpan(helpGroup, 2);
 
             // Notes
-            layout.Controls.Add(new KryptonLabel { Text = "Notes:" }, 0, 7);
+            layout.Controls.Add(new KryptonLabel
+            {
+                Text = "Notes:",
+                StateCommon = { ShortText = { Color1 = Color.White } }
+            }, 0, 7);
             txtNotes = new KryptonRichTextBox
             {
                 Dock = DockStyle.Fill,
-                Height = 100
+                Height = 100,
+                StateCommon = {
+                    Back = { Color1 = Color.Black },
+                    Content = { Color1 = Color.White },
+                    Border = { Color1 = Color.DarkGray }
+                }
             };
             layout.Controls.Add(txtNotes, 0, 8);
             layout.SetColumnSpan(txtNotes, 2);
@@ -191,7 +274,8 @@ namespace CTS.Modules.Simulation.NMR
                 Dock = DockStyle.Bottom,
                 Height = 50,
                 FlowDirection = FlowDirection.RightToLeft,
-                Padding = new Padding(5)
+                Padding = new Padding(5),
+                BackColor = Color.Black
             };
 
             var btnCancel = new KryptonButton
@@ -363,12 +447,13 @@ Porosity Effect:
         private KryptonButton btnReset;
         private CheckBox chkAdvancedMode;
         private TabControl tabControl;
+        private TabPage advancedTabPage; // Store reference to advanced tab
 
         public NMRMaterialPropertiesDialog(MainForm mainForm, NMRSimulation simulation)
         {
             try
             {
-                this.Icon = Properties.Resources.favicon;
+                this.Icon = CTS.Properties.Resources.favicon;
             }
             catch { }
 
@@ -382,14 +467,17 @@ Porosity Effect:
         private void InitializeComponent()
         {
             this.Text = "NMR Material Properties Manager";
-            this.Size = new Size(800, 600);
+            this.Size = new Size(800, 700);
             this.FormBorderStyle = FormBorderStyle.Sizable;
             this.StartPosition = FormStartPosition.CenterParent;
+            this.BackColor = Color.Black;
 
             // Create tab control
             tabControl = new TabControl
             {
-                Dock = DockStyle.Fill
+                Dock = DockStyle.Fill,
+                BackColor = Color.Black,
+                ForeColor = Color.White
             };
 
             // Basic properties tab
@@ -397,8 +485,8 @@ Porosity Effect:
             tabControl.TabPages.Add(basicTab);
 
             // Advanced properties tab
-            var advancedTab = CreateAdvancedPropertiesTab();
-            tabControl.TabPages.Add(advancedTab);
+            advancedTabPage = CreateAdvancedPropertiesTab();
+            tabControl.TabPages.Add(advancedTabPage);
 
             // Presets tab
             var presetsTab = CreatePresetsTab();
@@ -414,7 +502,8 @@ Porosity Effect:
         private TabPage CreateBasicPropertiesTab()
         {
             var tab = new TabPage("Basic Properties");
-            var panel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
+            tab.BackColor = Color.Black;
+            var panel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10), BackColor = Color.Black };
 
             dgvMaterials = new DataGridView
             {
@@ -426,7 +515,38 @@ Porosity Effect:
                 AllowUserToDeleteRows = false,
                 BackgroundColor = Color.Black,
                 ForeColor = Color.White,
-                ColumnHeadersDefaultCellStyle = { BackColor = Color.DarkGray, ForeColor = Color.White }
+                ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
+                {
+                    BackColor = Color.FromArgb(40, 40, 40),
+                    ForeColor = Color.White,
+                    Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                    SelectionBackColor = Color.FromArgb(60, 60, 60),
+                    SelectionForeColor = Color.White
+                },
+                RowHeadersDefaultCellStyle = new DataGridViewCellStyle
+                {
+                    BackColor = Color.FromArgb(40, 40, 40),
+                    ForeColor = Color.White,
+                    SelectionBackColor = Color.FromArgb(60, 60, 60)
+                },
+                DefaultCellStyle = new DataGridViewCellStyle
+                {
+                    BackColor = Color.FromArgb(20, 20, 20),
+                    ForeColor = Color.White,
+                    SelectionBackColor = Color.FromArgb(80, 80, 80),
+                    SelectionForeColor = Color.White
+                },
+                AlternatingRowsDefaultCellStyle = new DataGridViewCellStyle
+                {
+                    BackColor = Color.FromArgb(30, 30, 30),
+                    ForeColor = Color.White,
+                    SelectionBackColor = Color.FromArgb(80, 80, 80),
+                    SelectionForeColor = Color.White
+                },
+                GridColor = Color.FromArgb(60, 60, 60),
+                BorderStyle = BorderStyle.None,
+                CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal,
+                EnableHeadersVisualStyles = false
             };
 
             // Configure columns
@@ -461,7 +581,8 @@ Porosity Effect:
         private TabPage CreateAdvancedPropertiesTab()
         {
             var tab = new TabPage("Advanced Properties");
-            var panel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
+            tab.BackColor = Color.Black;
+            var panel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10), BackColor = Color.Black };
 
             var advancedGrid = new DataGridView
             {
@@ -473,7 +594,38 @@ Porosity Effect:
                 AllowUserToDeleteRows = false,
                 BackgroundColor = Color.Black,
                 ForeColor = Color.White,
-                ColumnHeadersDefaultCellStyle = { BackColor = Color.DarkGray, ForeColor = Color.White }
+                ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
+                {
+                    BackColor = Color.FromArgb(40, 40, 40),
+                    ForeColor = Color.White,
+                    Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                    SelectionBackColor = Color.FromArgb(60, 60, 60),
+                    SelectionForeColor = Color.White
+                },
+                RowHeadersDefaultCellStyle = new DataGridViewCellStyle
+                {
+                    BackColor = Color.FromArgb(40, 40, 40),
+                    ForeColor = Color.White,
+                    SelectionBackColor = Color.FromArgb(60, 60, 60)
+                },
+                DefaultCellStyle = new DataGridViewCellStyle
+                {
+                    BackColor = Color.FromArgb(20, 20, 20),
+                    ForeColor = Color.White,
+                    SelectionBackColor = Color.FromArgb(80, 80, 80),
+                    SelectionForeColor = Color.White
+                },
+                AlternatingRowsDefaultCellStyle = new DataGridViewCellStyle
+                {
+                    BackColor = Color.FromArgb(30, 30, 30),
+                    ForeColor = Color.White,
+                    SelectionBackColor = Color.FromArgb(80, 80, 80),
+                    SelectionForeColor = Color.White
+                },
+                GridColor = Color.FromArgb(60, 60, 60),
+                BorderStyle = BorderStyle.None,
+                CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal,
+                EnableHeadersVisualStyles = false
             };
 
             // Advanced columns
@@ -505,13 +657,15 @@ Porosity Effect:
         private TabPage CreatePresetsTab()
         {
             var tab = new TabPage("Material Presets");
-            var panel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
+            tab.BackColor = Color.Black;
+            var panel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10), BackColor = Color.Black };
 
             var presetsFlow = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 FlowDirection = FlowDirection.TopDown,
-                AutoScroll = true
+                AutoScroll = true,
+                BackColor = Color.Black
             };
 
             // Create preset buttons
@@ -585,7 +739,8 @@ Porosity Effect:
                 Width = 700,
                 Height = 80,
                 Margin = new Padding(5),
-                BorderStyle = BorderStyle.FixedSingle
+                BorderStyle = BorderStyle.FixedSingle,
+                BackColor = Color.FromArgb(20, 20, 20)
             };
 
             var layout = new TableLayoutPanel
@@ -593,7 +748,8 @@ Porosity Effect:
                 Dock = DockStyle.Fill,
                 ColumnCount = 3,
                 RowCount = 2,
-                Padding = new Padding(5)
+                Padding = new Padding(5),
+                BackColor = Color.FromArgb(20, 20, 20)
             };
 
             // Name and description
@@ -644,14 +800,32 @@ Porosity Effect:
             var panel = new Panel
             {
                 Dock = DockStyle.Bottom,
-                Height = 50,
-                Padding = new Padding(10)
+                Height = 80,
+                Padding = new Padding(10),
+                BackColor = Color.Black
             };
 
+            // Advanced mode checkbox - positioned at top of panel
+            chkAdvancedMode = new CheckBox
+            {
+                Text = "Show Advanced Properties",
+                ForeColor = Color.White,
+                AutoSize = true,
+                BackColor = Color.Black,
+                Location = new Point(10, 5),
+                Checked = true // Default to checked
+            };
+            chkAdvancedMode.CheckedChanged += ChkAdvancedMode_CheckedChanged;
+
+            // Button layout panel - positioned below checkbox
             var buttonLayout = new FlowLayoutPanel
             {
-                Dock = DockStyle.Fill,
-                FlowDirection = FlowDirection.RightToLeft
+                Location = new Point(0, 30),
+                Size = new Size(panel.Width, 40),
+                Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom,
+                FlowDirection = FlowDirection.RightToLeft,
+                Padding = new Padding(10, 0, 10, 0),
+                BackColor = Color.Black
             };
 
             // OK/Cancel buttons
@@ -690,22 +864,13 @@ Porosity Effect:
             };
             btnReset.Click += BtnReset_Click;
 
-            // Advanced mode checkbox
-            chkAdvancedMode = new CheckBox
-            {
-                Text = "Show Advanced Properties",
-                ForeColor = Color.White,
-                AutoSize = true
-            };
-            chkAdvancedMode.CheckedChanged += ChkAdvancedMode_CheckedChanged;
-
             buttonLayout.Controls.Add(btnClose);
             buttonLayout.Controls.Add(btnSave);
             buttonLayout.Controls.Add(btnLoad);
             buttonLayout.Controls.Add(btnReset);
 
-            panel.Controls.Add(buttonLayout);
             panel.Controls.Add(chkAdvancedMode);
+            panel.Controls.Add(buttonLayout);
 
             return panel;
         }
@@ -716,6 +881,10 @@ Porosity Effect:
 
             foreach (var material in _mainForm.Materials)
             {
+                // Skip exterior material (ID 0)
+                if (material.ID == 0)
+                    continue;
+
                 var properties = _simulation.GetMaterialProperties(material.ID);
                 var row = new DataGridViewRow();
                 row.CreateCells(dgvMaterials);
@@ -729,14 +898,18 @@ Porosity Effect:
                 dgvMaterials.Rows.Add(row);
             }
 
-            // Also update advanced tab if exists
-            if (tabControl.TabPages.Count > 1)
+            // Also update advanced tab if it exists in the tab control
+            if (tabControl.TabPages.Contains(advancedTabPage))
             {
-                var advancedGrid = (DataGridView)tabControl.TabPages[1].Controls[0].Controls[0];
+                var advancedGrid = (DataGridView)advancedTabPage.Controls[0].Controls[0];
                 advancedGrid.Rows.Clear();
 
                 foreach (var material in _mainForm.Materials)
                 {
+                    // Skip exterior material (ID 0)
+                    if (material.ID == 0)
+                        continue;
+
                     var properties = _simulation.GetMaterialProperties(material.ID);
                     var row = new DataGridViewRow();
                     row.CreateCells(advancedGrid);
@@ -845,6 +1018,10 @@ Porosity Effect:
 
                         foreach (var material in _mainForm.Materials)
                         {
+                            // Skip exterior material (ID 0)
+                            if (material.ID == 0)
+                                continue;
+
                             properties[material.Name] = _simulation.GetMaterialProperties(material.ID);
                         }
 
@@ -881,6 +1058,10 @@ Porosity Effect:
 
                         foreach (var material in _mainForm.Materials)
                         {
+                            // Skip exterior material (ID 0)
+                            if (material.ID == 0)
+                                continue;
+
                             if (properties.ContainsKey(material.Name))
                             {
                                 _simulation.SetMaterialProperties(material.ID, properties[material.Name]);
@@ -909,6 +1090,10 @@ Porosity Effect:
             {
                 foreach (var material in _mainForm.Materials)
                 {
+                    // Skip exterior material (ID 0)
+                    if (material.ID == 0)
+                        continue;
+
                     var defaultProps = new MaterialNMRProperties
                     {
                         MaterialName = material.Name,
@@ -928,10 +1113,28 @@ Porosity Effect:
 
         private void ChkAdvancedMode_CheckedChanged(object sender, EventArgs e)
         {
-            tabControl.TabPages[1].Text = chkAdvancedMode.Checked ? "Advanced Properties" : "Advanced Properties (Hidden)";
-
-            // Could disable/enable advanced tab based on checkbox
-            // tabControl.TabPages[1].Enabled = chkAdvancedMode.Checked;
+            // Actually show/hide the advanced tab
+            if (chkAdvancedMode.Checked)
+            {
+                // Show advanced tab if not already present
+                if (!tabControl.TabPages.Contains(advancedTabPage))
+                {
+                    tabControl.TabPages.Insert(1, advancedTabPage);
+                }
+            }
+            else
+            {
+                // Hide the advanced tab
+                if (tabControl.TabPages.Contains(advancedTabPage))
+                {
+                    // If currently on advanced tab, switch to first tab
+                    if (tabControl.SelectedTab == advancedTabPage)
+                    {
+                        tabControl.SelectedIndex = 0;
+                    }
+                    tabControl.TabPages.Remove(advancedTabPage);
+                }
+            }
         }
     }
 }

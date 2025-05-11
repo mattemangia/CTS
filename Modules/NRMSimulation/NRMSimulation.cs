@@ -126,12 +126,12 @@ namespace CTS.Modules.Simulation.NMR
 
         private void InitializeDefaultMaterialProperties()
         {
-            // Default properties for exterior material
+            // Default properties for exterior material (set density to 0 to exclude from computation)
             _materialProperties[0] = new MaterialNMRProperties
             {
                 MaterialName = "Exterior",
                 RelaxationTime = 0.1,
-                Density = 0.0,
+                Density = 0.0,  // Zero density ensures it's excluded from computation
                 Tortuosity = 1.0,
                 RelaxationStrength = 0.0,
                 PorosityEffect = 0.0
@@ -140,6 +140,10 @@ namespace CTS.Modules.Simulation.NMR
             // Add properties for existing materials
             foreach (var material in _mainForm.Materials)
             {
+                // Skip exterior material
+                if (material.ID == 0)
+                    continue;
+
                 if (!_materialProperties.ContainsKey(material.ID))
                 {
                     _materialProperties[material.ID] = new MaterialNMRProperties
@@ -320,6 +324,10 @@ namespace CTS.Modules.Simulation.NMR
 
                         byte label = _mainForm.volumeLabels[x, y, z];
 
+                        // Skip exterior material (ID 0)
+                        if (label == 0)
+                            continue;
+
                         // Count voxels
                         if (!localCounts.ContainsKey(label))
                             localCounts[label] = 0;
@@ -358,22 +366,22 @@ namespace CTS.Modules.Simulation.NMR
                 }
             });
 
-            // Create structure info for each material
+            // Create structure info for each material (excluding exterior)
             foreach (var material in _mainForm.Materials)
             {
-                if (materialCounts.ContainsKey(material.ID))
+                if (material.ID == 0 || !materialCounts.ContainsKey(material.ID))
+                    continue;
+
+                structure[material.ID] = new PoreStructureInfo
                 {
-                    structure[material.ID] = new PoreStructureInfo
-                    {
-                        MaterialID = material.ID,
-                        VoxelCount = materialCounts[material.ID],
-                        Porosity = (double)materialCounts[material.ID] / (width * height * depth),
-                        AveragePoreSize = avgPoreSize.ContainsKey(material.ID) ?
-                            avgPoreSize[material.ID] / materialCounts[material.ID] : 0,
-                        Connectivity = poreConnectivity.ContainsKey(material.ID) ?
-                            poreConnectivity[material.ID] / materialCounts[material.ID] : 0
-                    };
-                }
+                    MaterialID = material.ID,
+                    VoxelCount = materialCounts[material.ID],
+                    Porosity = (double)materialCounts[material.ID] / (width * height * depth),
+                    AveragePoreSize = avgPoreSize.ContainsKey(material.ID) ?
+                        avgPoreSize[material.ID] / materialCounts[material.ID] : 0,
+                    Connectivity = poreConnectivity.ContainsKey(material.ID) ?
+                        poreConnectivity[material.ID] / materialCounts[material.ID] : 0
+                };
             }
 
             return structure;
@@ -451,9 +459,13 @@ namespace CTS.Modules.Simulation.NMR
                 t2Values.Add(t2);
             }
 
-            // Create relaxation components for each material and T2 value
+            // Create relaxation components for each material and T2 value (excluding exterior)
             foreach (var material in _mainForm.Materials)
             {
+                // Skip exterior material (ID 0)
+                if (material.ID == 0)
+                    continue;
+
                 var properties = _materialProperties[material.ID];
 
                 if (properties.Density > 0) // Only for materials with hydrogen
@@ -483,7 +495,6 @@ namespace CTS.Modules.Simulation.NMR
 
             return components;
         }
-
         private double CalculateComponentAmplitude(MaterialNMRProperties properties,
             PoreStructureInfo structure, double t2)
         {

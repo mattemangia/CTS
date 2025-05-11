@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Drawing;
 using System.IO;
+using System.Windows.Controls.Primitives;
 using System.Windows.Forms;
 
 namespace CTS
@@ -16,6 +17,8 @@ namespace CTS
             Width = 800;
             Height = 600;
             BackColor = Color.Black;
+            this.Location = (new Point (0,0));
+            this.StartPosition = FormStartPosition.Manual;
 
             try
             {

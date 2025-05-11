@@ -1673,7 +1673,7 @@ namespace CTS
             this.pixelSize = mainForm.GetPixelSize();
 
             InitializeComponent();
-
+            SetupCalibrationUI();
             // Check if we got hardware acceleration
             CheckHardwareAcceleration();
 
@@ -7353,6 +7353,35 @@ namespace CTS
             {
                 throw new Exception("Error creating CSV file: " + ex.Message, ex);
             }
+        }
+        public float GetFailureShearStress()
+        {
+            return shearStress;
+        }
+
+        public float GetFailureSigma1()
+        {
+            return normalStress + shearStress; // Based on Mohr circle, sigma1 = center + radius
+        }
+
+        public float GetFailureSigma3()
+        {
+            return normalStress - shearStress; // Based on Mohr circle, sigma3 = center - radius
+        }
+
+        public float GetFailureStrain()
+        {
+            return currentStrain;
+        }
+
+        public float GetYoungsModulus()
+        {
+            return youngModulus;
+        }
+
+        public float GetPoissonRatio()
+        {
+            return poissonRatio;
         }
         private void ExportToExcel(string filePath, ProgressFormWithProgress progressForm)
         {

@@ -944,11 +944,56 @@ namespace CTS
                 }
             };
 
+            //NRM Simulation
+            ToolStripMenuItem nmrSimulationMenuItem = new ToolStripMenuItem("NMR Simulation");
+            nmrSimulationMenuItem.Click += (s, e) =>
+            {
+                if (mainForm.volumeData == null || mainForm.volumeLabels == null)
+                {
+                    // For NMR, we can still run with volumeData only (no labels required)
+                    if (mainForm.volumeData == null)
+                    {
+                        MessageBox.Show("Please load a dataset first to perform NMR simulation.",
+                            "No Dataset", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    // Show warning if no labels
+                    if (mainForm.volumeLabels == null)
+                    {
+                        var result = MessageBox.Show(
+                            "No labeled materials found. NMR simulation will assume all voxels are the same material.\n\n" +
+                            "Would you like to continue anyway?",
+                            "No Material Labels",
+                            MessageBoxButtons.YesNo,
+                            MessageBoxIcon.Question);
+
+                        if (result != DialogResult.Yes)
+                            return;
+                    }
+                }
+
+                try
+                {
+                    // Create and show the NMR simulation form
+                    NMRSimulationForm nmrForm = new NMRSimulationForm(mainForm);
+                    nmrForm.Show();
+                    Logger.Log("[ControlForm] Opened NMR Simulation form");
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Error opening NMR Simulation form: {ex.Message}",
+                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    Logger.Log($"[ControlForm] Error opening NMR Simulation form: {ex.Message}");
+                }
+            };
+
             // Add items to Simulation menu
             simulationMenu.DropDownItems.Add(poreNetworkMenuItem);
             simulationMenu.DropDownItems.Add(acousticSimulationMenuItem);
             simulationMenu.DropDownItems.Add(stressAnalysisMenuItem);
             simulationMenu.DropDownItems.Add(triaxialSimulationMenuItem);
+            simulationMenu.DropDownItems.Add(nmrSimulationMenuItem);
         }
         private FlowLayoutPanel CreateLeftPanel()
         {

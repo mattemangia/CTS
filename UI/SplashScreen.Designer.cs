@@ -165,7 +165,7 @@
             this.labelVersion.AutoSize = true;
             this.labelVersion.Font = new System.Drawing.Font("ECAMa", 11.25F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.labelVersion.ForeColor = System.Drawing.Color.DeepSkyBlue;
-            this.labelVersion.Location = new System.Drawing.Point(601, 443);
+            this.labelVersion.Location = new System.Drawing.Point(450, 443);
             this.labelVersion.Name = "labelVersion";
             this.labelVersion.Size = new System.Drawing.Size(65, 12);
             this.labelVersion.TabIndex = 11;

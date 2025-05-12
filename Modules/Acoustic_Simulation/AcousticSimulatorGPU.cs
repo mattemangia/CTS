@@ -820,6 +820,7 @@ namespace CTS
         {
             cts.Cancel();
         }
+        const int VIS_INTERVAL = 10;
         private void Run(CancellationToken token)
         {
             // Initialize with EXACT same values as CPU
@@ -938,7 +939,8 @@ namespace CTS
                     }
 
                     // Report progress on every step for better visualization
-                    ReportProgress();
+                    if (stepCount % VIS_INTERVAL == 0)
+                        ReportProgress();
                 }
                 catch (Exception ex)
                 {
@@ -974,223 +976,121 @@ namespace CTS
             ReportProgress("Finalising", 99);
             FinalizeAndRaiseEvent(); // Use measured arrivals for calculation
         }
+        /// <summary>Initialises the confining stress state and injects the
+        /// source pulse (stress + velocity kick) around the transmitter.</summary>
         private void ApplySource()
         {
-            // Clear velocity fields to zero
-            vxBuffer.MemSetToZero(); vyBuffer.MemSetToZero(); vzBuffer.MemSetToZero();
-            // Clear shear stress fields to zero
-            sxyBuffer.MemSetToZero(); sxzBuffer.MemSetToZero(); syzBuffer.MemSetToZero();
+            // ------------------------------------------------------------------
+            // 1) Clear dynamic fields
+            // ------------------------------------------------------------------
+            vxBuffer.MemSetToZero();
+            vyBuffer.MemSetToZero();
+            vzBuffer.MemSetToZero();
+            sxyBuffer.MemSetToZero();
+            sxzBuffer.MemSetToZero();
+            syzBuffer.MemSetToZero();
             damageBuffer.MemSetToZero();
             accelerator.Synchronize();
 
-            // Initialize normal stress components with confining pressure (compressive is negative)
-            double[] initialStressValues = new double[totalCells];
-            // Fill array with confining pressure values for cells with the selected material
+            // ------------------------------------------------------------------
+            // 2) Cache material & density once – NO per-voxel GetAsArray1D() later
+            // ------------------------------------------------------------------
             byte[] materialData = materialBuffer.GetAsArray1D();
-            for (int i = 0; i < totalCells; i++)
-            {
+            float[] densityData = densityBuffer.GetAsArray1D();
+
+            // ------------------------------------------------------------------
+            // 3) Pre-stress: hydrostatic confining pressure (-ve = compression)
+            // ------------------------------------------------------------------
+            double[] initialStress = new double[totalCells];
+            for (int i = 0; i < totalCells; ++i)
                 if (materialData[i] == selectedMaterialID)
-                {
-                    // Negative value for compression
-                    initialStressValues[i] = -confiningPressurePa;
-                }
-            }
+                    initialStress[i] = -confiningPressurePa;
 
-            // Upload initial stress state
-            sxxBuffer.CopyFromCPU(initialStressValues);
-            syyBuffer.CopyFromCPU(initialStressValues);
-            szzBuffer.CopyFromCPU(initialStressValues);
+            sxxBuffer.CopyFromCPU(initialStress);
+            syyBuffer.CopyFromCPU(initialStress);
+            szzBuffer.CopyFromCPU(initialStress);
             accelerator.Synchronize();
 
-            // Calculate pulse magnitude - EXACT match to CPU version
-            double pulse = sourceAmplitude * Math.Sqrt(sourceEnergyJ);
-            pulse *= 1e6; // Same amplification factor as CPU
+            // ------------------------------------------------------------------
+            // 4) Compute pulse magnitude (same formula as CPU version)
+            // ------------------------------------------------------------------
+            double pulse = sourceAmplitude * Math.Sqrt(sourceEnergyJ) * 1e6;
 
-            Logger.Log($"[AcousticSimulatorGPU] Applying source pulse with magnitude {pulse:E6}");
+            const int sourceRadius = 2;
+            double[] work = new double[totalCells];
 
-            // Use same spherical source region as CPU with identical radius
-            int sourceRadius = 2;
-            double[] tmpArray = new double[totalCells];
-
-            // Apply exact same source pattern as CPU
-            for (int dz = -sourceRadius; dz <= sourceRadius; dz++)
-            {
-                for (int dy = -sourceRadius; dy <= sourceRadius; dy++)
-                {
-                    for (int dx = -sourceRadius; dx <= sourceRadius; dx++)
-                    {
-                        // Calculate spherical distance for falloff - EXACT match to CPU
-                        double dist = Math.Sqrt(dx * dx + dy * dy + dz * dz);
-                        if (dist > sourceRadius) continue;
-
-                        // Calculate position
-                        int sx = tx + dx;
-                        int sy = ty + dy;
-                        int sz = tz + dz;
-
-                        // Check bounds
-                        if (sx < 0 || sx >= width || sy < 0 || sy >= height || sz < 0 || sz >= depth)
-                            continue;
-
-                        // Check if voxel is in the material - EXACT match to CPU
-                        int idx = FlattenIndex(sx, sy, sz);
-                        if (idx >= materialData.Length || materialData[idx] != selectedMaterialID)
-                            continue;
-
-                        // Apply falloff based on distance from center - EXACT match to CPU
-                        double falloff = 1.0 - (dist / sourceRadius);
-                        double localPulse = pulse * falloff * falloff;
-
-                        // Add pulse to existing initial stress values
-                        tmpArray[idx] = initialStressValues[idx] + localPulse;
-                    }
-                }
-            }
-
-            // Upload source stress values
-            sxxBuffer.CopyFromCPU(tmpArray);
-            syyBuffer.CopyFromCPU(tmpArray);
-            szzBuffer.CopyFromCPU(tmpArray);
-            accelerator.Synchronize();
-
-            // Also add to velocity field - EXACT match to CPU
-            // Determine main propagation direction based on TX-RX orientation
-            int mainAxis = 0; // 0=x, 1=y, 2=z
-            if (Math.Abs(rx - tx) >= Math.Abs(ry - ty) && Math.Abs(rx - tx) >= Math.Abs(rz - tz))
-                mainAxis = 0;
-            else if (Math.Abs(ry - ty) >= Math.Abs(rx - tx) && Math.Abs(ry - ty) >= Math.Abs(rz - tz))
-                mainAxis = 1;
-            else
-                mainAxis = 2;
-
-            // Reset array for velocity
-            Array.Clear(tmpArray, 0, tmpArray.Length);
-
-            for (int dz = -sourceRadius; dz <= sourceRadius; dz++)
-            {
-                for (int dy = -sourceRadius; dy <= sourceRadius; dy++)
-                {
-                    for (int dx = -sourceRadius; dx <= sourceRadius; dx++)
+            // ------------------------------------------------------------------
+            // 5) Add the stress pulse inside a small sphere around TX
+            // ------------------------------------------------------------------
+            for (int dz = -sourceRadius; dz <= sourceRadius; ++dz)
+                for (int dy = -sourceRadius; dy <= sourceRadius; ++dy)
+                    for (int dx = -sourceRadius; dx <= sourceRadius; ++dx)
                     {
                         double dist = Math.Sqrt(dx * dx + dy * dy + dz * dz);
                         if (dist > sourceRadius) continue;
 
                         int sx = tx + dx, sy = ty + dy, sz = tz + dz;
-                        if (sx < 0 || sx >= width || sy < 0 || sy >= height || sz < 0 || sz >= depth)
-                            continue;
+                        if (sx < 0 || sx >= width ||
+                            sy < 0 || sy >= height ||
+                            sz < 0 || sz >= depth) continue;
 
                         int idx = FlattenIndex(sx, sy, sz);
-                        if (materialBuffer.GetAsArray1D()[idx] != selectedMaterialID)
-                            continue;
+                        if (materialData[idx] != selectedMaterialID) continue;
+
+                        double falloff = 1.0 - dist / sourceRadius;
+                        work[idx] = initialStress[idx] + pulse * falloff * falloff;
+                    }
+
+            sxxBuffer.CopyFromCPU(work);
+            syyBuffer.CopyFromCPU(work);
+            szzBuffer.CopyFromCPU(work);
+            accelerator.Synchronize();
+
+            // ------------------------------------------------------------------
+            // 6) Prepare velocity kick along the TX→RX axis (one pass)
+            // ------------------------------------------------------------------
+            Array.Clear(work, 0, work.Length);
+
+            int mainAxis = Math.Abs(rx - tx) >= Math.Abs(ry - ty) &&
+                           Math.Abs(rx - tx) >= Math.Abs(rz - tz) ? 0 :
+                           Math.Abs(ry - ty) >= Math.Abs(rx - tx) &&
+                           Math.Abs(ry - ty) >= Math.Abs(rz - tz) ? 1 : 2;
+
+            int sign = mainAxis == 0 ? Math.Sign(rx - tx) :
+                       mainAxis == 1 ? Math.Sign(ry - ty) :
+                                        Math.Sign(rz - tz);
+            if (sign == 0) sign = 1;
+
+            for (int dz = -sourceRadius; dz <= sourceRadius; ++dz)
+                for (int dy = -sourceRadius; dy <= sourceRadius; ++dy)
+                    for (int dx = -sourceRadius; dx <= sourceRadius; ++dx)
+                    {
+                        double dist = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+                        if (dist > sourceRadius) continue;
+
+                        int sx = tx + dx, sy = ty + dy, sz = tz + dz;
+                        if (sx < 0 || sx >= width ||
+                            sy < 0 || sy >= height ||
+                            sz < 0 || sz >= depth) continue;
+
+                        int idx = FlattenIndex(sx, sy, sz);
+                        if (materialData[idx] != selectedMaterialID) continue;
 
                         double falloff = 1.0 - dist / sourceRadius;
                         double localPulse = pulse * falloff * falloff;
-                        float rho = densityBuffer.GetAsArray1D()[idx];
-                        double velocityKick = localPulse / (rho * 10);
 
-                        // Direction is TX→RX along the chosen axis
-                        int sign;
-                        switch (mainAxis)
-                        {
-                            case 0:
-                                sign = Math.Sign(rx - tx);
-                                break;
-                            case 1:
-                                sign = Math.Sign(ry - ty);
-                                break;
-                            default:
-                                sign = Math.Sign(rz - tz);
-                                break;
-                        }
-                        if (sign == 0) sign = 1;
+                        float rho = densityData[idx] > 0 ? densityData[idx] : 1000.0f;
+                        double vKick = localPulse / (rho * 10.0);
 
-                        tmpArray[idx] = velocityKick * sign;
+                        work[idx] = vKick * sign;
                     }
-                }
-            }
 
-            // Upload into the correct component buffer
             switch (mainAxis)
             {
-                case 0: vxBuffer.CopyFromCPU(tmpArray); break;
-                case 1: vyBuffer.CopyFromCPU(tmpArray); break;
-                case 2: vzBuffer.CopyFromCPU(tmpArray); break;
+                case 0: vxBuffer.CopyFromCPU(work); break;
+                case 1: vyBuffer.CopyFromCPU(work); break;
+                default: vzBuffer.CopyFromCPU(work); break;
             }
-            accelerator.Synchronize();
-
-            if (mainAxis == 0)
-            {
-                vxBuffer.CopyFromCPU(tmpArray);
-            }
-            else if (mainAxis == 1)
-            {
-                Array.Clear(tmpArray, 0, tmpArray.Length);
-                for (int dz = -sourceRadius; dz <= sourceRadius; dz++)
-                {
-                    for (int dy = -sourceRadius; dy <= sourceRadius; dy++)
-                    {
-                        for (int dx = -sourceRadius; dx <= sourceRadius; dx++)
-                        {
-                            double dist = Math.Sqrt(dx * dx + dy * dy + dz * dz);
-                            if (dist > sourceRadius) continue;
-
-                            int sx = tx + dx, sy = ty + dy, sz = tz + dz;
-                            if (sx < 0 || sx >= width || sy < 0 || sy >= height || sz < 0 || sz >= depth)
-                                continue;
-
-                            int idx = FlattenIndex(sx, sy, sz);
-                            byte[] materialSample = materialBuffer.GetAsArray1D();
-                            if (idx >= materialSample.Length || materialSample[idx] != selectedMaterialID)
-                                continue;
-
-                            double falloff = 1.0 - (dist / sourceRadius);
-                            float[] densitySample = densityBuffer.GetAsArray1D();
-                            float localDensity = idx < densitySample.Length ? densitySample[idx] : 1000.0f;
-                            double velocityPulse = pulse * falloff * falloff / (localDensity * 10);
-
-                            int direction = Math.Sign(ry - ty);
-                            if (direction == 0) direction = 1;
-                            tmpArray[idx] = velocityPulse * direction;
-                        }
-                    }
-                }
-                vyBuffer.CopyFromCPU(tmpArray);
-            }
-            else
-            {
-                Array.Clear(tmpArray, 0, tmpArray.Length);
-                for (int dz = -sourceRadius; dz <= sourceRadius; dz++)
-                {
-                    for (int dy = -sourceRadius; dy <= sourceRadius; dy++)
-                    {
-                        for (int dx = -sourceRadius; dx <= sourceRadius; dx++)
-                        {
-                            double dist = Math.Sqrt(dx * dx + dy * dy + dz * dz);
-                            if (dist > sourceRadius) continue;
-
-                            int sx = tx + dx, sy = ty + dy, sz = tz + dz;
-                            if (sx < 0 || sx >= width || sy < 0 || sy >= height || sz < 0 || sz >= depth)
-                                continue;
-
-                            int idx = FlattenIndex(sx, sy, sz);
-                            byte[] materialSample = materialBuffer.GetAsArray1D();
-                            if (idx >= materialSample.Length || materialSample[idx] != selectedMaterialID)
-                                continue;
-
-                            double falloff = 1.0 - (dist / sourceRadius);
-                            float[] densitySample = densityBuffer.GetAsArray1D();
-                            float localDensity = idx < densitySample.Length ? densitySample[idx] : 1000.0f;
-                            double velocityPulse = pulse * falloff * falloff / (localDensity * 10);
-
-                            int direction = Math.Sign(rz - tz);
-                            if (direction == 0) direction = 1;
-                            tmpArray[idx] = velocityPulse * direction;
-                        }
-                    }
-                }
-                vzBuffer.CopyFromCPU(tmpArray);
-            }
-
             accelerator.Synchronize();
         }
         private void UpdateStress()
@@ -1338,19 +1238,44 @@ namespace CTS
             if (pMagnitude > 1e-9) return true;
             return pMagnitude > threshold;
         }
+        /// <summary>
+        /// Returns <c>true</c> when the transverse (S-wave) motion at the receiver
+        /// has reached a clear, physically plausible peak.
+        /// </summary>
         private bool CheckSWaveReceiverTouch()
         {
-            // simple guard against firing too soon
-            if (stepCount - pWaveTouchStep < 5) return false;
+            // -----------------------------------------------------------------
+            // 0) Bail out if the P-wave has not yet been registered
+            // -----------------------------------------------------------------
+            if (!pWaveReceiverTouched)
+                return false;
 
+            // -----------------------------------------------------------------
+            // 1) Configurable detection parameters (tweak at will or expose as
+            //    public properties – but keep them out of the tight loop below)
+            // -----------------------------------------------------------------
+            const int minStepsAfterPWave = 5;     // guard against echo
+            const int pTailMarginSteps = 10;    // wait until P-tail fades
+            const double timeToleranceFraction = 0.05;  // allow 5 % early arrival
+            const double amplitudeFraction = 0.15;  // 15 % of running S-peak
+            const double distinctFromPFactor = 1.0;   // S must exceed P this much
+            const double vpvsLowerBound = 1.3;
+            const double vpvsUpperBound = 2.2;
+            const double tiny = 1e-10;  // numerical noise floor
+
+            if (stepCount - pWaveTouchStep < minStepsAfterPWave)
+                return false;
+
+            // -----------------------------------------------------------------
+            // 2) Fetch velocity components at the receiver voxel
+            // -----------------------------------------------------------------
             int rxIndex = FlattenIndex(rx, ry, rz);
 
-            // Pull velocity components at RX
             double vx = vxBuffer.GetAsArray1D()[rxIndex];
             double vy = vyBuffer.GetAsArray1D()[rxIndex];
             double vz = vzBuffer.GetAsArray1D()[rxIndex];
 
-            // P-wave component (longitudinal) and S-wave magnitude (transverse)
+            // Longitudinal P component and transverse S magnitude
             double pMag, sMag;
             switch (mainAxis)
             {
@@ -1359,34 +1284,74 @@ namespace CTS
                 default: pMag = Math.Abs(vz); sMag = Math.Sqrt(vx * vx + vy * vy); break;
             }
 
-            if (double.IsInfinity(sMag) || double.IsNaN(sMag))
-            {
-                Logger.Log("[AcousticSimulatorGPU] WARNING: S-wave magnitude at RX is invalid (INF or NaN)");
+            if (double.IsNaN(sMag) || double.IsInfinity(sMag))
                 return false;
-            }
 
-            if (sMag > sWaveMaxAmplitude) sWaveMaxAmplitude = sMag;
-            double threshold = Math.Max(1e-10, sWaveMaxAmplitude * 0.05);
+            // -----------------------------------------------------------------
+            // 3) Dynamic amplitude threshold (keeps growing with the running peak)
+            // -----------------------------------------------------------------
+            if (sMag > sWaveMaxAmplitude)
+                sWaveMaxAmplitude = sMag;
 
-            // Gate by expected arrival time from theory
-            double vpVs = GetTheoreticalVpVsRatio();
-            int expectedS = (int)(pWaveTouchStep * vpVs);
-            if (stepCount < expectedS * 0.7) return false;  // allow 30 % early
+            double sThreshold = Math.Max(tiny, sWaveMaxAmplitude * amplitudeFraction);
 
-            if (stepCount % 10 == 0)
-                Logger.Log($"[CheckSWaveTouch] Step {stepCount}: S={sMag:E6}, P={pMag:E6}, " +
-                           $"Threshold={threshold:E6}, Expected={expectedS}");
+            // -----------------------------------------------------------------
+            // 4) Time-of-arrival gate based on the *theoretical* Vp/Vs
+            // -----------------------------------------------------------------
+            double vpVsTheory = GetTheoreticalVpVsRatio();
+            // Clamp to a plausible range to avoid absurd estimates
+            vpVsTheory = Clamp(vpVsTheory, vpvsLowerBound, vpvsUpperBound);
 
-            bool distinctFromP = sMag > pMag * 0.5;
-            bool pastPtail = stepCount > pWaveTouchStep + 10;
+            int expectedSWaveStep = (int)(pWaveTouchStep * vpVsTheory);
+            if (stepCount < expectedSWaveStep * (1.0 - timeToleranceFraction))
+                return false;                     // too early
 
-            if (sMag > threshold && distinctFromP && pastPtail)
+            // -----------------------------------------------------------------
+            // 5) Quality criteria: amplitude high enough, clearly distinct from P,
+            //    and safely past the P-tail.
+            // -----------------------------------------------------------------
+            bool strongEnough = sMag > sThreshold;
+            bool distinctFromP = sMag > pMag * distinctFromPFactor;
+            bool pastPTail = stepCount > pWaveTouchStep + pTailMarginSteps;
+
+            if (strongEnough && distinctFromP && pastPTail)
             {
-                Logger.Log($"[AcousticSimulatorGPU] S-Wave detected at RX with magnitude {sMag:E6} at step {stepCount}");
+                // -----------------------------------------------------------------
+                // 6) Sanity check: will the derived Vp/Vs stay inside 1.3-2.2?
+                //    If not, keep waiting and issue a diagnostic log.
+                // -----------------------------------------------------------------
+                double vpvsMeasured = (double)stepCount / pWaveTouchStep;
+
+                if (vpvsMeasured < vpvsLowerBound || vpvsMeasured > vpvsUpperBound)
+                {
+                    Logger.Log($"[CheckSWaveTouch] Holding detection – " +
+                               $"measured Vp/Vs {vpvsMeasured:F2} outside {vpvsLowerBound:F1}-{vpvsUpperBound:F1}");
+                    return false;
+                }
+
+                // Optional: warn if we always flirt with the limits
+                if (Math.Abs(vpvsMeasured - vpvsLowerBound) < 0.02 ||
+                    Math.Abs(vpvsMeasured - vpvsUpperBound) < 0.02)
+                {
+                    Logger.Log($"[CheckSWaveTouch] Vp/Vs pinned near a bound ({vpvsMeasured:F2}). " +
+                               $"Check thresholds or anisotropy.");
+                }
+
+                Logger.Log($"[CheckSWaveTouch] S-wave detected at step {stepCount}, " +
+                           $"S={sMag:E3}, threshold={sThreshold:E3}, Vp/Vs={vpvsMeasured:F3}");
                 return true;
             }
 
             return false;
+        }
+        public static T Clamp<T>(T value, T min, T max) where T : IComparable<T>
+        {
+            if (min.CompareTo(max) > 0)
+                throw new ArgumentException("min must be ≤ max");
+
+            if (value.CompareTo(min) < 0) return min;
+            if (value.CompareTo(max) > 0) return max;
+            return value;
         }
         private void ReportProgress(string text = "Simulating", int? force = null)
         {

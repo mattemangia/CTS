@@ -724,39 +724,65 @@ namespace CTS
         #endregion
 
         #region termination -------------------------------------------------------------
+        private double GetTheoreticalVpVsRatio()
+        {
+            return Math.Sqrt((lambda0 + 2 * mu0) / mu0);
+        }
         private bool CheckSWaveReceiverTouch()
         {
-            // S-waves are primarily transverse (shear) - vy and vz components
-            double sTransverseMagnitude = Math.Sqrt(
-                vy[rx, ry, rz] * vy[rx, ry, rz] +
-                vz[rx, ry, rz] * vz[rx, ry, rz]);
+            if (!pWaveReceiverTouched) return false;          // P not picked yet
+            if (stepCount - pWaveTouchStep < 5) return false; // guard against echoes
 
-            // Protect against extremely large values
-            if (double.IsInfinity(sTransverseMagnitude) || double.IsNaN(sTransverseMagnitude))
+            // ---------- tunables (no magic literals in the code) ----------
+            const double timeTolerance = 0.05;   // 5 % early allowed
+            const double ampFraction = 0.15;   // 15 % of running S peak
+            const double distinctFactor = 1.0;    // S must exceed P energy
+            const int pTailSteps = 10;     // wait until P tail decays
+            const double vpvsMin = 1.3;
+            const double vpvsMax = 2.2;
+            const double tiny = 1e-10;
+            // --------------------------------------------------------------
+
+            // main axis as in the P-picker
+            int mainAxis = (Math.Abs(rx - tx) >= Math.Abs(ry - ty) &&
+                            Math.Abs(rx - tx) >= Math.Abs(rz - tz)) ? 0
+                          : (Math.Abs(ry - ty) >= Math.Abs(rx - tx) &&
+                             Math.Abs(ry - ty) >= Math.Abs(rz - tz)) ? 1 : 2;
+
+            // local velocity components at RX
+            double vxRx = vx[rx, ry, rz];
+            double vyRx = vy[rx, ry, rz];
+            double vzRx = vz[rx, ry, rz];
+
+            double pMag, sMag;
+            switch (mainAxis)
             {
-                Logger.Log("[AcousticSimulator] WARNING: S-wave magnitude at RX is invalid (INF or NaN)");
-                return false;
+                case 0: pMag = Math.Abs(vxRx); sMag = Math.Sqrt(vyRx * vyRx + vzRx * vzRx); break;
+                case 1: pMag = Math.Abs(vyRx); sMag = Math.Sqrt(vxRx * vxRx + vzRx * vzRx); break;
+                default: pMag = Math.Abs(vzRx); sMag = Math.Sqrt(vxRx * vxRx + vyRx * vyRx); break;
             }
 
-            // Track maximum S-wave amplitude for threshold calculation
-            if (sTransverseMagnitude > sWaveMaxAmplitude)
-                sWaveMaxAmplitude = sTransverseMagnitude;
+            if (double.IsNaN(sMag) || double.IsInfinity(sMag)) return false;
 
-            // Wait longer after P-wave to avoid false detection (increased from 5 to 20)
-            if (stepCount - pWaveTouchStep < 20)
-                return false;
+            if (sMag > sWaveMaxAmplitude) sWaveMaxAmplitude = sMag;
+            double threshold = Math.Max(tiny, sWaveMaxAmplitude * ampFraction);
 
-            // Use a more conservative threshold to avoid false detection
-            double threshold = Math.Max(1e-8, sWaveMaxAmplitude * 0.1); // Increased from 0.01 to 0.1
+            // time gate anchored to the theoretical Vp⁄Vs
+            double vpvsTheory = Clamp(GetTheoreticalVpVsRatio(), vpvsMin, vpvsMax);
+            int expectedS = (int)(pWaveTouchStep * vpvsTheory);
+            if (stepCount < expectedS * (1.0 - timeTolerance)) return false;
 
-            // Log S-wave detection data
-            if (stepCount % 10 == 0)
-                Logger.Log($"[CheckSWaveTouch] RX S-wave: {sTransverseMagnitude:E6}, Threshold: {threshold:E6}");
+            bool strongEnough = sMag > threshold;
+            bool distinctFromP = sMag > pMag * distinctFactor;
+            bool pastPTail = stepCount > pWaveTouchStep + pTailSteps;
 
-            // Require stronger signal and more time delay from P-wave
-            if (sTransverseMagnitude > threshold && stepCount - pWaveTouchStep >= 20)
+            if (strongEnough && distinctFromP && pastPTail)
             {
-                Logger.Log($"[AcousticSimulator] S-Wave detected at RX with magnitude {sTransverseMagnitude:E6}");
+                double vpvsMeasured = (double)stepCount / pWaveTouchStep;
+                if (vpvsMeasured < vpvsMin || vpvsMeasured > vpvsMax) return false;
+
+                Logger.Log($"[CheckSWaveTouch] S-wave detected at step {stepCount}, "
+                           + $"Vp/Vs={vpvsMeasured:F3}");
                 return true;
             }
 
@@ -764,40 +790,24 @@ namespace CTS
         }
         private bool CheckPWaveReceiverTouch()
         {
-            // P-waves are primarily longitudinal (compression) - vx component
-            double pMagnitude = Math.Abs(vx[rx, ry, rz]);
+            // pick the main propagation axis once
+            int mainAxis = (Math.Abs(rx - tx) >= Math.Abs(ry - ty) &&
+                            Math.Abs(rx - tx) >= Math.Abs(rz - tz)) ? 0
+                          : (Math.Abs(ry - ty) >= Math.Abs(rx - tx) &&
+                             Math.Abs(ry - ty) >= Math.Abs(rz - tz)) ? 1 : 2;
 
-            // Protect against extremely large values
-            if (double.IsInfinity(pMagnitude) || double.IsNaN(pMagnitude))
-            {
-                Logger.Log("[AcousticSimulator] WARNING: P-wave magnitude at RX is invalid (INF or NaN)");
-                return false;
-            }
+            double pMag = mainAxis == 0 ? Math.Abs(vx[rx, ry, rz])
+                         : mainAxis == 1 ? Math.Abs(vy[rx, ry, rz])
+                                         : Math.Abs(vz[rx, ry, rz]);
 
-            // Track maximum P-wave amplitude for threshold calculation
-            if (pMagnitude > pWaveMaxAmplitude)
-                pWaveMaxAmplitude = pMagnitude;
+            if (double.IsNaN(pMag) || double.IsInfinity(pMag)) return false;
 
-            // Use a more sensitive threshold for detection
-            // Lower the ratio from 0.05 to 0.01 for easier detection
+            if (pMag > pWaveMaxAmplitude) pWaveMaxAmplitude = pMag;
             double threshold = Math.Max(1e-10, pWaveMaxAmplitude * 0.01);
 
-            // Log P-wave detection data
-            if (stepCount % 10 == 0)
-                Logger.Log($"[CheckPWaveTouch] RX P-wave: {pMagnitude:E6}, Threshold: {threshold:E6}");
-
-            // Even with very small values, detect a minimum threshold
-            // This helps detect waves in case amplitudes are extremely small
-            if (pMagnitude > 1e-9)
-            {
-                Logger.Log($"[AcousticSimulator] P-Wave detected at RX with magnitude {pMagnitude:E6}");
-                return true;
-            }
-
-            return pMagnitude > threshold;
+            if (pMag > 1e-9) return true;          // absolute floor
+            return pMag > threshold;
         }
-
-
         private bool CheckReceiverTouch()
         {
             return Math.Abs(vx[rx, ry, rz]) > 1e-6 || Math.Abs(vy[rx, ry, rz]) > 1e-6 || Math.Abs(vz[rx, ry, rz]) > 1e-6;

@@ -1,8 +1,11 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.Globalization;
+using System.Linq;
 using System.Windows.Forms;
+using System.Windows.Forms.DataVisualization.Charting;
 using Krypton.Toolkit;
 
 namespace CTS
@@ -27,7 +30,8 @@ namespace CTS
         private KryptonNumericUpDown numConfiningPressure;
         private KryptonPanel pnlInputMethod;
         private KryptonLabel lblVpVsValue;
-       
+        private KryptonButton btnExportPlot;
+
         public CalibrationDialog(CalibrationManager manager, AcousticSimulationForm form,
                          double vp, double vs, double vpVsRatio)
         {
@@ -179,6 +183,13 @@ namespace CTS
                 btnApplyCalibration.Width = 120;
                 btnApplyCalibration.Click += BtnApplyCalibration_Click;
                 calibrationActionPanel.Controls.Add(btnApplyCalibration);
+
+                btnExportPlot = new KryptonButton();
+                btnExportPlot.Text = "Export Plot";
+                btnExportPlot.Location = new Point(530, 5);
+                btnExportPlot.Width = 120;
+                btnExportPlot.Click += BtnExportPlot_Click;
+                calibrationActionPanel.Controls.Add(btnExportPlot);
 
                 // Calibration summary label
                 lblCalibrationSummary = new KryptonLabel();
@@ -576,6 +587,197 @@ namespace CTS
                     "Add Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
+
+        private void BtnExportPlot_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                if (calibrationManager == null || calibrationManager.CurrentCalibration == null ||
+                    calibrationManager.CurrentCalibration.CalibrationPoints == null ||
+                    calibrationManager.CurrentCalibration.CalibrationPoints.Count < 2)
+                {
+                    MessageBox.Show("Need at least 2 calibration points to create a plot.",
+                        "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                using (SaveFileDialog saveDialog = new SaveFileDialog())
+                {
+                    saveDialog.Filter = "JPEG Files (*.jpg)|*.jpg|PNG Files (*.png)|*.png";
+                    saveDialog.DefaultExt = "jpg";
+                    saveDialog.Title = "Export Calibration Curve Plot";
+
+                    if (saveDialog.ShowDialog() == DialogResult.OK)
+                    {
+                        ExportCalibrationPlot(saveDialog.FileName);
+                        MessageBox.Show("Calibration plot exported successfully.",
+                            "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error exporting plot: {ex.Message}",
+                    "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void ExportCalibrationPlot(string filename)
+        {
+            var points = calibrationManager.CurrentCalibration.CalibrationPoints;
+
+            // Create chart
+            using (Chart chart = new Chart())
+            {
+                chart.Size = new Size(800, 600);
+                chart.BackColor = Color.White;
+
+                // Create chart area
+                ChartArea chartArea = new ChartArea("MainArea");
+                chartArea.BackColor = Color.White;
+                chartArea.AxisX.Title = "Confining Pressure (MPa)";
+                chartArea.AxisY.Title = "Vp/Vs Ratio";
+                chartArea.AxisX.TitleFont = new Font("Arial", 12, FontStyle.Bold);
+                chartArea.AxisY.TitleFont = new Font("Arial", 12, FontStyle.Bold);
+                chartArea.AxisX.LabelStyle.Font = new Font("Arial", 10);
+                chartArea.AxisY.LabelStyle.Font = new Font("Arial", 10);
+                chart.ChartAreas.Add(chartArea);
+
+                // Create legend
+                Legend legend = new Legend("Legend");
+                legend.Font = new Font("Arial", 10);
+                legend.Docking = Docking.Right;
+                chart.Legends.Add(legend);
+
+                // Add title
+                Title title = new Title("Acoustic Calibration Curve", Docking.Top,
+                    new Font("Arial", 16, FontStyle.Bold), Color.Black);
+                chart.Titles.Add(title);
+
+                // Add material name as subtitle
+                if (simulationForm.SelectedMaterial != null)
+                {
+                    Title subtitle = new Title(simulationForm.SelectedMaterial.Name,
+                        Docking.Top, new Font("Arial", 12), Color.DarkGray);
+                    chart.Titles.Add(subtitle);
+                }
+
+                // Create series for actual points
+                Series actualSeries = new Series("Actual Data");
+                actualSeries.ChartType = SeriesChartType.Point;
+                actualSeries.MarkerStyle = MarkerStyle.Circle;
+                actualSeries.MarkerSize = 10;
+                actualSeries.MarkerColor = Color.Blue;
+                actualSeries.IsVisibleInLegend = true;
+
+                // Create series for simulated points
+                Series simulatedSeries = new Series("Simulated Data");
+                simulatedSeries.ChartType = SeriesChartType.Point;
+                simulatedSeries.MarkerStyle = MarkerStyle.Diamond;
+                simulatedSeries.MarkerSize = 10;
+                simulatedSeries.MarkerColor = Color.Red;
+                simulatedSeries.IsVisibleInLegend = true;
+
+                // Add data points and prepare for regression
+                List<double> pressures = new List<double>();
+                List<double> actualRatios = new List<double>();
+                List<double> simulatedRatios = new List<double>();
+
+                foreach (var point in points)
+                {
+                    // Add actual point
+                    actualSeries.Points.AddXY(point.ConfiningPressureMPa, point.KnownVpVsRatio);
+
+                    // Add simulated point
+                    simulatedSeries.Points.AddXY(point.ConfiningPressureMPa, point.SimulatedVpVsRatio);
+
+                    // Collect for regression
+                    pressures.Add(point.ConfiningPressureMPa);
+                    actualRatios.Add(point.KnownVpVsRatio);
+                    simulatedRatios.Add(point.SimulatedVpVsRatio);
+                }
+
+                chart.Series.Add(actualSeries);
+                chart.Series.Add(simulatedSeries);
+
+                // Add regression lines if enough points
+                if (points.Count >= 2)
+                {
+                    // Calculate regression for actual data
+                    var actualRegression = CalculateLinearRegression(pressures.ToArray(), actualRatios.ToArray());
+                    AddRegressionLine(chart, "Actual Trend", actualRegression, pressures.Min(), pressures.Max(),
+                        Color.Blue, ChartDashStyle.Solid);
+
+                    // Calculate regression for simulated data
+                    var simulatedRegression = CalculateLinearRegression(pressures.ToArray(), simulatedRatios.ToArray());
+                    AddRegressionLine(chart, "Simulated Trend", simulatedRegression, pressures.Min(), pressures.Max(),
+                        Color.Red, ChartDashStyle.Dash);
+                }
+
+                // Add R² values as annotations if available
+                if (points.Count >= 3)
+                {
+                    var actualR2 = CalculateRSquared(pressures.ToArray(), actualRatios.ToArray());
+                    var simulatedR2 = CalculateRSquared(pressures.ToArray(), simulatedRatios.ToArray());
+
+                    TextAnnotation r2Annotation = new TextAnnotation();
+                    r2Annotation.Text = $"R² Actual: {actualR2:F4}\nR² Simulated: {simulatedR2:F4}";
+                    r2Annotation.X = 80;
+                    r2Annotation.Y = 10;
+                    r2Annotation.Font = new Font("Arial", 10);
+                    r2Annotation.ForeColor = Color.Black;
+                    chart.Annotations.Add(r2Annotation);
+                }
+
+                // Save to file
+                ImageFormat format = filename.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ?
+                    ImageFormat.Png : ImageFormat.Jpeg;
+                chart.SaveImage(filename, format);
+            }
+        }
+
+        private (double slope, double intercept) CalculateLinearRegression(double[] x, double[] y)
+        {
+            int n = x.Length;
+            double sumX = x.Sum();
+            double sumY = y.Sum();
+            double sumXY = x.Zip(y, (xi, yi) => xi * yi).Sum();
+            double sumX2 = x.Select(xi => xi * xi).Sum();
+
+            double slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+            double intercept = (sumY - slope * sumX) / n;
+
+            return (slope, intercept);
+        }
+
+        private double CalculateRSquared(double[] x, double[] y)
+        {
+            var regression = CalculateLinearRegression(x, y);
+            double meanY = y.Average();
+
+            double totalSS = y.Select(yi => Math.Pow(yi - meanY, 2)).Sum();
+            double residualSS = x.Zip(y, (xi, yi) =>
+                Math.Pow(yi - (regression.slope * xi + regression.intercept), 2)).Sum();
+
+            return 1 - (residualSS / totalSS);
+        }
+
+        private void AddRegressionLine(Chart chart, string name, (double slope, double intercept) regression,
+            double minX, double maxX, Color color, ChartDashStyle dashStyle)
+        {
+            Series lineSeries = new Series(name);
+            lineSeries.ChartType = SeriesChartType.Line;
+            lineSeries.Color = color;
+            lineSeries.BorderWidth = 2;
+            lineSeries.BorderDashStyle = dashStyle;
+
+            // Add points for the regression line
+            lineSeries.Points.AddXY(minX, regression.slope * minX + regression.intercept);
+            lineSeries.Points.AddXY(maxX, regression.slope * maxX + regression.intercept);
+
+            chart.Series.Add(lineSeries);
+        }
+
         private void PopulateExistingCalibrationPoints()
         {
             try

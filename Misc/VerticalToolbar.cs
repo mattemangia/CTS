@@ -41,7 +41,7 @@ namespace CTS
 
             this.Width = 36; // Reduced from 52
             this.Dock = DockStyle.Fill;
-
+            
             InitializeToolbar();
         }
 
@@ -370,27 +370,9 @@ namespace CTS
                 SetToggleState(selectedButton, true);
             }
 
-            mainForm.SetSegmentationTool(tool);
-            controlForm.currentTool = tool;
-
-            // Handle measurement tool specific actions
-            if (tool == SegmentationTool.Measurement)
-            {
-                if (controlForm.measurementForm == null || controlForm.measurementForm.IsDisposed)
-                {
-                    controlForm.measurementForm = new MeasurementForm(mainForm, controlForm.measurementManager);
-                }
-                controlForm.measurementForm.Show();
-            }
-            else
-            {
-                if (controlForm.measurementForm != null && controlForm.measurementForm.Visible)
-                {
-                    controlForm.measurementForm.Hide();
-                }
-            }
+            // Update the ControlForm UI using the new public method
+            controlForm.UpdateToolUI(tool);
         }
-
         private void SetToggleState(KryptonButton button, bool isToggled)
         {
             if (toggleStates.ContainsKey(button))

@@ -625,7 +625,16 @@ namespace CTS
                 }
 
                 CreateMeasurementResources();
-
+                renderTimer = new Timer();
+                renderTimer.Interval = 50; // 20 FPS for real-time updates
+                renderTimer.Tick += (s, e) =>
+                {
+                    if (NeedsRender && !isRendering)
+                    {
+                        Render();
+                    }
+                };
+                renderTimer.Start();
                 Vector3 volumeCenter = new Vector3(volW / 2.0f, volH / 2.0f, volD / 2.0f);
                 cameraYaw = 0.8f; // Approximately 45 degrees
                 cameraPitch = 0.6f; // Slightly elevated view
@@ -2022,7 +2031,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
         /// <summary>
         /// Updates the material color texture based on main form's material list
         /// </summary>
-        private void UpdateMaterialColors()
+        public void UpdateMaterialColors()
         {
             try
             {
@@ -3272,7 +3281,43 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
         #endregion Rendering
 
         #region Public Methods
+        public void RecreateLabelTextures()
+        {
+            try
+            {
+                Logger.Log("[SharpDXVolumeRenderer] Recreating label textures");
 
+                // Dispose existing textures
+                Utilities.Dispose(ref labelSRV);
+                Utilities.Dispose(ref labelTexture);
+
+                // Recreate from current data
+                if (mainForm.volumeLabels != null)
+                {
+                    labelTexture = CreateTexture3DFromChunkedLabelVolume((ChunkedLabelVolume)mainForm.volumeLabels, Format.R32_Float);
+                    if (labelTexture != null)
+                    {
+                        ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
+                        {
+                            Format = Format.R32_Float,
+                            Dimension = ShaderResourceViewDimension.Texture3D,
+                            Texture3D = new ShaderResourceViewDescription.Texture3DResource
+                            {
+                                MipLevels = 1,
+                                MostDetailedMip = 0
+                            }
+                        };
+
+                        labelSRV = new ShaderResourceView(device, labelTexture, srvDesc);
+                        Logger.Log("[SharpDXVolumeRenderer] Label texture recreated successfully");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] Error recreating label textures: {ex.Message}");
+            }
+        }
         public void OnResize()
         {
             if (device == null || swapChain == null) return;
@@ -3938,7 +3983,8 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                         Logger.Log("[SharpDXVolumeRenderer] Error disposing measurementOverlay: " + ex.Message);
                     }
                 }
-
+                renderTimer?.Stop();
+                renderTimer?.Dispose();
                 if (scaleBarPictureBox != null)
                 {
                     try

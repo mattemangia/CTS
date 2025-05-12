@@ -470,6 +470,7 @@ namespace CTS
 
                 // Create and show the 3D viewer form
                 SharpDXViewerForm viewer3DForm = new SharpDXViewerForm(mainForm);
+                viewer3DForm.InitializeEvents(mainForm);
                 viewer3DForm.Show();
             };
 
@@ -1412,120 +1413,27 @@ namespace CTS
         }
         private void ToolsMenuItem_Click(object sender, EventArgs e)
         {
-            // Uncheck all tool menu items.
-            panMenuItem.Checked = false;
-            eraserMenuItem.Checked = false;
-            brushMenuItem.Checked = false;
-            measurementMenuItem.Checked = false;
-            thresholdingMenuItem.Checked = false;
-            lassoMenuItem.Checked = false;
-
-            // Check the clicked item.
+            // Get the clicked item
             var item = sender as ToolStripMenuItem;
-            item.Checked = true;
 
-            // Additional logic for clearing overlays on tool switch.
-            if (item == brushMenuItem || item == eraserMenuItem || item == panMenuItem)
-            {
-                // When switching to brush, eraser, or pan, clear any threshold overlay.
-                mainForm.PreviewMin = 0;
-                mainForm.PreviewMax = 0;
-                // Optionally disable the threshold overlay.
-                mainForm.EnableThresholdMask = false;
-                // Also clear any temporary brush selection if needed.
-                mainForm.currentSelection = new byte[mainForm.GetWidth(), mainForm.GetHeight()];
-                mainForm.RenderViews();
-                _ = mainForm.RenderOrthoViewsAsync();
-            }
-            if (item == measurementMenuItem)
-            {
-                currentTool = SegmentationTool.Measurement;
-                toolSizeSlider.Enabled = false;
-                thresholdRangeSlider.Enabled = false;
-                numThresholdMin.Enabled = false;
-                numThresholdMax.Enabled = false;
-                btnInterpolate.Enabled = false;
+            // Determine which tool was selected
+            SegmentationTool selectedTool = SegmentationTool.Pan;
 
-                // Show measurement form if not already shown
-                if (measurementForm == null || measurementForm.IsDisposed)
-                {
-                    measurementForm = new MeasurementForm(mainForm, measurementManager);
-                }
-
-                if (!measurementForm.Visible)
-                {
-                    measurementForm.Show();
-                }
-                else
-                {
-                    measurementForm.BringToFront();
-                }
-            }
-            else
-            {
-                // Hide measurement form for other tools
-                if (measurementForm != null && measurementForm.Visible)
-                {
-                    measurementForm.Hide();
-                }
-            }
-            // Set the tool and enable/disable UI controls accordingly.
             if (item == panMenuItem)
-            {
-                currentTool = SegmentationTool.Pan;
-                toolSizeSlider.Enabled = false;
-                thresholdRangeSlider.Enabled = false;
-                numThresholdMin.Enabled = false;
-                numThresholdMax.Enabled = false;
-                btnInterpolate.Enabled = false;
-            }
+                selectedTool = SegmentationTool.Pan;
             else if (item == eraserMenuItem)
-            {
-                currentTool = SegmentationTool.Eraser;
-                toolSizeSlider.Enabled = true;
-                thresholdRangeSlider.Enabled = false;
-                numThresholdMin.Enabled = false;
-                numThresholdMax.Enabled = false;
-                btnInterpolate.Enabled = true;
-            }
+                selectedTool = SegmentationTool.Eraser;
             else if (item == brushMenuItem)
-            {
-                currentTool = SegmentationTool.Brush;
-                toolSizeSlider.Enabled = true;
-                thresholdRangeSlider.Enabled = false;
-                numThresholdMin.Enabled = false;
-                numThresholdMax.Enabled = false;
-                btnInterpolate.Enabled = true;
-            }
+                selectedTool = SegmentationTool.Brush;
+            else if (item == measurementMenuItem)
+                selectedTool = SegmentationTool.Measurement;
             else if (item == thresholdingMenuItem)
-            {
-                currentTool = SegmentationTool.Thresholding;
-                toolSizeSlider.Enabled = false;
-                // Enable threshold controls when in thresholding mode.
-                thresholdRangeSlider.Enabled = true;
-                numThresholdMin.Enabled = true;
-                numThresholdMax.Enabled = true;
-                btnInterpolate.Enabled = false;
-                // Ensure ShowMask is enabled
-                showMaskMenuItem.Checked = true;
-                mainForm.ShowMask = true;
-            }
+                selectedTool = SegmentationTool.Thresholding;
             else if (item == lassoMenuItem)
-            {
-                currentTool = SegmentationTool.Lasso;
-                toolSizeSlider.Enabled = false;
-                thresholdRangeSlider.Enabled = false;
-                numThresholdMin.Enabled = false;
-                numThresholdMax.Enabled = false;
-                btnInterpolate.Enabled = true;
-                chkLassoSnapping.Visible = true;
-                chkLassoSnapping.Enabled = true;
-                btnInvertSelection.Visible = true;
-                btnInvertSelection.Enabled = true;
-            }
+                selectedTool = SegmentationTool.Lasso;
 
-            // Inform MainForm of the current tool.
-            mainForm.SetSegmentationTool(currentTool);
+            // Update the UI using the shared method
+            UpdateToolUI(selectedTool);
         }
 
         private void AddLabelOperationsMenu()
@@ -2479,6 +2387,129 @@ namespace CTS
                     lstMaterials.SelectedIndex = mainForm.Materials.FindIndex(m => m.ID == targetMat.ID);
                 }
             }
+        }
+        public void UpdateToolUI(SegmentationTool tool)
+        {
+            // Update current tool
+            currentTool = tool;
+
+            // Uncheck all menu items
+            panMenuItem.Checked = false;
+            eraserMenuItem.Checked = false;
+            brushMenuItem.Checked = false;
+            measurementMenuItem.Checked = false;
+            thresholdingMenuItem.Checked = false;
+            lassoMenuItem.Checked = false;
+
+            // Check the appropriate menu item and update UI controls
+            switch (tool)
+            {
+                case SegmentationTool.Pan:
+                    panMenuItem.Checked = true;
+                    toolSizeSlider.Enabled = false;
+                    thresholdRangeSlider.Enabled = false;
+                    numThresholdMin.Enabled = false;
+                    numThresholdMax.Enabled = false;
+                    btnInterpolate.Enabled = false;
+                    chkLassoSnapping.Visible = false;
+                    btnInvertSelection.Visible = false;
+                    break;
+
+                case SegmentationTool.Eraser:
+                    eraserMenuItem.Checked = true;
+                    toolSizeSlider.Enabled = true;
+                    thresholdRangeSlider.Enabled = false;
+                    numThresholdMin.Enabled = false;
+                    numThresholdMax.Enabled = false;
+                    btnInterpolate.Enabled = true;
+                    chkLassoSnapping.Visible = false;
+                    btnInvertSelection.Visible = false;
+                    break;
+
+                case SegmentationTool.Brush:
+                    brushMenuItem.Checked = true;
+                    toolSizeSlider.Enabled = true;
+                    thresholdRangeSlider.Enabled = false;
+                    numThresholdMin.Enabled = false;
+                    numThresholdMax.Enabled = false;
+                    btnInterpolate.Enabled = true;
+                    chkLassoSnapping.Visible = false;
+                    btnInvertSelection.Visible = false;
+                    break;
+
+                case SegmentationTool.Measurement:
+                    measurementMenuItem.Checked = true;
+                    toolSizeSlider.Enabled = false;
+                    thresholdRangeSlider.Enabled = false;
+                    numThresholdMin.Enabled = false;
+                    numThresholdMax.Enabled = false;
+                    btnInterpolate.Enabled = false;
+                    chkLassoSnapping.Visible = false;
+                    btnInvertSelection.Visible = false;
+
+                    // Show measurement form if not already shown
+                    if (measurementForm == null || measurementForm.IsDisposed)
+                    {
+                        measurementForm = new MeasurementForm(mainForm, measurementManager);
+                    }
+
+                    if (!measurementForm.Visible)
+                    {
+                        measurementForm.Show();
+                    }
+                    else
+                    {
+                        measurementForm.BringToFront();
+                    }
+                    break;
+
+                case SegmentationTool.Thresholding:
+                    thresholdingMenuItem.Checked = true;
+                    toolSizeSlider.Enabled = false;
+                    thresholdRangeSlider.Enabled = true;
+                    numThresholdMin.Enabled = true;
+                    numThresholdMax.Enabled = true;
+                    btnInterpolate.Enabled = false;
+                    chkLassoSnapping.Visible = false;
+                    btnInvertSelection.Visible = false;
+                    // Ensure ShowMask is enabled
+                    showMaskMenuItem.Checked = true;
+                    mainForm.ShowMask = true;
+                    break;
+
+                case SegmentationTool.Lasso:
+                    lassoMenuItem.Checked = true;
+                    toolSizeSlider.Enabled = false;
+                    thresholdRangeSlider.Enabled = false;
+                    numThresholdMin.Enabled = false;
+                    numThresholdMax.Enabled = false;
+                    btnInterpolate.Enabled = true;
+                    chkLassoSnapping.Visible = true;
+                    chkLassoSnapping.Enabled = true;
+                    btnInvertSelection.Visible = true;
+                    btnInvertSelection.Enabled = true;
+                    break;
+            }
+
+            // Clear any overlays when switching tools (for non-eraser/brush tools)
+            if (tool != SegmentationTool.Brush && tool != SegmentationTool.Eraser)
+            {
+                mainForm.PreviewMin = 0;
+                mainForm.PreviewMax = 0;
+                mainForm.EnableThresholdMask = false;
+                mainForm.currentSelection = new byte[mainForm.GetWidth(), mainForm.GetHeight()];
+                mainForm.RenderViews();
+                _ = mainForm.RenderOrthoViewsAsync();
+            }
+
+            // Hide measurement form for non-measurement tools
+            if (tool != SegmentationTool.Measurement && measurementForm != null && measurementForm.Visible)
+            {
+                measurementForm.Hide();
+            }
+
+            // Inform MainForm of the current tool
+            mainForm.SetSegmentationTool(tool);
         }
     }
 }

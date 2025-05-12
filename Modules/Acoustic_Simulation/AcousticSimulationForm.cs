@@ -2247,8 +2247,11 @@ namespace CTS
                     cpuSimulator.ProgressUpdated += Simulator_ProgressUpdated;
                     cpuSimulator.SimulationCompleted += Simulator_SimulationCompleted;
 
-                    // Connect visualizer to the CPU simulator
-                    visualizer.ConnectToCpuSimulator(cpuSimulator);
+                    // Connect visualizer to the CPU simulator only if it's enabled
+                    if (visualizer != null)
+                    {
+                        visualizer.ConnectToCpuSimulator(cpuSimulator);
+                    }
 
                     usingGpuSimulator = false;
                 }

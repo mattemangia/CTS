@@ -1696,6 +1696,54 @@ namespace CTS.SharpDXIntegration
                 Logger.Log($"[SharpDXControlPanel] Error updating measurement UI: {ex.Message}");
             }
         }
+        public void RefreshMaterialsList()
+        {
+            try
+            {
+                Logger.Log("[SharpDXControlPanel] Refreshing materials list");
+
+                if (lstMaterials == null)
+                    return;
+
+                // Store current selection
+                int selectedIndex = lstMaterials.SelectedIndex;
+
+                // Clear and repopulate the list
+                lstMaterials.Items.Clear();
+
+                if (mainForm.volumeLabels != null && mainForm.Materials != null)
+                {
+                    for (int i = 0; i < mainForm.Materials.Count; i++)
+                    {
+                        Material mat = mainForm.Materials[i];
+
+                        // Get current visibility from the renderer
+                        bool currentlyVisible = volumeRenderer.GetMaterialVisibility(mat.ID);
+
+                        // Add the material to the list
+                        lstMaterials.Items.Add(mat, currentlyVisible);
+                    }
+                }
+
+                // Restore selection if possible
+                if (selectedIndex >= 0 && selectedIndex < lstMaterials.Items.Count)
+                {
+                    lstMaterials.SelectedIndex = selectedIndex;
+                }
+
+                // Update opacity slider for selected material
+                if (lstMaterials.SelectedIndex >= 0)
+                {
+                    Material mat = (Material)lstMaterials.Items[lstMaterials.SelectedIndex];
+                    float currentAlpha = volumeRenderer.GetMaterialOpacity(mat.ID);
+                    trkOpacity.Value = (int)Math.Round(currentAlpha * 100f);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXControlPanel] Error refreshing materials list: {ex.Message}");
+            }
+        }
         #region Clipping plane
         private void InitializeClippingPlaneTab()
         {

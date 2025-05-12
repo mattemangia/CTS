@@ -54,7 +54,22 @@ namespace CTS
         private bool isYzMeasurementDrawing = false;
         private Point yzMeasurementStart;
         private Point yzMeasurementCurrent;
+        public event EventHandler MaterialsChanged;
+        public event EventHandler<MaterialChangedEventArgs> MaterialUpdated;
+        public event EventHandler<MaterialRemovedEventArgs> MaterialRemoved;
+        public event EventHandler SelectionsApplied;
 
+        // Event args classes
+        public class MaterialChangedEventArgs : EventArgs
+        {
+            public byte MaterialId { get; set; }
+            public Material Material { get; set; }
+        }
+
+        public class MaterialRemovedEventArgs : EventArgs
+        {
+            public byte MaterialId { get; set; }
+        }
 
         // Materials: index 0 is reserved for the exterior.
         public List<Material> Materials = new List<Material>();
@@ -3714,6 +3729,7 @@ namespace CTS
             sparseSelectionsZ[slice] = copy;
 
             currentSelection = new byte[width, height];
+            SelectionsApplied?.Invoke(this, EventArgs.Empty);
             RenderViews(ViewType.All);
         }
 
@@ -3725,6 +3741,7 @@ namespace CTS
             MaterialOps.SubtractSelection(currentSelection, slice);
 
             currentSelection = new byte[width, height];
+            SelectionsApplied?.Invoke(this, EventArgs.Empty);
             RenderViews(ViewType.All);
         }
 
@@ -3757,7 +3774,7 @@ namespace CTS
 
                 currentSelectionYZ = new byte[depth, height];
             }
-
+            SelectionsApplied?.Invoke(this, EventArgs.Empty);
             RenderViews(ViewType.All);
         }
 
@@ -3778,6 +3795,17 @@ namespace CTS
                 MaterialOps.SubtractOrthogonalSelection(currentSelectionYZ, YzSliceX, (CTS.OrthogonalView)OrthogonalView.YZ);
                 currentSelectionYZ = new byte[depth, height];
             }
+            SelectionsApplied?.Invoke(this, EventArgs.Empty);
+            RenderViews(ViewType.All);
+        }
+        public void AddMaterial(Material material)
+        {
+            Materials.Add(material);
+            SaveLabelsChk();
+
+            // Trigger events
+            MaterialUpdated?.Invoke(this, new MaterialChangedEventArgs { MaterialId = material.ID, Material = material });
+            MaterialsChanged?.Invoke(this, EventArgs.Empty);
 
             RenderViews(ViewType.All);
         }
@@ -4635,7 +4663,8 @@ namespace CTS
             // Adjust the SelectedMaterialIndex if needed
             if (SelectedMaterialIndex >= Materials.Count)
                 SelectedMaterialIndex = Materials.Count - 1;
-
+            MaterialRemoved?.Invoke(this, new MaterialRemovedEventArgs { MaterialId = (byte)removeMaterialID });
+            MaterialsChanged?.Invoke(this, EventArgs.Empty);
             // Re-render all views
             RenderViews(ViewType.All);
         }

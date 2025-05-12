@@ -363,7 +363,78 @@ namespace CTS.SharpDXIntegration
                 throw;
             }
         }
+        // Events
+        public void InitializeEvents(MainForm mainForm)
+        {
+            mainForm.MaterialsChanged += OnMaterialsChanged;
+            mainForm.MaterialUpdated += OnMaterialUpdated;
+            mainForm.MaterialRemoved += OnMaterialRemoved;
+            mainForm.SelectionsApplied += OnSelectionsApplied;
+        }
 
+        private void OnMaterialsChanged(object sender, EventArgs e)
+        {
+            Logger.Log("[SharpDXViewerForm] Materials changed - updating renderer");
+
+            // Update the renderer's material color texture
+            if (volumeRenderer != null)
+            {
+                volumeRenderer.UpdateMaterialColors();
+                volumeRenderer.NeedsRender = true;
+            }
+
+            // Update the control panel
+            if (controlPanel != null)
+            {
+                controlPanel.RefreshMaterialsList();
+            }
+        }
+
+        private void OnMaterialUpdated(object sender, MainForm.MaterialChangedEventArgs e)
+        {
+            Logger.Log($"[SharpDXViewerForm] Material {e.MaterialId} updated");
+
+            if (volumeRenderer != null)
+            {
+                volumeRenderer.UpdateMaterialColors();
+                volumeRenderer.NeedsRender = true;
+            }
+
+            if (controlPanel != null)
+            {
+                controlPanel.RefreshMaterialsList();
+            }
+        }
+
+        private void OnMaterialRemoved(object sender, MainForm.MaterialRemovedEventArgs e)
+        {
+            Logger.Log($"[SharpDXViewerForm] Material {e.MaterialId} removed");
+
+            if (volumeRenderer != null)
+            {
+                // Clear the material from the renderer
+                volumeRenderer.SetMaterialVisibility(e.MaterialId, false);
+                volumeRenderer.UpdateMaterialColors();
+                volumeRenderer.NeedsRender = true;
+            }
+
+            if (controlPanel != null)
+            {
+                controlPanel.RefreshMaterialsList();
+            }
+        }
+
+        private void OnSelectionsApplied(object sender, EventArgs e)
+        {
+            Logger.Log("[SharpDXViewerForm] Selections applied - updating renderer");
+
+            if (volumeRenderer != null)
+            {
+                // Force recreation of label textures to reflect changes
+                volumeRenderer.RecreateLabelTextures();
+                volumeRenderer.NeedsRender = true;
+            }
+        }
         // Called by control panel for show/hide grayscale
         public void SetGrayscaleVisible(bool isVisible)
         {

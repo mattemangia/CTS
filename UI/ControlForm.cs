@@ -316,7 +316,7 @@ namespace CTS
             var compressSeparator = new ToolStripSeparator();
 
             // Compress Volume
-            var compressVolumeMenuItem = new ToolStripMenuItem("Compress Volume...");
+            var compressVolumeMenuItem = new ToolStripMenuItem("Compress ¦ Decompress Volume...");
             compressVolumeMenuItem.Click += (s, e) =>
             {
                 try
@@ -402,7 +402,7 @@ namespace CTS
             fileMenu.DropDownItems.AddRange(new ToolStripItem[]
             {
         loadFolderMenuItem, importBinMenuItem, fileSep1, saveBinMenuItem,
-        exportImagesMenuItem, compressSeparator, compressVolumeMenuItem, decompressVolumeMenuItem, compressSeparator, closeDatasetMenuItem, exitMenuItem
+        exportImagesMenuItem, compressSeparator, compressVolumeMenuItem, compressSeparator, closeDatasetMenuItem, exitMenuItem
             });
         }
 

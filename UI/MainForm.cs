@@ -38,7 +38,7 @@ namespace CTS
         Panel infoPanel;
         public string CurrentPath { get; private set; } = "";
         private bool useMemoryMapping = true;
-
+        private VerticalToolbar verticalToolbar;
         private MeasurementManager measurementManager;
         private bool isDrawingMeasurement = false;
         private Point measurementStartPoint;
@@ -152,7 +152,14 @@ namespace CTS
         private Point brushOverlayCenter;
         private PointF xzOverlayCenter = PointF.Empty;
         private PointF yzOverlayCenter = PointF.Empty;
-
+        public bool isDrawingLasso = false;
+        public List<Point> lassoPoints = new List<Point>();
+        public bool enableLassoSnapping = false;
+        public bool isXzDrawingLasso = false;
+        public List<Point> xzLassoPoints = new List<Point>();
+        public bool isYzDrawingLasso = false;
+        public List<Point> yzLassoPoints = new List<Point>();
+        private bool isShiftPressed = false;
         // Current temporary selections
         public byte[,] currentSelection;
         public byte[,] currentSelectionXZ;
@@ -277,45 +284,64 @@ namespace CTS
 
         private void InitializeDocking()
         {
-            // 1) single docking manager for the whole app
             _dockingManager = new KryptonDockingManager();
-
-            //----------------------------------------------------------------------
-            // 2) tell the manager that *this form* is the root docking control
-            //----------------------------------------------------------------------
             _dockingManager.ManageControl("MainHost", this);
             _dockingManager.ManageFloating("Floating", this);
-            //----------------------------------------------------------------------
-            // 3) build the control-form and wrap it in a page
-            //----------------------------------------------------------------------
+
+            // Create the control form
             var controlForm = new ControlForm(this) { Dock = DockStyle.Fill };
 
-            var page = new KryptonPage
+            // Create the vertical toolbar
+            verticalToolbar = new VerticalToolbar(controlForm, this);
+
+            // Create a page for the toolbar
+            var toolbarPage = new KryptonPage
+            {
+                Text = "Tools",
+                TextTitle = "Tools",
+                MinimumSize = new Size(52, 400)
+            };
+            toolbarPage.ClearFlags(KryptonPageFlags.DockingAllowClose);
+            toolbarPage.SetFlags(KryptonPageFlags.DockingAllowFloating |
+                                KryptonPageFlags.DockingAllowDocked);
+            toolbarPage.Controls.Add(verticalToolbar);
+
+            // Add toolbar to left dockspace
+            var toolbarDock = _dockingManager.AddDockspace(
+                "MainHost",
+                DockingEdge.Left,  // Dock to left side
+                new[] { toolbarPage });
+
+            if (toolbarDock?.DockspaceControl != null)
+            {
+                toolbarDock.DockspaceControl.Width = 52;
+            }
+
+            // Create control panel page
+            var controlPage = new KryptonPage
             {
                 Text = "Controls",
                 TextTitle = "Controls",
                 MinimumSize = new Size(700, 645)
             };
-            page.ClearFlags(KryptonPageFlags.DockingAllowClose);
-            page.SetFlags(KryptonPageFlags.DockingAllowFloating |
-                            KryptonPageFlags.DockingAllowDocked);
-            page.Controls.Add(controlForm);
+            controlPage.ClearFlags(KryptonPageFlags.DockingAllowClose);
+            controlPage.SetFlags(KryptonPageFlags.DockingAllowFloating |
+                                KryptonPageFlags.DockingAllowDocked);
+            controlPage.Controls.Add(controlForm);
 
-            //----------------------------------------------------------------------
-            // 4) create a RIGHT-hand dock-space under the root just registered
-            //----------------------------------------------------------------------
-            var dockElem = _dockingManager.AddDockspace(
-                               "MainHost",           // must match the ManageControl() path
-                               DockingEdge.Right,
-                               new[] { page });      // must be an array
+            // Add control panel to right dockspace
+            var controlDock = _dockingManager.AddDockspace(
+                "MainHost",
+                DockingEdge.Right,
+                new[] { controlPage });
 
-            // widen the pane a bit
-            if (dockElem?.DockspaceControl != null)
-                dockElem.DockspaceControl.Width = 700;
+            if (controlDock?.DockspaceControl != null)
+            {
+                controlDock.DockspaceControl.Width = 700;
+            }
 
-            //----------------------------------------------------------------------
-            // 5) show the embedded form so it gets a handle
-            //----------------------------------------------------------------------
+            // Show the embedded forms
+            verticalToolbar.Show();
             controlForm.Show();
         }
 
@@ -2051,6 +2077,48 @@ namespace CTS
         {
             ScrollablePictureBox view = GetViewForType(viewType);
             if (view == null) return;
+            isShiftPressed = (Control.ModifierKeys & Keys.Shift) != 0;
+
+            if (currentTool == SegmentationTool.Lasso)
+            {
+                if (e.Button == MouseButtons.Left)
+                {
+                    switch (viewType)
+                    {
+                        case ViewType.XY:
+                            if (!isShiftPressed)
+                            {
+                                // Clear previous selection if not holding shift
+                                currentSelection = new byte[width, height];
+                            }
+                            isDrawingLasso = true;
+                            lassoPoints.Clear();
+                            lassoPoints.Add(e.Location);
+                            break;
+
+                        case ViewType.XZ:
+                            if (!isShiftPressed)
+                            {
+                                currentSelectionXZ = new byte[width, depth];
+                            }
+                            isXzDrawingLasso = true;
+                            xzLassoPoints.Clear();
+                            xzLassoPoints.Add(e.Location);
+                            break;
+
+                        case ViewType.YZ:
+                            if (!isShiftPressed)
+                            {
+                                currentSelectionYZ = new byte[depth, height];
+                            }
+                            isYzDrawingLasso = true;
+                            yzLassoPoints.Clear();
+                            yzLassoPoints.Add(e.Location);
+                            break;
+                    }
+                }
+                return;
+            }
             if (currentTool == SegmentationTool.Measurement)
             {
                 if (e.Button == MouseButtons.Left)
@@ -2213,7 +2281,43 @@ namespace CTS
         {
             ScrollablePictureBox view = GetViewForType(viewType);
             if (view == null) return;
+            if (currentTool == SegmentationTool.Lasso && e.Button == MouseButtons.Left)
+            {
+                Point currentPoint = e.Location;
 
+                if (enableLassoSnapping)
+                {
+                    currentPoint = SnapToEdge(viewType, e.Location);
+                }
+
+                switch (viewType)
+                {
+                    case ViewType.XY:
+                        if (isDrawingLasso)
+                        {
+                            lassoPoints.Add(currentPoint);
+                            view.Invalidate();
+                        }
+                        break;
+
+                    case ViewType.XZ:
+                        if (isXzDrawingLasso)
+                        {
+                            xzLassoPoints.Add(currentPoint);
+                            view.Invalidate();
+                        }
+                        break;
+
+                    case ViewType.YZ:
+                        if (isYzDrawingLasso)
+                        {
+                            yzLassoPoints.Add(currentPoint);
+                            view.Invalidate();
+                        }
+                        break;
+                }
+                return;
+            }
             // Handle brush overlay preview
             if (e.Button == MouseButtons.None &&
                 (currentTool == SegmentationTool.Brush || currentTool == SegmentationTool.Eraser))
@@ -2387,6 +2491,38 @@ namespace CTS
                 (e.Button == MouseButtons.Left && currentTool != SegmentationTool.Brush))
             {
                 view.Tag = null;
+            }
+            if (e.Button == MouseButtons.Left && currentTool == SegmentationTool.Lasso)
+            {
+                switch (viewType)
+                {
+                    case ViewType.XY:
+                        if (isDrawingLasso && lassoPoints.Count > 2)
+                        {
+                            CompleteLassoSelection(viewType);
+                            isDrawingLasso = false;
+                        }
+                        break;
+
+                    case ViewType.XZ:
+                        if (isXzDrawingLasso && xzLassoPoints.Count > 2)
+                        {
+                            CompleteLassoSelection(viewType);
+                            isXzDrawingLasso = false;
+                        }
+                        break;
+
+                    case ViewType.YZ:
+                        if (isYzDrawingLasso && yzLassoPoints.Count > 2)
+                        {
+                            CompleteLassoSelection(viewType);
+                            isYzDrawingLasso = false;
+                        }
+                        break;
+                }
+
+                RenderViews(viewType);
+                return;
             }
             if (currentTool == SegmentationTool.Measurement)
             {
@@ -2619,7 +2755,213 @@ namespace CTS
                     break;
             }
         }
+        private Point SnapToEdge(ViewType viewType, Point currentPoint)
+        {
+            if (volumeData == null) return currentPoint;
 
+            // Convert screen coordinates to image coordinates
+            float zoom;
+            PointF pan;
+
+            switch (viewType)
+            {
+                case ViewType.XY:
+                    zoom = xyZoom;
+                    pan = xyPan;
+                    break;
+                case ViewType.XZ:
+                    zoom = xzZoom;
+                    pan = xzPan;
+                    break;
+                case ViewType.YZ:
+                    zoom = yzZoom;
+                    pan = yzPan;
+                    break;
+                default:
+                    return currentPoint;
+            }
+
+            int imageX = (int)((currentPoint.X - pan.X) / zoom);
+            int imageY = (int)((currentPoint.Y - pan.Y) / zoom);
+
+            // Find nearest edge using Sobel operator
+            Point edgePoint = FindNearestEdge(viewType, imageX, imageY, 10); // Search radius of 10 pixels
+
+            // Convert back to screen coordinates
+            return new Point(
+                (int)(edgePoint.X * zoom + pan.X),
+                (int)(edgePoint.Y * zoom + pan.Y)
+            );
+        }
+
+        private Point FindNearestEdge(ViewType viewType, int x, int y, int searchRadius)
+        {
+            double maxGradient = 0;
+            Point bestPoint = new Point(x, y);
+
+            for (int dy = -searchRadius; dy <= searchRadius; dy++)
+            {
+                for (int dx = -searchRadius; dx <= searchRadius; dx++)
+                {
+                    int testX = x + dx;
+                    int testY = y + dy;
+
+                    double gradient = CalculateGradient(viewType, testX, testY);
+                    if (gradient > maxGradient)
+                    {
+                        maxGradient = gradient;
+                        bestPoint = new Point(testX, testY);
+                    }
+                }
+            }
+
+            return bestPoint;
+        }
+
+        private double CalculateGradient(ViewType viewType, int x, int y)
+        {
+            if (volumeData == null) return 0;
+
+            // Sobel operator kernels
+            int[,] sobelX = { { -1, 0, 1 }, { -2, 0, 2 }, { -1, 0, 1 } };
+            int[,] sobelY = { { -1, -2, -1 }, { 0, 0, 0 }, { 1, 2, 1 } };
+
+            double gx = 0, gy = 0;
+
+            for (int dy = -1; dy <= 1; dy++)
+            {
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    int pixelValue = GetPixelValue(viewType, x + dx, y + dy);
+                    gx += pixelValue * sobelX[dy + 1, dx + 1];
+                    gy += pixelValue * sobelY[dy + 1, dx + 1];
+                }
+            }
+
+            return Math.Sqrt(gx * gx + gy * gy);
+        }
+
+        private int GetPixelValue(ViewType viewType, int x, int y)
+        {
+            switch (viewType)
+            {
+                case ViewType.XY:
+                    if (x >= 0 && x < width && y >= 0 && y < height)
+                        return volumeData[x, y, currentSlice];
+                    break;
+                case ViewType.XZ:
+                    if (x >= 0 && x < width && y >= 0 && y < depth)
+                        return volumeData[x, XzSliceY, y];
+                    break;
+                case ViewType.YZ:
+                    if (x >= 0 && x < depth && y >= 0 && y < height)
+                        return volumeData[YzSliceX, y, x];
+                    break;
+            }
+            return 0;
+        }
+
+        private void CompleteLassoSelection(ViewType viewType)
+        {
+            List<Point> points;
+            float zoom;
+            PointF pan;
+
+            switch (viewType)
+            {
+                case ViewType.XY:
+                    points = lassoPoints;
+                    zoom = xyZoom;
+                    pan = xyPan;
+                    break;
+                case ViewType.XZ:
+                    points = xzLassoPoints;
+                    zoom = xzZoom;
+                    pan = xzPan;
+                    break;
+                case ViewType.YZ:
+                    points = yzLassoPoints;
+                    zoom = yzZoom;
+                    pan = yzPan;
+                    break;
+                default:
+                    return;
+            }
+
+            if (points.Count < 3) return;
+
+            // Convert screen coordinates to image coordinates
+            List<Point> imagePoints = points.Select(p => new Point(
+                (int)((p.X - pan.X) / zoom),
+                (int)((p.Y - pan.Y) / zoom)
+            )).ToList();
+
+            // Fill selection using polygon fill algorithm
+            FillLassoSelection(viewType, imagePoints);
+
+            // Store in sparse selections for interpolation
+            switch (viewType)
+            {
+                case ViewType.XY:
+                    byte[,] copy = new byte[width, height];
+                    Array.Copy(currentSelection, copy, width * height);
+                    sparseSelectionsZ[currentSlice] = copy;
+                    break;
+
+                case ViewType.XZ:
+                    byte[,] copyXZ = new byte[width, depth];
+                    Array.Copy(currentSelectionXZ, copyXZ, width * depth);
+                    sparseSelectionsY[XzSliceY] = copyXZ;
+                    break;
+
+                case ViewType.YZ:
+                    byte[,] copyYZ = new byte[depth, height];
+                    Array.Copy(currentSelectionYZ, copyYZ, depth * height);
+                    sparseSelectionsX[YzSliceX] = copyYZ;
+                    break;
+            }
+        }
+
+        private void FillLassoSelection(ViewType viewType, List<Point> points)
+        {
+            byte labelToSet = (byte)((SelectedMaterialIndex > 0) ? Materials[SelectedMaterialIndex].ID : 1);
+
+            switch (viewType)
+            {
+                case ViewType.XY:
+                    FillPolygon(currentSelection, points, width, height, labelToSet);
+                    break;
+                case ViewType.XZ:
+                    FillPolygon(currentSelectionXZ, points, width, depth, labelToSet);
+                    break;
+                case ViewType.YZ:
+                    FillPolygon(currentSelectionYZ, points, depth, height, labelToSet);
+                    break;
+            }
+        }
+
+        private void FillPolygon(byte[,] selection, List<Point> points, int width, int height, byte value)
+        {
+            // Create a region from the polygon points
+            using (GraphicsPath path = new GraphicsPath())
+            {
+                path.AddPolygon(points.ToArray());
+                using (Region region = new Region(path))
+                {
+                    // Scan each row
+                    for (int y = 0; y < height; y++)
+                    {
+                        for (int x = 0; x < width; x++)
+                        {
+                            if (region.IsVisible(x, y))
+                            {
+                                selection[x, y] = value;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         private void ViewPaint(ViewType viewType, PaintEventArgs e)
         {
             ScrollablePictureBox view = GetViewForType(viewType);
@@ -2824,9 +3166,55 @@ namespace CTS
                 }
             }
 
+            // Draw lasso selection if in progress
+            if (currentTool == SegmentationTool.Lasso)
+            {
+                List<Point> points = null;
+                bool isDrawing = false;
+
+                switch (viewType)
+                {
+                    case ViewType.XY:
+                        if (isDrawingLasso)
+                        {
+                            points = lassoPoints;
+                            isDrawing = true;
+                        }
+                        break;
+                    case ViewType.XZ:
+                        if (isXzDrawingLasso)
+                        {
+                            points = xzLassoPoints;
+                            isDrawing = true;
+                        }
+                        break;
+                    case ViewType.YZ:
+                        if (isYzDrawingLasso)
+                        {
+                            points = yzLassoPoints;
+                            isDrawing = true;
+                        }
+                        break;
+                }
+
+                if (isDrawing && points != null && points.Count > 1)
+                {
+                    using (Pen pen = new Pen(Color.Yellow, 2))
+                    {
+                        pen.DashStyle = DashStyle.Dash;
+                        g.DrawLines(pen, points.ToArray());
+
+                        // Draw line from last point to first to show closing
+                        if (points.Count > 2)
+                        {
+                            g.DrawLine(pen, points[points.Count - 1], points[0]);
+                        }
+                    }
+                }
+            }
+
             // Draw the scale bar
             DrawScaleBar(g, view.ClientRectangle, zoom);
-
 
             // Draw view-specific overlays
             switch (viewType)
@@ -3034,6 +3422,85 @@ namespace CTS
         #endregion
 
         #region Segmentation Operations
+        public void SetLassoSnapping(bool enable)
+        {
+            enableLassoSnapping = enable;
+        }
+
+        public void InvertCurrentSelection()
+        {
+            byte labelToSet = (byte)((SelectedMaterialIndex > 0) ? Materials[SelectedMaterialIndex].ID : 1);
+
+            // Only invert the current slice in XY view
+            if (currentSelection != null)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        if (currentSelection[x, y] == 0)
+                            currentSelection[x, y] = labelToSet;
+                        else
+                            currentSelection[x, y] = 0;
+                    }
+                }
+            }
+
+            // Only invert the current row in XZ view
+            if (currentSelectionXZ != null)
+            {
+                for (int z = 0; z < depth; z++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        if (currentSelectionXZ[x, z] == 0)
+                            currentSelectionXZ[x, z] = labelToSet;
+                        else
+                            currentSelectionXZ[x, z] = 0;
+                    }
+                }
+            }
+
+            // Only invert the current column in YZ view
+            if (currentSelectionYZ != null)
+            {
+                for (int z = 0; z < depth; z++)
+                {
+                    for (int y = 0; y < height; y++)
+                    {
+                        if (currentSelectionYZ[z, y] == 0)
+                            currentSelectionYZ[z, y] = labelToSet;
+                        else
+                            currentSelectionYZ[z, y] = 0;
+                    }
+                }
+            }
+
+            // Update sparse selections for the current slices
+            if (currentSelection != null)
+            {
+                byte[,] copy = new byte[width, height];
+                Array.Copy(currentSelection, copy, width * height);
+                sparseSelectionsZ[CurrentSlice] = copy;
+            }
+
+            if (currentSelectionXZ != null)
+            {
+                byte[,] copyXZ = new byte[width, depth];
+                Array.Copy(currentSelectionXZ, copyXZ, width * depth);
+                sparseSelectionsY[XzSliceY] = copyXZ;
+            }
+
+            if (currentSelectionYZ != null)
+            {
+                byte[,] copyYZ = new byte[depth, height];
+                Array.Copy(currentSelectionYZ, copyYZ, depth * height);
+                sparseSelectionsX[YzSliceX] = copyYZ;
+            }
+
+            RenderViews(ViewType.All);
+        }
+
         public void OnThresholdRangeChanged(byte newMin, byte newMax)
         {
             if (SelectedMaterialIndex < 0 || Materials[SelectedMaterialIndex].IsExterior)

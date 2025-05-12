@@ -17,7 +17,7 @@ namespace CTS
     public partial class ControlForm : KryptonPanel
     {
         // Current segmentation tool. Default is Pan.
-        private SegmentationTool currentTool = SegmentationTool.Pan;
+        public SegmentationTool currentTool = SegmentationTool.Pan;
 
         // New Tools menu items.
         private ToolStripMenuItem toolsMenu;
@@ -26,10 +26,12 @@ namespace CTS
         private ToolStripMenuItem eraserMenuItem;
         private ToolStripMenuItem brushMenuItem;
         private ToolStripMenuItem thresholdingMenuItem;
-
+        private CheckBox chkLassoSnapping;
+        private Button btnInvertSelection;
+        private ToolStripMenuItem lassoMenuItem;
         private ToolStripMenuItem measurementMenuItem;
-        private MeasurementManager measurementManager;
-        private MeasurementForm measurementForm;
+        public MeasurementManager measurementManager;
+        public MeasurementForm measurementForm;
 
         // New UI elements in the left panel.
         private Button btnInterpolate;
@@ -235,7 +237,8 @@ namespace CTS
                 mainForm.HideBrushOverlay();
                 brushOverlayTimer.Stop();
             };
-
+            chkLassoSnapping.Visible = false;
+            btnInvertSelection.Visible = false;
             //this.ActiveControl = menuStrip;
         }
         private void InitializeMenus()
@@ -492,7 +495,8 @@ namespace CTS
             brushMenuItem = new ToolStripMenuItem("Brush") { CheckOnClick = true };
             measurementMenuItem = new ToolStripMenuItem("Measurement") { CheckOnClick = true };
             thresholdingMenuItem = new ToolStripMenuItem("Thresholding") { CheckOnClick = true };
-
+            lassoMenuItem = new ToolStripMenuItem("Lasso") { CheckOnClick = true };
+            lassoMenuItem.Click += ToolsMenuItem_Click;
             // Attach a common click handler
             panMenuItem.Click += ToolsMenuItem_Click;
             eraserMenuItem.Click += ToolsMenuItem_Click;
@@ -503,7 +507,7 @@ namespace CTS
             // Add basic tools to menu
             toolsMenu.DropDownItems.AddRange(new ToolStripItem[]
             {
-        panMenuItem, eraserMenuItem, brushMenuItem, measurementMenuItem, thresholdingMenuItem
+        panMenuItem, eraserMenuItem, brushMenuItem, measurementMenuItem, thresholdingMenuItem, lassoMenuItem
             });
 
             // Add statistics submenu
@@ -1160,13 +1164,33 @@ namespace CTS
             Button btnClearSelection = new Button { Text = "Clear", Width = 50, Height = 25 };
             btnClearSelection.Click += (s, e) =>
             {
-                // Clear the 2D temporary selection.
+                // Clear all 2D temporary selections
                 mainForm.currentSelection = new byte[mainForm.GetWidth(), mainForm.GetHeight()];
-                // Optionally, clear the 3D interpolated mask too.
+                mainForm.currentSelectionXZ = new byte[mainForm.GetWidth(), mainForm.GetDepth()];
+                mainForm.currentSelectionYZ = new byte[mainForm.GetDepth(), mainForm.GetHeight()];
+
+                // Clear the 3D interpolated mask
                 mainForm.interpolatedMask = null;
 
-                Logger.Log("[ClearSelection] Cleared current selection.");
-                // Refresh views so that the cleared selection is no longer shown.
+                // Clear all sparse selections
+                mainForm.sparseSelectionsZ.Clear();
+                mainForm.sparseSelectionsY.Clear();
+                mainForm.sparseSelectionsX.Clear();
+
+                // Clear lasso points if they exist
+                if (mainForm.currentTool == SegmentationTool.Lasso)
+                {
+                    mainForm.lassoPoints.Clear();
+                    mainForm.xzLassoPoints.Clear();
+                    mainForm.yzLassoPoints.Clear();
+                    mainForm.isDrawingLasso = false;
+                    mainForm.isXzDrawingLasso = false;
+                    mainForm.isYzDrawingLasso = false;
+                }
+
+                Logger.Log("[ClearSelection] Cleared all selections.");
+
+                // Refresh all views
                 mainForm.RenderViews();
                 _ = mainForm.RenderOrthoViewsAsync();
             };
@@ -1246,6 +1270,29 @@ namespace CTS
                 });
             };
             leftPanel.Controls.Add(btnInterpolate);
+            chkLassoSnapping = new CheckBox
+            {
+                Text = "Enable Snapping",
+                AutoSize = true,
+                Visible = false,
+                Checked = false
+            };
+            chkLassoSnapping.CheckedChanged += (s, e) =>
+            {
+                mainForm.SetLassoSnapping(chkLassoSnapping.Checked);
+            };
+            leftPanel.Controls.Add(chkLassoSnapping);
+            btnInvertSelection = new Button
+            {
+                Text = "Invert Selection",
+                Width = 120,
+                Visible = false
+            };
+            btnInvertSelection.Click += (s, e) =>
+            {
+                mainForm.InvertCurrentSelection();
+            };
+            leftPanel.Controls.Add(btnInvertSelection);
 
             return leftPanel;
         }
@@ -1371,6 +1418,7 @@ namespace CTS
             brushMenuItem.Checked = false;
             measurementMenuItem.Checked = false;
             thresholdingMenuItem.Checked = false;
+            lassoMenuItem.Checked = false;
 
             // Check the clicked item.
             var item = sender as ToolStripMenuItem;
@@ -1461,6 +1509,19 @@ namespace CTS
                 // Ensure ShowMask is enabled
                 showMaskMenuItem.Checked = true;
                 mainForm.ShowMask = true;
+            }
+            else if (item == lassoMenuItem)
+            {
+                currentTool = SegmentationTool.Lasso;
+                toolSizeSlider.Enabled = false;
+                thresholdRangeSlider.Enabled = false;
+                numThresholdMin.Enabled = false;
+                numThresholdMax.Enabled = false;
+                btnInterpolate.Enabled = true;
+                chkLassoSnapping.Visible = true;
+                chkLassoSnapping.Enabled = true;
+                btnInvertSelection.Visible = true;
+                btnInvertSelection.Enabled = true;
             }
 
             // Inform MainForm of the current tool.

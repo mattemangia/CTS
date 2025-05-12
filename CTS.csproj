@@ -146,6 +146,7 @@
       <SubType>Component</SubType>
     </Compile>
     <Compile Include="Misc\Triangle.cs" />
+    <Compile Include="Misc\VerticalToolbar.cs" />
     <Compile Include="Misc\WMVWriter.cs" />
     <Compile Include="Modules\Acoustic_Simulation\AcousticResults.cs">
       <SubType>Form</SubType>

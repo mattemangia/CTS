@@ -1,403 +1,338 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
-using System.IO.MemoryMappedFiles;
+using System.IO.Compression;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Collections.Concurrent;
 using System.Threading;
+using System.IO.MemoryMappedFiles;
 
 namespace CTS.Compression
 {
     /// <summary>
-    /// Represents a node in the octree structure for 3D compression
+    /// Compresses CTS volumes using 3D chunk-based compression
     /// </summary>
-    public class OctreeNode
+    public class ChunkedVolumeCompressor
     {
-        public byte Value { get; set; }
-        public bool IsLeaf { get; set; }
-        public OctreeNode[] Children { get; set; } // 8 children for octree
-        public byte MinValue { get; set; }
-        public byte MaxValue { get; set; }
-        public int X { get; set; }
-        public int Y { get; set; }
-        public int Z { get; set; }
-        public int Size { get; set; }
-
-        public OctreeNode()
-        {
-            Children = new OctreeNode[8];
-            IsLeaf = true;
-        }
-    }
-
-    /// <summary>
-    /// Main 3D volumetric compressor using adaptive octree compression
-    /// </summary>
-    public class VolumetricCompressor
-    {
-        private const int BLOCK_SIZE = 64; // Process volume in 64³ blocks
-        private const int MIN_NODE_SIZE = 2; // Minimum octree node size
-        private const byte VARIANCE_THRESHOLD = 5; // Threshold for subdividing nodes
+        private const string SIGNATURE = "CTS3D";
+        private const int VERSION = 1;
 
         // Compression settings
-        private readonly int _blockSize;
-        private readonly int _minNodeSize;
-        private readonly byte _varianceThreshold;
+        private int _compressionLevel;
+        private bool _usePredictiveCoding;
+        private bool _useRunLengthEncoding;
 
         // Progress reporting
         private IProgress<int> _progress;
-        private long _totalBlocks;
-        private long _processedBlocks;
+        private long _totalChunks;
+        private long _processedChunks;
 
-        public VolumetricCompressor(int blockSize = BLOCK_SIZE, int minNodeSize = MIN_NODE_SIZE, byte varianceThreshold = VARIANCE_THRESHOLD)
+        public ChunkedVolumeCompressor(int compressionLevel = 5, bool predictiveCoding = true, bool runLengthEncoding = true)
         {
-            _blockSize = blockSize;
-            _minNodeSize = minNodeSize;
-            _varianceThreshold = varianceThreshold;
+            _compressionLevel = Math.Max(1, Math.Min(9, compressionLevel));
+            _usePredictiveCoding = predictiveCoding;
+            _useRunLengthEncoding = runLengthEncoding;
         }
 
         /// <summary>
-        /// Compress a volume to a file
+        /// Compress a CTS volume to a compressed file
         /// </summary>
-        public async Task CompressVolumeAsync(string inputPath, string outputPath, IProgress<int> progress)
+        public async Task CompressAsync(string inputPath, string outputPath, IProgress<int> progress)
         {
             _progress = progress;
-            Logger.Log($"[VolumetricCompressor] Starting compression of {inputPath} to {outputPath}");
+            Logger.Log($"[ChunkedVolumeCompressor] Starting compression of {inputPath} to {outputPath}");
 
             try
             {
-                // Load volume metadata
-                var (volumeData, volumeLabels, width, height, depth, pixelSize) =
-                    await FileOperations.LoadDatasetAsync(inputPath, true, 1e-6, 1, null);
+                // Check if inputPath is a folder or a file
+                bool isFolder = Directory.Exists(inputPath);
+                string volumePath, labelsPath;
 
-                if (volumeData == null)
+                if (isFolder)
                 {
-                    throw new InvalidOperationException("No volume data found to compress");
+                    volumePath = Path.Combine(inputPath, "volume.bin");
+                    labelsPath = Path.Combine(inputPath, "labels.bin");
+                }
+                else
+                {
+                    // If it's a file, assume it's volume.bin and look for labels.bin in same directory
+                    volumePath = inputPath;
+                    labelsPath = Path.Combine(Path.GetDirectoryName(inputPath), "labels.bin");
                 }
 
-                // Calculate total blocks
-                int blocksX = (width + _blockSize - 1) / _blockSize;
-                int blocksY = (height + _blockSize - 1) / _blockSize;
-                int blocksZ = (depth + _blockSize - 1) / _blockSize;
-                _totalBlocks = blocksX * blocksY * blocksZ;
-                _processedBlocks = 0;
+                if (!File.Exists(volumePath))
+                {
+                    throw new FileNotFoundException($"Volume file not found: {volumePath}");
+                }
 
-                Logger.Log($"[VolumetricCompressor] Volume dimensions: {width}x{height}x{depth}, Blocks: {blocksX}x{blocksY}x{blocksZ}");
+                // Read header from volume file to get dimensions
+                VolumeHeader header;
+                using (var fs = new FileStream(volumePath, FileMode.Open, FileAccess.Read))
+                using (var br = new BinaryReader(fs))
+                {
+                    header = ReadVolumeHeader(br);
+                }
+
+                // Calculate total chunks
+                _totalChunks = header.ChunkCountX * header.ChunkCountY * header.ChunkCountZ;
+                if (File.Exists(labelsPath))
+                {
+                    _totalChunks *= 2; // Double for labels
+                }
+                _processedChunks = 0;
+
+                Logger.Log($"[ChunkedVolumeCompressor] Compressing {header.Width}x{header.Height}x{header.Depth} volume with {_totalChunks} chunks");
 
                 using (var outputStream = new FileStream(outputPath, FileMode.Create, FileAccess.Write))
                 using (var writer = new BinaryWriter(outputStream))
                 {
-                    // Write header
-                    WriteHeader(writer, width, height, depth, pixelSize, volumeLabels != null);
+                    // Write compressed file header
+                    WriteCompressedHeader(writer, header, File.Exists(labelsPath));
 
-                    // Compress grayscale data
-                    Logger.Log("[VolumetricCompressor] Compressing grayscale data...");
-                    await CompressGrayscaleDataAsync(writer, volumeData, width, height, depth);
+                    // Compress volume data
+                    await CompressVolumeFileAsync(volumePath, writer, header);
 
-                    // Compress labels if present
-                    if (volumeLabels != null)
+                    // Compress labels if they exist
+                    if (File.Exists(labelsPath))
                     {
-                        Logger.Log("[VolumetricCompressor] Compressing label data...");
-                        await CompressLabelDataAsync(writer, volumeLabels, width, height, depth);
+                        Logger.Log("[ChunkedVolumeCompressor] Compressing label data...");
+                        await CompressLabelsFileAsync(labelsPath, writer);
                     }
                 }
 
-                // Clean up
-                volumeData?.Dispose();
-                volumeLabels?.Dispose();
-
-                Logger.Log($"[VolumetricCompressor] Compression completed. Output file: {outputPath}");
+                Logger.Log($"[ChunkedVolumeCompressor] Compression completed. Output: {outputPath}");
                 progress?.Report(100);
             }
             catch (Exception ex)
             {
-                Logger.Log($"[VolumetricCompressor] Error during compression: {ex.Message}");
+                Logger.Log($"[ChunkedVolumeCompressor] Error: {ex.Message}");
                 throw;
             }
         }
 
         /// <summary>
-        /// Decompress a volume from file
+        /// Decompress a CTS compressed file back to volume files
         /// </summary>
-        public async Task DecompressVolumeAsync(string inputPath, string outputPath, IProgress<int> progress)
+        public async Task DecompressAsync(string inputPath, string outputPath, IProgress<int> progress)
         {
             _progress = progress;
-            Logger.Log($"[VolumetricCompressor] Starting decompression of {inputPath} to {outputPath}");
+            Logger.Log($"[ChunkedVolumeCompressor] Starting decompression of {inputPath} to {outputPath}");
 
             try
             {
+                // Create output directory if it doesn't exist
+                Directory.CreateDirectory(outputPath);
+
                 using (var inputStream = new FileStream(inputPath, FileMode.Open, FileAccess.Read))
                 using (var reader = new BinaryReader(inputStream))
                 {
-                    // Read header
-                    var header = ReadHeader(reader);
-                    Logger.Log($"[VolumetricCompressor] Decompressing volume: {header.Width}x{header.Height}x{header.Depth}");
+                    // Read and validate header
+                    var header = ReadCompressedHeader(reader);
 
-                    // Create output volume
-                    var volumeData = new ChunkedVolume(header.Width, header.Height, header.Depth, FileOperations.CHUNK_DIM);
-                    ChunkedLabelVolume volumeLabels = null;
+                    string volumePath = Path.Combine(outputPath, "volume.bin");
+                    string labelsPath = Path.Combine(outputPath, "labels.bin");
 
+                    // Calculate total chunks for progress
+                    _totalChunks = header.ChunkCountX * header.ChunkCountY * header.ChunkCountZ;
                     if (header.HasLabels)
                     {
-                        volumeLabels = new ChunkedLabelVolume(header.Width, header.Height, header.Depth,
-                            FileOperations.CHUNK_DIM, false, null);
+                        _totalChunks *= 2;
                     }
+                    _processedChunks = 0;
 
-                    // Decompress grayscale data
-                    Logger.Log("[VolumetricCompressor] Decompressing grayscale data...");
-                    await DecompressGrayscaleDataAsync(reader, volumeData, header.Width, header.Height, header.Depth);
+                    Logger.Log($"[ChunkedVolumeCompressor] Decompressing {header.Width}x{header.Height}x{header.Depth} volume");
+
+                    // Decompress volume data
+                    await DecompressVolumeFileAsync(reader, volumePath, header);
 
                     // Decompress labels if present
                     if (header.HasLabels)
                     {
-                        Logger.Log("[VolumetricCompressor] Decompressing label data...");
-                        await DecompressLabelDataAsync(reader, volumeLabels, header.Width, header.Height, header.Depth);
+                        Logger.Log("[ChunkedVolumeCompressor] Decompressing label data...");
+                        await DecompressLabelsFileAsync(reader, labelsPath, header);
                     }
 
-                    // Save decompressed volume
-                    string volumePath = Path.Combine(outputPath, "volume.bin");
-                    volumeData.SaveAsBin(volumePath);
-
-                    if (volumeLabels != null)
-                    {
-                        string labelsPath = Path.Combine(outputPath, "labels.bin");
-                        using (var fs = new FileStream(labelsPath, FileMode.Create))
-                        using (var bw = new BinaryWriter(fs))
-                        {
-                            volumeLabels.WriteChunks(bw);
-                        }
-                    }
-
-                    // Create header files
+                    // Create volume.chk for compatibility
                     FileOperations.CreateVolumeChk(outputPath, header.Width, header.Height, header.Depth,
-                        FileOperations.CHUNK_DIM, header.PixelSize);
-
-                    // Clean up
-                    volumeData.Dispose();
-                    volumeLabels?.Dispose();
+                        header.ChunkDim, header.PixelSize);
                 }
 
-                Logger.Log($"[VolumetricCompressor] Decompression completed. Output path: {outputPath}");
+                Logger.Log($"[ChunkedVolumeCompressor] Decompression completed. Output: {outputPath}");
                 progress?.Report(100);
             }
             catch (Exception ex)
             {
-                Logger.Log($"[VolumetricCompressor] Error during decompression: {ex.Message}");
+                Logger.Log($"[ChunkedVolumeCompressor] Error: {ex.Message}");
                 throw;
             }
         }
 
         #region Compression Methods
 
-        private async Task CompressGrayscaleDataAsync(BinaryWriter writer, IGrayscaleVolumeData volumeData,
-            int width, int height, int depth)
+        private async Task CompressVolumeFileAsync(string volumePath, BinaryWriter writer, VolumeHeader header)
         {
-            int blocksX = (width + _blockSize - 1) / _blockSize;
-            int blocksY = (height + _blockSize - 1) / _blockSize;
-            int blocksZ = (depth + _blockSize - 1) / _blockSize;
+            int chunkSize = header.ChunkDim * header.ChunkDim * header.ChunkDim;
+            int totalChunks = header.ChunkCountX * header.ChunkCountY * header.ChunkCountZ;
 
-            // Process blocks in parallel
-            var blockQueue = new ConcurrentQueue<CompressedBlock>();
-            var semaphore = new SemaphoreSlim(Environment.ProcessorCount * 2); // Limit concurrent blocks
+            // Process chunks in parallel
+            var compressedChunks = new ConcurrentDictionary<int, byte[]>();
+            var semaphore = new SemaphoreSlim(Environment.ProcessorCount);
 
-            var tasks = new List<Task>();
-
-            for (int bz = 0; bz < blocksZ; bz++)
+            using (var volumeFile = MemoryMappedFile.CreateFromFile(volumePath, FileMode.Open, null, 0, MemoryMappedFileAccess.Read))
+            using (var accessor = volumeFile.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read))
             {
-                for (int by = 0; by < blocksY; by++)
-                {
-                    for (int bx = 0; bx < blocksX; bx++)
-                    {
-                        int blockX = bx, blockY = by, blockZ = bz;
+                var tasks = new List<Task>();
 
+                for (int chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++)
+                {
+                    int index = chunkIndex; // Capture for closure
+
+                    var task = Task.Run(async () =>
+                    {
                         await semaphore.WaitAsync();
-                        var task = Task.Run(() =>
+                        try
                         {
-                            try
-                            {
-                                var block = ExtractBlock(volumeData, blockX, blockY, blockZ, width, height, depth);
-                                var compressedBlock = CompressBlock(block, blockX, blockY, blockZ);
-                                blockQueue.Enqueue(compressedBlock);
+                            // Read chunk data
+                            byte[] chunkData = new byte[chunkSize];
+                            long offset = 36 + (long)index * chunkSize; // 36 bytes header
+                            accessor.ReadArray(offset, chunkData, 0, chunkSize);
 
-                                Interlocked.Increment(ref _processedBlocks);
-                                _progress?.Report((int)(_processedBlocks * 100 / _totalBlocks));
-                            }
-                            finally
-                            {
-                                semaphore.Release();
-                            }
-                        });
+                            // Compress chunk
+                            byte[] compressed = Compress3DChunk(chunkData, header.ChunkDim);
+                            compressedChunks[index] = compressed;
 
-                        tasks.Add(task);
+                            Interlocked.Increment(ref _processedChunks);
+                            _progress?.Report((int)(_processedChunks * 100 / _totalChunks));
+                        }
+                        finally
+                        {
+                            semaphore.Release();
+                        }
+                    });
+
+                    tasks.Add(task);
+                }
+
+                await Task.WhenAll(tasks);
+            }
+
+            // Write compressed chunks in order
+            writer.Write(totalChunks);
+            for (int i = 0; i < totalChunks; i++)
+            {
+                var compressed = compressedChunks[i];
+                writer.Write(compressed.Length);
+                writer.Write(compressed);
+            }
+        }
+
+        private byte[] Compress3DChunk(byte[] chunkData, int chunkDim)
+        {
+            // Apply predictive coding if enabled
+            if (_usePredictiveCoding)
+            {
+                chunkData = ApplyPredictiveCoding3D(chunkData, chunkDim);
+            }
+
+            // Apply run-length encoding if enabled
+            if (_useRunLengthEncoding)
+            {
+                chunkData = ApplyRunLengthEncoding(chunkData);
+            }
+
+            // Apply final compression (DEFLATE)
+            using (var output = new MemoryStream())
+            {
+                using (var deflate = new DeflateStream(output, (CompressionLevel)_compressionLevel))
+                {
+                    deflate.Write(chunkData, 0, chunkData.Length);
+                }
+                return output.ToArray();
+            }
+        }
+
+        private byte[] ApplyPredictiveCoding3D(byte[] data, int dim)
+        {
+            byte[] result = new byte[data.Length];
+            int dimSq = dim * dim;
+
+            // First voxel is stored as-is
+            result[0] = data[0];
+
+            // Apply 3D predictive coding
+            for (int z = 0; z < dim; z++)
+            {
+                for (int y = 0; y < dim; y++)
+                {
+                    for (int x = 0; x < dim; x++)
+                    {
+                        int idx = z * dimSq + y * dim + x;
+
+                        if (idx == 0) continue; // Skip first voxel
+
+                        // Predict based on neighbors
+                        int prediction = 0;
+                        int count = 0;
+
+                        // Previous in X
+                        if (x > 0)
+                        {
+                            prediction += data[idx - 1];
+                            count++;
+                        }
+
+                        // Previous in Y
+                        if (y > 0)
+                        {
+                            prediction += data[idx - dim];
+                            count++;
+                        }
+
+                        // Previous in Z
+                        if (z > 0)
+                        {
+                            prediction += data[idx - dimSq];
+                            count++;
+                        }
+
+                        // Average prediction
+                        prediction = count > 0 ? prediction / count : 128;
+
+                        // Store difference
+                        int diff = data[idx] - prediction;
+                        result[idx] = (byte)(diff + 128); // Offset to make positive
                     }
                 }
             }
 
-            await Task.WhenAll(tasks);
-
-            // Write compressed blocks
-            Logger.Log($"[VolumetricCompressor] Writing {blockQueue.Count} compressed blocks");
-            writer.Write(blockQueue.Count);
-
-            foreach (var block in blockQueue.OrderBy(b => b.Z).ThenBy(b => b.Y).ThenBy(b => b.X))
-            {
-                WriteCompressedBlock(writer, block);
-            }
+            return result;
         }
 
-        private byte[,,] ExtractBlock(IGrayscaleVolumeData volumeData, int blockX, int blockY, int blockZ,
-            int volumeWidth, int volumeHeight, int volumeDepth)
+        private byte[] ApplyRunLengthEncoding(byte[] data)
         {
-            int startX = blockX * _blockSize;
-            int startY = blockY * _blockSize;
-            int startZ = blockZ * _blockSize;
-
-            int sizeX = Math.Min(_blockSize, volumeWidth - startX);
-            int sizeY = Math.Min(_blockSize, volumeHeight - startY);
-            int sizeZ = Math.Min(_blockSize, volumeDepth - startZ);
-
-            byte[,,] block = new byte[sizeX, sizeY, sizeZ];
-
-            for (int z = 0; z < sizeZ; z++)
+            using (var output = new MemoryStream())
             {
-                for (int y = 0; y < sizeY; y++)
+                int i = 0;
+                while (i < data.Length)
                 {
-                    for (int x = 0; x < sizeX; x++)
+                    byte value = data[i];
+                    int count = 1;
+
+                    // Count consecutive same values
+                    while (i + count < data.Length && data[i + count] == value && count < 255)
                     {
-                        block[x, y, z] = volumeData[startX + x, startY + y, startZ + z];
-                    }
-                }
-            }
-
-            return block;
-        }
-
-        private CompressedBlock CompressBlock(byte[,,] block, int blockX, int blockY, int blockZ)
-        {
-            var compressedBlock = new CompressedBlock
-            {
-                X = blockX,
-                Y = blockY,
-                Z = blockZ,
-                SizeX = block.GetLength(0),
-                SizeY = block.GetLength(1),
-                SizeZ = block.GetLength(2)
-            };
-
-            // Build octree representation
-            var octree = BuildOctree(block, 0, 0, 0, Math.Max(Math.Max(block.GetLength(0), block.GetLength(1)), block.GetLength(2)));
-
-            // Serialize octree to compressed format
-            using (var stream = new MemoryStream())
-            using (var writer = new BinaryWriter(stream))
-            {
-                SerializeOctree(writer, octree);
-                compressedBlock.Data = stream.ToArray();
-            }
-
-            return compressedBlock;
-        }
-
-        private OctreeNode BuildOctree(byte[,,] data, int x, int y, int z, int size)
-        {
-            var node = new OctreeNode
-            {
-                X = x,
-                Y = y,
-                Z = z,
-                Size = size
-            };
-
-            // Check if we're within bounds
-            if (x >= data.GetLength(0) || y >= data.GetLength(1) || z >= data.GetLength(2))
-            {
-                node.Value = 0;
-                node.IsLeaf = true;
-                return node;
-            }
-
-            // Calculate min/max values and variance in this region
-            byte minVal = 255, maxVal = 0;
-            long sum = 0, sumSquares = 0;
-            int count = 0;
-
-            for (int dz = 0; dz < size && z + dz < data.GetLength(2); dz++)
-            {
-                for (int dy = 0; dy < size && y + dy < data.GetLength(1); dy++)
-                {
-                    for (int dx = 0; dx < size && x + dx < data.GetLength(0); dx++)
-                    {
-                        byte val = data[x + dx, y + dy, z + dz];
-                        minVal = Math.Min(minVal, val);
-                        maxVal = Math.Max(maxVal, val);
-                        sum += val;
-                        sumSquares += val * val;
                         count++;
                     }
+
+                    // Write count and value
+                    output.WriteByte((byte)count);
+                    output.WriteByte(value);
+
+                    i += count;
                 }
-            }
 
-            node.MinValue = minVal;
-            node.MaxValue = maxVal;
-
-            // Calculate variance
-            double mean = (double)sum / count;
-            double variance = (sumSquares / count) - (mean * mean);
-
-            // Decide if we should subdivide
-            if (size <= _minNodeSize || variance < _varianceThreshold * _varianceThreshold)
-            {
-                // Make this a leaf node with average value
-                node.IsLeaf = true;
-                node.Value = (byte)Math.Round(mean);
-            }
-            else
-            {
-                // Subdivide into 8 children
-                node.IsLeaf = false;
-                int halfSize = size / 2;
-
-                for (int i = 0; i < 8; i++)
-                {
-                    int childX = x + (i & 1) * halfSize;
-                    int childY = y + ((i >> 1) & 1) * halfSize;
-                    int childZ = z + ((i >> 2) & 1) * halfSize;
-
-                    node.Children[i] = BuildOctree(data, childX, childY, childZ, halfSize);
-                }
-            }
-
-            return node;
-        }
-
-        private void SerializeOctree(BinaryWriter writer, OctreeNode node)
-        {
-            // Write node type flag
-            writer.Write(node.IsLeaf);
-
-            if (node.IsLeaf)
-            {
-                // Write leaf value
-                writer.Write(node.Value);
-            }
-            else
-            {
-                // Write child presence mask
-                byte mask = 0;
-                for (int i = 0; i < 8; i++)
-                {
-                    if (node.Children[i] != null)
-                        mask |= (byte)(1 << i);
-                }
-                writer.Write(mask);
-
-                // Recursively write children
-                for (int i = 0; i < 8; i++)
-                {
-                    if (node.Children[i] != null)
-                        SerializeOctree(writer, node.Children[i]);
-                }
+                return output.ToArray();
             }
         }
 
@@ -405,309 +340,344 @@ namespace CTS.Compression
 
         #region Decompression Methods
 
-        private async Task DecompressGrayscaleDataAsync(BinaryReader reader, ChunkedVolume volumeData,
-            int width, int height, int depth)
+        private async Task DecompressVolumeFileAsync(BinaryReader reader, string outputPath, VolumeHeader header)
         {
-            int blockCount = reader.ReadInt32();
-            Logger.Log($"[VolumetricCompressor] Decompressing {blockCount} blocks");
+            int chunkSize = header.ChunkDim * header.ChunkDim * header.ChunkDim;
+            int totalChunks = reader.ReadInt32();
 
-            var semaphore = new SemaphoreSlim(Environment.ProcessorCount * 2);
-            var tasks = new List<Task>();
-
-            for (int i = 0; i < blockCount; i++)
+            // Create output file
+            using (var fs = new FileStream(outputPath, FileMode.Create, FileAccess.Write))
+            using (var writer = new BinaryWriter(fs))
             {
-                var compressedBlock = ReadCompressedBlock(reader);
+                // Write volume header
+                WriteVolumeHeader(writer, header);
 
-                await semaphore.WaitAsync();
-                var task = Task.Run(() =>
+                // Pre-allocate file
+                long totalSize = 36 + (long)totalChunks * chunkSize;
+                fs.SetLength(totalSize);
+
+                // Decompress chunks
+                for (int i = 0; i < totalChunks; i++)
                 {
-                    try
-                    {
-                        var block = DecompressBlock(compressedBlock);
-                        WriteBlockToVolume(volumeData, block, compressedBlock.X, compressedBlock.Y, compressedBlock.Z);
+                    int compressedSize = reader.ReadInt32();
+                    byte[] compressedData = reader.ReadBytes(compressedSize);
 
-                        _progress?.Report((i + 1) * 100 / blockCount);
-                    }
-                    finally
-                    {
-                        semaphore.Release();
-                    }
-                });
+                    byte[] decompressed = Decompress3DChunk(compressedData, header.ChunkDim);
 
-                tasks.Add(task);
-            }
+                    // Write to correct position
+                    long offset = 36 + (long)i * chunkSize;
+                    fs.Seek(offset, SeekOrigin.Begin);
+                    writer.Write(decompressed);
 
-            await Task.WhenAll(tasks);
-        }
-
-        private byte[,,] DecompressBlock(CompressedBlock compressedBlock)
-        {
-            byte[,,] block = new byte[compressedBlock.SizeX, compressedBlock.SizeY, compressedBlock.SizeZ];
-
-            using (var stream = new MemoryStream(compressedBlock.Data))
-            using (var reader = new BinaryReader(stream))
-            {
-                var octree = DeserializeOctree(reader);
-                FillBlockFromOctree(block, octree, 0, 0, 0,
-                    Math.Max(Math.Max(compressedBlock.SizeX, compressedBlock.SizeY), compressedBlock.SizeZ));
-            }
-
-            return block;
-        }
-
-        private OctreeNode DeserializeOctree(BinaryReader reader)
-        {
-            var node = new OctreeNode();
-            node.IsLeaf = reader.ReadBoolean();
-
-            if (node.IsLeaf)
-            {
-                node.Value = reader.ReadByte();
-            }
-            else
-            {
-                byte mask = reader.ReadByte();
-
-                for (int i = 0; i < 8; i++)
-                {
-                    if ((mask & (1 << i)) != 0)
-                        node.Children[i] = DeserializeOctree(reader);
+                    _processedChunks++;
+                    _progress?.Report((int)(_processedChunks * 100 / _totalChunks));
                 }
             }
-
-            return node;
         }
 
-        private void FillBlockFromOctree(byte[,,] block, OctreeNode node, int x, int y, int z, int size)
+        private byte[] Decompress3DChunk(byte[] compressedData, int chunkDim)
         {
-            if (node == null) return;
-
-            if (node.IsLeaf)
+            // Decompress with DEFLATE
+            byte[] decompressed;
+            using (var input = new MemoryStream(compressedData))
+            using (var output = new MemoryStream())
+            using (var deflate = new DeflateStream(input, CompressionMode.Decompress))
             {
-                // Fill the region with the leaf value
-                for (int dz = 0; dz < size && z + dz < block.GetLength(2); dz++)
+                deflate.CopyTo(output);
+                decompressed = output.ToArray();
+            }
+
+            // Reverse run-length encoding if it was applied
+            if (_useRunLengthEncoding)
+            {
+                decompressed = ReverseRunLengthEncoding(decompressed);
+            }
+
+            // Reverse predictive coding if it was applied
+            if (_usePredictiveCoding)
+            {
+                decompressed = ReversePredictiveCoding3D(decompressed, chunkDim);
+            }
+
+            return decompressed;
+        }
+
+        private byte[] ReverseRunLengthEncoding(byte[] data)
+        {
+            using (var output = new MemoryStream())
+            {
+                int i = 0;
+                while (i < data.Length - 1)
                 {
-                    for (int dy = 0; dy < size && y + dy < block.GetLength(1); dy++)
+                    byte count = data[i];
+                    byte value = data[i + 1];
+
+                    for (int j = 0; j < count; j++)
                     {
-                        for (int dx = 0; dx < size && x + dx < block.GetLength(0); dx++)
+                        output.WriteByte(value);
+                    }
+
+                    i += 2;
+                }
+
+                return output.ToArray();
+            }
+        }
+
+        private byte[] ReversePredictiveCoding3D(byte[] data, int dim)
+        {
+            byte[] result = new byte[data.Length];
+            int dimSq = dim * dim;
+
+            // First voxel is stored as-is
+            result[0] = data[0];
+
+            // Reverse predictive coding
+            for (int z = 0; z < dim; z++)
+            {
+                for (int y = 0; y < dim; y++)
+                {
+                    for (int x = 0; x < dim; x++)
+                    {
+                        int idx = z * dimSq + y * dim + x;
+
+                        if (idx == 0) continue;
+
+                        // Reconstruct prediction
+                        int prediction = 0;
+                        int count = 0;
+
+                        if (x > 0)
                         {
-                            block[x + dx, y + dy, z + dz] = node.Value;
+                            prediction += result[idx - 1];
+                            count++;
                         }
+
+                        if (y > 0)
+                        {
+                            prediction += result[idx - dim];
+                            count++;
+                        }
+
+                        if (z > 0)
+                        {
+                            prediction += result[idx - dimSq];
+                            count++;
+                        }
+
+                        prediction = count > 0 ? prediction / count : 128;
+
+                        // Reconstruct original value
+                        int diff = data[idx] - 128;
+                        result[idx] = (byte)Math.Max(0, Math.Min(255, prediction + diff));
                     }
                 }
             }
-            else
-            {
-                // Recursively fill children
-                int halfSize = size / 2;
 
-                for (int i = 0; i < 8; i++)
-                {
-                    if (node.Children[i] != null)
-                    {
-                        int childX = x + (i & 1) * halfSize;
-                        int childY = y + ((i >> 1) & 1) * halfSize;
-                        int childZ = z + ((i >> 2) & 1) * halfSize;
-
-                        FillBlockFromOctree(block, node.Children[i], childX, childY, childZ, halfSize);
-                    }
-                }
-            }
-        }
-
-        private void WriteBlockToVolume(ChunkedVolume volumeData, byte[,,] block, int blockX, int blockY, int blockZ)
-        {
-            int startX = blockX * _blockSize;
-            int startY = blockY * _blockSize;
-            int startZ = blockZ * _blockSize;
-
-            for (int z = 0; z < block.GetLength(2); z++)
-            {
-                for (int y = 0; y < block.GetLength(1); y++)
-                {
-                    for (int x = 0; x < block.GetLength(0); x++)
-                    {
-                        volumeData[startX + x, startY + y, startZ + z] = block[x, y, z];
-                    }
-                }
-            }
+            return result;
         }
 
         #endregion
 
-        #region Label Compression
+        #region Header Management
 
-        private async Task CompressLabelDataAsync(BinaryWriter writer, ILabelVolumeData volumeLabels,
-            int width, int height, int depth)
-        {
-            Logger.Log("[VolumetricCompressor] Using sparse representation for label compression");
-
-            // Count non-zero voxels
-            long nonZeroCount = 0;
-            var nonZeroVoxels = new ConcurrentBag<SparseVoxel>();
-
-            int slicesPerThread = depth / Environment.ProcessorCount;
-            var tasks = new List<Task>();
-
-            for (int t = 0; t < Environment.ProcessorCount; t++)
-            {
-                int startZ = t * slicesPerThread;
-                int endZ = (t == Environment.ProcessorCount - 1) ? depth : (t + 1) * slicesPerThread;
-
-                tasks.Add(Task.Run(() =>
-                {
-                    for (int z = startZ; z < endZ; z++)
-                    {
-                        for (int y = 0; y < height; y++)
-                        {
-                            for (int x = 0; x < width; x++)
-                            {
-                                byte label = volumeLabels[x, y, z];
-                                if (label != 0)
-                                {
-                                    nonZeroVoxels.Add(new SparseVoxel
-                                    {
-                                        X = (ushort)x,
-                                        Y = (ushort)y,
-                                        Z = (ushort)z,
-                                        Value = label
-                                    });
-                                    Interlocked.Increment(ref nonZeroCount);
-                                }
-                            }
-                        }
-
-                        _progress?.Report(50 + (z - startZ) * 50 / (endZ - startZ));
-                    }
-                }));
-            }
-
-            await Task.WhenAll(tasks);
-
-            // Write sparse representation
-            writer.Write(nonZeroCount);
-            Logger.Log($"[VolumetricCompressor] Writing {nonZeroCount} non-zero label voxels");
-
-            foreach (var voxel in nonZeroVoxels.OrderBy(v => v.Z).ThenBy(v => v.Y).ThenBy(v => v.X))
-            {
-                writer.Write(voxel.X);
-                writer.Write(voxel.Y);
-                writer.Write(voxel.Z);
-                writer.Write(voxel.Value);
-            }
-        }
-
-        private async Task DecompressLabelDataAsync(BinaryReader reader, ChunkedLabelVolume volumeLabels,
-            int width, int height, int depth)
-        {
-            long nonZeroCount = reader.ReadInt64();
-            Logger.Log($"[VolumetricCompressor] Decompressing {nonZeroCount} non-zero label voxels");
-
-            // Read sparse voxels
-            for (long i = 0; i < nonZeroCount; i++)
-            {
-                ushort x = reader.ReadUInt16();
-                ushort y = reader.ReadUInt16();
-                ushort z = reader.ReadUInt16();
-                byte value = reader.ReadByte();
-
-                volumeLabels[x, y, z] = value;
-
-                if (i % 100000 == 0)
-                {
-                    _progress?.Report(50 + (int)(i * 50 / nonZeroCount));
-                }
-            }
-        }
-
-        #endregion
-
-        #region Helper Classes and Methods
-
-        private class CompressedBlock
-        {
-            public int X { get; set; }
-            public int Y { get; set; }
-            public int Z { get; set; }
-            public int SizeX { get; set; }
-            public int SizeY { get; set; }
-            public int SizeZ { get; set; }
-            public byte[] Data { get; set; }
-        }
-
-        private class SparseVoxel
-        {
-            public ushort X { get; set; }
-            public ushort Y { get; set; }
-            public ushort Z { get; set; }
-            public byte Value { get; set; }
-        }
-
-        private class CompressionHeader
+        private class VolumeHeader
         {
             public int Width { get; set; }
             public int Height { get; set; }
             public int Depth { get; set; }
+            public int ChunkDim { get; set; }
+            public int BitsPerPixel { get; set; }
             public double PixelSize { get; set; }
+            public int ChunkCountX { get; set; }
+            public int ChunkCountY { get; set; }
+            public int ChunkCountZ { get; set; }
             public bool HasLabels { get; set; }
-            public int Version { get; set; }
         }
 
-        private void WriteHeader(BinaryWriter writer, int width, int height, int depth, double pixelSize, bool hasLabels)
+        private VolumeHeader ReadVolumeHeader(BinaryReader reader)
         {
-            writer.Write("CTS3D"); // Magic signature
-            writer.Write(1); // Version
-            writer.Write(width);
-            writer.Write(height);
-            writer.Write(depth);
-            writer.Write(pixelSize);
-            writer.Write(hasLabels);
-            writer.Write(_blockSize);
-            writer.Write(_minNodeSize);
-            writer.Write(_varianceThreshold);
-        }
-
-        private CompressionHeader ReadHeader(BinaryReader reader)
-        {
-            string signature = new string(reader.ReadChars(5));
-            if (signature != "CTS3D")
-                throw new InvalidDataException("Invalid file signature");
-
-            return new CompressionHeader
+            return new VolumeHeader
             {
-                Version = reader.ReadInt32(),
                 Width = reader.ReadInt32(),
                 Height = reader.ReadInt32(),
                 Depth = reader.ReadInt32(),
+                ChunkDim = reader.ReadInt32(),
+                BitsPerPixel = reader.ReadInt32(),
+                PixelSize = reader.ReadDouble(),
+                ChunkCountX = reader.ReadInt32(),
+                ChunkCountY = reader.ReadInt32(),
+                ChunkCountZ = reader.ReadInt32()
+            };
+        }
+
+        private void WriteVolumeHeader(BinaryWriter writer, VolumeHeader header)
+        {
+            writer.Write(header.Width);
+            writer.Write(header.Height);
+            writer.Write(header.Depth);
+            writer.Write(header.ChunkDim);
+            writer.Write(header.BitsPerPixel);
+            writer.Write(header.PixelSize);
+            writer.Write(header.ChunkCountX);
+            writer.Write(header.ChunkCountY);
+            writer.Write(header.ChunkCountZ);
+        }
+
+        private void WriteCompressedHeader(BinaryWriter writer, VolumeHeader header, bool hasLabels)
+        {
+            writer.Write(SIGNATURE.ToCharArray());
+            writer.Write(VERSION);
+            writer.Write(header.Width);
+            writer.Write(header.Height);
+            writer.Write(header.Depth);
+            writer.Write(header.ChunkDim);
+            writer.Write(header.PixelSize);
+            writer.Write(hasLabels);
+            writer.Write(_compressionLevel);
+            writer.Write(_usePredictiveCoding);
+            writer.Write(_useRunLengthEncoding);
+        }
+
+        private VolumeHeader ReadCompressedHeader(BinaryReader reader)
+        {
+            char[] signature = reader.ReadChars(5);
+            if (new string(signature) != SIGNATURE)
+                throw new InvalidDataException("Invalid file signature");
+
+            int version = reader.ReadInt32();
+            if (version != VERSION)
+                throw new InvalidDataException($"Unsupported version: {version}");
+
+            var header = new VolumeHeader
+            {
+                Width = reader.ReadInt32(),
+                Height = reader.ReadInt32(),
+                Depth = reader.ReadInt32(),
+                ChunkDim = reader.ReadInt32(),
                 PixelSize = reader.ReadDouble(),
                 HasLabels = reader.ReadBoolean()
             };
+
+            // Read compression settings
+            _compressionLevel = reader.ReadInt32();
+            _usePredictiveCoding = reader.ReadBoolean();
+            _useRunLengthEncoding = reader.ReadBoolean();
+
+            // Calculate chunk counts
+            header.ChunkCountX = (header.Width + header.ChunkDim - 1) / header.ChunkDim;
+            header.ChunkCountY = (header.Height + header.ChunkDim - 1) / header.ChunkDim;
+            header.ChunkCountZ = (header.Depth + header.ChunkDim - 1) / header.ChunkDim;
+
+            return header;
         }
 
-        private void WriteCompressedBlock(BinaryWriter writer, CompressedBlock block)
+        private async Task CompressLabelsFileAsync(string labelsPath, BinaryWriter writer)
         {
-            writer.Write(block.X);
-            writer.Write(block.Y);
-            writer.Write(block.Z);
-            writer.Write(block.SizeX);
-            writer.Write(block.SizeY);
-            writer.Write(block.SizeZ);
-            writer.Write(block.Data.Length);
-            writer.Write(block.Data);
-        }
-
-        private CompressedBlock ReadCompressedBlock(BinaryReader reader)
-        {
-            return new CompressedBlock
+            // Read labels header
+            int chunkDim, cntX, cntY, cntZ;
+            using (var fs = new FileStream(labelsPath, FileMode.Open, FileAccess.Read))
+            using (var br = new BinaryReader(fs))
             {
-                X = reader.ReadInt32(),
-                Y = reader.ReadInt32(),
-                Z = reader.ReadInt32(),
-                SizeX = reader.ReadInt32(),
-                SizeY = reader.ReadInt32(),
-                SizeZ = reader.ReadInt32(),
-                Data = reader.ReadBytes(reader.ReadInt32())
-            };
+                chunkDim = br.ReadInt32();
+                cntX = br.ReadInt32();
+                cntY = br.ReadInt32();
+                cntZ = br.ReadInt32();
+            }
+
+            int totalChunks = cntX * cntY * cntZ;
+            int chunkSize = chunkDim * chunkDim * chunkDim;
+
+            writer.Write(chunkDim);
+            writer.Write(cntX);
+            writer.Write(cntY);
+            writer.Write(cntZ);
+
+            using (var labelsFile = MemoryMappedFile.CreateFromFile(labelsPath, FileMode.Open))
+            using (var accessor = labelsFile.CreateViewAccessor())
+            {
+                for (int i = 0; i < totalChunks; i++)
+                {
+                    byte[] chunkData = new byte[chunkSize];
+                    long offset = 16 + (long)i * chunkSize; // 16 bytes header
+                    accessor.ReadArray(offset, chunkData, 0, chunkSize);
+
+                    // Compress label chunk (labels compress better with RLE)
+                    byte[] compressed = CompressLabelChunk(chunkData);
+
+                    writer.Write(compressed.Length);
+                    writer.Write(compressed);
+
+                    _processedChunks++;
+                    _progress?.Report((int)(_processedChunks * 100 / _totalChunks));
+                }
+            }
+        }
+
+        private byte[] CompressLabelChunk(byte[] data)
+        {
+            // For labels, RLE is usually very effective
+            var rle = ApplyRunLengthEncoding(data);
+
+            // Then apply DEFLATE
+            using (var output = new MemoryStream())
+            {
+                using (var deflate = new DeflateStream(output, (CompressionLevel)_compressionLevel))
+                {
+                    deflate.Write(rle, 0, rle.Length);
+                }
+                return output.ToArray();
+            }
+        }
+
+        private async Task DecompressLabelsFileAsync(BinaryReader reader, string outputPath, VolumeHeader header)
+        {
+            int chunkDim = reader.ReadInt32();
+            int cntX = reader.ReadInt32();
+            int cntY = reader.ReadInt32();
+            int cntZ = reader.ReadInt32();
+
+            int totalChunks = cntX * cntY * cntZ;
+            int chunkSize = chunkDim * chunkDim * chunkDim;
+
+            using (var fs = new FileStream(outputPath, FileMode.Create))
+            using (var writer = new BinaryWriter(fs))
+            {
+                // Write labels header
+                writer.Write(chunkDim);
+                writer.Write(cntX);
+                writer.Write(cntY);
+                writer.Write(cntZ);
+
+                // Decompress chunks
+                for (int i = 0; i < totalChunks; i++)
+                {
+                    int compressedSize = reader.ReadInt32();
+                    byte[] compressed = reader.ReadBytes(compressedSize);
+
+                    byte[] decompressed = DecompressLabelChunk(compressed);
+                    writer.Write(decompressed);
+
+                    _processedChunks++;
+                    _progress?.Report((int)(_processedChunks * 100 / _totalChunks));
+                }
+            }
+        }
+
+        private byte[] DecompressLabelChunk(byte[] compressed)
+        {
+            // Decompress with DEFLATE
+            byte[] decompressed;
+            using (var input = new MemoryStream(compressed))
+            using (var output = new MemoryStream())
+            using (var deflate = new DeflateStream(input, CompressionMode.Decompress))
+            {
+                deflate.CopyTo(output);
+                decompressed = output.ToArray();
+            }
+
+            // Reverse RLE
+            return ReverseRunLengthEncoding(decompressed);
         }
 
         #endregion

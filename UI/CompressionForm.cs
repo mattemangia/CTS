@@ -6,182 +6,172 @@ using System.Windows.Forms;
 
 namespace CTS.Compression
 {
-    public partial class CompressionForm : Form
+    public class VolumeCompressionForm : Form
     {
         private MainForm _mainForm;
-        private VolumetricCompressor _compressor;
+        private ChunkedVolumeCompressor _compressor;
 
         private TextBox txtInputPath;
         private TextBox txtOutputPath;
-        private Button btnBrowseInput;
-        private Button btnBrowseOutput;
-        private ProgressBar progressBar;
-        private Label lblStatus;
+        private Button btnSelectInput;
+        private Button btnSelectOutput;
         private Button btnCompress;
         private Button btnDecompress;
-        private NumericUpDown numBlockSize;
-        private NumericUpDown numMinNodeSize;
-        private NumericUpDown numVarianceThreshold;
-        private CheckBox chkUseDefaults;
-        private Label lblInfo;
+        private ProgressBar progressBar;
+        private Label lblStatus;
+        private NumericUpDown numCompressionLevel;
+        private CheckBox chkPredictiveCoding;
+        private CheckBox chkRunLengthEncoding;
+        private Label lblFileSize;
+        private Label lblRatio;
 
-        public CompressionForm(MainForm mainForm)
+        public VolumeCompressionForm(MainForm mainForm)
         {
             _mainForm = mainForm;
-            _compressor = new VolumetricCompressor();
             InitializeComponent();
+
+            // Set default input path to current dataset
+            if (!string.IsNullOrEmpty(_mainForm.CurrentPath))
+            {
+                txtInputPath.Text = _mainForm.CurrentPath;
+                UpdateOutputPath();
+            }
         }
 
         private void InitializeComponent()
         {
-            this.Text = "CTS 3D Volumetric Compression";
-            this.Size = new Size(600, 400);
+            this.Text = "CTS Volume Compression";
+            this.Size = new Size(600, 450);
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.StartPosition = FormStartPosition.CenterParent;
 
-            // Input path
+            // Title
+            Label lblTitle = new Label
+            {
+                Text = "CTS 3D Volume Compression",
+                Font = new Font("Arial", 12, FontStyle.Bold),
+                Location = new Point(20, 10),
+                AutoSize = true
+            };
+
+            // Input section
             Label lblInput = new Label
             {
-                Text = "Input Path:",
-                Location = new Point(20, 20),
+                Text = "Input Volume:",
+                Location = new Point(20, 50),
                 AutoSize = true
             };
 
             txtInputPath = new TextBox
             {
-                Location = new Point(100, 18),
-                Width = 380,
+                Location = new Point(20, 70),
+                Width = 450,
                 ReadOnly = true
             };
 
-            btnBrowseInput = new Button
+            btnSelectInput = new Button
             {
                 Text = "Browse...",
-                Location = new Point(490, 16),
-                Width = 80
+                Location = new Point(480, 68),
+                Width = 80,
+                Height = 25
             };
-            btnBrowseInput.Click += BtnBrowseInput_Click;
+            btnSelectInput.Click += BtnSelectInput_Click;
 
-            // Output path
+            // Output section
             Label lblOutput = new Label
             {
                 Text = "Output Path:",
-                Location = new Point(20, 50),
+                Location = new Point(20, 110),
                 AutoSize = true
             };
 
             txtOutputPath = new TextBox
             {
-                Location = new Point(100, 48),
-                Width = 380,
+                Location = new Point(20, 130),
+                Width = 450,
                 ReadOnly = true
             };
 
-            btnBrowseOutput = new Button
+            btnSelectOutput = new Button
             {
                 Text = "Browse...",
-                Location = new Point(490, 46),
-                Width = 80
+                Location = new Point(480, 128),
+                Width = 80,
+                Height = 25
             };
-            btnBrowseOutput.Click += BtnBrowseOutput_Click;
+            btnSelectOutput.Click += BtnSelectOutput_Click;
 
-            // Settings panel
-            GroupBox settingsGroup = new GroupBox
+            // Settings section
+            GroupBox grpSettings = new GroupBox
             {
                 Text = "Compression Settings",
-                Location = new Point(20, 90),
-                Size = new Size(550, 120)
+                Location = new Point(20, 170),
+                Size = new Size(540, 90)
             };
 
-            chkUseDefaults = new CheckBox
+            Label lblLevel = new Label
             {
-                Text = "Use Default Settings (Recommended)",
-                Location = new Point(20, 20),
-                Width = 250,
+                Text = "Compression Level:",
+                Location = new Point(20, 25),
+                AutoSize = true
+            };
+
+            numCompressionLevel = new NumericUpDown
+            {
+                Location = new Point(140, 23),
+                Width = 60,
+                Minimum = 1,
+                Maximum = 9,
+                Value = 5
+            };
+
+            chkPredictiveCoding = new CheckBox
+            {
+                Text = "3D Predictive Coding",
+                Location = new Point(220, 25),
+                Width = 150,
                 Checked = true
             };
-            chkUseDefaults.CheckedChanged += ChkUseDefaults_CheckedChanged;
 
-            Label lblBlockSize = new Label
+            chkRunLengthEncoding = new CheckBox
             {
-                Text = "Block Size:",
-                Location = new Point(20, 50),
-                AutoSize = true
+                Text = "Run-Length Encoding",
+                Location = new Point(380, 25),
+                Width = 150,
+                Checked = true
             };
 
-            numBlockSize = new NumericUpDown
-            {
-                Location = new Point(120, 48),
-                Width = 80,
-                Minimum = 16,
-                Maximum = 128,
-                Value = 64,
-                Enabled = false
-            };
+            grpSettings.Controls.AddRange(new Control[] { lblLevel, numCompressionLevel, chkPredictiveCoding, chkRunLengthEncoding });
 
-            Label lblMinNode = new Label
-            {
-                Text = "Min Node Size:",
-                Location = new Point(220, 50),
-                AutoSize = true
-            };
-
-            numMinNodeSize = new NumericUpDown
-            {
-                Location = new Point(320, 48),
-                Width = 80,
-                Minimum = 1,
-                Maximum = 8,
-                Value = 2,
-                Enabled = false
-            };
-
-            Label lblVariance = new Label
-            {
-                Text = "Variance Threshold:",
-                Location = new Point(20, 80),
-                AutoSize = true
-            };
-
-            numVarianceThreshold = new NumericUpDown
-            {
-                Location = new Point(120, 78),
-                Width = 80,
-                Minimum = 1,
-                Maximum = 50,
-                Value = 5,
-                Enabled = false
-            };
-
-            settingsGroup.Controls.AddRange(new Control[]
-            {
-                chkUseDefaults, lblBlockSize, numBlockSize, lblMinNode, numMinNodeSize,
-                lblVariance, numVarianceThreshold
-            });
-
-            // Info label
-            lblInfo = new Label
-            {
-                Text = "CTS 3D compression uses adaptive octree subdivision for optimal compression of volumetric data.",
-                Location = new Point(20, 220),
-                Size = new Size(550, 40),
-                ForeColor = Color.DarkBlue
-            };
-
-            // Progress bar
+            // Progress section
             progressBar = new ProgressBar
             {
-                Location = new Point(20, 270),
-                Size = new Size(550, 23),
+                Location = new Point(20, 280),
+                Width = 540,
+                Height = 23,
                 Style = ProgressBarStyle.Continuous
             };
 
-            // Status label
             lblStatus = new Label
             {
                 Text = "Ready",
-                Location = new Point(20, 300),
+                Location = new Point(20, 310),
+                AutoSize = true
+            };
+
+            lblFileSize = new Label
+            {
+                Text = "",
+                Location = new Point(20, 330),
+                AutoSize = true
+            };
+
+            lblRatio = new Label
+            {
+                Text = "",
+                Location = new Point(300, 330),
                 AutoSize = true
             };
 
@@ -189,71 +179,57 @@ namespace CTS.Compression
             btnCompress = new Button
             {
                 Text = "Compress",
-                Location = new Point(370, 320),
-                Size = new Size(90, 30)
+                Location = new Point(370, 360),
+                Width = 90,
+                Height = 30
             };
             btnCompress.Click += BtnCompress_Click;
 
             btnDecompress = new Button
             {
                 Text = "Decompress",
-                Location = new Point(480, 320),
-                Size = new Size(90, 30)
+                Location = new Point(470, 360),
+                Width = 90,
+                Height = 30
             };
             btnDecompress.Click += BtnDecompress_Click;
 
-            // Add controls to form
+            // Add controls
             this.Controls.AddRange(new Control[]
             {
-                lblInput, txtInputPath, btnBrowseInput,
-                lblOutput, txtOutputPath, btnBrowseOutput,
-                settingsGroup, lblInfo, progressBar, lblStatus,
+                lblTitle, lblInput, txtInputPath, btnSelectInput,
+                lblOutput, txtOutputPath, btnSelectOutput,
+                grpSettings, progressBar, lblStatus, lblFileSize, lblRatio,
                 btnCompress, btnDecompress
             });
         }
 
-        private void ChkUseDefaults_CheckedChanged(object sender, EventArgs e)
+        private void BtnSelectInput_Click(object sender, EventArgs e)
         {
-            bool useCustom = !chkUseDefaults.Checked;
-            numBlockSize.Enabled = useCustom;
-            numMinNodeSize.Enabled = useCustom;
-            numVarianceThreshold.Enabled = useCustom;
-        }
-
-        private void BtnBrowseInput_Click(object sender, EventArgs e)
-        {
+            // Check if selecting compressed file or volume folder
             using (var dialog = new OpenFileDialog())
             {
-                dialog.Filter = "CTS Compressed Files (*.cts3d)|*.cts3d|All Files (*.*)|*.*";
-                dialog.Title = "Select Input File";
+                dialog.Filter = "CTS Files|*.cts3d|Volume Files|volume.bin|All Files|*.*";
+                dialog.Title = "Select Input";
+
+                if (!string.IsNullOrEmpty(txtInputPath.Text))
+                {
+                    dialog.InitialDirectory = Path.GetDirectoryName(txtInputPath.Text);
+                }
 
                 if (dialog.ShowDialog() == DialogResult.OK)
                 {
                     txtInputPath.Text = dialog.FileName;
-
-                    // Auto-generate output path
-                    string dir = Path.GetDirectoryName(dialog.FileName);
-                    string name = Path.GetFileNameWithoutExtension(dialog.FileName);
-
-                    if (Path.GetExtension(dialog.FileName).ToLower() == ".cts3d")
-                    {
-                        // Decompression - create output folder
-                        txtOutputPath.Text = Path.Combine(dir, name + "_extracted");
-                    }
-                    else
-                    {
-                        // Compression - create output file
-                        txtOutputPath.Text = Path.Combine(dir, name + ".cts3d");
-                    }
+                    UpdateOutputPath();
                 }
             }
         }
 
-        private void BtnBrowseOutput_Click(object sender, EventArgs e)
+        private void BtnSelectOutput_Click(object sender, EventArgs e)
         {
-            if (Path.GetExtension(txtInputPath.Text).ToLower() == ".cts3d")
+            if (txtInputPath.Text.EndsWith(".cts3d"))
             {
-                // Decompression - select folder
+                // Decompression - select output folder
                 using (var dialog = new FolderBrowserDialog())
                 {
                     dialog.Description = "Select Output Folder";
@@ -266,16 +242,45 @@ namespace CTS.Compression
             }
             else
             {
-                // Compression - select file
+                // Compression - select output file
                 using (var dialog = new SaveFileDialog())
                 {
-                    dialog.Filter = "CTS Compressed Files (*.cts3d)|*.cts3d";
-                    dialog.Title = "Save Compressed File As";
+                    dialog.Filter = "CTS Compressed Files|*.cts3d";
+                    dialog.Title = "Save Compressed File";
 
                     if (dialog.ShowDialog() == DialogResult.OK)
                     {
                         txtOutputPath.Text = dialog.FileName;
                     }
+                }
+            }
+        }
+
+        private void UpdateOutputPath()
+        {
+            if (string.IsNullOrEmpty(txtInputPath.Text))
+                return;
+
+            string dir = Path.GetDirectoryName(txtInputPath.Text);
+            string name = Path.GetFileNameWithoutExtension(txtInputPath.Text);
+
+            if (txtInputPath.Text.EndsWith(".cts3d"))
+            {
+                // Decompression
+                txtOutputPath.Text = Path.Combine(dir, name + "_decompressed");
+            }
+            else
+            {
+                // Compression
+                if (name == "volume")
+                {
+                    // If it's volume.bin, use parent folder name
+                    string parentDir = Directory.GetParent(dir).Name;
+                    txtOutputPath.Text = Path.Combine(dir, parentDir + ".cts3d");
+                }
+                else
+                {
+                    txtOutputPath.Text = Path.Combine(dir, name + ".cts3d");
                 }
             }
         }
@@ -291,19 +296,15 @@ namespace CTS.Compression
 
             btnCompress.Enabled = false;
             btnDecompress.Enabled = false;
-            progressBar.Value = 0;
-            lblStatus.Text = "Compressing...";
+            lblFileSize.Text = "";
+            lblRatio.Text = "";
 
             try
             {
-                // Create compressor with settings
-                if (!chkUseDefaults.Checked)
-                {
-                    _compressor = new VolumetricCompressor(
-                        (int)numBlockSize.Value,
-                        (int)numMinNodeSize.Value,
-                        (byte)numVarianceThreshold.Value);
-                }
+                _compressor = new ChunkedVolumeCompressor(
+                    (int)numCompressionLevel.Value,
+                    chkPredictiveCoding.Checked,
+                    chkRunLengthEncoding.Checked);
 
                 var progress = new Progress<int>(value =>
                 {
@@ -311,23 +312,29 @@ namespace CTS.Compression
                     lblStatus.Text = $"Compressing... {value}%";
                 });
 
-                await _compressor.CompressVolumeAsync(txtInputPath.Text, txtOutputPath.Text, progress);
+                var startTime = DateTime.Now;
+                await _compressor.CompressAsync(txtInputPath.Text, txtOutputPath.Text, progress);
+                var duration = DateTime.Now - startTime;
 
-                // Show compression statistics
-                FileInfo inputFile = new FileInfo(txtInputPath.Text);
+                // Calculate compression ratio
+                long inputSize = GetInputSize(txtInputPath.Text);
                 FileInfo outputFile = new FileInfo(txtOutputPath.Text);
-                double ratio = (double)outputFile.Length / inputFile.Length;
+                double ratio = (double)outputFile.Length / inputSize * 100;
 
-                lblStatus.Text = $"Compression complete. Ratio: {ratio:P2}";
-                MessageBox.Show($"Compression successful!\n\nOriginal size: {inputFile.Length:N0} bytes\n" +
-                               $"Compressed size: {outputFile.Length:N0} bytes\n" +
-                               $"Compression ratio: {ratio:P2}",
+                lblStatus.Text = $"Compression completed in {duration.TotalSeconds:F1}s";
+                lblFileSize.Text = $"Size: {FormatFileSize(inputSize)} → {FormatFileSize(outputFile.Length)}";
+                lblRatio.Text = $"Compression ratio: {ratio:F1}%";
+
+                MessageBox.Show($"Compression successful!\n\nTime: {duration.TotalSeconds:F1}s\n" +
+                               $"Original: {FormatFileSize(inputSize)}\n" +
+                               $"Compressed: {FormatFileSize(outputFile.Length)}\n" +
+                               $"Ratio: {ratio:F1}%",
                                "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
                 lblStatus.Text = "Compression failed";
-                Logger.Log($"[CompressionForm] Error: {ex.Message}");
+                Logger.Log($"[VolumeCompressionForm] Error: {ex.Message}");
                 MessageBox.Show($"Compression failed: {ex.Message}", "Error",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
@@ -349,13 +356,12 @@ namespace CTS.Compression
 
             btnCompress.Enabled = false;
             btnDecompress.Enabled = false;
-            progressBar.Value = 0;
-            lblStatus.Text = "Decompressing...";
+            lblFileSize.Text = "";
+            lblRatio.Text = "";
 
             try
             {
-                // Create output directory if it doesn't exist
-                Directory.CreateDirectory(txtOutputPath.Text);
+                _compressor = new ChunkedVolumeCompressor();
 
                 var progress = new Progress<int>(value =>
                 {
@@ -363,15 +369,14 @@ namespace CTS.Compression
                     lblStatus.Text = $"Decompressing... {value}%";
                 });
 
-                await _compressor.DecompressVolumeAsync(txtInputPath.Text, txtOutputPath.Text, progress);
+                var startTime = DateTime.Now;
+                await _compressor.DecompressAsync(txtInputPath.Text, txtOutputPath.Text, progress);
+                var duration = DateTime.Now - startTime;
 
-                lblStatus.Text = "Decompression complete";
-                MessageBox.Show("Decompression successful!", "Success",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                lblStatus.Text = $"Decompression completed in {duration.TotalSeconds:F1}s";
 
-                // Offer to load the decompressed dataset
-                var result = MessageBox.Show("Would you like to load the decompressed dataset?",
-                    "Load Dataset", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                var result = MessageBox.Show("Decompression successful!\n\nWould you like to load the dataset?",
+                    "Success", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
 
                 if (result == DialogResult.Yes)
                 {
@@ -382,7 +387,7 @@ namespace CTS.Compression
             catch (Exception ex)
             {
                 lblStatus.Text = "Decompression failed";
-                Logger.Log($"[CompressionForm] Error: {ex.Message}");
+                Logger.Log($"[VolumeCompressionForm] Error: {ex.Message}");
                 MessageBox.Show($"Decompression failed: {ex.Message}", "Error",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
@@ -391,6 +396,55 @@ namespace CTS.Compression
                 btnCompress.Enabled = true;
                 btnDecompress.Enabled = true;
             }
+        }
+
+        private long GetInputSize(string path)
+        {
+            if (Directory.Exists(path))
+            {
+                // It's a folder - sum up volume.bin and labels.bin
+                long size = 0;
+                string volumePath = Path.Combine(path, "volume.bin");
+                string labelsPath = Path.Combine(path, "labels.bin");
+
+                if (File.Exists(volumePath))
+                    size += new FileInfo(volumePath).Length;
+                if (File.Exists(labelsPath))
+                    size += new FileInfo(labelsPath).Length;
+
+                return size;
+            }
+            else if (File.Exists(path))
+            {
+                // It's a file - check for labels in same directory
+                long size = new FileInfo(path).Length;
+
+                if (path.EndsWith("volume.bin"))
+                {
+                    string labelsPath = Path.Combine(Path.GetDirectoryName(path), "labels.bin");
+                    if (File.Exists(labelsPath))
+                        size += new FileInfo(labelsPath).Length;
+                }
+
+                return size;
+            }
+
+            return 0;
+        }
+
+        private string FormatFileSize(long bytes)
+        {
+            string[] sizes = { "B", "KB", "MB", "GB", "TB" };
+            double size = bytes;
+            int order = 0;
+
+            while (size >= 1024 && order < sizes.Length - 1)
+            {
+                order++;
+                size = size / 1024;
+            }
+
+            return $"{size:F2} {sizes[order]}";
         }
     }
 }

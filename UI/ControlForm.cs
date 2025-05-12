@@ -319,49 +319,66 @@ namespace CTS
             var compressVolumeMenuItem = new ToolStripMenuItem("Compress Volume...");
             compressVolumeMenuItem.Click += (s, e) =>
             {
-                if (mainForm.volumeData == null && mainForm.volumeLabels == null)
+                try
                 {
-                    MessageBox.Show("Please load a dataset first.", "No Dataset",
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-
-                Logger.Log("[ControlForm] Opening Compression Form");
-
-                using (var compressionForm = new CompressionForm(mainForm))
-                {
-                    // Set default input path to current dataset path
-                    if (!string.IsNullOrEmpty(mainForm.CurrentPath))
+                    // Show compression form
+                    using (var compressionForm = new VolumeCompressionForm(mainForm))
                     {
-                        var inputField = compressionForm.Controls.Find("txtInputPath", true)[0] as TextBox;
-                        if (inputField != null)
-                        {
-                            inputField.Text = mainForm.CurrentPath;
-
-                            // Auto-generate output path
-                            string dir = Path.GetDirectoryName(mainForm.CurrentPath);
-                            string name = Path.GetFileNameWithoutExtension(mainForm.CurrentPath);
-                            var outputField = compressionForm.Controls.Find("txtOutputPath", true)[0] as TextBox;
-                            if (outputField != null)
-                            {
-                                outputField.Text = Path.Combine(dir, name + ".cts3d");
-                            }
-                        }
+                        compressionForm.ShowDialog();
                     }
-
-                    compressionForm.ShowDialog();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[ControlForm] Error opening compression form: {ex.Message}");
+                    MessageBox.Show($"Error opening compression form: {ex.Message}", "Error",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             };
+
 
             // Decompress Volume
             var decompressVolumeMenuItem = new ToolStripMenuItem("Decompress Volume...");
             decompressVolumeMenuItem.Click += (s, e) =>
             {
-                Logger.Log("[ControlForm] Opening Decompression Form");
-
-                using (var compressionForm = new CompressionForm(mainForm))
+                try
                 {
-                    compressionForm.ShowDialog();
+                    Logger.Log("[ControlForm] Opening Volume Decompression form");
+
+                    using (var fileDialog = new OpenFileDialog())
+                    {
+                        fileDialog.Filter = "CTS Compressed Files (*.cts3d)|*.cts3d|All Files (*.*)|*.*";
+                        fileDialog.Title = "Select Compressed Volume";
+
+                        if (fileDialog.ShowDialog() == DialogResult.OK)
+                        {
+                            using (var compressionForm = new VolumeCompressionForm(mainForm))
+                            {
+                                // Set the input path to the selected compressed file
+                                var inputField = compressionForm.Controls.Find("txtInputPath", true)[0] as TextBox;
+                                if (inputField != null)
+                                {
+                                    inputField.Text = fileDialog.FileName;
+
+                                    // Auto-generate output path
+                                    string dir = Path.GetDirectoryName(fileDialog.FileName);
+                                    string name = Path.GetFileNameWithoutExtension(fileDialog.FileName);
+                                    var outputField = compressionForm.Controls.Find("txtOutputPath", true)[0] as TextBox;
+                                    if (outputField != null)
+                                    {
+                                        outputField.Text = Path.Combine(dir, name + "_decompressed");
+                                    }
+                                }
+
+                                compressionForm.ShowDialog();
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[ControlForm] Error opening decompression form: {ex.Message}");
+                    MessageBox.Show($"Error opening decompression form: {ex.Message}", "Error",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             };
 

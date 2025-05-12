@@ -924,8 +924,12 @@ namespace CTS
                 bool labelsChkExists = File.Exists(labelsChkPath);
                 Logger.Log($"[LoadDatasetAsync] Checking for materials file: {labelsChkPath}, exists: {labelsChkExists}");
 
-                // Ask for pixel size only in folder mode
-                if (folderMode)
+                // Check if volume.chk exists (it should after decompression)
+                string volumeChkPath = Path.Combine(folderMode ? path : Path.GetDirectoryName(path), "volume.chk");
+                bool hasVolumeChk = File.Exists(volumeChkPath);
+
+                // Ask for pixel size only if it's a new folder without volume.chk
+                if (folderMode && !hasVolumeChk)
                 {
                     double? userPixelSize = await Task.Run(() => AskUserPixelSize());
                     if (!userPixelSize.HasValue || userPixelSize.Value <= 0)

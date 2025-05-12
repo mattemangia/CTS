@@ -143,7 +143,7 @@ namespace CTS
             Application.Exit();
         }*/
 
-        private void InitializeSliceControls()
+        public void InitializeSliceControls()
         {
             // Calculate the maximum slice index
             int maxSlice = Math.Max(0, mainForm.GetDepth() - 1);

@@ -1,6 +1,8 @@
-﻿using System;
+﻿using Krypton.Docking;
+using System;
 using System.Drawing;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -144,13 +146,13 @@ namespace CTS.Compression
             Label lblOutput = new Label
             {
                 Text = "Output Path:",
-                Location = new Point(20, 110),
+                Location = new Point(20, 170),
                 AutoSize = true
             };
 
             txtOutputPath = new TextBox
             {
-                Location = new Point(20, 130),
+                Location = new Point(20, 190),
                 Width = 450,
                 ReadOnly = true
             };
@@ -158,7 +160,7 @@ namespace CTS.Compression
             btnSelectOutput = new Button
             {
                 Text = "Browse...",
-                Location = new Point(480, 128),
+                Location = new Point(480, 188),
                 Width = 80,
                 Height = 25
             };
@@ -168,7 +170,7 @@ namespace CTS.Compression
             GroupBox grpSettings = new GroupBox
             {
                 Text = "Compression Settings",
-                Location = new Point(20, 170),
+                Location = new Point(20, 230),
                 Size = new Size(540, 90)
             };
 
@@ -209,7 +211,7 @@ namespace CTS.Compression
             // Progress section
             progressBar = new ProgressBar
             {
-                Location = new Point(20, 280),
+                Location = new Point(20, 340),
                 Width = 540,
                 Height = 23,
                 Style = ProgressBarStyle.Continuous
@@ -218,21 +220,21 @@ namespace CTS.Compression
             lblStatus = new Label
             {
                 Text = "Ready",
-                Location = new Point(20, 310),
+                Location = new Point(20, 370),
                 AutoSize = true
             };
 
             lblFileSize = new Label
             {
                 Text = "",
-                Location = new Point(20, 330),
+                Location = new Point(20, 390),
                 AutoSize = true
             };
 
             lblRatio = new Label
             {
                 Text = "",
-                Location = new Point(300, 330),
+                Location = new Point(300, 390),
                 AutoSize = true
             };
 
@@ -240,7 +242,7 @@ namespace CTS.Compression
             btnCompress = new Button
             {
                 Text = "Compress",
-                Location = new Point(370, 360),
+                Location = new Point(370, 420),
                 Width = 90,
                 Height = 30
             };
@@ -249,7 +251,7 @@ namespace CTS.Compression
             btnDecompress = new Button
             {
                 Text = "Decompress",
-                Location = new Point(470, 360),
+                Location = new Point(470, 420),
                 Width = 90,
                 Height = 30
             };
@@ -257,13 +259,57 @@ namespace CTS.Compression
 
             // Add controls
             this.Controls.AddRange(new Control[]
-        {
-            lblTitle, grpSource, lblInput, txtInputPath, btnSelectInput,
-            lblOutput, txtOutputPath, btnSelectOutput,
-            grpSettings, progressBar, lblStatus, lblFileSize, lblRatio,
-            btnCompress, btnDecompress
-        });
+            {
+                lblTitle, grpSource, lblInput, txtInputPath, btnSelectInput,
+                lblOutput, txtOutputPath, btnSelectOutput,
+                grpSettings, progressBar, lblStatus, lblFileSize, lblRatio,
+                btnCompress, btnDecompress
+            });
         }
+
+        private ControlForm FindControlForm()
+        {
+            // ControlForm is not a Form, it's a KryptonPanel
+            // We need to search in the MainForm's controls
+            return FindControlInContainer(_mainForm);
+        }
+        private ControlForm FindControlInContainer(Control container)
+        {
+            if (container is ControlForm)
+                return container as ControlForm;
+
+            foreach (Control child in container.Controls)
+            {
+                var result = FindControlInContainer(child);
+                if (result != null)
+                    return result;
+            }
+
+            // Check in docking manager if available
+            if (container is Form form)
+            {
+                var dockingManager = form.Controls.OfType<KryptonDockingManager>().FirstOrDefault();
+                if (dockingManager != null)
+                {
+                    // Search through docked pages
+                    foreach (var page in dockingManager.Pages)
+                    {
+                        foreach (Control control in page.Controls)
+                        {
+                            if (control is ControlForm)
+                                return control as ControlForm;
+
+                            var result = FindControlInContainer(control);
+                            if (result != null)
+                                return result;
+                        }
+                    }
+                }
+            }
+
+            return null;
+        }
+
         private void UpdateSourceSelection()
         {
             if (rbCurrentVolume.Checked)
@@ -280,6 +326,7 @@ namespace CTS.Compression
                 btnSelectInput.Enabled = true;
             }
         }
+
         private void BtnSelectInput_Click(object sender, EventArgs e)
         {
             // Check if selecting compressed file or volume folder
@@ -413,6 +460,7 @@ namespace CTS.Compression
 
             return true;
         }
+
         private async void BtnCompress_Click(object sender, EventArgs e)
         {
             if (!ValidateInputs())
@@ -518,6 +566,7 @@ namespace CTS.Compression
                 }
             }
         }
+
         private long CalculateLoadedVolumeSize()
         {
             long size = 0;
@@ -540,7 +589,6 @@ namespace CTS.Compression
 
             return size;
         }
-
 
         private async void BtnDecompress_Click(object sender, EventArgs e)
         {
@@ -578,6 +626,17 @@ namespace CTS.Compression
                 if (result == DialogResult.Yes)
                 {
                     await _mainForm.LoadDatasetAsync(txtOutputPath.Text);
+
+                    // Find and update the ControlForm
+                    var controlForm = FindControlForm();
+                    if (controlForm != null)
+                    {
+                        // Refresh the controls and material list
+                        controlForm.RefreshMaterialList();
+                        controlForm.InitializeSliceControls();
+                        Logger.Log("[VolumeCompressionForm] Updated ControlForm after decompression");
+                    }
+
                     this.Close();
                 }
             }

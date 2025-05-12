@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using System.Collections.Concurrent;
 using System.Threading;
 using System.IO.MemoryMappedFiles;
+using System.Drawing;
 
 namespace CTS.Compression
 {
@@ -61,7 +62,9 @@ namespace CTS.Compression
                     ChunkDim = volumeData?.ChunkDim ?? volumeLabels.ChunkDim,
                     PixelSize = mainForm.pixelSize,
                     BitsPerPixel = 8,
-                    HasLabels = volumeLabels != null
+                    HasLabels = volumeLabels != null,
+                    // Store the materials in the header
+                    Materials = mainForm.Materials
                 };
 
                 header.ChunkCountX = (header.Width + header.ChunkDim - 1) / header.ChunkDim;
@@ -217,6 +220,17 @@ namespace CTS.Compression
                     header = ReadVolumeHeader(br);
                 }
 
+                // Load materials from labels.chk if it exists
+                string chkPath = Path.Combine(isFolder ? inputPath : Path.GetDirectoryName(inputPath), "labels.chk");
+                if (File.Exists(chkPath))
+                {
+                    header.Materials = FileOperations.ReadLabelsChk(isFolder ? inputPath : Path.GetDirectoryName(inputPath));
+                }
+                else
+                {
+                    header.Materials = new List<Material>();
+                }
+
                 // Calculate total chunks
                 _totalChunks = header.ChunkCountX * header.ChunkCountY * header.ChunkCountZ;
                 if (File.Exists(labelsPath))
@@ -296,9 +310,16 @@ namespace CTS.Compression
                         await DecompressLabelsFileAsync(reader, labelsPath, header);
                     }
 
-                    // Create volume.chk for compatibility
+                    // Create volume.chk with proper metadata
                     FileOperations.CreateVolumeChk(outputPath, header.Width, header.Height, header.Depth,
                         header.ChunkDim, header.PixelSize);
+
+                    // Create labels.chk with materials if they exist
+                    if (header.Materials != null && header.Materials.Count > 0)
+                    {
+                        FileOperations.CreateLabelsChk(outputPath, header.Materials);
+                        Logger.Log($"[ChunkedVolumeCompressor] Created labels.chk with {header.Materials.Count} materials");
+                    }
                 }
 
                 Logger.Log($"[ChunkedVolumeCompressor] Decompression completed. Output: {outputPath}");
@@ -662,6 +683,7 @@ namespace CTS.Compression
             public int ChunkCountY { get; set; }
             public int ChunkCountZ { get; set; }
             public bool HasLabels { get; set; }
+            public List<Material> Materials { get; set; }
         }
 
         private VolumeHeader ReadVolumeHeader(BinaryReader reader)
@@ -705,9 +727,28 @@ namespace CTS.Compression
                 writer.Write(header.ChunkDim);
                 writer.Write(header.PixelSize);
                 writer.Write(hasLabels);
-                writer.Write(_compressionLevel); // Write int directly
+                writer.Write(_compressionLevel);
                 writer.Write(_usePredictiveCoding);
                 writer.Write(_useRunLengthEncoding);
+
+                // Write materials count and data
+                if (header.Materials != null)
+                {
+                    writer.Write(header.Materials.Count);
+                    foreach (var material in header.Materials)
+                    {
+                        writer.Write(material.ID);
+                        writer.Write(material.Name);
+                        writer.Write(material.Color.ToArgb());
+                        writer.Write(material.Min);
+                        writer.Write(material.Max);
+                        writer.Write(material.IsExterior);
+                    }
+                }
+                else
+                {
+                    writer.Write(0); // No materials
+                }
             }
             catch (Exception ex)
             {
@@ -742,6 +783,24 @@ namespace CTS.Compression
                 _compressionLevel = reader.ReadInt32();
                 _usePredictiveCoding = reader.ReadBoolean();
                 _useRunLengthEncoding = reader.ReadBoolean();
+
+                // Read materials if present
+                int materialCount = reader.ReadInt32();
+                header.Materials = new List<Material>();
+                for (int i = 0; i < materialCount; i++)
+                {
+                    byte id = reader.ReadByte();
+                    string name = reader.ReadString();
+                    int colorArgb = reader.ReadInt32();
+                    byte min = reader.ReadByte();
+                    byte max = reader.ReadByte();
+                    bool isExterior = reader.ReadBoolean();
+
+                    header.Materials.Add(new Material(name, Color.FromArgb(colorArgb), min, max, id)
+                    {
+                        IsExterior = isExterior
+                    });
+                }
 
                 // Calculate chunk counts
                 header.ChunkCountX = (header.Width + header.ChunkDim - 1) / header.ChunkDim;

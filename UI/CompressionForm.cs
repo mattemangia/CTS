@@ -337,50 +337,93 @@ namespace CTS.Compression
             if (string.IsNullOrEmpty(txtInputPath.Text))
                 return;
 
-            string dir = Path.GetDirectoryName(txtInputPath.Text);
-            string name = Path.GetFileNameWithoutExtension(txtInputPath.Text);
+            try
+            {
+                string dir = Path.GetDirectoryName(txtInputPath.Text);
+                string name = Path.GetFileNameWithoutExtension(txtInputPath.Text);
 
-            if (txtInputPath.Text.EndsWith(".cts3d"))
-            {
-                // Decompression
-                txtOutputPath.Text = Path.Combine(dir, name + "_decompressed");
-            }
-            else
-            {
-                // Compression
-                if (name == "volume")
+                if (txtInputPath.Text.EndsWith(".cts3d", StringComparison.OrdinalIgnoreCase))
                 {
-                    // If it's volume.bin, use parent folder name
-                    string parentDir = Directory.GetParent(dir).Name;
-                    txtOutputPath.Text = Path.Combine(dir, parentDir + ".cts3d");
+                    // Decompression
+                    txtOutputPath.Text = Path.Combine(dir, name + "_decompressed");
                 }
                 else
                 {
-                    txtOutputPath.Text = Path.Combine(dir, name + ".cts3d");
+                    // Compression
+                    if (name.Equals("volume", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // If it's volume.bin, use parent folder name
+                        DirectoryInfo parentDir = Directory.GetParent(dir);
+                        if (parentDir != null)
+                        {
+                            txtOutputPath.Text = Path.Combine(dir, parentDir.Name + ".cts3d");
+                        }
+                        else
+                        {
+                            txtOutputPath.Text = Path.Combine(dir, "compressed.cts3d");
+                        }
+                    }
+                    else
+                    {
+                        txtOutputPath.Text = Path.Combine(dir, name + ".cts3d");
+                    }
                 }
             }
+            catch (Exception ex)
+            {
+                Logger.Log($"[UpdateOutputPath] Error: {ex.Message}");
+                // Don't throw, just leave output path blank
+            }
         }
-
-        private async void BtnCompress_Click(object sender, EventArgs e)
+        private bool ValidateInputs()
         {
+            if (_useLoadedVolume)
+            {
+                if (_mainForm.volumeData == null && _mainForm.volumeLabels == null)
+                {
+                    MessageBox.Show("No volume is currently loaded.", "No Data",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return false;
+                }
+            }
+            else
+            {
+                if (string.IsNullOrEmpty(txtInputPath.Text))
+                {
+                    MessageBox.Show("Please select an input file.", "Missing Input",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return false;
+                }
+
+                if (!File.Exists(txtInputPath.Text) && !Directory.Exists(txtInputPath.Text))
+                {
+                    MessageBox.Show("Input path does not exist.", "Invalid Input",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return false;
+                }
+            }
+
             if (string.IsNullOrEmpty(txtOutputPath.Text))
             {
-                MessageBox.Show("Please select output path.", "Missing Path",
+                MessageBox.Show("Please specify an output path.", "Missing Output",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
+                return false;
             }
 
-            if (!_useLoadedVolume && string.IsNullOrEmpty(txtInputPath.Text))
-            {
-                MessageBox.Show("Please select input path.", "Missing Path",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return true;
+        }
+        private async void BtnCompress_Click(object sender, EventArgs e)
+        {
+            if (!ValidateInputs())
                 return;
-            }
 
             btnCompress.Enabled = false;
             btnDecompress.Enabled = false;
+            btnSelectInput.Enabled = false;
+            btnSelectOutput.Enabled = false;
             lblFileSize.Text = "";
             lblRatio.Text = "";
+            progressBar.Value = 0;
 
             try
             {
@@ -391,8 +434,14 @@ namespace CTS.Compression
 
                 var progress = new Progress<int>(value =>
                 {
-                    progressBar.Value = value;
-                    lblStatus.Text = $"Compressing... {value}%";
+                    if (!this.IsDisposed && this.IsHandleCreated)
+                    {
+                        this.BeginInvoke(new Action(() =>
+                        {
+                            progressBar.Value = Math.Min(value, 100);
+                            lblStatus.Text = $"Compressing... {value}%";
+                        }));
+                    }
                 });
 
                 var startTime = DateTime.Now;
@@ -424,27 +473,48 @@ namespace CTS.Compression
                 FileInfo outputFile = new FileInfo(txtOutputPath.Text);
                 double ratio = (double)outputFile.Length / inputSize * 100;
 
-                lblStatus.Text = $"Compression completed in {duration.TotalSeconds:F1}s";
-                lblFileSize.Text = $"Size: {FormatFileSize(inputSize)} → {FormatFileSize(outputFile.Length)}";
-                lblRatio.Text = $"Compression ratio: {ratio:F1}%";
+                if (!this.IsDisposed && this.IsHandleCreated)
+                {
+                    this.BeginInvoke(new Action(() =>
+                    {
+                        lblStatus.Text = $"Compression completed in {duration.TotalSeconds:F1}s";
+                        lblFileSize.Text = $"Size: {FormatFileSize(inputSize)} → {FormatFileSize(outputFile.Length)}";
+                        lblRatio.Text = $"Compression ratio: {ratio:F1}%";
 
-                MessageBox.Show($"Compression successful!\n\nTime: {duration.TotalSeconds:F1}s\n" +
-                               $"Original: {FormatFileSize(inputSize)}\n" +
-                               $"Compressed: {FormatFileSize(outputFile.Length)}\n" +
-                               $"Ratio: {ratio:F1}%",
-                               "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        MessageBox.Show($"Compression successful!\n\nTime: {duration.TotalSeconds:F1}s\n" +
+                                       $"Original: {FormatFileSize(inputSize)}\n" +
+                                       $"Compressed: {FormatFileSize(outputFile.Length)}\n" +
+                                       $"Ratio: {ratio:F1}%",
+                                       "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }));
+                }
             }
             catch (Exception ex)
             {
-                lblStatus.Text = "Compression failed";
-                Logger.Log($"[VolumeCompressionForm] Error: {ex.Message}");
-                MessageBox.Show($"Compression failed: {ex.Message}", "Error",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Logger.Log($"[VolumeCompressionForm] Error: {ex.Message}\n{ex.StackTrace}");
+
+                if (!this.IsDisposed && this.IsHandleCreated)
+                {
+                    this.BeginInvoke(new Action(() =>
+                    {
+                        lblStatus.Text = "Compression failed";
+                        MessageBox.Show($"Compression failed:\n\n{ex.Message}", "Error",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }));
+                }
             }
             finally
             {
-                btnCompress.Enabled = true;
-                btnDecompress.Enabled = true;
+                if (!this.IsDisposed && this.IsHandleCreated)
+                {
+                    this.BeginInvoke(new Action(() =>
+                    {
+                        btnCompress.Enabled = true;
+                        btnDecompress.Enabled = true;
+                        btnSelectInput.Enabled = true;
+                        btnSelectOutput.Enabled = true;
+                    }));
+                }
             }
         }
         private long CalculateLoadedVolumeSize()

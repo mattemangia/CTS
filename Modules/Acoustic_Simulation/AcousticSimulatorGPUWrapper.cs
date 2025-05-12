@@ -33,19 +33,21 @@ namespace CTS
         private readonly bool useElasticModel, usePlasticModel, useBrittleModel;
         private readonly double youngsModulusMPa, poissonRatio;
         private readonly int tx, ty, tz, rx, ry, rz;
+        private readonly bool useFullFaceTransducers;
         #endregion
 
         #region Constructor
         public AcousticSimulatorGPUWrapper() { }
         public AcousticSimulatorGPUWrapper(
-            int width, int height, int depth, float pixelSize,
-            byte[,,] volumeLabels, float[,,] densityVolume, byte selectedMaterialID,
-            string axis, string waveType,
-            double confiningPressure, double tensileStrength, double failureAngle, double cohesion,
-            double energy, double frequency, int amplitude, int timeSteps,
-            bool useElasticModel, bool usePlasticModel, bool useBrittleModel,
-            double youngsModulus, double poissonRatio,
-            int tx = -1, int ty = -1, int tz = -1, int rx = -1, int ry = -1, int rz = -1)
+    int width, int height, int depth, float pixelSize,
+    byte[,,] volumeLabels, float[,,] densityVolume, byte selectedMaterialID,
+    string axis, string waveType,
+    double confiningPressure, double tensileStrength, double failureAngle, double cohesion,
+    double energy, double frequency, int amplitude, int timeSteps,
+    bool useElasticModel, bool usePlasticModel, bool useBrittleModel,
+    double youngsModulus, double poissonRatio,
+    int tx = -1, int ty = -1, int tz = -1, int rx = -1, int ry = -1, int rz = -1,
+    bool useFullFaceTransducers = false)
         {
             // Cache all parameters for possible reuse
             this.width = width;
@@ -70,6 +72,7 @@ namespace CTS
             this.useBrittleModel = useBrittleModel;
             this.youngsModulusMPa = youngsModulus;
             this.poissonRatio = poissonRatio;
+            this.useFullFaceTransducers = useFullFaceTransducers;
 
             // Set transducer positions
             if (tx >= 0 && ty >= 0 && tz >= 0 && rx >= 0 && ry >= 0 && rz >= 0)
@@ -117,7 +120,8 @@ namespace CTS
                 confiningPressureMPa, tensileStrengthMPa, failureAngleDeg, cohesionMPa,
                 sourceEnergyJ, sourceFrequencyKHz, sourceAmplitude, totalTimeSteps,
                 useElasticModel, usePlasticModel, useBrittleModel,
-                youngsModulusMPa, poissonRatio);
+                youngsModulusMPa, poissonRatio,
+                useFullFaceTransducers);
 
             // Connect event handlers
             gpuSimulator.ProgressUpdated += (sender, args) =>
@@ -126,7 +130,7 @@ namespace CTS
             gpuSimulator.SimulationCompleted += (sender, args) =>
                 SimulationCompleted?.Invoke(this, args);
 
-            Logger.Log("[AcousticSimulatorGPUWrapper] GPU simulator initialized");
+            Logger.Log("[AcousticSimulatorGPUWrapper] GPU simulator initialized with full-face transducers: " + useFullFaceTransducers);
         }
         #endregion
 

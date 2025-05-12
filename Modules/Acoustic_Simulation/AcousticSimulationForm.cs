@@ -89,6 +89,7 @@ namespace CTS
         private KryptonNumericUpDown numYoungsModulus;
         private KryptonNumericUpDown numPoissonRatio;
         private float[,,] cachedZWaveField;
+        private KryptonCheckBox chkFullFaceTransducers;
         public bool UseVisualizer { get; set; }
 
         // A class to store simulation results
@@ -742,6 +743,18 @@ namespace CTS
                 Checked = false
             };
             controlPanel.Controls.Add(chkRunOnGpu);
+            currentY += verticalSpacing;
+            chkFullFaceTransducers = new KryptonCheckBox
+            {
+                Text = "Full-face transducers",
+                Location = new Point(10, currentY),
+                Width = controlWidth - 20,
+                Checked = false,
+                ToolTipValues = {
+        Description = "Use realistic transducers covering entire material face instead of point sources"
+    }
+            };
+            controlPanel.Controls.Add(chkFullFaceTransducers);
             currentY += verticalSpacing;
             btnManageCalibration = new KryptonButton();
             btnManageCalibration.Text = "Manage Calibration";
@@ -1836,6 +1849,7 @@ namespace CTS
                 double youngsModulus = (double)numYoungsModulus.Value;  // MPa
                 double poissonRatio = (double)numPoissonRatio.Value;   // unitless
                 bool useGPU = chkRunOnGpu.Checked;  // Check if GPU should be used
+                bool useFullFaceTransducers = chkFullFaceTransducers.Checked;
 
                 // ROBUST validation of parameters
                 if (energy <= 0.1)
@@ -2178,13 +2192,15 @@ namespace CTS
                     {
                         // Create GPU simulator wrapper
                         gpuSimulator = new AcousticSimulatorGPUWrapper(
-                            width, height, depth, pixelSizeF,
-                            labels, densityVolume, materialID,
-                            axis, waveType,
-                            confiningPressure, tensileStrength, failureAngle, cohesion,
-                            energy, frequency, amplitude, timeSteps,
-                            useElastic, usePlastic, useBrittle,
-                            youngsModulus, poissonRatio);
+    width, height, depth, pixelSizeF,
+    labels, densityVolume, materialID,
+    axis, waveType,
+    confiningPressure, tensileStrength, failureAngle, cohesion,
+    energy, frequency, amplitude, timeSteps,
+    useElastic, usePlastic, useBrittle,
+    youngsModulus, poissonRatio,
+    tx, ty, tz, rx, ry, rz, 
+    useFullFaceTransducers);
 
                         // Wire up events
                         gpuSimulator.ProgressUpdated += Simulator_ProgressUpdated;
@@ -2217,7 +2233,7 @@ namespace CTS
                             energy, frequency, amplitude, timeSteps,
                             useElastic, usePlastic, useBrittle,
                             youngsModulus, poissonRatio,
-                            tx, ty, tz, rx, ry, rz);
+                            tx, ty, tz, rx, ry, rz,useFullFaceTransducers);
 
                         // Wire up events
                         cpuSimulator.ProgressUpdated += Simulator_ProgressUpdated;
@@ -4169,21 +4185,45 @@ namespace CTS
         }
         private void CalculateAutoElasticProperties()
         {
-            // use your baseDensity in kg/m³
-            double rho = baseDensity;
-            // estimate Vp from density (same law you use in simulator)
-            double rhoGcm3 = rho / 1000.0;
-            double vp_km = 3.0 + 1.5 * Math.Pow(rhoGcm3, 0.25);
-            double vp = vp_km * 1000.0;          // m/s
-            double vs = vp / Math.Sqrt(3.0);    // approximate
-            double G = rho * vs * vs;           // shear modulus (Pa)
-            double K = rho * (vp * vp - (4.0 / 3.0) * vs * vs);  // bulk modulus (Pa)
-            double E = 9.0 * K * G / (3.0 * K + G);        // Young’s modulus (Pa)
-            double nu = (3.0 * K - 2.0 * G) / (2.0 * (3.0 * K + G)); // Poisson’s ratio
+            // ------------------------------------------------------------------ ρ
+            double ρ = baseDensity;                       // kg m⁻³
+            if (ρ <= 0.0) ρ = 1000.0;                     // safety default
 
-            // fill the UI (convert Pa→MPa)
-            numYoungsModulus.Value = (decimal)(E / 1e6);
-            numPoissonRatio.Value = (decimal)nu;
+            // ------------------------------------------------------------------ ν
+            double ν;
+            if (calibrationManager != null &&
+                calibrationManager.CurrentCalibration.CalibrationPoints.Count >= 2)
+            {
+                ν = calibrationManager.PredictPoissonRatioFromDensity(ρ);
+                Logger.Log($"[AutoElastic] ν from calibration = {ν:F4}");
+            }
+            else
+            {
+                // empirical fallback:   ρ ∈ [1500, 3200]  →  ν ∈ [0.18, 0.32]
+                ν = 0.18 + (ρ - 1500.0) * (0.32 - 0.18) / (3200.0 - 1500.0);
+                ν = Math.Max(0.15, Math.Min(0.35, ν));
+                Logger.Log($"[AutoElastic] ν from fallback map = {ν:F4}");
+            }
+
+            // ------------------------------------------------------------------ Vp 
+            double ρg = ρ / 1000.0;                       // g cm⁻³
+            double Vp = (3.0 + 1.5 * Math.Pow(ρg, 0.25)) * 1000.0;   // m s⁻¹
+
+            // ------------------------------------------------------------------ Vs from ν
+            double vpvs = Math.Sqrt(2.0 * (1.0 - ν) / (1.0 - 2.0 * ν));
+            double Vs = Vp / vpvs;
+
+            // ------------------------------------------------------------------ elastic moduli
+            double G = ρ * Vs * Vs;                       // Pa
+            double K = ρ * (Vp * Vp - (4.0 / 3.0) * Vs * Vs);
+            double E = 9.0 * K * G / (3.0 * K + G);       // Pa
+
+            // ------------------------------------------------------------------ push to UI
+            numYoungsModulus.Value = (decimal)(E / 1e6);  // MPa
+            numPoissonRatio.Value = (decimal)ν;
+
+            Logger.Log($"[AutoElastic] ρ={ρ:F0} kg/m³ → Vp={Vp:F0} Vs={Vs:F0} " +
+                       $"Vp/Vs={vpvs:F3}  E={E / 1e9:F2} GPa  ν={ν:F3}");
         }
         private void CalculateVolumes()
         {

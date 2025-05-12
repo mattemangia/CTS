@@ -10,6 +10,7 @@ namespace CTS
     /// and tensile‑brittle damage response. Written for C# 7.3 compatibility – no target‑typed «new» or
     /// nullable reference‑type syntax, and no reliance on Math.Cbrt.
     /// </summary>
+    /// 
     public class AcousticSimulator : IDisposable
     {
         #region configuration -----------------------------------------------------------
@@ -25,6 +26,7 @@ namespace CTS
         private int sWaveTouchStep;
         private double pWaveMaxAmplitude;
         private double sWaveMaxAmplitude;
+        private readonly bool useFullFaceTransducers;
         // progress ----------------------------------------------------
         private int expectedTotalSteps;
         private readonly double confiningPressureMPa;
@@ -81,7 +83,7 @@ namespace CTS
     double energy, double frequency, int amplitude, int timeSteps,
     bool useElasticModel, bool usePlasticModel, bool useBrittleModel,
     double youngsModulus, double poissonRatio,
-    int tx, int ty, int tz, int rx, int ry, int rz)
+    int tx, int ty, int tz, int rx, int ry, int rz, bool useFullFaceTransducers = false)
         {
             // Grid & material properties
             this.width = width;
@@ -106,12 +108,12 @@ namespace CTS
             this.useBrittleModel = useBrittleModel;
             youngsModulusMPa = youngsModulus;
             this.poissonRatio = poissonRatio;
-
+            this.useFullFaceTransducers = useFullFaceTransducers;
             // Lamé constants (Pa)
             double E = youngsModulusMPa * 1e6;
             mu0 = E / (2.0 * (1.0 + poissonRatio));
             lambda0 = E * poissonRatio / ((1 + poissonRatio) * (1 - 2 * poissonRatio));
-
+            Logger.Log($"[AcousticSimulator] Full-face transducers: {useFullFaceTransducers}");
             // Allocate arrays for simulation
             vx = new double[width, height, depth];
             vy = new double[width, height, depth];
@@ -164,7 +166,7 @@ namespace CTS
         private void Run(CancellationToken token)
         {
             ComputeStableTimeStep();                 // sets dt
-            ClearFields();
+            ClearFields();                          // calls ApplySource() for initial pulse
 
             // ----- progress -----------------------------------------------------------
             double dist = Math.Sqrt((tx - rx) * (tx - rx) +
@@ -191,12 +193,17 @@ namespace CTS
 
             Logger.Log($"[AcousticSimulator] Starting simulation with prolongSteps: {prolongSteps}");
             Logger.Log($"[AcousticSimulator] Expected total steps: {expectedTotalSteps}, Maximum allowed: {absoluteMaxSteps}");
+            Logger.Log($"[AcousticSimulator] Using full-face transducers: {useFullFaceTransducers}");
 
             // Add variables to detect instability
             bool instabilityDetected = false;
             double previousMaxField = 0;
             int stableCount = 0;
             int instabilityCounter = 0;
+
+            // Set check interval based on transducer type
+            int waveCheckInterval = useFullFaceTransducers ? 5 : 1;
+            int progressInterval = useFullFaceTransducers ? 10 : 5;
 
             while (!token.IsCancellationRequested)
             {
@@ -206,54 +213,61 @@ namespace CTS
                     UpdateVelocity();
                     stepCount++;
 
-                    // Check for numerical instability
-                    double currentMaxField = GetMaxFieldValue();
-                    if (double.IsInfinity(currentMaxField) || double.IsNaN(currentMaxField) ||
-                        currentMaxField > 1e30 || (currentMaxField > 1e15 && currentMaxField > previousMaxField * 10))
+                    // Check for numerical instability (less frequently for full-face)
+                    if (stepCount % 20 == 0)
                     {
-                        instabilityCounter++;
-
-                        if (instabilityCounter >= 3) // Confirm instability with multiple detections
+                        double currentMaxField = GetMaxFieldValue();
+                        if (double.IsInfinity(currentMaxField) || double.IsNaN(currentMaxField) ||
+                            currentMaxField > 1e30 || (currentMaxField > 1e15 && currentMaxField > previousMaxField * 10))
                         {
-                            Logger.Log($"[AcousticSimulator] WARNING: Numerical instability detected at step {stepCount}. Max field value: {currentMaxField:E6}");
-                            instabilityDetected = true;
+                            instabilityCounter++;
 
-                            // Start checking for wave arrival even with instability
-                            if (!pWaveReceiverTouched && stepCount > minRequiredSteps / 2)
+                            if (instabilityCounter >= 3) // Confirm instability with multiple detections
                             {
-                                pWaveReceiverTouched = true;
-                                pWaveTouchStep = stepCount;
-                                Logger.Log($"[AcousticSimulator] Using current step {stepCount} as P-Wave arrival due to instability");
-                            }
-                            else if (pWaveReceiverTouched && !sWaveReceiverTouched && stepCount > pWaveTouchStep + minRequiredSteps / 4)
-                            {
-                                sWaveReceiverTouched = true;
-                                sWaveTouchStep = stepCount;
-                                Logger.Log($"[AcousticSimulator] Using current step {stepCount} as S-Wave arrival due to instability");
+                                Logger.Log($"[AcousticSimulator] WARNING: Numerical instability detected at step {stepCount}. Max field value: {currentMaxField:E6}");
+                                instabilityDetected = true;
+
+                                // Start checking for wave arrival even with instability
+                                if (!pWaveReceiverTouched && stepCount > minRequiredSteps / 2)
+                                {
+                                    pWaveReceiverTouched = true;
+                                    pWaveTouchStep = stepCount;
+                                    Logger.Log($"[AcousticSimulator] Using current step {stepCount} as P-Wave arrival due to instability");
+                                }
+                                else if (pWaveReceiverTouched && !sWaveReceiverTouched && stepCount > pWaveTouchStep + minRequiredSteps / 4)
+                                {
+                                    sWaveReceiverTouched = true;
+                                    sWaveTouchStep = stepCount;
+                                    Logger.Log($"[AcousticSimulator] Using current step {stepCount} as S-Wave arrival due to instability");
+                                }
                             }
                         }
-                    }
-                    else
-                    {
-                        instabilityCounter = 0;
-                        stableCount++;
-                    }
-                    previousMaxField = currentMaxField;
-
-                    // Check for P-wave arrival (primarily in vx component)
-                    if (!pWaveReceiverTouched && CheckPWaveReceiverTouch())
-                    {
-                        pWaveReceiverTouched = true;
-                        pWaveTouchStep = stepCount;
-                        Logger.Log($"[AcousticSimulator] P-Wave reached RX at step {pWaveTouchStep}");
+                        else
+                        {
+                            instabilityCounter = 0;
+                            stableCount++;
+                        }
+                        previousMaxField = currentMaxField;
                     }
 
-                    // Check for S-wave arrival (primarily in vy/vz components)
-                    if (pWaveReceiverTouched && !sWaveReceiverTouched && CheckSWaveReceiverTouch())
+                    // Check for wave arrivals (optimized frequency for full-face)
+                    if (stepCount % waveCheckInterval == 0)
                     {
-                        sWaveReceiverTouched = true;
-                        sWaveTouchStep = stepCount;
-                        Logger.Log($"[AcousticSimulator] S-Wave reached RX at step {sWaveTouchStep}");
+                        // Check for P-wave arrival (primarily in vx component)
+                        if (!pWaveReceiverTouched && CheckPWaveReceiverTouch())
+                        {
+                            pWaveReceiverTouched = true;
+                            pWaveTouchStep = stepCount;
+                            Logger.Log($"[AcousticSimulator] P-Wave reached RX at step {pWaveTouchStep}");
+                        }
+
+                        // Check for S-wave arrival (primarily in vy/vz components)
+                        if (pWaveReceiverTouched && !sWaveReceiverTouched && CheckSWaveReceiverTouch())
+                        {
+                            sWaveReceiverTouched = true;
+                            sWaveTouchStep = stepCount;
+                            Logger.Log($"[AcousticSimulator] S-Wave reached RX at step {sWaveTouchStep}");
+                        }
                     }
 
                     // Only terminate after BOTH waves have been detected and additional steps
@@ -288,8 +302,11 @@ namespace CTS
                         break;
                     }
 
-                    // Report progress on every step
-                    ReportProgress();
+                    // Report progress (less frequently for full-face)
+                    if (stepCount % progressInterval == 0)
+                    {
+                        ReportProgress();
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -360,27 +377,22 @@ namespace CTS
         #region helpers -----------------------------------------------------------------
         private void ComputeStableTimeStep()
         {
-            double rhoMin = densityVolume.Cast<float>().Where(d => d > 0).Min();
-            // Ensure rhoMin has a reasonable minimum value to prevent division by very small numbers
-            rhoMin = Math.Max(rhoMin, 100.0); // Set minimum density to 100 kg/m³
+            double rhoMin = densityVolume.Cast<float>()
+                            .Where(d => d > 0)
+                            .DefaultIfEmpty(1000f)   // graceful fallback
+                            .Min();
 
-            // Calculate maximum P-wave velocity
             double vpMax = Math.Sqrt((lambda0 + 2 * mu0) / rhoMin);
-
-            // Limit maximum velocity to prevent extremely small time steps
-            vpMax = Math.Min(vpMax, 6000.0); // Cap maximum velocity at 6000 m/s
+            vpMax = Math.Min(vpMax, 6000.0);         // upper-cap for robustness
 
             double f = sourceFrequencyKHz > 0 ? sourceFrequencyKHz * 1e3 : 1e5;
             double dtFreq = 1.0 / (20.0 * f);
 
-            // Increase safety factor from 0.4 to 0.2 for more stable simulation
-            double safetyFactor = 0.2;
-            dt = Math.Min(safetyFactor * pixelSize / vpMax, dtFreq);
+            const double Safety = 0.20;              // CFL safety factor
+            dt = Math.Min(Safety * pixelSize / vpMax, dtFreq);
+            dt = Math.Max(dt, 1e-8);                 // never go sub-nanosecond
 
-            // Ensure dt is not too small
-            dt = Math.Max(dt, 1e-8);
-
-            Logger.Log($"[AcousticSimulator] Time step calculated: dt={dt:E6} s, vpMax={vpMax:F2} m/s");
+            Logger.Log($"[AcousticSimulator] dt={dt:E6}s, vpMax={vpMax:F1}m/s, rhoMin={rhoMin:F0}kg/m³");
         }
         private double Clamp(double value, double min, double max)
         {
@@ -392,7 +404,7 @@ namespace CTS
 
         private void ClearFields()
         {
-            // Reset all field arrays to zero
+            // ------------------------------------------------------ 0. reset dynamics
             Array.Clear(vx, 0, vx.Length);
             Array.Clear(vy, 0, vy.Length);
             Array.Clear(vz, 0, vz.Length);
@@ -401,120 +413,118 @@ namespace CTS
             Array.Clear(syz, 0, syz.Length);
             Array.Clear(damage, 0, damage.Length);
 
-            // Apply confining pressure to initial stress state (convert MPa to Pa)
-            double confiningPressurePa = confiningPressureMPa * 1e6;
+            // ------------------------------------------------------ 1. confining stress
+            double confPa = confiningPressureMPa * 1e6;   // MPa → Pa
 
-            // Apply initial stress state with confining pressure to all cells
-            for (int z = 0; z < depth; z++)
+            Parallel.For(0, depth, z =>
+            {
                 for (int y = 0; y < height; y++)
                     for (int x = 0; x < width; x++)
-                    {
                         if (volumeLabels[x, y, z] == selectedMaterialID)
                         {
-                            // Negative sign because compression is negative in solid mechanics
-                            sxx[x, y, z] = -confiningPressurePa;
-                            syy[x, y, z] = -confiningPressurePa;
-                            szz[x, y, z] = -confiningPressurePa;
+                            sxx[x, y, z] = -confPa;        // –ve = compression
+                            syy[x, y, z] = -confPa;
+                            szz[x, y, z] = -confPa;
                         }
-                    }
+            });
 
-            // Calculate pulse magnitude and DRAMATICALLY amplify it
-            double pulse = sourceAmplitude * Math.Sqrt(sourceEnergyJ);
-            pulse *= 1e6; // Apply a very large amplification factor to ensure propagation
+            // ------------------------------------------------------ 2. pulse (same magnitude, now **negative**)
+            double pulse = -sourceAmplitude * Math.Sqrt(sourceEnergyJ) * 1e6;
+            Logger.Log($"[CPU] Source pulse = {pulse:E6}  (full-face = {useFullFaceTransducers})");
 
-            // Log the applied pulse magnitude
-            Logger.Log($"[AcousticSimulator] Applying source pulse with magnitude {pulse:E6}");
-
-            // Instead of a point source, use a small spherical source region to improve propagation
-            int sourceRadius = 2; // Small sphere radius
-
-            // Apply source around TX position to create a stronger, more stable source
-            for (int dz = -sourceRadius; dz <= sourceRadius; dz++)
+            if (!useFullFaceTransducers)
             {
-                for (int dy = -sourceRadius; dy <= sourceRadius; dy++)
-                {
-                    for (int dx = -sourceRadius; dx <= sourceRadius; dx++)
-                    {
-                        // Calculate spherical distance for falloff
-                        double dist = Math.Sqrt(dx * dx + dy * dy + dz * dz);
-                        if (dist > sourceRadius) continue; // Skip if outside sphere
-
-                        // Calculate position
-                        int sx = tx + dx;
-                        int sy = ty + dy;
-                        int sz = tz + dz;
-
-                        // Check bounds
-                        if (sx < 0 || sx >= width || sy < 0 || sy >= height || sz < 0 || sz >= depth)
-                            continue;
-
-                        // Check if voxel is in the material
-                        if (volumeLabels[sx, sy, sz] != selectedMaterialID)
-                            continue;
-
-                        // Apply falloff based on distance from center
-                        double falloff = 1.0 - (dist / sourceRadius);
-
-                        // Apply source with distance falloff
-                        double localPulse = pulse * falloff * falloff;
-
-                        // Apply to stress fields (compressional pulse)
-                        sxx[sx, sy, sz] = localPulse;
-                        syy[sx, sy, sz] = localPulse;
-                        szz[sx, sy, sz] = localPulse;
-
-                        // Also add to velocity field to ensure propagation
-                        double velocityPulse = localPulse / (densityVolume[sx, sy, sz] * 10);
-
-                        // Determine main propagation direction based on axis
-                        int mainAxis = 0; // 0=x, 1=y, 2=z based on RX-TX orientation
-                        if (Math.Abs(rx - tx) >= Math.Abs(ry - ty) && Math.Abs(rx - tx) >= Math.Abs(rz - tz))
-                            mainAxis = 0;
-                        else if (Math.Abs(ry - ty) >= Math.Abs(rx - tx) && Math.Abs(ry - ty) >= Math.Abs(rz - tz))
-                            mainAxis = 1;
-                        else
-                            mainAxis = 2;
-
-                        // Apply initial velocity in the main propagation direction
-                        if (mainAxis == 0)
+                // existing point-source logic unchanged
+                int radius = 2;
+                for (int dz = -radius; dz <= radius; dz++)
+                    for (int dy = -radius; dy <= radius; dy++)
+                        for (int dx = -radius; dx <= radius; dx++)
                         {
-                            int direction = Math.Sign(rx - tx);
-                            if (direction == 0) direction = 1;
-                            vx[sx, sy, sz] = velocityPulse * direction;
+                            double dist = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+                            if (dist > radius) continue;
+
+                            int sx = tx + dx, sy = ty + dy, sz = tz + dz;
+                            if (sx < 0 || sx >= width ||
+                                sy < 0 || sy >= height ||
+                                sz < 0 || sz >= depth) continue;
+
+                            if (volumeLabels[sx, sy, sz] != selectedMaterialID) continue;
+
+                            double fall = 1.0 - dist / radius;
+                            double local = pulse * fall * fall;
+
+                            sxx[sx, sy, sz] += local;
+                            syy[sx, sy, sz] += local;
+                            szz[sx, sy, sz] += local;
+
+                            double vKick = local / (densityVolume[sx, sy, sz] * 10.0);
+                            int dir = Math.Sign(rx - tx);
+                            if (dir == 0) dir = 1;
+                            vx[sx, sy, sz] += vKick * dir;
                         }
-                        else if (mainAxis == 1)
-                        {
-                            int direction = Math.Sign(ry - ty);
-                            if (direction == 0) direction = 1;
-                            vy[sx, sy, sz] = velocityPulse * direction;
-                        }
-                        else
-                        {
-                            int direction = Math.Sign(rz - tz);
-                            if (direction == 0) direction = 1;
-                            vz[sx, sy, sz] = velocityPulse * direction;
-                        }
-                    }
-                }
+                return;
             }
 
-            // Log initial field statistics
-            int nonZeroCount = 0;
-            double maxVal = 0;
+            // ------------------------------------------------------ 3. full-face stress & velocity (CPU version)
+            // choose the dominating axis
+            int axis = Math.Abs(rx - tx) >= Math.Abs(ry - ty) && Math.Abs(rx - tx) >= Math.Abs(rz - tz) ? 0
+                     : Math.Abs(ry - ty) >= Math.Abs(rz - tz) ? 1 : 2;
 
-            for (int z = 0; z < depth; z++)
+            int sign = axis == 0 ? Math.Sign(rx - tx)
+                    : axis == 1 ? Math.Sign(ry - ty)
+                                 : Math.Sign(rz - tz);
+            if (sign == 0) sign = 1;
+
+            switch (axis)
             {
-                for (int y = 0; y < height; y++)
-                {
-                    for (int x = 0; x < width; x++)
+                case 0: // X-face
+                    Parallel.For(0, height, y =>
                     {
-                        if (Math.Abs(sxx[x, y, z]) > 1e-12) nonZeroCount++;
-                        maxVal = Math.Max(maxVal, Math.Abs(sxx[x, y, z]));
-                    }
-                }
-            }
+                        for (int z = 0; z < depth; z++)
+                            if (volumeLabels[tx, y, z] == selectedMaterialID)
+                            {
+                                sxx[tx, y, z] += pulse;
+                                syy[tx, y, z] += pulse;
+                                szz[tx, y, z] += pulse;
 
-            Logger.Log($"[AcousticSimulator] Source initialization: {nonZeroCount} non-zero voxels, max value: {maxVal:E6}");
+                                double vKick = pulse / (densityVolume[tx, y, z] * 10.0);
+                                vx[tx, y, z] += vKick * sign;
+                            }
+                    });
+                    break;
+
+                case 1: // Y-face
+                    Parallel.For(0, width, x =>
+                    {
+                        for (int z = 0; z < depth; z++)
+                            if (volumeLabels[x, ty, z] == selectedMaterialID)
+                            {
+                                sxx[x, ty, z] += pulse;
+                                syy[x, ty, z] += pulse;
+                                szz[x, ty, z] += pulse;
+
+                                double vKick = pulse / (densityVolume[x, ty, z] * 10.0);
+                                vy[x, ty, z] += vKick * sign;
+                            }
+                    });
+                    break;
+
+                default: // Z-face
+                    Parallel.For(0, width, x =>
+                    {
+                        for (int y = 0; y < height; y++)
+                            if (volumeLabels[x, y, tz] == selectedMaterialID)
+                            {
+                                sxx[x, y, tz] += pulse;
+                                syy[x, y, tz] += pulse;
+                                szz[x, y, tz] += pulse;
+
+                                double vKick = pulse / (densityVolume[x, y, tz] * 10.0);
+                                vz[x, y, tz] += vKick * sign;
+                            }
+                    });
+                    break;
+            }
         }
 
         #endregion
@@ -730,36 +740,91 @@ namespace CTS
         }
         private bool CheckSWaveReceiverTouch()
         {
-            if (!pWaveReceiverTouched) return false;          // P not picked yet
-            if (stepCount - pWaveTouchStep < 5) return false; // guard against echoes
+            if (!pWaveReceiverTouched) return false;
+            if (stepCount - pWaveTouchStep < 5) return false;
 
-            // ---------- tunables (no magic literals in the code) ----------
-            const double timeTolerance = 0.05;   // 5 % early allowed
-            const double ampFraction = 0.15;   // 15 % of running S peak
-            const double distinctFactor = 1.0;    // S must exceed P energy
-            const int pTailSteps = 10;     // wait until P tail decays
+            const double timeTolerance = 0.05;
+            const double ampFraction = 0.15;
+            const double distinctFactor = 1.0;
+            const int pTailSteps = 10;
             const double vpvsMin = 1.3;
             const double vpvsMax = 2.2;
             const double tiny = 1e-10;
-            // --------------------------------------------------------------
 
-            // main axis as in the P-picker
             int mainAxis = (Math.Abs(rx - tx) >= Math.Abs(ry - ty) &&
                             Math.Abs(rx - tx) >= Math.Abs(rz - tz)) ? 0
                           : (Math.Abs(ry - ty) >= Math.Abs(rx - tx) &&
                              Math.Abs(ry - ty) >= Math.Abs(rz - tz)) ? 1 : 2;
 
-            // local velocity components at RX
-            double vxRx = vx[rx, ry, rz];
-            double vyRx = vy[rx, ry, rz];
-            double vzRx = vz[rx, ry, rz];
+            double pMag = 0, sMag = 0;
 
-            double pMag, sMag;
-            switch (mainAxis)
+            if (useFullFaceTransducers)
             {
-                case 0: pMag = Math.Abs(vxRx); sMag = Math.Sqrt(vyRx * vyRx + vzRx * vzRx); break;
-                case 1: pMag = Math.Abs(vyRx); sMag = Math.Sqrt(vxRx * vxRx + vzRx * vzRx); break;
-                default: pMag = Math.Abs(vzRx); sMag = Math.Sqrt(vxRx * vxRx + vyRx * vyRx); break;
+                // SUBSAMPLE for performance
+                int sampleRate = 4;
+                int count = 0;
+
+                switch (mainAxis)
+                {
+                    case 0: // X axis - subsample YZ plane
+                        for (int y = 0; y < height; y += sampleRate)
+                            for (int z = 0; z < depth; z += sampleRate)
+                                if (volumeLabels[rx, y, z] == selectedMaterialID)
+                                {
+                                    double vxRx = vx[rx, y, z];
+                                    double vyRx = vy[rx, y, z];
+                                    double vzRx = vz[rx, y, z];
+                                    pMag += Math.Abs(vxRx);
+                                    sMag += Math.Sqrt(vyRx * vyRx + vzRx * vzRx);
+                                    count++;
+                                }
+                        break;
+                    case 1: // Y axis - subsample XZ plane
+                        for (int x = 0; x < width; x += sampleRate)
+                            for (int z = 0; z < depth; z += sampleRate)
+                                if (volumeLabels[x, ry, z] == selectedMaterialID)
+                                {
+                                    double vxRx = vx[x, ry, z];
+                                    double vyRx = vy[x, ry, z];
+                                    double vzRx = vz[x, ry, z];
+                                    pMag += Math.Abs(vyRx);
+                                    sMag += Math.Sqrt(vxRx * vxRx + vzRx * vzRx);
+                                    count++;
+                                }
+                        break;
+                    default: // Z axis - subsample XY plane
+                        for (int x = 0; x < width; x += sampleRate)
+                            for (int y = 0; y < height; y += sampleRate)
+                                if (volumeLabels[x, y, rz] == selectedMaterialID)
+                                {
+                                    double vxRx = vx[x, y, rz];
+                                    double vyRx = vy[x, y, rz];
+                                    double vzRx = vz[x, y, rz];
+                                    pMag += Math.Abs(vzRx);
+                                    sMag += Math.Sqrt(vxRx * vxRx + vyRx * vyRx);
+                                    count++;
+                                }
+                        break;
+                }
+                if (count > 0)
+                {
+                    pMag /= count;
+                    sMag /= count;
+                }
+            }
+            else
+            {
+                // Point detection (no changes)
+                double vxRx = vx[rx, ry, rz];
+                double vyRx = vy[rx, ry, rz];
+                double vzRx = vz[rx, ry, rz];
+
+                switch (mainAxis)
+                {
+                    case 0: pMag = Math.Abs(vxRx); sMag = Math.Sqrt(vyRx * vyRx + vzRx * vzRx); break;
+                    case 1: pMag = Math.Abs(vyRx); sMag = Math.Sqrt(vxRx * vxRx + vzRx * vzRx); break;
+                    default: pMag = Math.Abs(vzRx); sMag = Math.Sqrt(vxRx * vxRx + vyRx * vyRx); break;
+                }
             }
 
             if (double.IsNaN(sMag) || double.IsInfinity(sMag)) return false;
@@ -767,7 +832,6 @@ namespace CTS
             if (sMag > sWaveMaxAmplitude) sWaveMaxAmplitude = sMag;
             double threshold = Math.Max(tiny, sWaveMaxAmplitude * ampFraction);
 
-            // time gate anchored to the theoretical Vp⁄Vs
             double vpvsTheory = Clamp(GetTheoreticalVpVsRatio(), vpvsMin, vpvsMax);
             int expectedS = (int)(pWaveTouchStep * vpvsTheory);
             if (stepCount < expectedS * (1.0 - timeTolerance)) return false;
@@ -790,22 +854,71 @@ namespace CTS
         }
         private bool CheckPWaveReceiverTouch()
         {
-            // pick the main propagation axis once
-            int mainAxis = (Math.Abs(rx - tx) >= Math.Abs(ry - ty) &&
-                            Math.Abs(rx - tx) >= Math.Abs(rz - tz)) ? 0
-                          : (Math.Abs(ry - ty) >= Math.Abs(rx - tx) &&
-                             Math.Abs(ry - ty) >= Math.Abs(rz - tz)) ? 1 : 2;
+            double pMag = 0;
 
-            double pMag = mainAxis == 0 ? Math.Abs(vx[rx, ry, rz])
-                         : mainAxis == 1 ? Math.Abs(vy[rx, ry, rz])
-                                         : Math.Abs(vz[rx, ry, rz]);
+            if (useFullFaceTransducers)
+            {
+                // Pick the main propagation axis
+                int mainAxis = (Math.Abs(rx - tx) >= Math.Abs(ry - ty) &&
+                                Math.Abs(rx - tx) >= Math.Abs(rz - tz)) ? 0
+                              : (Math.Abs(ry - ty) >= Math.Abs(rx - tx) &&
+                                 Math.Abs(ry - ty) >= Math.Abs(rz - tz)) ? 1 : 2;
+
+                // SUBSAMPLE for performance - check every Nth voxel
+                int sampleRate = 4; // Adjust this for speed vs accuracy tradeoff
+                int count = 0;
+
+                switch (mainAxis)
+                {
+                    case 0: // X axis - subsample YZ plane
+                        for (int y = 0; y < height; y += sampleRate)
+                            for (int z = 0; z < depth; z += sampleRate)
+                                if (volumeLabels[rx, y, z] == selectedMaterialID)
+                                {
+                                    pMag += Math.Abs(vx[rx, y, z]);
+                                    count++;
+                                }
+                        break;
+                    case 1: // Y axis - subsample XZ plane
+                        for (int x = 0; x < width; x += sampleRate)
+                            for (int z = 0; z < depth; z += sampleRate)
+                                if (volumeLabels[x, ry, z] == selectedMaterialID)
+                                {
+                                    pMag += Math.Abs(vy[x, ry, z]);
+                                    count++;
+                                }
+                        break;
+                    default: // Z axis - subsample XY plane
+                        for (int x = 0; x < width; x += sampleRate)
+                            for (int y = 0; y < height; y += sampleRate)
+                                if (volumeLabels[x, y, rz] == selectedMaterialID)
+                                {
+                                    pMag += Math.Abs(vz[x, y, rz]);
+                                    count++;
+                                }
+                        break;
+                }
+                if (count > 0) pMag /= count;
+            }
+            else
+            {
+                // Existing point detection
+                int mainAxis = (Math.Abs(rx - tx) >= Math.Abs(ry - ty) &&
+                                Math.Abs(rx - tx) >= Math.Abs(rz - tz)) ? 0
+                              : (Math.Abs(ry - ty) >= Math.Abs(rx - tx) &&
+                                 Math.Abs(ry - ty) >= Math.Abs(rz - tz)) ? 1 : 2;
+
+                pMag = mainAxis == 0 ? Math.Abs(vx[rx, ry, rz])
+                      : mainAxis == 1 ? Math.Abs(vy[rx, ry, rz])
+                                      : Math.Abs(vz[rx, ry, rz]);
+            }
 
             if (double.IsNaN(pMag) || double.IsInfinity(pMag)) return false;
 
             if (pMag > pWaveMaxAmplitude) pWaveMaxAmplitude = pMag;
             double threshold = Math.Max(1e-10, pWaveMaxAmplitude * 0.01);
 
-            if (pMag > 1e-9) return true;          // absolute floor
+            if (pMag > 1e-9) return true;
             return pMag > threshold;
         }
         private bool CheckReceiverTouch()

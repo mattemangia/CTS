@@ -81,6 +81,7 @@ namespace CTS
         private byte selectedMaterialID;
         private int tx, ty, tz;
         private int rx, ry, rz;
+        private readonly bool useFullFaceTransducers;
         private double dt;
         private int stepCount;
         private bool pWaveReceiverTouched;
@@ -116,7 +117,8 @@ namespace CTS
             ArrayView<double>, ArrayView<double>, ArrayView<double>,
             ArrayView<double>, ArrayView<double>, ArrayView<double>,
             ArrayView<double>, PhysicsParams, GridParams> stressKernel;
-
+        private readonly Action<Index1D, ArrayView<double>, ArrayView<byte>,
+    int, int, int, int, int, double, byte> fullFaceSourceKernel;
         private readonly Action<Index1D,
             ArrayView<byte>, ArrayView<float>,
             ArrayView<double>, ArrayView<double>, ArrayView<double>,
@@ -127,13 +129,14 @@ namespace CTS
 
         #region Constructor
         public AcousticSimulatorGPU(
-            int width, int height, int depth, float pixelSize,
-            byte[,,] volumeLabels, float[,,] densityVolume, byte selectedMaterialID,
-            string axis, string waveType,
-            double confiningPressure, double tensileStrength, double failureAngle, double cohesion,
-            double energy, double frequency, int amplitude, int timeSteps,
-            bool useElasticModel, bool usePlasticModel, bool useBrittleModel,
-            double youngsModulus, double poissonRatio)
+     int width, int height, int depth, float pixelSize,
+     byte[,,] volumeLabels, float[,,] densityVolume, byte selectedMaterialID,
+     string axis, string waveType,
+     double confiningPressure, double tensileStrength, double failureAngle, double cohesion,
+     double energy, double frequency, int amplitude, int timeSteps,
+     bool useElasticModel, bool usePlasticModel, bool useBrittleModel,
+     double youngsModulus, double poissonRatio,
+     bool useFullFaceTransducers = false)
         {
             // Store grid dimensions
             this.width = width;
@@ -170,6 +173,9 @@ namespace CTS
             this.usePlasticModel = usePlasticModel;
             this.useBrittleModel = useBrittleModel;
 
+            // Store full-face transducer flag
+            this.useFullFaceTransducers = useFullFaceTransducers;
+
             // Calculate time step based on material properties (same as CPU)
             ComputeStableTimeStep(densityVolume);
 
@@ -186,6 +192,8 @@ namespace CTS
                 mainAxis = 2;        // Z
 
             Logger.Log($"[AcousticSimulatorGPU] Main propagation axis: {(mainAxis == 0 ? "X" : mainAxis == 1 ? "Y" : "Z")}");
+            Logger.Log($"[AcousticSimulatorGPU] Full-face transducers: {useFullFaceTransducers}");
+
             // Calculate expected steps for progress reporting
             CalculateExpectedSteps(densityVolume);
 
@@ -198,9 +206,9 @@ namespace CTS
 
             // Select best available accelerator (CUDA > OpenCL > CPU)
             var selectedDevice = context.Devices
-    .FirstOrDefault(d => d.AcceleratorType == AcceleratorType.Cuda) ??
-    context.Devices.FirstOrDefault(d => d.AcceleratorType == AcceleratorType.OpenCL) ??
-    context.Devices.First(d => d.AcceleratorType == AcceleratorType.CPU);
+                .FirstOrDefault(d => d.AcceleratorType == AcceleratorType.Cuda) ??
+                context.Devices.FirstOrDefault(d => d.AcceleratorType == AcceleratorType.OpenCL) ??
+                context.Devices.First(d => d.AcceleratorType == AcceleratorType.CPU);
 
             this.accelerator = selectedDevice.CreateAccelerator(context);
             Logger.Log($"[AcousticSimulatorGPU] Using {this.accelerator.AcceleratorType} accelerator: {this.accelerator.Name}");
@@ -274,12 +282,17 @@ namespace CTS
                 ArrayView<double>, ArrayView<double>, ArrayView<double>,
                 ArrayView<double>, ArrayView<double>, ArrayView<double>,
                 PhysicsParams, GridParams>(VelocityUpdateKernel);
-            
+
+            fullFaceSourceKernel = accelerator.LoadAutoGroupedStreamKernel<Index1D,
+    ArrayView<double>, ArrayView<byte>,
+    int, int, int, int, int, double, byte>(ApplyFullFaceSourceKernel);
+
             scaleVectorFieldKernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<double>, double>(
                 ScaleVectorFieldKernelImpl);
 
             scaleScalarFieldKernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<double>, double>(
                 ScaleScalarFieldKernelImpl);
+
             Logger.Log("[AcousticSimulatorGPU] GPU initialization complete");
         }
         #endregion
@@ -669,7 +682,36 @@ namespace CTS
             if (value < -MAX_VALUE) return -MAX_VALUE;
             return value;
         }
+        private static void ApplyFullFaceSourceKernel(
+    Index1D index,
+    ArrayView<double> field,
+    ArrayView<byte> material,
+    int width, int height, int depth,
+    int position, int axis,
+    double value, byte materialID)
+        {
+            if (index >= field.Length) return;
 
+            // Extract 3D coordinates
+            int z = index / (width * height);
+            int remainder = index % (width * height);
+            int y = remainder / width;
+            int x = remainder % width;
+
+            // Check if we're on the correct plane
+            bool onPlane = false;
+            switch (axis)
+            {
+                case 0: onPlane = (x == position); break;
+                case 1: onPlane = (y == position); break;
+                case 2: onPlane = (z == position); break;
+            }
+
+            if (onPlane && material[index] == materialID)
+            {
+                field[index] = value;
+            }
+        }
         private static void VelocityUpdateKernel(Index1D index,
     ArrayView<byte> material, ArrayView<float> density,
     ArrayView<double> vx, ArrayView<double> vy, ArrayView<double> vz,
@@ -832,19 +874,25 @@ namespace CTS
             pWaveMaxAmplitude = 0;
             sWaveMaxAmplitude = 0;
 
-            // Initialize source - exactly the same as CPU
+            // Initialize source
             ApplySource();
 
-            // Use same safety maximum - EXACT match to CPU
+            // Use same safety maximum
             int absoluteMaxSteps = Math.Max(1000, expectedTotalSteps * 2);
 
             Logger.Log($"[AcousticSimulatorGPU] Starting simulation with prolongSteps: {totalTimeSteps}");
             Logger.Log($"[AcousticSimulatorGPU] Expected total steps: {expectedTotalSteps}, Maximum allowed: {absoluteMaxSteps}");
+            Logger.Log($"[AcousticSimulatorGPU] Using full-face transducers: {useFullFaceTransducers}");
 
-            // Instability detection variables - EXACT match to CPU
+            // Instability detection variables
             bool instabilityDetected = false;
             double previousMaxField = 0;
             int instabilityCounter = 0;
+
+            // Set check intervals based on transducer type
+            int waveCheckInterval = useFullFaceTransducers ? 5 : 1;
+            int progressInterval = useFullFaceTransducers ? 10 : VIS_INTERVAL;
+            int stabilityCheckInterval = useFullFaceTransducers ? 30 : 20;
 
             while (!token.IsCancellationRequested)
             {
@@ -854,55 +902,60 @@ namespace CTS
                     UpdateVelocity();
                     stepCount++;
 
-                    // Check for numerical instability - EXACT match to CPU
-                    double currentMaxField = GetMaxFieldValue();
-                    if (double.IsInfinity(currentMaxField) || double.IsNaN(currentMaxField) ||
-                        currentMaxField > 1e30 || (currentMaxField > 1e15 && currentMaxField > previousMaxField * 10))
+                    // Check for numerical instability (less frequently for full-face)
+                    if (stepCount % stabilityCheckInterval == 0)
                     {
-                        instabilityCounter++;
-
-                        if (instabilityCounter >= 3) // Same threshold as CPU
+                        double currentMaxField = GetMaxFieldValue();
+                        if (double.IsInfinity(currentMaxField) || double.IsNaN(currentMaxField) ||
+                            currentMaxField > 1e30 || (currentMaxField > 1e15 && currentMaxField > previousMaxField * 10))
                         {
-                            Logger.Log($"[AcousticSimulatorGPU] WARNING: Numerical instability detected at step {stepCount}. Max field value: {currentMaxField:E6}");
-                            instabilityDetected = true;
+                            instabilityCounter++;
 
-                            // EXACTLY same fallback approach as CPU
-                            if (!pWaveReceiverTouched && stepCount > minRequiredSteps / 2)
+                            if (instabilityCounter >= 3)
                             {
-                                pWaveReceiverTouched = true;
-                                pWaveTouchStep = stepCount;
-                                Logger.Log($"[AcousticSimulatorGPU] Using current step {stepCount} as P-Wave arrival due to instability");
-                            }
-                            else if (pWaveReceiverTouched && !sWaveReceiverTouched && stepCount > pWaveTouchStep + minRequiredSteps / 4)
-                            {
-                                sWaveReceiverTouched = true;
-                                sWaveTouchStep = stepCount;
-                                Logger.Log($"[AcousticSimulatorGPU] Using current step {stepCount} as S-Wave arrival due to instability");
+                                Logger.Log($"[AcousticSimulatorGPU] WARNING: Numerical instability detected at step {stepCount}. Max field value: {currentMaxField:E6}");
+                                instabilityDetected = true;
+
+                                if (!pWaveReceiverTouched && stepCount > minRequiredSteps / 2)
+                                {
+                                    pWaveReceiverTouched = true;
+                                    pWaveTouchStep = stepCount;
+                                    Logger.Log($"[AcousticSimulatorGPU] Using current step {stepCount} as P-Wave arrival due to instability");
+                                }
+                                else if (pWaveReceiverTouched && !sWaveReceiverTouched && stepCount > pWaveTouchStep + minRequiredSteps / 4)
+                                {
+                                    sWaveReceiverTouched = true;
+                                    sWaveTouchStep = stepCount;
+                                    Logger.Log($"[AcousticSimulatorGPU] Using current step {stepCount} as S-Wave arrival due to instability");
+                                }
                             }
                         }
-                    }
-                    else
-                    {
-                        instabilityCounter = 0;
-                    }
-                    previousMaxField = currentMaxField;
-
-                    // Check for wave arrivals - EXACT match to CPU
-                    if (!pWaveReceiverTouched && CheckPWaveReceiverTouch())
-                    {
-                        pWaveReceiverTouched = true;
-                        pWaveTouchStep = stepCount;
-                        Logger.Log($"[AcousticSimulatorGPU] P-Wave reached RX at step {pWaveTouchStep}");
+                        else
+                        {
+                            instabilityCounter = 0;
+                        }
+                        previousMaxField = currentMaxField;
                     }
 
-                    if (pWaveReceiverTouched && !sWaveReceiverTouched && CheckSWaveReceiverTouch())
+                    // Check for wave arrivals (optimized frequency)
+                    if (stepCount % waveCheckInterval == 0)
                     {
-                        sWaveReceiverTouched = true;
-                        sWaveTouchStep = stepCount;
-                        Logger.Log($"[AcousticSimulatorGPU] S-Wave reached RX at step {sWaveTouchStep}");
+                        if (!pWaveReceiverTouched && CheckPWaveReceiverTouch())
+                        {
+                            pWaveReceiverTouched = true;
+                            pWaveTouchStep = stepCount;
+                            Logger.Log($"[AcousticSimulatorGPU] P-Wave reached RX at step {pWaveTouchStep}");
+                        }
+
+                        if (pWaveReceiverTouched && !sWaveReceiverTouched && CheckSWaveReceiverTouch())
+                        {
+                            sWaveReceiverTouched = true;
+                            sWaveTouchStep = stepCount;
+                            Logger.Log($"[AcousticSimulatorGPU] S-Wave reached RX at step {sWaveTouchStep}");
+                        }
                     }
 
-                    // EXACT same termination condition as CPU
+                    // Termination condition
                     if (pWaveReceiverTouched && sWaveReceiverTouched &&
                         (stepCount - sWaveTouchStep >= totalTimeSteps))
                     {
@@ -910,7 +963,6 @@ namespace CTS
                         break;
                     }
 
-                    // EXACT same max steps termination as CPU
                     if (stepCount >= absoluteMaxSteps)
                     {
                         Logger.Log($"[AcousticSimulatorGPU] WARNING: Terminating due to reaching maximum step count ({stepCount})");
@@ -932,19 +984,20 @@ namespace CTS
                         break;
                     }
 
-                    // For stability with GPU, add extra renormalization every N steps
-                    if (stepCount % 20 == 0)
+                    // Renormalization for stability (less frequent for full-face)
+                    if (stepCount % (useFullFaceTransducers ? 30 : 20) == 0)
                     {
                         RenormalizeFields();
                     }
 
-                    // Report progress on every step for better visualization
-                    if (stepCount % VIS_INTERVAL == 0)
+                    // Report progress (less frequently for full-face)
+                    if (stepCount % progressInterval == 0)
+                    {
                         ReportProgress();
+                    }
                 }
                 catch (Exception ex)
                 {
-                    // EXACT same error handling as CPU
                     Logger.Log($"[AcousticSimulatorGPU] Error during simulation step {stepCount}: {ex.Message}");
 
                     if (!pWaveReceiverTouched)
@@ -974,15 +1027,13 @@ namespace CTS
             }
 
             ReportProgress("Finalising", 99);
-            FinalizeAndRaiseEvent(); // Use measured arrivals for calculation
+            FinalizeAndRaiseEvent();
         }
         /// <summary>Initialises the confining stress state and injects the
         /// source pulse (stress + velocity kick) around the transmitter.</summary>
         private void ApplySource()
         {
-            // ------------------------------------------------------------------
-            // 1) Clear dynamic fields
-            // ------------------------------------------------------------------
+            // ---------------------------------------------------------- 1. zero fields
             vxBuffer.MemSetToZero();
             vyBuffer.MemSetToZero();
             vzBuffer.MemSetToZero();
@@ -992,36 +1043,84 @@ namespace CTS
             damageBuffer.MemSetToZero();
             accelerator.Synchronize();
 
-            // ------------------------------------------------------------------
-            // 2) Cache material & density once – NO per-voxel GetAsArray1D() later
-            // ------------------------------------------------------------------
-            byte[] materialData = materialBuffer.GetAsArray1D();
-            float[] densityData = densityBuffer.GetAsArray1D();
+            // ---------------------------------------------------------- 2. pre-stress
+            byte[] mat = materialBuffer.GetAsArray1D();
+            double[] prestress = new double[totalCells];
+            for (int i = 0; i < totalCells; i++)
+                if (mat[i] == selectedMaterialID)
+                    prestress[i] = -confiningPressurePa;     // compression = –ve
 
-            // ------------------------------------------------------------------
-            // 3) Pre-stress: hydrostatic confining pressure (-ve = compression)
-            // ------------------------------------------------------------------
-            double[] initialStress = new double[totalCells];
-            for (int i = 0; i < totalCells; ++i)
-                if (materialData[i] == selectedMaterialID)
-                    initialStress[i] = -confiningPressurePa;
-
-            sxxBuffer.CopyFromCPU(initialStress);
-            syyBuffer.CopyFromCPU(initialStress);
-            szzBuffer.CopyFromCPU(initialStress);
+            sxxBuffer.CopyFromCPU(prestress);
+            syyBuffer.CopyFromCPU(prestress);
+            szzBuffer.CopyFromCPU(prestress);
             accelerator.Synchronize();
 
-            // ------------------------------------------------------------------
-            // 4) Compute pulse magnitude (same formula as CPU version)
-            // ------------------------------------------------------------------
+            // ---------------------------------------------------------- 3. pulse magnitude
             double pulse = sourceAmplitude * Math.Sqrt(sourceEnergyJ) * 1e6;
+            Logger.Log($"[GPU] Source pulse = {pulse:E6}  (full-face = {useFullFaceTransducers})");
 
+            // ---------------------------------------------------------- 4. inject source
+            if (useFullFaceTransducers)
+            {
+                // 4a – stress kick on sxx / syy / szz
+                int planePos = mainAxis == 0 ? tx : mainAxis == 1 ? ty : tz;
+
+                fullFaceSourceKernel(totalCells, sxxBuffer.View, materialBuffer.View,
+                                     width, height, depth,
+                                     planePos, mainAxis, pulse, selectedMaterialID);
+
+                fullFaceSourceKernel(totalCells, syyBuffer.View, materialBuffer.View,
+                                     width, height, depth,
+                                     planePos, mainAxis, pulse, selectedMaterialID);
+
+                fullFaceSourceKernel(totalCells, szzBuffer.View, materialBuffer.View,
+                                     width, height, depth,
+                                     planePos, mainAxis, pulse, selectedMaterialID);
+
+                // 4b – velocity kick along TX→RX axis (computed on host, one upload)
+                double sign = mainAxis == 0 ? Math.Sign(rx - tx)
+                           : mainAxis == 1 ? Math.Sign(ry - ty)
+                                           : Math.Sign(rz - tz);
+                if (sign == 0) sign = 1;
+
+                float[] rho = densityBuffer.GetAsArray1D();
+                double[] vKick = new double[totalCells];
+
+                for (int i = 0; i < totalCells; i++)
+                {
+                    // coordinates from flat index
+                    int z = i / (width * height);
+                    int rem = i % (width * height);
+                    int y = rem / width;
+                    int x = rem % width;
+
+                    bool onPlane = mainAxis == 0 ? (x == tx)
+                                 : mainAxis == 1 ? (y == ty)
+                                                 : (z == tz);
+
+                    if (onPlane && mat[i] == selectedMaterialID)
+                    {
+                        float r = rho[i] > 0 ? rho[i] : 1000f;
+                        vKick[i] = pulse / (r * 10.0) * sign;
+                    }
+                }
+
+                switch (mainAxis)
+                {
+                    case 0: vxBuffer.CopyFromCPU(vKick); break;
+                    case 1: vyBuffer.CopyFromCPU(vKick); break;
+                    default: vzBuffer.CopyFromCPU(vKick); break;
+                }
+
+                accelerator.Synchronize();
+                return; // done – no point-source fall-back needed
+            }
+
+            // ---------------------------------------------------------- 5. legacy point source (unchanged)
+            // original point‐sphere logic kept verbatim below -------------
             const int sourceRadius = 2;
             double[] work = new double[totalCells];
 
-            // ------------------------------------------------------------------
-            // 5) Add the stress pulse inside a small sphere around TX
-            // ------------------------------------------------------------------
             for (int dz = -sourceRadius; dz <= sourceRadius; ++dz)
                 for (int dy = -sourceRadius; dy <= sourceRadius; ++dy)
                     for (int dx = -sourceRadius; dx <= sourceRadius; ++dx)
@@ -1035,10 +1134,10 @@ namespace CTS
                             sz < 0 || sz >= depth) continue;
 
                         int idx = FlattenIndex(sx, sy, sz);
-                        if (materialData[idx] != selectedMaterialID) continue;
+                        if (mat[idx] != selectedMaterialID) continue;
 
                         double falloff = 1.0 - dist / sourceRadius;
-                        work[idx] = initialStress[idx] + pulse * falloff * falloff;
+                        work[idx] = prestress[idx] + pulse * falloff * falloff;
                     }
 
             sxxBuffer.CopyFromCPU(work);
@@ -1046,44 +1145,20 @@ namespace CTS
             szzBuffer.CopyFromCPU(work);
             accelerator.Synchronize();
 
-            // ------------------------------------------------------------------
-            // 6) Prepare velocity kick along the TX→RX axis (one pass)
-            // ------------------------------------------------------------------
             Array.Clear(work, 0, work.Length);
 
-            int mainAxis = Math.Abs(rx - tx) >= Math.Abs(ry - ty) &&
-                           Math.Abs(rx - tx) >= Math.Abs(rz - tz) ? 0 :
-                           Math.Abs(ry - ty) >= Math.Abs(rx - tx) &&
-                           Math.Abs(ry - ty) >= Math.Abs(rz - tz) ? 1 : 2;
+            double dir = mainAxis == 0 ? Math.Sign(rx - tx)
+                     : mainAxis == 1 ? Math.Sign(ry - ty)
+                                     : Math.Sign(rz - tz);
+            if (dir == 0) dir = 1;
 
-            int sign = mainAxis == 0 ? Math.Sign(rx - tx) :
-                       mainAxis == 1 ? Math.Sign(ry - ty) :
-                                        Math.Sign(rz - tz);
-            if (sign == 0) sign = 1;
-
-            for (int dz = -sourceRadius; dz <= sourceRadius; ++dz)
-                for (int dy = -sourceRadius; dy <= sourceRadius; ++dy)
-                    for (int dx = -sourceRadius; dx <= sourceRadius; ++dx)
-                    {
-                        double dist = Math.Sqrt(dx * dx + dy * dy + dz * dz);
-                        if (dist > sourceRadius) continue;
-
-                        int sx = tx + dx, sy = ty + dy, sz = tz + dz;
-                        if (sx < 0 || sx >= width ||
-                            sy < 0 || sy >= height ||
-                            sz < 0 || sz >= depth) continue;
-
-                        int idx = FlattenIndex(sx, sy, sz);
-                        if (materialData[idx] != selectedMaterialID) continue;
-
-                        double falloff = 1.0 - dist / sourceRadius;
-                        double localPulse = pulse * falloff * falloff;
-
-                        float rho = densityData[idx] > 0 ? densityData[idx] : 1000.0f;
-                        double vKick = localPulse / (rho * 10.0);
-
-                        work[idx] = vKick * sign;
-                    }
+            float[] rhoPt = densityBuffer.GetAsArray1D();
+            for (int i = 0; i < totalCells; ++i)
+                if (work[i] != 0.0)
+                {
+                    float r = rhoPt[i] > 0 ? rhoPt[i] : 1000f;
+                    work[i] = pulse / (r * 10.0) * dir;
+                }
 
             switch (mainAxis)
             {
@@ -1091,8 +1166,10 @@ namespace CTS
                 case 1: vyBuffer.CopyFromCPU(work); break;
                 default: vzBuffer.CopyFromCPU(work); break;
             }
+
             accelerator.Synchronize();
         }
+
         private void UpdateStress()
         {
             // Launch stress kernel on all cells
@@ -1207,36 +1284,92 @@ namespace CTS
 
         private bool CheckPWaveReceiverTouch()
         {
-            int rxIndex = FlattenIndex(rx, ry, rz);
+            // ------------------------------------------------------------------ 0
+            // One-time snapshots of the fields we need
+            // ------------------------------------------------------------------
+            double[] vxData = vxBuffer.GetAsArray1D();
+            double[] vyData = vyBuffer.GetAsArray1D();
+            double[] vzData = vzBuffer.GetAsArray1D();
+            byte[] mat = materialBuffer.GetAsArray1D();
 
-            double pMagnitude;
-            switch (mainAxis)
+            // Fast accessor that gives |vx|, |vy|, |vz| depending on mainAxis
+            Func<int, double> absField =
+                mainAxis == 0 ? new Func<int, double>(i => Math.Abs(vxData[i])) :
+                mainAxis == 1 ? new Func<int, double>(i => Math.Abs(vyData[i])) :
+                                new Func<int, double>(i => Math.Abs(vzData[i]));
+
+            double pMag = 0.0;
+            int samples = 0;
+
+            if (useFullFaceTransducers)
             {
-                case 0:
-                    pMagnitude = Math.Abs(vxBuffer.GetAsArray1D()[rxIndex]);
-                    break;
-                case 1:
-                    pMagnitude = Math.Abs(vyBuffer.GetAsArray1D()[rxIndex]);
-                    break;
-                default:
-                    pMagnitude = Math.Abs(vzBuffer.GetAsArray1D()[rxIndex]);
-                    break;
+                // ------------------------------------------------------------------ 1
+                // Average over the whole receiver face
+                // ------------------------------------------------------------------
+                switch (mainAxis)
+                {
+                    case 0: // plane x = rx
+                        for (int y = 0; y < height; y++)
+                            for (int z = 0; z < depth; z++)
+                            {
+                                int idx = FlattenIndex(rx, y, z);
+                                if (mat[idx] == selectedMaterialID)
+                                {
+                                    pMag += absField(idx);
+                                    samples++;
+                                }
+                            }
+                        break;
+
+                    case 1: // plane y = ry
+                        for (int x = 0; x < width; x++)
+                            for (int z = 0; z < depth; z++)
+                            {
+                                int idx = FlattenIndex(x, ry, z);
+                                if (mat[idx] == selectedMaterialID)
+                                {
+                                    pMag += absField(idx);
+                                    samples++;
+                                }
+                            }
+                        break;
+
+                    default: // plane z = rz
+                        for (int x = 0; x < width; x++)
+                            for (int y = 0; y < height; y++)
+                            {
+                                int idx = FlattenIndex(x, y, rz);
+                                if (mat[idx] == selectedMaterialID)
+                                {
+                                    pMag += absField(idx);
+                                    samples++;
+                                }
+                            }
+                        break;
+                }
+
+                if (samples > 0) pMag /= samples;  // face-average
+            }
+            else
+            {
+                // ------------------------------------------------------------------ 2
+                // Single-voxel detection
+                // ------------------------------------------------------------------
+                int rxIdx = FlattenIndex(rx, ry, rz);
+                pMag = absField(rxIdx);
             }
 
-            if (double.IsInfinity(pMagnitude) || double.IsNaN(pMagnitude))
-            {
-                Logger.Log("[AcousticSimulatorGPU] WARNING: P-wave magnitude at RX is invalid (INF or NaN)");
-                return false;
-            }
+            // ------------------------------------------------------------------ 3
+            // Robust thresholding
+            // ------------------------------------------------------------------
+            if (double.IsNaN(pMag) || double.IsInfinity(pMag))
+                return false;                                // corrupt value – ignore
 
-            if (pMagnitude > pWaveMaxAmplitude) pWaveMaxAmplitude = pMagnitude;
+            if (pMag > pWaveMaxAmplitude) pWaveMaxAmplitude = pMag;
+
             double threshold = Math.Max(1e-10, pWaveMaxAmplitude * 0.01);
 
-            if (stepCount % 10 == 0)
-                Logger.Log($"[CheckPWaveTouch] RX P-wave: {pMagnitude:E6}, Threshold: {threshold:E6}");
-
-            if (pMagnitude > 1e-9) return true;
-            return pMagnitude > threshold;
+            return pMag > threshold;
         }
         /// <summary>
         /// Returns <c>true</c> when the transverse (S-wave) motion at the receiver
@@ -1244,82 +1377,120 @@ namespace CTS
         /// </summary>
         private bool CheckSWaveReceiverTouch()
         {
-            // -----------------------------------------------------------------
-            // 0) Bail out if the P-wave has not yet been registered
-            // -----------------------------------------------------------------
             if (!pWaveReceiverTouched)
                 return false;
 
-            // -----------------------------------------------------------------
-            // 1) Configurable detection parameters (tweak at will or expose as
-            //    public properties – but keep them out of the tight loop below)
-            // -----------------------------------------------------------------
-            const int minStepsAfterPWave = 5;     // guard against echo
-            const int pTailMarginSteps = 10;    // wait until P-tail fades
-            const double timeToleranceFraction = 0.05;  // allow 5 % early arrival
-            const double amplitudeFraction = 0.15;  // 15 % of running S-peak
-            const double distinctFromPFactor = 1.0;   // S must exceed P this much
+            const int minStepsAfterPWave = 5;
+            const int pTailMarginSteps = 10;
+            const double timeToleranceFraction = 0.05;
+            const double amplitudeFraction = 0.15;
+            const double distinctFromPFactor = 1.0;
             const double vpvsLowerBound = 1.3;
             const double vpvsUpperBound = 2.2;
-            const double tiny = 1e-10;  // numerical noise floor
+            const double tiny = 1e-10;
 
             if (stepCount - pWaveTouchStep < minStepsAfterPWave)
                 return false;
 
-            // -----------------------------------------------------------------
-            // 2) Fetch velocity components at the receiver voxel
-            // -----------------------------------------------------------------
-            int rxIndex = FlattenIndex(rx, ry, rz);
+            double pMag = 0, sMag = 0;
 
-            double vx = vxBuffer.GetAsArray1D()[rxIndex];
-            double vy = vyBuffer.GetAsArray1D()[rxIndex];
-            double vz = vzBuffer.GetAsArray1D()[rxIndex];
-
-            // Longitudinal P component and transverse S magnitude
-            double pMag, sMag;
-            switch (mainAxis)
+            if (useFullFaceTransducers)
             {
-                case 0: pMag = Math.Abs(vx); sMag = Math.Sqrt(vy * vy + vz * vz); break;
-                case 1: pMag = Math.Abs(vy); sMag = Math.Sqrt(vx * vx + vz * vz); break;
-                default: pMag = Math.Abs(vz); sMag = Math.Sqrt(vx * vx + vy * vy); break;
+                // Average over receiver face
+                int count = 0;
+                double[] vxData = vxBuffer.GetAsArray1D();
+                double[] vyData = vyBuffer.GetAsArray1D();
+                double[] vzData = vzBuffer.GetAsArray1D();
+                byte[] materialData = materialBuffer.GetAsArray1D();
+
+                switch (mainAxis)
+                {
+                    case 0: // X-axis
+                        for (int y = 0; y < height; y++)
+                            for (int z = 0; z < depth; z++)
+                            {
+                                int idx = FlattenIndex(rx, y, z);
+                                if (materialData[idx] == selectedMaterialID)
+                                {
+                                    pMag += Math.Abs(vxData[idx]);
+                                    sMag += Math.Sqrt(vyData[idx] * vyData[idx] + vzData[idx] * vzData[idx]);
+                                    count++;
+                                }
+                            }
+                        break;
+
+                    case 1: // Y-axis
+                        for (int x = 0; x < width; x++)
+                            for (int z = 0; z < depth; z++)
+                            {
+                                int idx = FlattenIndex(x, ry, z);
+                                if (materialData[idx] == selectedMaterialID)
+                                {
+                                    pMag += Math.Abs(vyData[idx]);
+                                    sMag += Math.Sqrt(vxData[idx] * vxData[idx] + vzData[idx] * vzData[idx]);
+                                    count++;
+                                }
+                            }
+                        break;
+
+                    default: // Z-axis
+                        for (int x = 0; x < width; x++)
+                            for (int y = 0; y < height; y++)
+                            {
+                                int idx = FlattenIndex(x, y, rz);
+                                if (materialData[idx] == selectedMaterialID)
+                                {
+                                    pMag += Math.Abs(vzData[idx]);
+                                    sMag += Math.Sqrt(vxData[idx] * vxData[idx] + vyData[idx] * vyData[idx]);
+                                    count++;
+                                }
+                            }
+                        break;
+                }
+
+                if (count > 0)
+                {
+                    pMag /= count;
+                    sMag /= count;
+                }
+            }
+            else
+            {
+                // Point detection
+                int rxIndex = FlattenIndex(rx, ry, rz);
+                double vx = vxBuffer.GetAsArray1D()[rxIndex];
+                double vy = vyBuffer.GetAsArray1D()[rxIndex];
+                double vz = vzBuffer.GetAsArray1D()[rxIndex];
+
+                switch (mainAxis)
+                {
+                    case 0: pMag = Math.Abs(vx); sMag = Math.Sqrt(vy * vy + vz * vz); break;
+                    case 1: pMag = Math.Abs(vy); sMag = Math.Sqrt(vx * vx + vz * vz); break;
+                    default: pMag = Math.Abs(vz); sMag = Math.Sqrt(vx * vx + vy * vy); break;
+                }
             }
 
             if (double.IsNaN(sMag) || double.IsInfinity(sMag))
                 return false;
 
-            // -----------------------------------------------------------------
-            // 3) Dynamic amplitude threshold (keeps growing with the running peak)
-            // -----------------------------------------------------------------
             if (sMag > sWaveMaxAmplitude)
                 sWaveMaxAmplitude = sMag;
 
             double sThreshold = Math.Max(tiny, sWaveMaxAmplitude * amplitudeFraction);
 
-            // -----------------------------------------------------------------
-            // 4) Time-of-arrival gate based on the *theoretical* Vp/Vs
-            // -----------------------------------------------------------------
             double vpVsTheory = GetTheoreticalVpVsRatio();
-            // Clamp to a plausible range to avoid absurd estimates
             vpVsTheory = Clamp(vpVsTheory, vpvsLowerBound, vpvsUpperBound);
 
             int expectedSWaveStep = (int)(pWaveTouchStep * vpVsTheory);
             if (stepCount < expectedSWaveStep * (1.0 - timeToleranceFraction))
-                return false;                     // too early
+                return false;
 
-            // -----------------------------------------------------------------
-            // 5) Quality criteria: amplitude high enough, clearly distinct from P,
-            //    and safely past the P-tail.
-            // -----------------------------------------------------------------
             bool strongEnough = sMag > sThreshold;
             bool distinctFromP = sMag > pMag * distinctFromPFactor;
             bool pastPTail = stepCount > pWaveTouchStep + pTailMarginSteps;
 
             if (strongEnough && distinctFromP && pastPTail)
             {
-                // -----------------------------------------------------------------
-                // 6) Sanity check: will the derived Vp/Vs stay inside 1.3-2.2?
-                //    If not, keep waiting and issue a diagnostic log.
-                // -----------------------------------------------------------------
                 double vpvsMeasured = (double)stepCount / pWaveTouchStep;
 
                 if (vpvsMeasured < vpvsLowerBound || vpvsMeasured > vpvsUpperBound)
@@ -1329,7 +1500,6 @@ namespace CTS
                     return false;
                 }
 
-                // Optional: warn if we always flirt with the limits
                 if (Math.Abs(vpvsMeasured - vpvsLowerBound) < 0.02 ||
                     Math.Abs(vpvsMeasured - vpvsUpperBound) < 0.02)
                 {

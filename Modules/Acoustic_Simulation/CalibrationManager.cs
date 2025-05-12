@@ -826,6 +826,44 @@ namespace CTS
                 return lower.PoissonRatio + t * (upper.PoissonRatio - lower.PoissonRatio);
             }
         }
+        internal double PredictPoissonRatioFromDensity(double density)
+        {
+            var pts = CurrentCalibration?.CalibrationPoints;
+            if (pts == null || pts.Count < 2)
+                return 0.25;                                 // fallback
+
+            // sort once by ρ
+            var ordered = pts.OrderBy(p => p.MeasuredDensity).ToList();
+
+            // clamp outside range
+            if (density <= ordered.First().MeasuredDensity)
+                return ordered.First().PoissonRatio;
+            if (density >= ordered.Last().MeasuredDensity)
+                return ordered.Last().PoissonRatio;
+
+            // find the segment [lower, upper] that brackets ρ
+            CalibrationPoint lower = null, upper = null;
+            foreach (var p in ordered)
+            {
+                if (p.MeasuredDensity <= density) lower = p;
+                if (p.MeasuredDensity >= density)
+                {
+                    upper = p;
+                    break;
+                }
+            }
+
+            if (lower == null || upper == null) return 0.25;
+
+            // linear interpolation
+            double t = (density - lower.MeasuredDensity) /
+                       (upper.MeasuredDensity - lower.MeasuredDensity);
+
+            double nu = lower.PoissonRatio + t * (upper.PoissonRatio - lower.PoissonRatio);
+
+            // physical bounds
+            return Math.Max(0.0, Math.Min(0.49, nu));
+        }
         /// <summary>
         /// Save calibration data to a file
         /// </summary>

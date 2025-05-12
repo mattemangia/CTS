@@ -22,12 +22,31 @@ namespace CTS
         private KryptonRadioButton rbSeparateValues;
         private KryptonNumericUpDown numKnownVp;
         private KryptonNumericUpDown numKnownVs;
+        double youngModulus = 0;
+        double poissonRatio = 0.25;
         private KryptonNumericUpDown numConfiningPressure;
         private KryptonPanel pnlInputMethod;
         private KryptonLabel lblVpVsValue;
         public CalibrationDialog(CalibrationManager manager, AcousticSimulationForm form,
                          double vp, double vs, double vpVsRatio)
         {
+            try
+            {
+                youngModulus = (double)simulationForm.GetYoungsModulus();
+                poissonRatio = (double)simulationForm.GetPoissonRatio();
+
+                // Ensure we have a valid Poisson's ratio
+                if (poissonRatio <= 0 || poissonRatio >= 0.5)
+                {
+                    poissonRatio = 0.25; // Use default if invalid
+                }
+            }
+            catch (Exception)
+            {
+                // Default values if exception
+                youngModulus = 50000.0; // Default for limestone
+                poissonRatio = 0.25;
+            }
             try
             {
                 // Ensure all parameters are valid

@@ -7,6 +7,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.VisualBasic;
+using CTS.Compression;
 
 namespace CTS
 {
@@ -312,6 +313,57 @@ namespace CTS
             // Save .bin
             saveBinMenuItem = new ToolStripMenuItem("Save .bin");
             saveBinMenuItem.Click += (s, e) => OnSaveClicked();
+            var compressSeparator = new ToolStripSeparator();
+
+            // Compress Volume
+            var compressVolumeMenuItem = new ToolStripMenuItem("Compress Volume...");
+            compressVolumeMenuItem.Click += (s, e) =>
+            {
+                if (mainForm.volumeData == null && mainForm.volumeLabels == null)
+                {
+                    MessageBox.Show("Please load a dataset first.", "No Dataset",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                Logger.Log("[ControlForm] Opening Compression Form");
+
+                using (var compressionForm = new CompressionForm(mainForm))
+                {
+                    // Set default input path to current dataset path
+                    if (!string.IsNullOrEmpty(mainForm.CurrentPath))
+                    {
+                        var inputField = compressionForm.Controls.Find("txtInputPath", true)[0] as TextBox;
+                        if (inputField != null)
+                        {
+                            inputField.Text = mainForm.CurrentPath;
+
+                            // Auto-generate output path
+                            string dir = Path.GetDirectoryName(mainForm.CurrentPath);
+                            string name = Path.GetFileNameWithoutExtension(mainForm.CurrentPath);
+                            var outputField = compressionForm.Controls.Find("txtOutputPath", true)[0] as TextBox;
+                            if (outputField != null)
+                            {
+                                outputField.Text = Path.Combine(dir, name + ".cts3d");
+                            }
+                        }
+                    }
+
+                    compressionForm.ShowDialog();
+                }
+            };
+
+            // Decompress Volume
+            var decompressVolumeMenuItem = new ToolStripMenuItem("Decompress Volume...");
+            decompressVolumeMenuItem.Click += (s, e) =>
+            {
+                Logger.Log("[ControlForm] Opening Decompression Form");
+
+                using (var compressionForm = new CompressionForm(mainForm))
+                {
+                    compressionForm.ShowDialog();
+                }
+            };
 
             // Export Images
             exportImagesMenuItem = new ToolStripMenuItem("Export Images");
@@ -334,7 +386,7 @@ namespace CTS
             fileMenu.DropDownItems.AddRange(new ToolStripItem[]
             {
         loadFolderMenuItem, importBinMenuItem, fileSep1, saveBinMenuItem,
-        exportImagesMenuItem, closeDatasetMenuItem, exitMenuItem
+        exportImagesMenuItem, compressSeparator, compressVolumeMenuItem, decompressVolumeMenuItem, compressSeparator, closeDatasetMenuItem, exitMenuItem
             });
         }
 

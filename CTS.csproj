@@ -123,6 +123,7 @@
     <Compile Include="MaterialOperations\MaterialOperations.cs" />
     <Compile Include="Misc\Annotations.cs" />
     <Compile Include="Misc\AcousticVolume.cs" />
+    <Compile Include="Misc\Compression.cs" />
     <Compile Include="Misc\ExportAnimationDialog.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -254,6 +255,9 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="UI\CancellableProgressForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="UI\CompressionForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="UI\DensityCalibrationPreviewForm.cs">

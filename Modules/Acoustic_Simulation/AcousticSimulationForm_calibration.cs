@@ -149,11 +149,29 @@ namespace CTS
         /// </summary>
         private void BtnManageCalibration_Click(object sender, EventArgs e)
         {
-            // Show calibration dialog with empty results (for management only)
+            // Get current simulation values if available, otherwise use defaults
+            double vpValue = 0, vsValue = 0, vpvsValue = 0;
+
+            if (simulationResults != null)
+            {
+                vpValue = simulationResults.PWaveVelocity;
+                vsValue = simulationResults.SWaveVelocity;
+                vpvsValue = simulationResults.VpVsRatio;
+
+                // Recalculate if needed
+                if (vpValue > 0 && vsValue > 0 && vpvsValue <= 0)
+                {
+                    vpvsValue = vpValue / vsValue;
+                }
+            }
+
+            // Show calibration dialog with current or default values
             using (CalibrationDialog dialog = new CalibrationDialog(
                 calibrationManager,
                 this,
-                0, 0, 0))
+                vpValue,
+                vsValue,
+                vpvsValue))
             {
                 dialog.ShowDialog(this);
             }

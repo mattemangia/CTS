@@ -659,11 +659,11 @@ namespace CTS
         }
 
         private static void VelocityUpdateKernel(Index1D index,
-        ArrayView<byte> material, ArrayView<float> density,
-        ArrayView<double> vx, ArrayView<double> vy, ArrayView<double> vz,
-        ArrayView<double> sxx, ArrayView<double> syy, ArrayView<double> szz,
-        ArrayView<double> sxy, ArrayView<double> sxz, ArrayView<double> syz,
-        PhysicsParams physics, GridParams grid)
+    ArrayView<byte> material, ArrayView<float> density,
+    ArrayView<double> vx, ArrayView<double> vy, ArrayView<double> vz,
+    ArrayView<double> sxx, ArrayView<double> syy, ArrayView<double> szz,
+    ArrayView<double> sxy, ArrayView<double> sxz, ArrayView<double> syz,
+    PhysicsParams physics, GridParams grid)
         {
             // Skip if outside domain or not the selected material
             if (index >= material.Length) return;
@@ -695,7 +695,7 @@ namespace CTS
                 zm1 < 0 || zp1 >= material.Length)
                 return;
 
-            // Get density with safety check
+            // Get density with safety check - matching CPU version exactly
             float rho = density[index];
             rho = XMath.Max(100.0f, rho); // Same safety minimum as CPU
 
@@ -734,29 +734,40 @@ namespace CTS
             double vyCurrent = vy[index];
             double vzCurrent = vz[index];
 
-            // Calculate new velocities
+            // Calculate velocity increments - exactly as CPU version
             double dvx = physics.Dt * (dsxx_dx + dsxy_dy + dsxz_dz) / rho;
             double dvy = physics.Dt * (dsxy_dx + dsyy_dy + dsyz_dz) / rho;
             double dvz = physics.Dt * (dsxz_dx + dsyz_dy + dszz_dz) / rho;
 
-            // Apply damping factor to prevent acceleration (5% damping per step)
-            const double DAMPING_FACTOR = 0.05;
+            // Apply damping factor to prevent acceleration - EXACT match to CPU version
+            const double DAMPING_FACTOR = 0.05; // 5% damping per step
             double damping = 1.0 - DAMPING_FACTOR;
 
-            // Update with damping
+            // Update velocities WITH damping to prevent acceleration - matching CPU exactly
             double vxNew = vxCurrent * damping + dvx;
             double vyNew = vyCurrent * damping + dvy;
             double vzNew = vzCurrent * damping + dvz;
 
-            // Apply clamping for stability
-            vxNew = SafeClamp(vxNew);
-            vyNew = SafeClamp(vyNew);
-            vzNew = SafeClamp(vzNew);
+            // Only clamp at extreme values to prevent numerical explosion - matching CPU
+            const double MAX_VELOCITY = 1.0e10;
+            vxNew = SafeClamp(vxNew, -MAX_VELOCITY, MAX_VELOCITY);
+            vyNew = SafeClamp(vyNew, -MAX_VELOCITY, MAX_VELOCITY);
+            vzNew = SafeClamp(vzNew, -MAX_VELOCITY, MAX_VELOCITY);
 
             // Store updated velocities
             vx[index] = vxNew;
             vy[index] = vyNew;
             vz[index] = vzNew;
+        }
+        private static double SafeClamp(double value, double min, double max)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value))
+                return 0.0;
+
+            // Apply symmetric clamping
+            if (value > max) return max;
+            if (value < min) return min;
+            return value;
         }
         #endregion
 

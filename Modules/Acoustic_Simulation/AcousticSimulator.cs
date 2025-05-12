@@ -742,26 +742,25 @@ namespace CTS
             if (sTransverseMagnitude > sWaveMaxAmplitude)
                 sWaveMaxAmplitude = sTransverseMagnitude;
 
-            // Use a more sensitive threshold to avoid false detection 
-            // Wait a bit after P-wave to avoid false detection
-            if (stepCount - pWaveTouchStep < 5) // Reduced from 10 to 5
+            // Wait longer after P-wave to avoid false detection (increased from 5 to 20)
+            if (stepCount - pWaveTouchStep < 20)
                 return false;
 
-            // Lower the ratio from 0.05 to 0.01 for easier detection
-            double threshold = Math.Max(1e-10, sWaveMaxAmplitude * 0.01);
+            // Use a more conservative threshold to avoid false detection
+            double threshold = Math.Max(1e-8, sWaveMaxAmplitude * 0.1); // Increased from 0.01 to 0.1
 
             // Log S-wave detection data
             if (stepCount % 10 == 0)
                 Logger.Log($"[CheckSWaveTouch] RX S-wave: {sTransverseMagnitude:E6}, Threshold: {threshold:E6}");
 
-            // Even with very small values, detect a minimum threshold
-            if (sTransverseMagnitude > 1e-9 && stepCount - pWaveTouchStep >= 5)
+            // Require stronger signal and more time delay from P-wave
+            if (sTransverseMagnitude > threshold && stepCount - pWaveTouchStep >= 20)
             {
                 Logger.Log($"[AcousticSimulator] S-Wave detected at RX with magnitude {sTransverseMagnitude:E6}");
                 return true;
             }
 
-            return sTransverseMagnitude > threshold;
+            return false;
         }
         private bool CheckPWaveReceiverTouch()
         {

@@ -27,6 +27,7 @@ namespace CTS
         private KryptonNumericUpDown numConfiningPressure;
         private KryptonPanel pnlInputMethod;
         private KryptonLabel lblVpVsValue;
+       
         public CalibrationDialog(CalibrationManager manager, AcousticSimulationForm form,
                          double vp, double vs, double vpVsRatio)
         {
@@ -280,7 +281,7 @@ namespace CTS
                 lblPoisson.StateCommon.ShortText.Color1 = Color.White;
                 addPointPanel.Controls.Add(lblPoisson);
 
-                KryptonLabel lblPoissonValue = new KryptonLabel();
+                lblPoissonValue = new KryptonLabel();
                 lblPoissonValue.Name = "lblPoissonValue";
                 lblPoissonValue.Location = new Point(150, 140);
                 lblPoissonValue.StateCommon.ShortText.Color1 = Color.White;
@@ -336,6 +337,7 @@ namespace CTS
                 numKnownVpVs.Maximum = 4.0m;
                 numKnownVpVs.Value = Math.Max(0.0m, Math.Min(4.0m, (decimal)simulatedVpVsRatio));
                 numKnownVpVs.Increment = 0.001m;
+                numKnownVpVs.ValueChanged += UpdateVpVsRatio;
                 pnlInputMethod.Controls.Add(numKnownVpVs);
 
                 // Separate Vp and Vs inputs
@@ -448,11 +450,15 @@ namespace CTS
                 numKnownVs.ValueChanged += UpdateVpVsRatio;
             }
         }
+        private KryptonLabel lblPoissonValue;
         private void UpdateVpVsRatio(object sender, EventArgs e)
         {
             if (numKnownVs.Value > 0)
             {
                 numKnownVpVs.Value = numKnownVp.Value / numKnownVs.Value;
+                double vpVs = (double)numKnownVpVs.Value;
+                double nu = CalibrationManager.PoissonFromVpVs(vpVs);
+                lblPoissonValue.Text = nu.ToString("F4", CultureInfo.InvariantCulture);
             }
         }
         // Use discrete methods for event handling instead of lambdas

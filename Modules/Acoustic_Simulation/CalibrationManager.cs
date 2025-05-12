@@ -602,49 +602,56 @@ namespace CTS
         /// Add calibration point using Vp/Vs ratio
         /// </summary>
         public void AddCurrentSimulationAsCalibrationPoint(double knownVpVsRatio,
-                                                          double simulatedVp, double simulatedVs,
-                                                          double confiningPressure)
+                                                   double simulatedVp, double simulatedVs,
+                                                   double confiningPressure)
         {
             var point = CreateCalibrationPointFromCurrentSimulation(
                 knownVpVsRatio, 0, 0, confiningPressure);
 
-            if (point == null)
-                return;
+            if (point == null) return;
 
-            // Update with simulation results
+            /* ---------- NEW : derive Poisson’s ratio from the user’s Vp/Vs ---------- */
+            if (knownVpVsRatio > 0.0)
+                point.PoissonRatio = PoissonFromVpVs(knownVpVsRatio);
+
+            /* ----------------------------------------------------------------------- */
             point.SimulatedVp = simulatedVp;
             point.SimulatedVs = simulatedVs;
             point.SimulatedVpVsRatio = simulatedVp / simulatedVs;
 
-            // Add to calibration dataset
             CurrentCalibration.AddCalibrationPoint(point);
 
-            Logger.Log($"[CalibrationManager] Added new calibration point: {point.MaterialName}, " +
-                      $"VpVs={point.KnownVpVsRatio:F3}, Density={point.MeasuredDensity:F1}, P={confiningPressure:F1} MPa");
+            Logger.Log($"[CalibrationManager] Added (ratio) point {point.MaterialName} " +
+                       $"Vp/Vs ={point.KnownVpVsRatio:F3}, ν ={point.PoissonRatio:F4}, " +
+                       $"ρ ={point.MeasuredDensity:F1} kg/m³, P ={confiningPressure:F1} MPa");
         }
+
         /// <summary>
         /// Add calibration point using separate Vp and Vs values
         /// </summary>
         public void AddCurrentSimulationAsCalibrationPoint(double knownVp, double knownVs,
-                                                          double simulatedVp, double simulatedVs,
-                                                          double confiningPressure)
+                                                   double simulatedVp, double simulatedVs,
+                                                   double confiningPressure)
         {
             var point = CreateCalibrationPointFromCurrentSimulation(
                 0, knownVp, knownVs, confiningPressure);
 
-            if (point == null)
-                return;
+            if (point == null) return;
 
-            // Update with simulation results
+            /* ---------- NEW : derive Poisson’s ratio from the user’s Vp / Vs ---------- */
+            if (knownVp > 0.0 && knownVs > 0.0)
+                point.PoissonRatio = PoissonFromVpVs(knownVp / knownVs);
+            /* ------------------------------------------------------------------------- */
+
             point.SimulatedVp = simulatedVp;
             point.SimulatedVs = simulatedVs;
             point.SimulatedVpVsRatio = simulatedVp / simulatedVs;
 
-            // Add to calibration dataset
             CurrentCalibration.AddCalibrationPoint(point);
 
-            Logger.Log($"[CalibrationManager] Added new calibration point: {point.MaterialName}, " +
-                      $"Vp={knownVp:F0}, Vs={knownVs:F0}, Density={point.MeasuredDensity:F1}, P={confiningPressure:F1} MPa");
+            Logger.Log($"[CalibrationManager] Added (Vp+Vs) point {point.MaterialName} " +
+                       $"Vp ={knownVp:F0} m/s, Vs ={knownVs:F0} m/s, ν ={point.PoissonRatio:F4}, " +
+                       $"ρ ={point.MeasuredDensity:F1} kg/m³, P ={confiningPressure:F1} MPa");
         }
         /// <summary>
         /// Create a new calibration point from the current simulation parameters and results
@@ -880,7 +887,18 @@ namespace CTS
                 return false;
             }
         }
-        
+        /// <summary>Compute Poisson’s ratio from a Vp/Vs ratio
+        ///     (valid for an isotropic, elastic solid)</summary>
+        internal static double PoissonFromVpVs(double vpVs)
+        {
+            // Guard against illegal or numerically unstable ratios
+            if (vpVs <= 1.0001) return 0.0;          // physically impossible
+            double r2 = vpVs * vpVs;                 // (Vp/Vs)^2
+            double nu = (r2 - 2.0) / (2.0 * (r2 - 1.0));   // ν = (R-2)/(2·(R-1))
+                                                           // keep the result inside the admissible range
+            return Math.Max(0.0, Math.Min(0.5, nu));
+        }
+
     }
 
 }

@@ -321,7 +321,8 @@ namespace CTS
             {
                 try
                 {
-                    // Show compression form
+                    Logger.Log("[ControlForm] Opening Volume Compression form");
+
                     using (var compressionForm = new VolumeCompressionForm(mainForm))
                     {
                         compressionForm.ShowDialog();
@@ -334,8 +335,6 @@ namespace CTS
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             };
-
-
             // Decompress Volume
             var decompressVolumeMenuItem = new ToolStripMenuItem("Decompress Volume...");
             decompressVolumeMenuItem.Click += (s, e) =>

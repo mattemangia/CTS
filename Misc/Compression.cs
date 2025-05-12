@@ -34,7 +34,150 @@ namespace CTS.Compression
             _usePredictiveCoding = predictiveCoding;
             _useRunLengthEncoding = runLengthEncoding;
         }
+        /// <summary>
+        /// Compress the currently loaded volume from MainForm
+        /// </summary>
+        public async Task CompressLoadedVolumeAsync(MainForm mainForm, string outputPath, IProgress<int> progress)
+        {
+            _progress = progress;
+            Logger.Log($"[ChunkedVolumeCompressor] Starting compression of loaded volume to {outputPath}");
 
+            try
+            {
+                if (mainForm.volumeData == null && mainForm.volumeLabels == null)
+                {
+                    throw new InvalidOperationException("No volume data loaded");
+                }
+
+                var volumeData = mainForm.volumeData;
+                var volumeLabels = mainForm.volumeLabels;
+
+                // Create header from loaded data
+                VolumeHeader header = new VolumeHeader
+                {
+                    Width = volumeData?.Width ?? volumeLabels.Width,
+                    Height = volumeData?.Height ?? volumeLabels.Height,
+                    Depth = volumeData?.Depth ?? volumeLabels.Depth,
+                    ChunkDim = volumeData?.ChunkDim ?? volumeLabels.ChunkDim,
+                    PixelSize = mainForm.pixelSize,
+                    BitsPerPixel = 8,
+                    HasLabels = volumeLabels != null
+                };
+
+                header.ChunkCountX = (header.Width + header.ChunkDim - 1) / header.ChunkDim;
+                header.ChunkCountY = (header.Height + header.ChunkDim - 1) / header.ChunkDim;
+                header.ChunkCountZ = (header.Depth + header.ChunkDim - 1) / header.ChunkDim;
+
+                _totalChunks = header.ChunkCountX * header.ChunkCountY * header.ChunkCountZ;
+                if (header.HasLabels)
+                {
+                    _totalChunks *= 2;
+                }
+                _processedChunks = 0;
+
+                Logger.Log($"[ChunkedVolumeCompressor] Compressing loaded {header.Width}x{header.Height}x{header.Depth} volume");
+
+                using (var outputStream = new FileStream(outputPath, FileMode.Create, FileAccess.Write))
+                using (var writer = new BinaryWriter(outputStream))
+                {
+                    // Write compressed file header
+                    WriteCompressedHeader(writer, header, header.HasLabels);
+
+                    // Compress volume data if present
+                    if (volumeData != null)
+                    {
+                        await CompressLoadedVolumeDataAsync(volumeData, writer, header);
+                    }
+
+                    // Compress labels if present
+                    if (volumeLabels != null)
+                    {
+                        Logger.Log("[ChunkedVolumeCompressor] Compressing loaded label data...");
+                        await CompressLoadedLabelsAsync(volumeLabels, writer, header);
+                    }
+                }
+
+                Logger.Log($"[ChunkedVolumeCompressor] Compression completed. Output: {outputPath}");
+                progress?.Report(100);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ChunkedVolumeCompressor] Error: {ex.Message}");
+                throw;
+            }
+        }
+        private async Task CompressLoadedLabelsAsync(ILabelVolumeData volumeLabels, BinaryWriter writer, VolumeHeader header)
+        {
+            int totalChunks = volumeLabels.ChunkCountX * volumeLabels.ChunkCountY * volumeLabels.ChunkCountZ;
+            int chunkSize = volumeLabels.ChunkDim * volumeLabels.ChunkDim * volumeLabels.ChunkDim;
+
+            writer.Write(volumeLabels.ChunkDim);
+            writer.Write(volumeLabels.ChunkCountX);
+            writer.Write(volumeLabels.ChunkCountY);
+            writer.Write(volumeLabels.ChunkCountZ);
+
+            for (int i = 0; i < totalChunks; i++)
+            {
+                byte[] chunkData = volumeLabels.GetChunkBytes(i);
+                byte[] compressed = CompressLabelChunk(chunkData);
+
+                writer.Write(compressed.Length);
+                writer.Write(compressed);
+
+                _processedChunks++;
+                _progress?.Report((int)(_processedChunks * 100 / _totalChunks));
+            }
+        }
+        private async Task CompressLoadedVolumeDataAsync(IGrayscaleVolumeData volumeData, BinaryWriter writer, VolumeHeader header)
+        {
+            int chunkSize = header.ChunkDim * header.ChunkDim * header.ChunkDim;
+            int totalChunks = header.ChunkCountX * header.ChunkCountY * header.ChunkCountZ;
+
+            // Process chunks in parallel
+            var compressedChunks = new ConcurrentDictionary<int, byte[]>();
+            var semaphore = new SemaphoreSlim(Environment.ProcessorCount);
+
+            var tasks = new List<Task>();
+
+            for (int chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++)
+            {
+                int index = chunkIndex; // Capture for closure
+
+                var task = Task.Run(async () =>
+                {
+                    await semaphore.WaitAsync();
+                    try
+                    {
+                        // Get chunk data directly from the loaded volume
+                        byte[] chunkData = volumeData.GetChunkBytes(index);
+
+                        // Compress chunk
+                        byte[] compressed = Compress3DChunk(chunkData, header.ChunkDim);
+                        compressedChunks[index] = compressed;
+
+                        Interlocked.Increment(ref _processedChunks);
+                        _progress?.Report((int)(_processedChunks * 100 / _totalChunks));
+                    }
+                    finally
+                    {
+                        semaphore.Release();
+                    }
+                });
+
+                tasks.Add(task);
+            }
+
+            await Task.WhenAll(tasks);
+
+            // Write compressed chunks in order
+            writer.Write(totalChunks);
+            for (int i = 0; i < totalChunks; i++)
+            {
+                var compressed = compressedChunks[i];
+                writer.Write(compressed.Length);
+                writer.Write(compressed);
+            }
+        }
         /// <summary>
         /// Compress a CTS volume to a compressed file
         /// </summary>

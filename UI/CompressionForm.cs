@@ -10,7 +10,10 @@ namespace CTS.Compression
     {
         private MainForm _mainForm;
         private ChunkedVolumeCompressor _compressor;
-
+        private bool _useLoadedVolume = false;
+        private RadioButton rbCurrentVolume;
+        private RadioButton rbExternalFile;
+        private GroupBox grpSource;
         private TextBox txtInputPath;
         private TextBox txtOutputPath;
         private Button btnSelectInput;
@@ -25,23 +28,52 @@ namespace CTS.Compression
         private Label lblFileSize;
         private Label lblRatio;
 
-        public VolumeCompressionForm(MainForm mainForm)
+        public VolumeCompressionForm(MainForm mainForm, bool decompressMode = false)
         {
             _mainForm = mainForm;
             InitializeComponent();
 
-            // Set default input path to current dataset
-            if (!string.IsNullOrEmpty(_mainForm.CurrentPath))
+            if (decompressMode)
             {
-                txtInputPath.Text = _mainForm.CurrentPath;
-                UpdateOutputPath();
+                // Configure form for decompression mode
+                this.Text = "CTS Volume Decompression";
+                btnDecompress.BackColor = Color.FromArgb(0, 120, 215);
+                btnCompress.BackColor = SystemColors.Control;
+
+                // Hide source selection for decompression
+                grpSource.Visible = false;
+                this.Height -= 60;
+            }
+            else
+            {
+                // Configure form for compression mode
+                this.Text = "CTS Volume Compression";
+                btnCompress.BackColor = Color.FromArgb(0, 120, 215);
+                btnDecompress.BackColor = SystemColors.Control;
+
+                // Enable source selection
+                grpSource.Visible = true;
+
+                // Check if a volume is currently loaded
+                if (_mainForm.volumeData != null || _mainForm.volumeLabels != null)
+                {
+                    rbCurrentVolume.Enabled = true;
+                    rbCurrentVolume.Checked = true;
+                    txtInputPath.Text = _mainForm.CurrentPath;
+                    UpdateOutputPath();
+                }
+                else
+                {
+                    rbCurrentVolume.Enabled = false;
+                    rbExternalFile.Checked = true;
+                }
             }
         }
 
         private void InitializeComponent()
         {
             this.Text = "CTS Volume Compression";
-            this.Size = new Size(600, 450);
+            this.Size = new Size(600, 520); // Increased height for source selection
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.StartPosition = FormStartPosition.CenterParent;
@@ -55,17 +87,46 @@ namespace CTS.Compression
                 AutoSize = true
             };
 
+            // Source selection group
+            grpSource = new GroupBox
+            {
+                Text = "Data Source",
+                Location = new Point(20, 40),
+                Size = new Size(540, 60)
+            };
+
+            rbCurrentVolume = new RadioButton
+            {
+                Text = "Use Currently Loaded Volume",
+                Location = new Point(20, 25),
+                Width = 200,
+                AutoSize = true
+            };
+            rbCurrentVolume.CheckedChanged += (s, e) => UpdateSourceSelection();
+
+            rbExternalFile = new RadioButton
+            {
+                Text = "Select External File",
+                Location = new Point(250, 25),
+                Width = 150,
+                AutoSize = true
+            };
+            rbExternalFile.CheckedChanged += (s, e) => UpdateSourceSelection();
+
+            grpSource.Controls.Add(rbCurrentVolume);
+            grpSource.Controls.Add(rbExternalFile);
+
             // Input section
             Label lblInput = new Label
             {
                 Text = "Input Volume:",
-                Location = new Point(20, 50),
+                Location = new Point(20, 110),
                 AutoSize = true
             };
 
             txtInputPath = new TextBox
             {
-                Location = new Point(20, 70),
+                Location = new Point(20, 130),
                 Width = 450,
                 ReadOnly = true
             };
@@ -73,7 +134,7 @@ namespace CTS.Compression
             btnSelectInput = new Button
             {
                 Text = "Browse...",
-                Location = new Point(480, 68),
+                Location = new Point(480, 128),
                 Width = 80,
                 Height = 25
             };
@@ -196,14 +257,29 @@ namespace CTS.Compression
 
             // Add controls
             this.Controls.AddRange(new Control[]
-            {
-                lblTitle, lblInput, txtInputPath, btnSelectInput,
-                lblOutput, txtOutputPath, btnSelectOutput,
-                grpSettings, progressBar, lblStatus, lblFileSize, lblRatio,
-                btnCompress, btnDecompress
-            });
+        {
+            lblTitle, grpSource, lblInput, txtInputPath, btnSelectInput,
+            lblOutput, txtOutputPath, btnSelectOutput,
+            grpSettings, progressBar, lblStatus, lblFileSize, lblRatio,
+            btnCompress, btnDecompress
+        });
         }
-
+        private void UpdateSourceSelection()
+        {
+            if (rbCurrentVolume.Checked)
+            {
+                _useLoadedVolume = true;
+                txtInputPath.Text = _mainForm.CurrentPath;
+                btnSelectInput.Enabled = false;
+                UpdateOutputPath();
+            }
+            else
+            {
+                _useLoadedVolume = false;
+                txtInputPath.Text = "";
+                btnSelectInput.Enabled = true;
+            }
+        }
         private void BtnSelectInput_Click(object sender, EventArgs e)
         {
             // Check if selecting compressed file or volume folder
@@ -287,9 +363,16 @@ namespace CTS.Compression
 
         private async void BtnCompress_Click(object sender, EventArgs e)
         {
-            if (string.IsNullOrEmpty(txtInputPath.Text) || string.IsNullOrEmpty(txtOutputPath.Text))
+            if (string.IsNullOrEmpty(txtOutputPath.Text))
             {
-                MessageBox.Show("Please select input and output paths.", "Missing Paths",
+                MessageBox.Show("Please select output path.", "Missing Path",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (!_useLoadedVolume && string.IsNullOrEmpty(txtInputPath.Text))
+            {
+                MessageBox.Show("Please select input path.", "Missing Path",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
@@ -313,11 +396,31 @@ namespace CTS.Compression
                 });
 
                 var startTime = DateTime.Now;
-                await _compressor.CompressAsync(txtInputPath.Text, txtOutputPath.Text, progress);
+
+                if (_useLoadedVolume)
+                {
+                    // Compress the currently loaded volume
+                    await _compressor.CompressLoadedVolumeAsync(_mainForm, txtOutputPath.Text, progress);
+                }
+                else
+                {
+                    // Compress external file
+                    await _compressor.CompressAsync(txtInputPath.Text, txtOutputPath.Text, progress);
+                }
+
                 var duration = DateTime.Now - startTime;
 
                 // Calculate compression ratio
-                long inputSize = GetInputSize(txtInputPath.Text);
+                long inputSize;
+                if (_useLoadedVolume)
+                {
+                    inputSize = CalculateLoadedVolumeSize();
+                }
+                else
+                {
+                    inputSize = GetInputSize(txtInputPath.Text);
+                }
+
                 FileInfo outputFile = new FileInfo(txtOutputPath.Text);
                 double ratio = (double)outputFile.Length / inputSize * 100;
 
@@ -344,6 +447,29 @@ namespace CTS.Compression
                 btnDecompress.Enabled = true;
             }
         }
+        private long CalculateLoadedVolumeSize()
+        {
+            long size = 0;
+
+            if (_mainForm.volumeData != null)
+            {
+                var volume = _mainForm.volumeData;
+                size += 36; // Header size
+                size += (long)volume.ChunkCountX * volume.ChunkCountY * volume.ChunkCountZ *
+                        volume.ChunkDim * volume.ChunkDim * volume.ChunkDim;
+            }
+
+            if (_mainForm.volumeLabels != null)
+            {
+                var labels = _mainForm.volumeLabels;
+                size += 16; // Header size
+                size += (long)labels.ChunkCountX * labels.ChunkCountY * labels.ChunkCountZ *
+                        labels.ChunkDim * labels.ChunkDim * labels.ChunkDim;
+            }
+
+            return size;
+        }
+
 
         private async void BtnDecompress_Click(object sender, EventArgs e)
         {

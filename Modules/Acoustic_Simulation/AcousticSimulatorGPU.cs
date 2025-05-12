@@ -61,6 +61,7 @@ namespace CTS
         private readonly bool useElasticModel;
         private readonly bool usePlasticModel;
         private readonly bool useBrittleModel;
+        private readonly int mainAxis;
         #endregion
 
         #region ILGPU objects
@@ -97,7 +98,11 @@ namespace CTS
         private CancellationTokenSource cts = new CancellationTokenSource();
         #endregion
 
-
+        /// <summary>Returns √((λ + 2μ) / μ) for the current elastic constants.</summary>
+        private double GetTheoreticalVpVsRatio()
+        {
+            return Math.Sqrt((lambda0 + 2 * mu0) / mu0);
+        }
 
         #region Events (same as CPU version)
         public event EventHandler<AcousticSimulationProgressEventArgs> ProgressUpdated;
@@ -173,7 +178,14 @@ namespace CTS
 
             // Set TX/RX positions based on axis (same logic as CPU)
             SetTransducerPositions(axis, width, height, depth);
+            if (Math.Abs(rx - tx) >= Math.Abs(ry - ty) && Math.Abs(rx - tx) >= Math.Abs(rz - tz))
+                mainAxis = 0;        // X
+            else if (Math.Abs(ry - ty) >= Math.Abs(rx - tx) && Math.Abs(ry - ty) >= Math.Abs(rz - tz))
+                mainAxis = 1;        // Y
+            else
+                mainAxis = 2;        // Z
 
+            Logger.Log($"[AcousticSimulatorGPU] Main propagation axis: {(mainAxis == 0 ? "X" : mainAxis == 1 ? "Y" : "Z")}");
             // Calculate expected steps for progress reporting
             CalculateExpectedSteps(densityVolume);
 
@@ -1054,7 +1066,6 @@ namespace CTS
             // Reset array for velocity
             Array.Clear(tmpArray, 0, tmpArray.Length);
 
-            // Apply initial velocity in the main direction
             for (int dz = -sourceRadius; dz <= sourceRadius; dz++)
             {
                 for (int dy = -sourceRadius; dy <= sourceRadius; dy++)
@@ -1069,27 +1080,43 @@ namespace CTS
                             continue;
 
                         int idx = FlattenIndex(sx, sy, sz);
-                        byte[] materialSample = materialBuffer.GetAsArray1D();
-                        if (idx >= materialSample.Length || materialSample[idx] != selectedMaterialID)
+                        if (materialBuffer.GetAsArray1D()[idx] != selectedMaterialID)
                             continue;
 
-                        double falloff = 1.0 - (dist / sourceRadius);
-                        float[] densitySample = densityBuffer.GetAsArray1D();
-                        float localDensity = idx < densitySample.Length ? densitySample[idx] : 1000.0f;
-
-                        // Calculate velocity impulse exactly as CPU does
+                        double falloff = 1.0 - dist / sourceRadius;
                         double localPulse = pulse * falloff * falloff;
-                        double velocityPulse = localPulse / (localDensity * 10);
+                        float rho = densityBuffer.GetAsArray1D()[idx];
+                        double velocityKick = localPulse / (rho * 10);
 
-                        if (mainAxis == 0)
+                        // Direction is TX→RX along the chosen axis
+                        int sign;
+                        switch (mainAxis)
                         {
-                            int direction = Math.Sign(rx - tx);
-                            if (direction == 0) direction = 1;
-                            tmpArray[idx] = velocityPulse * direction;
+                            case 0:
+                                sign = Math.Sign(rx - tx);
+                                break;
+                            case 1:
+                                sign = Math.Sign(ry - ty);
+                                break;
+                            default:
+                                sign = Math.Sign(rz - tz);
+                                break;
                         }
+                        if (sign == 0) sign = 1;
+
+                        tmpArray[idx] = velocityKick * sign;
                     }
                 }
             }
+
+            // Upload into the correct component buffer
+            switch (mainAxis)
+            {
+                case 0: vxBuffer.CopyFromCPU(tmpArray); break;
+                case 1: vyBuffer.CopyFromCPU(tmpArray); break;
+                case 2: vzBuffer.CopyFromCPU(tmpArray); break;
+            }
+            accelerator.Synchronize();
 
             if (mainAxis == 0)
             {
@@ -1280,81 +1307,86 @@ namespace CTS
 
         private bool CheckPWaveReceiverTouch()
         {
-            // Get value at receiver position
             int rxIndex = FlattenIndex(rx, ry, rz);
-            double[] vxSample = vxBuffer.GetAsArray1D();
 
-            // Exact match to CPU - check vx component at RX position
-            double pMagnitude = Math.Abs(vxSample[rxIndex]);
+            double pMagnitude;
+            switch (mainAxis)
+            {
+                case 0:
+                    pMagnitude = Math.Abs(vxBuffer.GetAsArray1D()[rxIndex]);
+                    break;
+                case 1:
+                    pMagnitude = Math.Abs(vyBuffer.GetAsArray1D()[rxIndex]);
+                    break;
+                default:
+                    pMagnitude = Math.Abs(vzBuffer.GetAsArray1D()[rxIndex]);
+                    break;
+            }
 
-            // Same error checking as CPU
             if (double.IsInfinity(pMagnitude) || double.IsNaN(pMagnitude))
             {
                 Logger.Log("[AcousticSimulatorGPU] WARNING: P-wave magnitude at RX is invalid (INF or NaN)");
                 return false;
             }
 
-            // Track maximum amplitude - EXACT match to CPU
-            if (pMagnitude > pWaveMaxAmplitude)
-                pWaveMaxAmplitude = pMagnitude;
-
-            // Use exactly same threshold calculation as CPU
+            if (pMagnitude > pWaveMaxAmplitude) pWaveMaxAmplitude = pMagnitude;
             double threshold = Math.Max(1e-10, pWaveMaxAmplitude * 0.01);
 
-            // Log data occasionally - same as CPU
             if (stepCount % 10 == 0)
                 Logger.Log($"[CheckPWaveTouch] RX P-wave: {pMagnitude:E6}, Threshold: {threshold:E6}");
 
-            // Same absolute minimum detection - EXACT match to CPU
-            if (pMagnitude > 1e-9)
-            {
-                Logger.Log($"[AcousticSimulatorGPU] P-Wave detected at RX with magnitude {pMagnitude:E6}");
-                return true;
-            }
-
+            if (pMagnitude > 1e-9) return true;
             return pMagnitude > threshold;
         }
         private bool CheckSWaveReceiverTouch()
         {
-            // EXACT match to CPU - Wait a bit after P-wave to avoid false detection
-            if (stepCount - pWaveTouchStep < 5)
-                return false;
+            // simple guard against firing too soon
+            if (stepCount - pWaveTouchStep < 5) return false;
 
             int rxIndex = FlattenIndex(rx, ry, rz);
-            double[] vySample = vyBuffer.GetAsArray1D();
-            double[] vzSample = vzBuffer.GetAsArray1D();
 
-            // EXACT match to CPU - S-waves measured through vy and vz components
-            double sTransverseMagnitude = Math.Sqrt(
-                vySample[rxIndex] * vySample[rxIndex] +
-                vzSample[rxIndex] * vzSample[rxIndex]);
+            // Pull velocity components at RX
+            double vx = vxBuffer.GetAsArray1D()[rxIndex];
+            double vy = vyBuffer.GetAsArray1D()[rxIndex];
+            double vz = vzBuffer.GetAsArray1D()[rxIndex];
 
-            // Same error checking as CPU
-            if (double.IsInfinity(sTransverseMagnitude) || double.IsNaN(sTransverseMagnitude))
+            // P-wave component (longitudinal) and S-wave magnitude (transverse)
+            double pMag, sMag;
+            switch (mainAxis)
+            {
+                case 0: pMag = Math.Abs(vx); sMag = Math.Sqrt(vy * vy + vz * vz); break;
+                case 1: pMag = Math.Abs(vy); sMag = Math.Sqrt(vx * vx + vz * vz); break;
+                default: pMag = Math.Abs(vz); sMag = Math.Sqrt(vx * vx + vy * vy); break;
+            }
+
+            if (double.IsInfinity(sMag) || double.IsNaN(sMag))
             {
                 Logger.Log("[AcousticSimulatorGPU] WARNING: S-wave magnitude at RX is invalid (INF or NaN)");
                 return false;
             }
 
-            // Track maximum S-wave amplitude - EXACT match to CPU
-            if (sTransverseMagnitude > sWaveMaxAmplitude)
-                sWaveMaxAmplitude = sTransverseMagnitude;
+            if (sMag > sWaveMaxAmplitude) sWaveMaxAmplitude = sMag;
+            double threshold = Math.Max(1e-10, sWaveMaxAmplitude * 0.05);
 
-            // Use exactly same threshold calculation as CPU
-            double threshold = Math.Max(1e-10, sWaveMaxAmplitude * 0.01);
+            // Gate by expected arrival time from theory
+            double vpVs = GetTheoreticalVpVsRatio();
+            int expectedS = (int)(pWaveTouchStep * vpVs);
+            if (stepCount < expectedS * 0.7) return false;  // allow 30 % early
 
-            // Log detection data occasionally - same as CPU
             if (stepCount % 10 == 0)
-                Logger.Log($"[CheckSWaveTouch] RX S-wave: {sTransverseMagnitude:E6}, Threshold: {threshold:E6}");
+                Logger.Log($"[CheckSWaveTouch] Step {stepCount}: S={sMag:E6}, P={pMag:E6}, " +
+                           $"Threshold={threshold:E6}, Expected={expectedS}");
 
-            // Same minimum detection - EXACT match to CPU
-            if (sTransverseMagnitude > 1e-9 && stepCount - pWaveTouchStep >= 5)
+            bool distinctFromP = sMag > pMag * 0.5;
+            bool pastPtail = stepCount > pWaveTouchStep + 10;
+
+            if (sMag > threshold && distinctFromP && pastPtail)
             {
-                Logger.Log($"[AcousticSimulatorGPU] S-Wave detected at RX with magnitude {sTransverseMagnitude:E6}");
+                Logger.Log($"[AcousticSimulatorGPU] S-Wave detected at RX with magnitude {sMag:E6} at step {stepCount}");
                 return true;
             }
 
-            return sTransverseMagnitude > threshold;
+            return false;
         }
         private void ReportProgress(string text = "Simulating", int? force = null)
         {

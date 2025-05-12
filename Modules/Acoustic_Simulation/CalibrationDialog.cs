@@ -24,19 +24,46 @@ namespace CTS
         private KryptonNumericUpDown numKnownVs;
         private KryptonNumericUpDown numConfiningPressure;
         private KryptonPanel pnlInputMethod;
+        private KryptonLabel lblVpVsValue;
         public CalibrationDialog(CalibrationManager manager, AcousticSimulationForm form,
-                                 double vp, double vs, double vpVsRatio)
+                         double vp, double vs, double vpVsRatio)
         {
             try
             {
                 // Ensure all parameters are valid
                 this.calibrationManager = manager ?? throw new ArgumentNullException(nameof(manager));
                 this.simulationForm = form ?? throw new ArgumentNullException(nameof(form));
-                this.simulatedVp = vp;
-                this.simulatedVs = vs;
-                this.simulatedVpVsRatio = vpVsRatio;
+
+                // Ensure we have reasonable values for wave velocities
+                this.simulatedVp = Math.Max(0, vp);
+                this.simulatedVs = Math.Max(0, vs);
+
+                // Calculate VpVs ratio directly if necessary
+                if (vpVsRatio <= 0 && this.simulatedVs > 0)
+                {
+                    this.simulatedVpVsRatio = this.simulatedVp / this.simulatedVs;
+                    Logger.Log($"[CalibrationDialog] Recalculated Vp/Vs ratio: {this.simulatedVpVsRatio:F3}");
+                }
+                else
+                {
+                    this.simulatedVpVsRatio = vpVsRatio;
+                }
+
+                // Validate the final value isn't still zero
+                if (this.simulatedVpVsRatio <= 0)
+                {
+                    Logger.Log("[CalibrationDialog] Warning: VpVs ratio is still <= 0, setting default");
+                    this.simulatedVpVsRatio = 1.732; // Default sqrt(3)
+                }
 
                 InitializeComponent();
+
+                // Double-check that the values are set in UI after initialization
+                if (lblVpVsValue != null)
+                {
+                    lblVpVsValue.Text = $"{this.simulatedVpVsRatio:F3}";
+                    Logger.Log($"[CalibrationDialog] Set Vp/Vs display to: {this.simulatedVpVsRatio:F3}");
+                }
 
                 // Verify essential controls were created
                 if (calibrationPointsList == null || numKnownVpVs == null || txtNote == null)
@@ -191,11 +218,11 @@ namespace CTS
                 lblSimulatedVpVs.StateCommon.ShortText.Color1 = Color.White;
                 addPointPanel.Controls.Add(lblSimulatedVpVs);
 
-                KryptonLabel lblVpVsValue = new KryptonLabel();
+                lblVpVsValue = new KryptonLabel();
                 lblVpVsValue.Name = "lblVpVsValue";
                 lblVpVsValue.Location = new Point(150, 80);
-                lblVpVsValue.StateCommon.ShortText.Color1 = Color.White;
-                lblVpVsValue.Text = $"{simulatedVpVsRatio:F3}";
+                lblVpVsValue.StateCommon.ShortText.Color1 = Color.LightGreen; // Make it stand out more
+                lblVpVsValue.Text = simulatedVpVsRatio > 0 ? $"{simulatedVpVsRatio:F3}" : "N/A";
                 addPointPanel.Controls.Add(lblVpVsValue);
 
                 // Material elastic properties

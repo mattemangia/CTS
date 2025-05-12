@@ -200,40 +200,50 @@ namespace CTS
 
             Logger.Log($"[CalibrationDataset] Processing {pressureGroups.Count} pressure groups");
 
-            // Create models for each pressure group
+            // Process each pressure group
             foreach (var group in pressureGroups)
             {
-                if (group.Count() < 2)
-                {
-                    Logger.Log($"[CalibrationDataset] Skipping pressure {group.Key} MPa - only {group.Count()} point(s)");
-                    continue;
-                }
-
                 double pressure = group.Key;
                 var points = group.ToList();
 
+                if (points.Count < 2)
+                {
+                    Logger.Log($"[CalibrationDataset] Skipping pressure {pressure} MPa - only {points.Count} point(s)");
+                    continue;
+                }
+
                 Logger.Log($"[CalibrationDataset] Creating models for pressure {pressure} MPa with {points.Count} points");
 
-                // Create model for density-to-Young's modulus relationship at this pressure
+                // Create model for density-to-Young's modulus relationship
                 var densityYoungPoints = points
-                    .Where(p => p.YoungsModulus > 0) // Filter out invalid values
+                    .Where(p => p.YoungsModulus > 0)
                     .Select(p => new Tuple<double, double>(p.MeasuredDensity, p.YoungsModulus))
                     .ToList();
 
                 if (densityYoungPoints.Count >= 2)
                 {
-                    DensityToYoungsModulusModelsByPressure[pressure] = CalculateLinearModel(densityYoungPoints);
+                    var model = CalculateLinearModel(densityYoungPoints);
+                    if (model != null)
+                    {
+                        DensityToYoungsModulusModelsByPressure[pressure] = model;
+                        Logger.Log($"[CalibrationDataset] Created density-to-Young's model: E = {model.Slope:F2} × ρ + {model.Intercept:F2}, R²={model.R2:F3}");
+                    }
                 }
 
-                // Create model for VpVs-to-Poisson's ratio relationship at this pressure
+                // Create model for VpVs-to-Poisson's ratio relationship
                 var vpvsPoissonPoints = points
-                    .Where(p => p.PoissonRatio > 0 && p.KnownVpVsRatio > 0) // Filter out invalid values
+                    .Where(p => p.PoissonRatio > 0 && p.KnownVpVsRatio > 0)
                     .Select(p => new Tuple<double, double>(p.KnownVpVsRatio, p.PoissonRatio))
                     .ToList();
 
                 if (vpvsPoissonPoints.Count >= 2)
                 {
-                    VpVsToPoissonRatioModelsByPressure[pressure] = CalculateLinearModel(vpvsPoissonPoints);
+                    var model = CalculateLinearModel(vpvsPoissonPoints);
+                    if (model != null)
+                    {
+                        VpVsToPoissonRatioModelsByPressure[pressure] = model;
+                        Logger.Log($"[CalibrationDataset] Created VpVs-to-Poisson model: ν = {model.Slope:F4} × (Vp/Vs) + {model.Intercept:F4}, R²={model.R2:F3}");
+                    }
                 }
             }
 
@@ -261,6 +271,40 @@ namespace CTS
             if (points == null || points.Count < 2)
                 return null;
 
+            // Special case for exactly 2 points - use direct line equation for more accuracy
+            if (points.Count == 2)
+            {
+                var p1 = points[0];
+                var p2 = points[1];
+
+                // Check if x values are too close together
+                if (Math.Abs(p2.Item1 - p1.Item1) < 1e-10)
+                {
+                    Logger.Log("[CalibrationDataset] Warning: x values are almost identical, using constant model");
+                    return new CalibrationModel
+                    {
+                        Slope = 0,
+                        Intercept = (p1.Item2 + p2.Item2) / 2,
+                        R2 = 1.0  // Perfect fit for a horizontal line through these points
+                    };
+                }
+
+                // Calculate slope and intercept directly from two points
+                double lineSlope = (p2.Item2 - p1.Item2) / (p2.Item1 - p1.Item1);
+                double lineIntercept = p1.Item2 - lineSlope * p1.Item1;
+
+                // With exactly 2 distinct points, R² is always 1.0 for a line
+                Logger.Log($"[CalibrationDataset] 2-point linear model: y = {lineSlope:F6}x + {lineIntercept:F6}, R² = 1.0");
+
+                return new CalibrationModel
+                {
+                    Slope = lineSlope,
+                    Intercept = lineIntercept,
+                    R2 = 1.0  // Perfect fit by definition for 2 points
+                };
+            }
+
+            // For more than 2 points, use standard regression
             int n = points.Count;
             double sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
 
@@ -282,33 +326,40 @@ namespace CTS
                 return null;
             }
 
-            double slope = (n * sumXY - sumX * sumY) / denominator;
-            double intercept = (sumY - slope * sumX) / n;
+            double regressionSlope = (n * sumXY - sumX * sumY) / denominator;
+            double regressionIntercept = (sumY - regressionSlope * sumX) / n;
 
-            double r2 = CalculateR2(points, slope, intercept);
+            double r2 = CalculateR2(points, regressionSlope, regressionIntercept);
 
-            Logger.Log($"[CalibrationDataset] Linear model: y = {slope:F6}x + {intercept:F6}, R² = {r2:F4}");
+            Logger.Log($"[CalibrationDataset] Linear model: y = {regressionSlope:F6}x + {regressionIntercept:F6}, R² = {r2:F4}");
 
-            return new CalibrationModel { Slope = slope, Intercept = intercept, R2 = r2 };
+            return new CalibrationModel
+            {
+                Slope = regressionSlope,
+                Intercept = regressionIntercept,
+                R2 = r2
+            };
         }
+
 
         /// <summary>
         /// Calculate the coefficient of determination (R²) for a linear model
         /// </summary>
-        private double CalculateR2(List<Tuple<double, double>> points, double slope, double intercept)
+        private double CalculateR2(List<Tuple<double, double>> points, double modelSlope, double modelIntercept)
         {
             if (points == null || points.Count == 0)
                 return 0.0;
 
             double yMean = points.Average(p => p.Item2);
             double ssTot = points.Sum(p => Math.Pow(p.Item2 - yMean, 2));
-            double ssRes = points.Sum(p => Math.Pow(p.Item2 - (slope * p.Item1 + intercept), 2));
+            double ssRes = points.Sum(p => Math.Pow(p.Item2 - (modelSlope * p.Item1 + modelIntercept), 2));
 
             if (Math.Abs(ssTot) < 1e-10)
                 return 0.0;
 
             return 1 - (ssRes / ssTot);
         }
+
 
         /// <summary>
         /// Calculate Young's modulus based on material density using the calibration model

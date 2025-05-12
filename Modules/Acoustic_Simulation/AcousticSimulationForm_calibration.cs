@@ -112,17 +112,37 @@ namespace CTS
                 return;
             }
 
+            // Ensure we have valid values to display
+            double vpValue = simulationResults.PWaveVelocity;
+            double vsValue = simulationResults.SWaveVelocity;
+            double vpvsValue = simulationResults.VpVsRatio;
+
+            // Fallback if any values are zero or invalid
+            if (vpValue <= 0 || vsValue <= 0 || double.IsNaN(vpvsValue) || vpvsValue <= 0)
+            {
+                if (vpValue > 0 && vsValue > 0)
+                {
+                    vpvsValue = vpValue / vsValue;
+                    Logger.Log($"[BtnCalibrate_Click] Recalculated Vp/Vs: {vpvsValue:F3}");
+                }
+                else
+                {
+                    Logger.Log("[BtnCalibrate_Click] Warning: Invalid simulation results");
+                }
+            }
+
             // Show calibration dialog with the current simulation results
             using (CalibrationDialog dialog = new CalibrationDialog(
                 calibrationManager,
                 this,
-                simulationResults.PWaveVelocity,
-                simulationResults.SWaveVelocity,
-                simulationResults.VpVsRatio))
+                vpValue,
+                vsValue,
+                vpvsValue))
             {
                 dialog.ShowDialog(this);
             }
         }
+
 
         /// <summary>
         /// Handle the Manage Calibration button click

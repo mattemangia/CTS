@@ -2433,12 +2433,25 @@ namespace CTS
             // Update simulation results
             simulationRunning = false;
             cachedTotalTimeSteps = e.TotalTimeSteps;
+
+            // Validate and normalize values
+            double pWaveVel = Math.Max(0, e.PWaveVelocity);
+            double sWaveVel = Math.Max(0, e.SWaveVelocity);
+            double vpvsRatio = e.VpVsRatio;
+
+            // Recalculate ratio if needed
+            if (vpvsRatio <= 0 && sWaveVel > 0)
+            {
+                vpvsRatio = pWaveVel / sWaveVel;
+                Logger.Log($"[Simulator_SimulationCompleted] Recalculated Vp/Vs: {vpvsRatio:F3}");
+            }
+
             // Store the results
             simulationResults = new SimulationResults
             {
-                PWaveVelocity = e.PWaveVelocity,
-                SWaveVelocity = e.SWaveVelocity,
-                VpVsRatio = e.VpVsRatio,
+                PWaveVelocity = pWaveVel,
+                SWaveVelocity = sWaveVel,
+                VpVsRatio = vpvsRatio,
                 PWaveTravelTime = e.PWaveTravelTime,
                 SWaveTravelTime = e.SWaveTravelTime
             };
@@ -2448,14 +2461,20 @@ namespace CTS
                 var snapshot = gpuSimulator.GetWaveFieldSnapshot();
                 cachedPWaveField = ConvertToFloat(snapshot.vx);
                 cachedSWaveField = ConvertToFloat(snapshot.vy);
+                cachedZWaveField = ConvertToFloat(snapshot.vz); // Make sure we save Z field too
             }
             else if (cpuSimulator != null)
             {
                 var snapshot = cpuSimulator.GetWaveFieldSnapshot();
                 cachedPWaveField = ConvertToFloat(snapshot.vx);
                 cachedSWaveField = ConvertToFloat(snapshot.vy);
+                cachedZWaveField = ConvertToFloat(snapshot.vz); // Make sure we save Z field too
             }
 
+            // Log important values for debugging
+            Logger.Log($"[Simulator_SimulationCompleted] Vp={pWaveVel:F1} m/s, Vs={sWaveVel:F1} m/s, Vp/Vs={vpvsRatio:F3}");
+
+            // Enable visualizer button if available
             foreach (ToolStripItem item in toolStrip.Items)
             {
                 if (item.ToolTipText == "Open Visualizer")
@@ -2466,7 +2485,8 @@ namespace CTS
             }
 
             UpdateResultsDisplay();
-            InitializeVelocityField();
+            InitializeVelocityField(); // Make sure this is called
+
             // Display results
             DisplaySimulationResults();
 

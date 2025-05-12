@@ -9,6 +9,15 @@ namespace CTS.Modules.Simulation.NMR
 {
     public partial class NMRCalibrationDialog : KryptonForm
     {
+        // Dark theme colors
+        private readonly Color DarkBackground = Color.FromArgb(20, 20, 20);
+        private readonly Color DarkPanel = Color.FromArgb(30, 30, 30);
+        private readonly Color DarkControl = Color.FromArgb(40, 40, 40);
+        private readonly Color DarkBorder = Color.FromArgb(60, 60, 60);
+        private readonly Color LightText = Color.FromArgb(240, 240, 240);
+        private readonly Color DimText = Color.FromArgb(180, 180, 180);
+        private readonly Color AccentColor = Color.FromArgb(0, 120, 215);
+
         public NMRCalibration Calibration { get; private set; }
 
         // UI Controls
@@ -45,7 +54,9 @@ namespace CTS.Modules.Simulation.NMR
             catch { }
 
             Calibration = calibration ?? new NMRCalibration();
+
             InitializeComponent();
+            ApplyDarkTheme();
             LoadCalibrationData();
             UpdatePlot();
         }
@@ -62,8 +73,13 @@ namespace CTS.Modules.Simulation.NMR
             // Create tab control
             var tabControl = new TabControl
             {
-                Dock = DockStyle.Fill
+                Dock = DockStyle.Fill,
+                DrawMode = TabDrawMode.OwnerDrawFixed,
+                ItemSize = new Size(120, 40),
+                SizeMode = TabSizeMode.Fixed,
+                Padding = new Point(20, 5)
             };
+            tabControl.DrawItem += TabControl_DrawItem;
 
             // Calibration Points tab
             var pointsTab = CreateCalibrationPointsTab();
@@ -84,12 +100,101 @@ namespace CTS.Modules.Simulation.NMR
             this.Controls.Add(bottomPanel);
         }
 
+        private void ApplyDarkTheme()
+        {
+            this.BackColor = DarkBackground;
+            this.StateCommon.Back.Color1 = DarkBackground;
+            this.StateCommon.Back.Color2 = DarkBackground;
+            this.StateCommon.Border.Color1 = DarkBorder;
+            this.StateCommon.Border.Color2 = DarkBorder;
+            this.StateCommon.Header.Back.Color1 = DarkPanel;
+            this.StateCommon.Header.Back.Color2 = DarkPanel;
+            this.StateCommon.Header.Content.ShortText.Color1 = LightText;
+            this.StateCommon.Header.Content.ShortText.Color2 = LightText;
+        }
+
+        private void ApplyDarkThemeToControl(Control control)
+        {
+            if (control is KryptonButton button)
+            {
+                button.StateCommon.Back.Color1 = DarkControl;
+                button.StateCommon.Back.Color2 = DarkControl;
+                button.StateCommon.Border.Color1 = DarkBorder;
+                button.StateCommon.Border.Color2 = DarkBorder;
+                button.StateCommon.Content.ShortText.Color1 = LightText;
+                button.StateCommon.Content.ShortText.Color2 = LightText;
+                button.StateTracking.Back.Color1 = Color.FromArgb(50, 50, 50);
+                button.StateTracking.Back.Color2 = Color.FromArgb(60, 60, 60);
+            }
+            else if (control is KryptonTextBox textBox)
+            {
+                textBox.StateCommon.Back.Color1 = DarkControl;
+                textBox.StateCommon.Border.Color1 = DarkBorder;
+                textBox.StateCommon.Content.Color1 = LightText;
+                textBox.StateCommon.Content.Font = new Font("Segoe UI", 9);
+            }
+            else if (control is KryptonNumericUpDown numeric)
+            {
+                numeric.StateCommon.Back.Color1 = DarkControl;
+                numeric.StateCommon.Border.Color1 = DarkBorder;
+                numeric.StateCommon.Content.Color1 = LightText;
+                numeric.StateCommon.Content.Font = new Font("Segoe UI", 9);
+            }
+            else if (control is KryptonRichTextBox richTextBox)
+            {
+                richTextBox.StateCommon.Back.Color1 = DarkControl;
+                richTextBox.StateCommon.Border.Color1 = DarkBorder;
+                richTextBox.StateCommon.Content.Color1 = LightText;
+                richTextBox.StateCommon.Content.Font = new Font("Segoe UI", 9);
+            }
+            else if (control is KryptonLabel label)
+            {
+                label.StateCommon.ShortText.Color1 = LightText;
+                label.StateCommon.ShortText.Color2 = LightText;
+                label.StateCommon.ShortText.Font = new Font("Segoe UI", 9);
+            }
+            else if (control is Label standardLabel)
+            {
+                standardLabel.ForeColor = LightText;
+                standardLabel.BackColor = Color.Transparent;
+                standardLabel.Font = new Font("Segoe UI", 9);
+            }
+            else if (control is CheckBox checkBox)
+            {
+                checkBox.ForeColor = LightText;
+                checkBox.BackColor = Color.Transparent;
+                checkBox.Font = new Font("Segoe UI", 9);
+            }
+            else if (control is Panel panel)
+            {
+                panel.BackColor = DarkPanel;
+            }
+            else if (control is FlowLayoutPanel flowPanel)
+            {
+                flowPanel.BackColor = DarkPanel;
+            }
+            else if (control is TabPage tabPage)
+            {
+                tabPage.BackColor = DarkPanel;
+            }
+            else if (control is PictureBox pictureBox)
+            {
+                pictureBox.BackColor = DarkBackground;
+            }
+
+            // Recursively apply to all children
+            foreach (Control child in control.Controls)
+            {
+                ApplyDarkThemeToControl(child);
+            }
+        }
+
         private TabPage CreateCalibrationPointsTab()
         {
             var tab = new TabPage("Calibration Points");
             var panel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
 
-            // Data grid view
+            // Data grid view with full dark theme
             dgvCalibrationPoints = new DataGridView
             {
                 Dock = DockStyle.Fill,
@@ -98,9 +203,39 @@ namespace CTS.Modules.Simulation.NMR
                 MultiSelect = false,
                 AllowUserToAddRows = false,
                 AllowUserToDeleteRows = false,
-                BackgroundColor = Color.Black,
-                ForeColor = Color.White,
-                ColumnHeadersDefaultCellStyle = { BackColor = Color.DarkGray, ForeColor = Color.White }
+                BackgroundColor = DarkBackground,
+                BorderStyle = BorderStyle.None,
+                CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal,
+                EnableHeadersVisualStyles = false,
+                RowHeadersVisible = false,
+                ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
+                ColumnHeadersHeight = 35,
+                DefaultCellStyle = new DataGridViewCellStyle
+                {
+                    BackColor = DarkPanel,
+                    ForeColor = LightText,
+                    SelectionBackColor = AccentColor,
+                    SelectionForeColor = Color.White,
+                    Font = new Font("Segoe UI", 9)
+                },
+                AlternatingRowsDefaultCellStyle = new DataGridViewCellStyle
+                {
+                    BackColor = DarkControl,
+                    ForeColor = LightText,
+                    SelectionBackColor = AccentColor,
+                    SelectionForeColor = Color.White
+                },
+                ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
+                {
+                    BackColor = DarkControl,
+                    ForeColor = LightText,
+                    Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                    SelectionBackColor = DarkControl,
+                    SelectionForeColor = LightText,
+                    Alignment = DataGridViewContentAlignment.MiddleLeft,
+                    Padding = new Padding(5, 0, 0, 0)
+                },
+                GridColor = DarkBorder
             };
 
             // Columns
@@ -120,15 +255,17 @@ namespace CTS.Modules.Simulation.NMR
             var buttonPanel = new FlowLayoutPanel
             {
                 Dock = DockStyle.Top,
-                Height = 40,
+                Height = 50,
                 FlowDirection = FlowDirection.LeftToRight,
-                Padding = new Padding(5)
+                Padding = new Padding(5),
+                BackColor = DarkPanel
             };
 
             btnAddPoint = new KryptonButton
             {
                 Text = "Add Point",
-                Width = 100,
+                Width = 120,
+                Height = 35,
                 Values = { Image = CreateAddIcon() }
             };
             btnAddPoint.Click += BtnAddPoint_Click;
@@ -136,7 +273,8 @@ namespace CTS.Modules.Simulation.NMR
             btnEditPoint = new KryptonButton
             {
                 Text = "Edit Point",
-                Width = 100,
+                Width = 120,
+                Height = 35,
                 Values = { Image = CreateEditIcon() }
             };
             btnEditPoint.Click += BtnEditPoint_Click;
@@ -144,7 +282,8 @@ namespace CTS.Modules.Simulation.NMR
             btnRemovePoint = new KryptonButton
             {
                 Text = "Remove Point",
-                Width = 100,
+                Width = 120,
+                Height = 35,
                 Values = { Image = CreateRemoveIcon() }
             };
             btnRemovePoint.Click += BtnRemovePoint_Click;
@@ -152,7 +291,8 @@ namespace CTS.Modules.Simulation.NMR
             btnClear = new KryptonButton
             {
                 Text = "Clear All",
-                Width = 100,
+                Width = 120,
+                Height = 35,
                 Values = { Image = CreateClearIcon() }
             };
             btnClear.Click += BtnClear_Click;
@@ -162,36 +302,59 @@ namespace CTS.Modules.Simulation.NMR
             buttonPanel.Controls.Add(btnRemovePoint);
             buttonPanel.Controls.Add(btnClear);
 
+            // Apply dark theme to buttons
+            foreach (Control control in buttonPanel.Controls)
+            {
+                ApplyDarkThemeToControl(control);
+            }
+
             // Statistics panel
             var statsPanel = new Panel
             {
                 Dock = DockStyle.Bottom,
                 Height = 80,
-                Padding = new Padding(5)
+                Padding = new Padding(5),
+                BackColor = DarkControl
             };
 
             var statsLayout = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 4,
-                RowCount = 2
+                RowCount = 2,
+                BackColor = Color.Transparent
             };
 
-            statsLayout.Controls.Add(new Label { Text = "T2 Calibration R²:", AutoSize = true, ForeColor = Color.White }, 0, 0);
+            // Add statistic labels
+            var t2Label = new Label { Text = "T2 Calibration R²:", AutoSize = true };
+            statsLayout.Controls.Add(t2Label, 0, 0);
             lblT2R2 = new Label { Text = "0.0000", AutoSize = true, ForeColor = Color.LightGreen };
             statsLayout.Controls.Add(lblT2R2, 1, 0);
 
-            statsLayout.Controls.Add(new Label { Text = "T2 RMSE:", AutoSize = true, ForeColor = Color.White }, 2, 0);
+            var t2RmseLabel = new Label { Text = "T2 RMSE:", AutoSize = true };
+            statsLayout.Controls.Add(t2RmseLabel, 2, 0);
             lblT2RMSE = new Label { Text = "0.0000", AutoSize = true, ForeColor = Color.LightGreen };
             statsLayout.Controls.Add(lblT2RMSE, 3, 0);
 
-            statsLayout.Controls.Add(new Label { Text = "Amplitude Calibration R²:", AutoSize = true, ForeColor = Color.White }, 0, 1);
+            var ampLabel = new Label { Text = "Amplitude Calibration R²:", AutoSize = true };
+            statsLayout.Controls.Add(ampLabel, 0, 1);
             lblAmplitudeR2 = new Label { Text = "0.0000", AutoSize = true, ForeColor = Color.LightGreen };
             statsLayout.Controls.Add(lblAmplitudeR2, 1, 1);
 
-            statsLayout.Controls.Add(new Label { Text = "Amplitude RMSE:", AutoSize = true, ForeColor = Color.White }, 2, 1);
+            var ampRmseLabel = new Label { Text = "Amplitude RMSE:", AutoSize = true };
+            statsLayout.Controls.Add(ampRmseLabel, 2, 1);
             lblAmplitudeRMSE = new Label { Text = "0.0000", AutoSize = true, ForeColor = Color.LightGreen };
             statsLayout.Controls.Add(lblAmplitudeRMSE, 3, 1);
+
+            // Apply dark theme to all stat labels
+            foreach (Control control in statsLayout.Controls)
+            {
+                if (control is Label label && !label.Equals(lblT2R2) && !label.Equals(lblAmplitudeR2)
+                    && !label.Equals(lblT2RMSE) && !label.Equals(lblAmplitudeRMSE))
+                {
+                    label.ForeColor = LightText;
+                }
+            }
 
             statsPanel.Controls.Add(statsLayout);
 
@@ -206,25 +369,27 @@ namespace CTS.Modules.Simulation.NMR
         private TabPage CreateMetadataTab()
         {
             var tab = new TabPage("Metadata");
-            var panel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
+            var panel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10), BackColor = DarkPanel };
 
             var layout = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 2,
                 RowCount = 9,
-                Padding = new Padding(5)
+                Padding = new Padding(5),
+                BackColor = Color.Transparent
             };
 
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            // Set column widths
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+            // Set row heights
+            for (int i = 0; i < 8; i++)
+            {
+                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
+            }
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
             // Name
             layout.Controls.Add(new KryptonLabel { Text = "Name:" }, 0, 0);
@@ -271,6 +436,12 @@ namespace CTS.Modules.Simulation.NMR
             txtSampleDescription = new KryptonRichTextBox { Dock = DockStyle.Fill };
             layout.Controls.Add(txtSampleDescription, 1, 8);
 
+            // Apply dark theme to all controls
+            foreach (Control control in layout.Controls)
+            {
+                ApplyDarkThemeToControl(control);
+            }
+
             panel.Controls.Add(layout);
             tab.Controls.Add(panel);
             return tab;
@@ -279,13 +450,13 @@ namespace CTS.Modules.Simulation.NMR
         private TabPage CreateVisualizationTab()
         {
             var tab = new TabPage("Visualization");
-            var panel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
+            var panel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10), BackColor = DarkPanel };
 
             pbCalibrationPlot = new PictureBox
             {
                 Dock = DockStyle.Fill,
                 SizeMode = PictureBoxSizeMode.Zoom,
-                BackColor = Color.Black
+                BackColor = DarkBackground
             };
 
             panel.Controls.Add(pbCalibrationPlot);
@@ -299,15 +470,17 @@ namespace CTS.Modules.Simulation.NMR
             {
                 Dock = DockStyle.Bottom,
                 Height = 60,
-                Padding = new Padding(10)
+                Padding = new Padding(10),
+                BackColor = DarkPanel
             };
 
             var buttonLayout = new FlowLayoutPanel
             {
                 Dock = DockStyle.Right,
-                Width = 400,
+                Width = 600,
                 FlowDirection = FlowDirection.RightToLeft,
-                Padding = new Padding(5)
+                Padding = new Padding(5),
+                BackColor = Color.Transparent
             };
 
             // OK/Cancel buttons
@@ -315,7 +488,7 @@ namespace CTS.Modules.Simulation.NMR
             {
                 Text = "Cancel",
                 Width = 100,
-                Height = 35,
+                Height = 25,
                 DialogResult = DialogResult.Cancel
             };
 
@@ -323,7 +496,7 @@ namespace CTS.Modules.Simulation.NMR
             {
                 Text = "OK",
                 Width = 100,
-                Height = 35,
+                Height = 25,
                 DialogResult = DialogResult.OK,
                 Values = { Image = CreateOkIcon() }
             };
@@ -334,7 +507,7 @@ namespace CTS.Modules.Simulation.NMR
             {
                 Text = "Save...",
                 Width = 100,
-                Height = 35,
+                Height = 25,
                 Values = { Image = CreateSaveIcon() }
             };
             btnSave.Click += BtnSave_Click;
@@ -343,7 +516,7 @@ namespace CTS.Modules.Simulation.NMR
             {
                 Text = "Load...",
                 Width = 100,
-                Height = 35,
+                Height = 25,
                 Values = { Image = CreateLoadIcon() }
             };
             btnLoad.Click += BtnLoad_Click;
@@ -352,7 +525,7 @@ namespace CTS.Modules.Simulation.NMR
             {
                 Text = "Import...",
                 Width = 100,
-                Height = 35,
+                Height = 25,
                 Values = { Image = CreateImportIcon() }
             };
             btnImport.Click += BtnImport_Click;
@@ -363,8 +536,9 @@ namespace CTS.Modules.Simulation.NMR
                 Text = "Apply this calibration",
                 Checked = true,
                 AutoSize = true,
-                ForeColor = Color.White,
-                Dock = DockStyle.Left
+                ForeColor = LightText,
+                Dock = DockStyle.Left,
+                Font = new Font("Segoe UI", 9)
             };
 
             buttonLayout.Controls.Add(btnCancel);
@@ -373,10 +547,43 @@ namespace CTS.Modules.Simulation.NMR
             buttonLayout.Controls.Add(btnLoad);
             buttonLayout.Controls.Add(btnImport);
 
+            // Apply dark theme to all buttons
+            foreach (Control control in buttonLayout.Controls)
+            {
+                ApplyDarkThemeToControl(control);
+            }
+
             panel.Controls.Add(buttonLayout);
             panel.Controls.Add(chkApplyCalibration);
 
             return panel;
+        }
+
+        private void TabControl_DrawItem(object sender, DrawItemEventArgs e)
+        {
+            TabControl tabControl = sender as TabControl;
+            if (tabControl == null) return;
+
+            Graphics g = e.Graphics;
+            Rectangle tabBounds = tabControl.GetTabRect(e.Index);
+
+            // Fill background
+            using (Brush backBrush = new SolidBrush(e.State == DrawItemState.Selected ? DarkControl : DarkPanel))
+            {
+                g.FillRectangle(backBrush, tabBounds);
+            }
+
+            // Draw text
+            string tabText = tabControl.TabPages[e.Index].Text;
+            using (Brush textBrush = new SolidBrush(LightText))
+            {
+                var sf = new StringFormat
+                {
+                    Alignment = StringAlignment.Center,
+                    LineAlignment = StringAlignment.Center
+                };
+                g.DrawString(tabText, new Font("Segoe UI", 9, FontStyle.Regular), textBrush, tabBounds, sf);
+            }
         }
 
         private void LoadCalibrationData()
@@ -645,7 +852,9 @@ namespace CTS.Modules.Simulation.NMR
                 return;
 
             var plot = new CalibrationPlotter();
-            var bitmap = plot.PlotCalibration(Calibration, new Size(pbCalibrationPlot.Width, pbCalibrationPlot.Height));
+            var bitmap = plot.PlotCalibration(Calibration,
+                new Size(pbCalibrationPlot.Width, pbCalibrationPlot.Height),
+                DarkBackground, LightText, DarkBorder, AccentColor);
 
             pbCalibrationPlot.Image?.Dispose();
             pbCalibrationPlot.Image = bitmap;
@@ -804,39 +1013,56 @@ namespace CTS.Modules.Simulation.NMR
         #endregion
     }
 
-    // Helper class for plotting calibration data
+    // Helper class for plotting calibration data with dark theme support
     public class CalibrationPlotter
     {
-        public Bitmap PlotCalibration(NMRCalibration calibration, Size size)
+        public Bitmap PlotCalibration(NMRCalibration calibration, Size size,
+            Color backgroundColor, Color textColor, Color gridColor, Color accentColor)
         {
             var bitmap = new Bitmap(size.Width, size.Height);
 
             using (var g = Graphics.FromImage(bitmap))
             {
                 g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                g.Clear(Color.Black);
+                g.Clear(backgroundColor);
 
                 if (calibration.CalibrationPoints.Count < 2)
                 {
                     // Draw message
                     string message = "Add at least 2 calibration points to see the calibration curve";
-                    var font = new Font("Arial", 12);
+                    var font = new Font("Segoe UI", 12);
                     var stringSize = g.MeasureString(message, font);
-                    g.DrawString(message, font, Brushes.White,
-                        (size.Width - stringSize.Width) / 2,
-                        (size.Height - stringSize.Height) / 2);
+                    using (var brush = new SolidBrush(textColor))
+                    {
+                        g.DrawString(message, font, brush,
+                            (size.Width - stringSize.Width) / 2,
+                            (size.Height - stringSize.Height) / 2);
+                    }
                     font.Dispose();
                     return bitmap;
                 }
 
                 // Set up margins and plot area
-                var margins = new Padding(50, 30, 30, 40);
+                var margins = new Padding(60, 40, 40, 50);
                 var plotArea = new Rectangle(margins.Left, margins.Top,
                     size.Width - margins.Left - margins.Right,
                     size.Height - margins.Top - margins.Bottom);
 
+                // Draw grid
+                using (var gridPen = new Pen(Color.FromArgb(30, gridColor)))
+                {
+                    for (int i = 1; i < 5; i++)
+                    {
+                        int x = plotArea.Left + (plotArea.Width * i) / 5;
+                        g.DrawLine(gridPen, x, plotArea.Top, x, plotArea.Bottom);
+
+                        int y = plotArea.Top + (plotArea.Height * i) / 5;
+                        g.DrawLine(gridPen, plotArea.Left, y, plotArea.Right, y);
+                    }
+                }
+
                 // Draw axes
-                using (var pen = new Pen(Color.White))
+                using (var pen = new Pen(textColor))
                 {
                     g.DrawLine(pen, plotArea.Left, plotArea.Bottom, plotArea.Right, plotArea.Bottom);
                     g.DrawLine(pen, plotArea.Left, plotArea.Bottom, plotArea.Left, plotArea.Top);
@@ -852,7 +1078,7 @@ namespace CTS.Modules.Simulation.NMR
                 double maxRef = refData.Max();
 
                 // Plot calibration points
-                using (var pointBrush = new SolidBrush(Color.Cyan))
+                using (var pointBrush = new SolidBrush(accentColor))
                 {
                     foreach (var point in calibration.CalibrationPoints)
                     {
@@ -861,14 +1087,14 @@ namespace CTS.Modules.Simulation.NMR
                         float y = (float)(plotArea.Bottom - (Math.Log10(point.ReferenceT2) - Math.Log10(minRef)) /
                                  (Math.Log10(maxRef) - Math.Log10(minRef)) * plotArea.Height);
 
-                        g.FillEllipse(pointBrush, x - 3, y - 3, 6, 6);
+                        g.FillEllipse(pointBrush, x - 4, y - 4, 8, 8);
                     }
                 }
 
                 // Plot calibration curve
                 if (calibration.IsCalibrated)
                 {
-                    using (var curvePen = new Pen(Color.Yellow, 2))
+                    using (var curvePen = new Pen(Color.Orange, 2))
                     {
                         var points = new List<PointF>();
                         for (int i = 0; i < 100; i++)
@@ -890,23 +1116,27 @@ namespace CTS.Modules.Simulation.NMR
                 }
 
                 // Draw labels
-                using (var font = new Font("Arial", 10))
+                using (var font = new Font("Segoe UI", 10))
+                using (var brush = new SolidBrush(textColor))
                 {
-                    g.DrawString("Simulated T2 (ms)", font, Brushes.White, plotArea.Left + plotArea.Width / 2 - 60, plotArea.Bottom + 20);
+                    g.DrawString("Simulated T2 (ms)", font, brush,
+                        plotArea.Left + plotArea.Width / 2 - 60, plotArea.Bottom + 25);
 
                     var labelFormat = new StringFormat
                     {
                         Alignment = StringAlignment.Center,
                         FormatFlags = StringFormatFlags.DirectionVertical
                     };
-                    g.DrawString("Reference T2 (ms)", font, Brushes.White, plotArea.Left - 40, plotArea.Top + plotArea.Height / 2, labelFormat);
+                    g.DrawString("Reference T2 (ms)", font, brush,
+                        plotArea.Left - 45, plotArea.Top + plotArea.Height / 2, labelFormat);
                 }
 
                 // Draw statistics
                 string stats = $"T2 Calibration R²: {calibration.T2CalibrationR2:F4}";
-                using (var font = new Font("Arial", 9))
+                using (var font = new Font("Segoe UI", 9))
+                using (var brush = new SolidBrush(textColor))
                 {
-                    g.DrawString(stats, font, Brushes.White, plotArea.Left + 10, plotArea.Top + 10);
+                    g.DrawString(stats, font, brush, plotArea.Left + 10, plotArea.Top + 10);
                 }
             }
 

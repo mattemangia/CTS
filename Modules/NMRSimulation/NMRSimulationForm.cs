@@ -9,6 +9,7 @@ using System.Drawing.Drawing2D;
 using System.Linq;
 using System.Threading;
 using System.IO;
+using System.Drawing.Imaging;
 
 namespace CTS
 {
@@ -190,7 +191,7 @@ namespace CTS
                 Dock = DockStyle.Fill,
                 BackColor = Color.Black,
                 DrawMode = TabDrawMode.OwnerDrawFixed,
-                ItemSize = new Size(100, 30), // Make tabs wider to avoid truncation
+                ItemSize = new Size(100, 30),
                 SizeMode = TabSizeMode.Fixed,
                 Padding = new Point(15, 4)
             };
@@ -209,28 +210,45 @@ namespace CTS
             };
             resultsTab.Controls.Add(txtResults);
 
+            // Decay curve tab with export button
             var decayTab = new TabPage("Decay Curve");
             decayTab.BackColor = Color.Black;
             var decayPanel = CreateDecayCurvePanel();
             decayTab.Controls.Add(decayPanel);
 
+            // T2 distribution tab with export button  
             var t2Tab = new TabPage("T2 Distribution");
             t2Tab.BackColor = Color.Black;
+
+            // Create panel for T2 distribution with export button
+            var t2Panel = new Panel { Dock = DockStyle.Fill, BackColor = Color.Black };
+
+            var t2ExportButton = new KryptonButton
+            {
+                Text = "Export Image",
+                Values = { Image = CreateExportIcon() },
+                Dock = DockStyle.Bottom,
+                Height = 30
+            };
+            t2ExportButton.Click += (s, e) => ExportT2DistributionImage();
+
             pbT2Distribution = new PictureBox
             {
                 Dock = DockStyle.Fill,
                 SizeMode = PictureBoxSizeMode.StretchImage,
                 BackColor = Color.Black
             };
-            t2Tab.Controls.Add(pbT2Distribution);
 
+            t2Panel.Controls.Add(pbT2Distribution);
+            t2Panel.Controls.Add(t2ExportButton);
+            t2Tab.Controls.Add(t2Panel);
+
+            // Overview tab (already has export button)
             var overviewTab = new TabPage("Overview");
             overviewTab.BackColor = Color.Black;
 
-            // Create a panel for the overview tab that holds both the image and the export button
             var overviewPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.Black };
 
-            // Add export button
             var exportButton = new KryptonButton
             {
                 Text = "Export Image",
@@ -238,10 +256,8 @@ namespace CTS
                 Dock = DockStyle.Bottom,
                 Height = 30
             };
-
             exportButton.Click += (s, e) => ExportOverviewImage();
 
-            // Add picture box for overview plot
             pbOverview = new PictureBox
             {
                 Dock = DockStyle.Fill,
@@ -261,7 +277,6 @@ namespace CTS
 
             resultsPanel.Controls.Add(resultsTabControl);
         }
-
         private Image CreateExportIcon()
         {
             var bitmap = new Bitmap(16, 16);
@@ -585,11 +600,12 @@ namespace CTS
 
             var layout = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill,
+                Dock = DockStyle.Top,  // Changed from Fill to Top
                 ColumnCount = 1,
-                RowCount = 8,  // Increased for new buttons
+                RowCount = 8,
                 Padding = new Padding(10),
-                BackColor = Color.Black
+                BackColor = Color.Black,
+                AutoSize = true  // Added to prevent expansion
             };
 
             // Run button
@@ -634,7 +650,7 @@ namespace CTS
             btnCalibration.Click += OpenCalibrationDialog;
             layout.Controls.Add(btnCalibration, 0, 3);
 
-            // Material properties button (made smaller)
+            // Material properties button
             btnMaterialProperties = new KryptonButton
             {
                 Text = "Material Properties...",
@@ -644,7 +660,7 @@ namespace CTS
             btnMaterialProperties.Click += OpenMaterialPropertiesDialog;
             layout.Controls.Add(btnMaterialProperties, 0, 4);
 
-            // Save simulation settings button (NEW)
+            // Save simulation settings button
             btnSaveSimulation = new KryptonButton
             {
                 Text = "Save Settings",
@@ -654,7 +670,7 @@ namespace CTS
             btnSaveSimulation.Click += SaveSimulationSettings;
             layout.Controls.Add(btnSaveSimulation, 0, 5);
 
-            // Load simulation settings button (NEW)
+            // Load simulation settings button
             btnLoadSimulation = new KryptonButton
             {
                 Text = "Load Settings",
@@ -664,7 +680,7 @@ namespace CTS
             btnLoadSimulation.Click += LoadSimulationSettings;
             layout.Controls.Add(btnLoadSimulation, 0, 6);
 
-            // Load PNM button (NEW)
+            // Load PNM button
             btnLoadPNM = new KryptonButton
             {
                 Text = "Load PNM Data",
@@ -674,13 +690,12 @@ namespace CTS
             btnLoadPNM.Click += LoadPNMData;
             layout.Controls.Add(btnLoadPNM, 0, 7);
 
-            // Set row styles for buttons
+            // Set row styles for buttons - ALL with fixed height
             for (int i = 0; i < 8; i++)
             {
-                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));  // Reduced from 45 to 35
+                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
             }
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
+            
             panel.Controls.Add(layout);
             return panel;
         }
@@ -720,6 +735,16 @@ namespace CTS
             optionsPanel.Controls.Add(chkLogScale);
             optionsPanel.Controls.Add(chkShowComponents);
 
+            // Add export button to bottom
+            var exportButton = new KryptonButton
+            {
+                Text = "Export Image",
+                Values = { Image = CreateExportIcon() },
+                Dock = DockStyle.Bottom,
+                Height = 30
+            };
+            exportButton.Click += (s, e) => ExportDecayCurveImage();
+
             pbDecayCurve = new PictureBox
             {
                 Dock = DockStyle.Fill,
@@ -729,9 +754,10 @@ namespace CTS
 
             panel.Controls.Add(pbDecayCurve);
             panel.Controls.Add(optionsPanel);
+            panel.Controls.Add(exportButton);
+
             return panel;
         }
-
         private void LoadMaterialProperties()
         {
             dgvMaterials.Rows.Clear();
@@ -1776,7 +1802,109 @@ namespace CTS
 
             return properties;
         }
+        private void ExportDecayCurveImage()
+        {
+            if (_lastResult == null)
+            {
+                MessageBox.Show("No simulation results to export.", "Export Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
 
+            using (var dialog = new SaveFileDialog())
+            {
+                dialog.Filter = "PNG Image|*.png|JPEG Image|*.jpg";
+                dialog.Title = "Export Decay Curve";
+                dialog.DefaultExt = "png";
+
+                if (dialog.ShowDialog() == DialogResult.OK)
+                {
+                    try
+                    {
+                        // Generate high-quality image for export
+                        var bitmap = _plotter.PlotDecayCurve(_lastResult, new Size(1200, 800),
+                            chkLogScale.Checked, chkShowComponents.Checked);
+
+                        SaveBitmapWithQuality(bitmap, dialog.FileName);
+                        bitmap.Dispose();
+
+                        MessageBox.Show("Decay curve exported successfully!", "Export Complete",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"Error exporting image: {ex.Message}", "Export Error",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+            }
+        }
+
+        private void ExportT2DistributionImage()
+        {
+            if (_lastResult == null)
+            {
+                MessageBox.Show("No simulation results to export.", "Export Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            using (var dialog = new SaveFileDialog())
+            {
+                dialog.Filter = "PNG Image|*.png|JPEG Image|*.jpg";
+                dialog.Title = "Export T2 Distribution";
+                dialog.DefaultExt = "png";
+
+                if (dialog.ShowDialog() == DialogResult.OK)
+                {
+                    try
+                    {
+                        // Generate high-quality image for export
+                        var bitmap = _plotter.PlotT2Distribution(_lastResult, new Size(1200, 800),
+                            chkLogScale.Checked);
+
+                        SaveBitmapWithQuality(bitmap, dialog.FileName);
+                        bitmap.Dispose();
+
+                        MessageBox.Show("T2 distribution exported successfully!", "Export Complete",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"Error exporting image: {ex.Message}", "Export Error",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+            }
+        }
+
+        private void SaveBitmapWithQuality(Bitmap bitmap, string filename)
+        {
+            string extension = Path.GetExtension(filename).ToLower();
+
+            if (extension == ".jpg" || extension == ".jpeg")
+            {
+                // Save JPEG with quality using EncoderParameters
+                var jpegCodec = ImageCodecInfo.GetImageDecoders()
+                    .FirstOrDefault(codec => codec.FormatID == ImageFormat.Jpeg.Guid);
+
+                if (jpegCodec != null)
+                {
+                    var encoderParams = new EncoderParameters(1);
+                    encoderParams.Param[0] = new EncoderParameter(Encoder.Quality, 90L);
+                    bitmap.Save(filename, jpegCodec, encoderParams);
+                }
+                else
+                {
+                    // Fallback if codec not found
+                    bitmap.Save(filename, ImageFormat.Jpeg);
+                }
+            }
+            else
+            {
+                bitmap.Save(filename, ImageFormat.Png);
+            }
+        }
         private PoreNetworkProperties TryLoadPNMData(string filename)
         {
             // Try to detect and load either format

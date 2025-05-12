@@ -109,6 +109,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
+    <None Include="Modules\Acoustic_Simulation\TestCalibrationFile.calib" />
     <None Include="Ruleset.ruleset" />
   </ItemGroup>
   <ItemGroup>

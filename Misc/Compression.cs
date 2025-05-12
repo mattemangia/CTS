@@ -27,21 +27,12 @@ namespace CTS.Compression
         private IProgress<int> _progress;
         private long _totalChunks;
         private long _processedChunks;
-        private readonly int _compressionLevelInt;
+
         public ChunkedVolumeCompressor(int compressionLevel = 5, bool predictiveCoding = true, bool runLengthEncoding = true)
         {
             _compressionLevel = Math.Max(1, Math.Min(9, compressionLevel));
             _usePredictiveCoding = predictiveCoding;
             _useRunLengthEncoding = runLengthEncoding;
-        }
-        private CompressionLevel GetCompressionLevel()
-        {
-            if (_compressionLevel <= 3)
-                return CompressionLevel.Fastest;
-            else if (_compressionLevel >= 7)
-                return CompressionLevel.Optimal;
-            else
-                return CompressionLevel.NoCompression;
         }
         /// <summary>
         /// Compress the currently loaded volume from MainForm
@@ -192,40 +183,25 @@ namespace CTS.Compression
         /// </summary>
         public async Task CompressAsync(string inputPath, string outputPath, IProgress<int> progress)
         {
-            if (string.IsNullOrEmpty(inputPath))
-                throw new ArgumentNullException(nameof(inputPath));
-            if (string.IsNullOrEmpty(outputPath))
-                throw new ArgumentNullException(nameof(outputPath));
-
             _progress = progress;
             Logger.Log($"[ChunkedVolumeCompressor] Starting compression of {inputPath} to {outputPath}");
 
             try
             {
-                // Determine the actual input path
-                string volumePath = null;
-                string labelsPath = null;
+                // Check if inputPath is a folder or a file
+                bool isFolder = Directory.Exists(inputPath);
+                string volumePath, labelsPath;
 
-                if (Directory.Exists(inputPath))
+                if (isFolder)
                 {
                     volumePath = Path.Combine(inputPath, "volume.bin");
                     labelsPath = Path.Combine(inputPath, "labels.bin");
                 }
-                else if (File.Exists(inputPath))
-                {
-                    if (inputPath.EndsWith("volume.bin", StringComparison.OrdinalIgnoreCase))
-                    {
-                        volumePath = inputPath;
-                        labelsPath = Path.Combine(Path.GetDirectoryName(inputPath), "labels.bin");
-                    }
-                    else
-                    {
-                        throw new ArgumentException($"Unknown file type: {inputPath}");
-                    }
-                }
                 else
                 {
-                    throw new FileNotFoundException($"Input path not found: {inputPath}");
+                    // If it's a file, assume it's volume.bin and look for labels.bin in same directory
+                    volumePath = inputPath;
+                    labelsPath = Path.Combine(Path.GetDirectoryName(inputPath), "labels.bin");
                 }
 
                 if (!File.Exists(volumePath))
@@ -235,16 +211,15 @@ namespace CTS.Compression
 
                 // Read header from volume file to get dimensions
                 VolumeHeader header;
-                using (var fs = new FileStream(volumePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                using (var fs = new FileStream(volumePath, FileMode.Open, FileAccess.Read))
                 using (var br = new BinaryReader(fs))
                 {
                     header = ReadVolumeHeader(br);
                 }
-                header.HasLabels = File.Exists(labelsPath);
 
                 // Calculate total chunks
                 _totalChunks = header.ChunkCountX * header.ChunkCountY * header.ChunkCountZ;
-                if (header.HasLabels)
+                if (File.Exists(labelsPath))
                 {
                     _totalChunks *= 2; // Double for labels
                 }
@@ -256,13 +231,13 @@ namespace CTS.Compression
                 using (var writer = new BinaryWriter(outputStream))
                 {
                     // Write compressed file header
-                    WriteCompressedHeader(writer, header, header.HasLabels);
+                    WriteCompressedHeader(writer, header, File.Exists(labelsPath));
 
                     // Compress volume data
                     await CompressVolumeFileAsync(volumePath, writer, header);
 
                     // Compress labels if they exist
-                    if (header.HasLabels)
+                    if (File.Exists(labelsPath))
                     {
                         Logger.Log("[ChunkedVolumeCompressor] Compressing label data...");
                         await CompressLabelsFileAsync(labelsPath, writer);
@@ -397,36 +372,29 @@ namespace CTS.Compression
 
         private byte[] Compress3DChunk(byte[] chunkData, int chunkDim)
         {
-            try
+            // Apply predictive coding if enabled
+            if (_usePredictiveCoding)
             {
-                // Apply predictive coding if enabled
-                if (_usePredictiveCoding)
-                {
-                    chunkData = ApplyPredictiveCoding3D(chunkData, chunkDim);
-                }
-
-                // Apply run-length encoding if enabled
-                if (_useRunLengthEncoding)
-                {
-                    chunkData = ApplyRunLengthEncoding(chunkData);
-                }
-
-                // Apply final compression (DEFLATE)
-                using (var output = new MemoryStream())
-                {
-                    using (var deflate = new DeflateStream(output, GetCompressionLevel(), leaveOpen: true))
-                    {
-                        deflate.Write(chunkData, 0, chunkData.Length);
-                    }
-                    return output.ToArray();
-                }
+                chunkData = ApplyPredictiveCoding3D(chunkData, chunkDim);
             }
-            catch (Exception ex)
+
+            // Apply run-length encoding if enabled
+            if (_useRunLengthEncoding)
             {
-                Logger.Log($"[Compress3DChunk] Error: {ex.Message}");
-                throw;
+                chunkData = ApplyRunLengthEncoding(chunkData);
+            }
+
+            // Apply final compression (DEFLATE)
+            using (var output = new MemoryStream())
+            {
+                using (var deflate = new DeflateStream(output, (CompressionLevel)_compressionLevel))
+                {
+                    deflate.Write(chunkData, 0, chunkData.Length);
+                }
+                return output.ToArray();
             }
         }
+
         private byte[] ApplyPredictiveCoding3D(byte[] data, int dim)
         {
             byte[] result = new byte[data.Length];
@@ -486,9 +454,6 @@ namespace CTS.Compression
 
         private byte[] ApplyRunLengthEncoding(byte[] data)
         {
-            if (data == null || data.Length == 0)
-                return data;
-
             using (var output = new MemoryStream())
             {
                 int i = 0;
@@ -497,7 +462,7 @@ namespace CTS.Compression
                     byte value = data[i];
                     int count = 1;
 
-                    // Count consecutive same values (max 255)
+                    // Count consecutive same values
                     while (i + count < data.Length && data[i + count] == value && count < 255)
                     {
                         count++;
@@ -555,46 +520,33 @@ namespace CTS.Compression
 
         private byte[] Decompress3DChunk(byte[] compressedData, int chunkDim)
         {
-            try
+            // Decompress with DEFLATE
+            byte[] decompressed;
+            using (var input = new MemoryStream(compressedData))
+            using (var output = new MemoryStream())
+            using (var deflate = new DeflateStream(input, CompressionMode.Decompress))
             {
-                // Decompress with DEFLATE
-                byte[] decompressed;
-                using (var input = new MemoryStream(compressedData))
-                using (var output = new MemoryStream())
-                {
-                    using (var deflate = new DeflateStream(input, CompressionMode.Decompress))
-                    {
-                        deflate.CopyTo(output);
-                    }
-                    decompressed = output.ToArray();
-                }
-
-                // Reverse run-length encoding if it was applied
-                if (_useRunLengthEncoding)
-                {
-                    decompressed = ReverseRunLengthEncoding(decompressed);
-                }
-
-                // Reverse predictive coding if it was applied
-                if (_usePredictiveCoding)
-                {
-                    decompressed = ReversePredictiveCoding3D(decompressed, chunkDim);
-                }
-
-                return decompressed;
+                deflate.CopyTo(output);
+                decompressed = output.ToArray();
             }
-            catch (Exception ex)
+
+            // Reverse run-length encoding if it was applied
+            if (_useRunLengthEncoding)
             {
-                Logger.Log($"[Decompress3DChunk] Error: {ex.Message}");
-                throw;
+                decompressed = ReverseRunLengthEncoding(decompressed);
             }
+
+            // Reverse predictive coding if it was applied
+            if (_usePredictiveCoding)
+            {
+                decompressed = ReversePredictiveCoding3D(decompressed, chunkDim);
+            }
+
+            return decompressed;
         }
 
         private byte[] ReverseRunLengthEncoding(byte[] data)
         {
-            if (data == null || data.Length < 2)
-                return data;
-
             using (var output = new MemoryStream())
             {
                 int i = 0;
@@ -602,14 +554,6 @@ namespace CTS.Compression
                 {
                     byte count = data[i];
                     byte value = data[i + 1];
-
-                    // Validate count
-                    if (count == 0)
-                    {
-                        Logger.Log("[ReverseRunLengthEncoding] Warning: Zero count encountered");
-                        i += 2;
-                        continue;
-                    }
 
                     for (int j = 0; j < count; j++)
                     {
@@ -622,6 +566,7 @@ namespace CTS.Compression
                 return output.ToArray();
             }
         }
+
         private byte[] ReversePredictiveCoding3D(byte[] data, int dim)
         {
             byte[] result = new byte[data.Length];
@@ -724,67 +669,51 @@ namespace CTS.Compression
 
         private void WriteCompressedHeader(BinaryWriter writer, VolumeHeader header, bool hasLabels)
         {
-            try
-            {
-                writer.Write(SIGNATURE.ToCharArray());
-                writer.Write(VERSION);
-                writer.Write(header.Width);
-                writer.Write(header.Height);
-                writer.Write(header.Depth);
-                writer.Write(header.ChunkDim);
-                writer.Write(header.PixelSize);
-                writer.Write(hasLabels);
-                writer.Write(_compressionLevel); // Write int directly
-                writer.Write(_usePredictiveCoding);
-                writer.Write(_useRunLengthEncoding);
-            }
-            catch (Exception ex)
-            {
-                Logger.Log($"[WriteCompressedHeader] Error: {ex.Message}");
-                throw;
-            }
+            writer.Write(SIGNATURE.ToCharArray());
+            writer.Write(VERSION);
+            writer.Write(header.Width);
+            writer.Write(header.Height);
+            writer.Write(header.Depth);
+            writer.Write(header.ChunkDim);
+            writer.Write(header.PixelSize);
+            writer.Write(hasLabels);
+            writer.Write(_compressionLevel);
+            writer.Write(_usePredictiveCoding);
+            writer.Write(_useRunLengthEncoding);
         }
+
         private VolumeHeader ReadCompressedHeader(BinaryReader reader)
         {
-            try
+            char[] signature = reader.ReadChars(5);
+            if (new string(signature) != SIGNATURE)
+                throw new InvalidDataException("Invalid file signature");
+
+            int version = reader.ReadInt32();
+            if (version != VERSION)
+                throw new InvalidDataException($"Unsupported version: {version}");
+
+            var header = new VolumeHeader
             {
-                char[] signature = reader.ReadChars(5);
-                if (new string(signature) != SIGNATURE)
-                    throw new InvalidDataException("Invalid file signature");
+                Width = reader.ReadInt32(),
+                Height = reader.ReadInt32(),
+                Depth = reader.ReadInt32(),
+                ChunkDim = reader.ReadInt32(),
+                PixelSize = reader.ReadDouble(),
+                HasLabels = reader.ReadBoolean()
+            };
 
-                int version = reader.ReadInt32();
-                if (version != VERSION)
-                    throw new InvalidDataException($"Unsupported version: {version}");
+            // Read compression settings
+            _compressionLevel = reader.ReadInt32();
+            _usePredictiveCoding = reader.ReadBoolean();
+            _useRunLengthEncoding = reader.ReadBoolean();
 
-                var header = new VolumeHeader
-                {
-                    Width = reader.ReadInt32(),
-                    Height = reader.ReadInt32(),
-                    Depth = reader.ReadInt32(),
-                    ChunkDim = reader.ReadInt32(),
-                    PixelSize = reader.ReadDouble(),
-                    HasLabels = reader.ReadBoolean()
-                };
+            // Calculate chunk counts
+            header.ChunkCountX = (header.Width + header.ChunkDim - 1) / header.ChunkDim;
+            header.ChunkCountY = (header.Height + header.ChunkDim - 1) / header.ChunkDim;
+            header.ChunkCountZ = (header.Depth + header.ChunkDim - 1) / header.ChunkDim;
 
-                // Read compression settings as int
-                _compressionLevel = reader.ReadInt32();
-                _usePredictiveCoding = reader.ReadBoolean();
-                _useRunLengthEncoding = reader.ReadBoolean();
-
-                // Calculate chunk counts
-                header.ChunkCountX = (header.Width + header.ChunkDim - 1) / header.ChunkDim;
-                header.ChunkCountY = (header.Height + header.ChunkDim - 1) / header.ChunkDim;
-                header.ChunkCountZ = (header.Depth + header.ChunkDim - 1) / header.ChunkDim;
-
-                return header;
-            }
-            catch (Exception ex)
-            {
-                Logger.Log($"[ReadCompressedHeader] Error: {ex.Message}");
-                throw;
-            }
+            return header;
         }
-
 
         private async Task CompressLabelsFileAsync(string labelsPath, BinaryWriter writer)
         {
@@ -836,13 +765,14 @@ namespace CTS.Compression
             // Then apply DEFLATE
             using (var output = new MemoryStream())
             {
-                using (var deflate = new DeflateStream(output, GetCompressionLevel()))
+                using (var deflate = new DeflateStream(output, (CompressionLevel)_compressionLevel))
                 {
                     deflate.Write(rle, 0, rle.Length);
                 }
                 return output.ToArray();
             }
         }
+
         private async Task DecompressLabelsFileAsync(BinaryReader reader, string outputPath, VolumeHeader header)
         {
             int chunkDim = reader.ReadInt32();

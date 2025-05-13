@@ -14,7 +14,8 @@ namespace CTS
 {
     public static class Logger
     {
-        public static readonly string LogFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log.txt");
+        public static readonly string LogFilePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CTS", "log.txt");
+
         private static readonly object LockObj = new object();
         private static Thread logWindowThread;
         private static readonly ConcurrentQueue<LogEntry> _logQueue = new ConcurrentQueue<LogEntry>();

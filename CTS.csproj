@@ -170,6 +170,7 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Modules\Acoustic_Simulation\CalibrationManager.cs" />
+    <Compile Include="Modules\Acoustic_Simulation\FrameCacheManager.cs" />
     <Compile Include="Modules\Acoustic_Simulation\ToolbarExtension.cs">
       <SubType>Form</SubType>
     </Compile>

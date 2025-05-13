@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -57,6 +58,9 @@ namespace CTS
         private KryptonCheckBox chkFullVolumeRendering;
         private bool useFullVolumeRendering = true;
         private PictureBox pictureBoxVolume;
+        private KryptonCheckBox chkUseCache;
+        private KryptonTextBox txtCachePath;
+        private KryptonButton btnBrowseCachePath;
         //More Simulation COntrols
         private KryptonComboBox comboMaterialLibrary;
         private KryptonComboBox comboAxis;
@@ -338,13 +342,13 @@ namespace CTS
         {
             Panel scrollContainer = new Panel();
             scrollContainer.Dock = DockStyle.Left;
-            scrollContainer.Width = 250;
+            scrollContainer.Width = 260;
             scrollContainer.BackColor = Color.FromArgb(45, 45, 48); // Dark background
             scrollContainer.AutoScroll = true; // Enable scrolling
             // Create panel for controls
             KryptonPanel controlPanel = new KryptonPanel();
             controlPanel.Dock = DockStyle.None;
-            controlPanel.Width = 210;
+            controlPanel.Width = 240;
             controlPanel.StateCommon.Color1 = Color.FromArgb(45, 45, 48); // Dark background
             controlPanel.StateCommon.Color2 = Color.FromArgb(45, 45, 48); // Dark background
 
@@ -762,7 +766,65 @@ namespace CTS
             btnManageCalibration.Width = controlWidth - 30;
             btnManageCalibration.Click += BtnManageCalibration_Click;
             controlPanel.Controls.Add(btnManageCalibration);
+            currentY += verticalSpacing;
 
+            // Cache settings
+            chkUseCache = new KryptonCheckBox
+            {
+                Text = "Enable frame caching",
+                Location = new Point(10, currentY),
+                Width = controlWidth - 20,
+                Checked = true,
+                ToolTipValues = {
+        Description = "Cache simulation frames to disk for faster playback and export"
+    }
+            };
+            chkUseCache.CheckedChanged += ChkUseCache_CheckedChanged;
+            controlPanel.Controls.Add(chkUseCache);
+
+            currentY += 25;
+
+            // Create panel for path controls (textbox and browse button)
+            Panel pathPanel = new Panel
+            {
+                Location = new Point(10, currentY),
+                Width = controlWidth - 10,
+                Height = 30,
+                BackColor = Color.FromArgb(45, 45, 48)
+            };
+
+
+            txtCachePath = new KryptonTextBox
+            {
+                Location = new Point(0, 0),
+                Width = pathPanel.Width - 45, 
+                Height = 25,
+                Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AcousticSimulator"),
+                ToolTipValues = {
+        Description = "Location to store cached simulation frames"
+    }
+            };
+            pathPanel.Controls.Add(txtCachePath);
+
+            btnBrowseCachePath = new KryptonButton
+            {
+                Location = new Point(pathPanel.Width - 45, 0), // Move left to have more space
+                Width = 45, // Increased width
+                Height = 25,
+                Values = {
+        Image = CreateFolderIcon(),
+        Text = ""
+    },
+                ToolTipValues = {
+        Description = "Browse for cache folder"
+    }
+            };
+            btnBrowseCachePath.Click += BtnBrowseCachePath_Click;
+            pathPanel.Controls.Add(btnBrowseCachePath);
+
+            controlPanel.Controls.Add(pathPanel);
+
+            currentY += verticalSpacing;
             currentY += 40;
             // 11. Start Simulation button
             btnStartSimulation = new KryptonButton();
@@ -1801,24 +1863,49 @@ namespace CTS
 
         private void BtnStartSimulation_Click(object sender, EventArgs e)
         {
+
             try
             {
-                // Prevent re-entrancy
-                if ((cpuSimulator != null || gpuSimulator != null) && simulationRunning)
+                // Prevent re-entrancy and ensure proper cleanup
+                if (simulationRunning)
                 {
                     MessageBox.Show("Simulation is already running.", "Simulation in Progress",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
 
-                // Ensure volume data is ready
-                if (densityVolume == null || mainForm.volumeLabels == null)
+                // Ensure proper cleanup before starting a new simulation
+                if (cpuSimulator != null || gpuSimulator != null)
                 {
-                    MessageBox.Show("Please initialize the volume data first.",
-                        "Missing Data", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
+                    try
+                    {
+                        // Dispose existing simulators
+                        if (cpuSimulator != null)
+                        {
+                            cpuSimulator.Dispose();
+                            cpuSimulator = null;
+                        }
 
+                        if (gpuSimulator != null)
+                        {
+                            gpuSimulator.Dispose();
+                            gpuSimulator = null;
+                        }
+
+                        // Reset state
+                        simulator = null;
+                        usingGpuSimulator = false;
+
+                        // Force garbage collection to clean up resources
+                        GC.Collect();
+                        GC.WaitForPendingFinalizers();
+                    }
+                    catch (Exception cleanupEx)
+                    {
+                        Logger.Log($"[AcousticSimulationForm] Warning during cleanup: {cleanupEx.Message}");
+                        // Continue anyway
+                    }
+                }
                 // Disable UI
                 btnStartSimulation.Enabled = false;
 
@@ -2192,15 +2279,26 @@ namespace CTS
                     {
                         // Create GPU simulator wrapper
                         gpuSimulator = new AcousticSimulatorGPUWrapper(
-    width, height, depth, pixelSizeF,
-    labels, densityVolume, materialID,
-    axis, waveType,
-    confiningPressure, tensileStrength, failureAngle, cohesion,
-    energy, frequency, amplitude, timeSteps,
-    useElastic, usePlastic, useBrittle,
-    youngsModulus, poissonRatio,
-    tx, ty, tz, rx, ry, rz, 
-    useFullFaceTransducers);
+                            width, height, depth, pixelSizeF,
+                            labels, densityVolume, materialID,
+                            axis, waveType,
+                            confiningPressure, tensileStrength, failureAngle, cohesion,
+                            energy, frequency, amplitude, timeSteps,
+                            useElastic, usePlastic, useBrittle,
+                            youngsModulus, poissonRatio,
+                            tx, ty, tz, rx, ry, rz,
+                            useFullFaceTransducers);
+
+                        // Set cache settings
+                        gpuSimulator.EnableFrameCaching = chkUseCache.Checked;
+                        if (chkUseCache.Checked && !string.IsNullOrWhiteSpace(txtCachePath.Text))
+                        {
+                            gpuSimulator.SetCachePath(txtCachePath.Text);
+                        }
+                        if (!chkUseCache.Checked)
+                        {
+                            gpuSimulator.CacheInterval = 10; // Update every 10 frames when cache is disabled
+                        }
 
                         // Wire up events
                         gpuSimulator.ProgressUpdated += Simulator_ProgressUpdated;
@@ -2233,7 +2331,18 @@ namespace CTS
                             energy, frequency, amplitude, timeSteps,
                             useElastic, usePlastic, useBrittle,
                             youngsModulus, poissonRatio,
-                            tx, ty, tz, rx, ry, rz,useFullFaceTransducers);
+                            tx, ty, tz, rx, ry, rz, useFullFaceTransducers);
+
+                        // Set cache settings
+                        cpuSimulator.EnableFrameCaching = chkUseCache.Checked;
+                        if (chkUseCache.Checked && !string.IsNullOrWhiteSpace(txtCachePath.Text))
+                        {
+                            cpuSimulator.SetCachePath(txtCachePath.Text);
+                        }
+                        if (!chkUseCache.Checked)
+                        {
+                            cpuSimulator.CacheInterval = 10; // Update every 10 frames when cache is disabled
+                        }
 
                         // Wire up events
                         cpuSimulator.ProgressUpdated += Simulator_ProgressUpdated;
@@ -2258,6 +2367,17 @@ namespace CTS
                         useElastic, usePlastic, useBrittle,
                         youngsModulus, poissonRatio,
                         tx, ty, tz, rx, ry, rz);
+
+                    // Set cache settings
+                    cpuSimulator.EnableFrameCaching = chkUseCache.Checked;
+                    if (chkUseCache.Checked && !string.IsNullOrWhiteSpace(txtCachePath.Text))
+                    {
+                        cpuSimulator.SetCachePath(txtCachePath.Text);
+                    }
+                    if (!chkUseCache.Checked)
+                    {
+                        cpuSimulator.CacheInterval = 10; // Update every 10 frames when cache is disabled
+                    }
 
                     // Wire up events
                     cpuSimulator.ProgressUpdated += Simulator_ProgressUpdated;
@@ -2299,6 +2419,7 @@ namespace CTS
                 btnStartSimulation.Enabled = true;
             }
         }
+
 
         private List<Point3D> CreateStraightLinePath(int x1, int y1, int z1, int x2, int y2, int z2, int numPoints)
         {
@@ -4889,7 +5010,67 @@ namespace CTS
                 }
             }
         }
+        /// <summary>
+        /// Handle the cache checkbox state change
+        /// </summary>
+        private void ChkUseCache_CheckedChanged(object sender, EventArgs e)
+        {
+            // Enable/disable the path selection controls based on checkbox state
+            txtCachePath.Enabled = chkUseCache.Checked;
+            btnBrowseCachePath.Enabled = chkUseCache.Checked;
+        }
 
+        /// <summary>
+        /// Handle the browse button click for cache path
+        /// </summary>
+        private void BtnBrowseCachePath_Click(object sender, EventArgs e)
+        {
+            using (var dialog = new FolderBrowserDialog())
+            {
+                dialog.Description = "Select folder for cache storage";
+                dialog.ShowNewFolderButton = true;
+
+                // Set initial directory if the current path exists
+                if (Directory.Exists(txtCachePath.Text))
+                {
+                    dialog.SelectedPath = txtCachePath.Text;
+                }
+
+                if (dialog.ShowDialog() == DialogResult.OK)
+                {
+                    txtCachePath.Text = dialog.SelectedPath;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Creates a folder icon for the browse button
+        /// </summary>
+        private Image CreateFolderIcon()
+        {
+            Bitmap bmp = new Bitmap(16, 16);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.Clear(Color.Transparent);
+
+                // Draw folder shape
+                using (Pen pen = new Pen(Color.White, 1))
+                {
+                    // Folder body
+                    g.DrawLine(pen, 1, 5, 15, 5);
+                    g.DrawLine(pen, 1, 5, 1, 14);
+                    g.DrawLine(pen, 1, 14, 15, 14);
+                    g.DrawLine(pen, 15, 5, 15, 14);
+
+                    // Folder tab
+                    g.DrawLine(pen, 5, 2, 10, 2);
+                    g.DrawLine(pen, 5, 2, 5, 5);
+                    g.DrawLine(pen, 10, 2, 10, 5);
+                }
+            }
+            return bmp;
+        }
         protected override void Dispose(bool disposing)
         {
             if (disposing)

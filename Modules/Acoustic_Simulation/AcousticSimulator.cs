@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -27,8 +29,14 @@ namespace CTS
         private double pWaveMaxAmplitude;
         private double sWaveMaxAmplitude;
         private readonly bool useFullFaceTransducers;
+
         // progress ----------------------------------------------------
         private int expectedTotalSteps;
+        private FrameCacheManager cacheManager;
+        private bool enableFrameCaching = true;
+        private int cacheInterval = 1; // Save every frame
+        private List<float> pWaveHistory = new List<float>();
+        private List<float> sWaveHistory = new List<float>();
         private readonly double confiningPressureMPa;
         private readonly double tensileStrengthMPa;
         private readonly double failureAngleDeg;
@@ -71,7 +79,17 @@ namespace CTS
         // events
         public event EventHandler<AcousticSimulationProgressEventArgs> ProgressUpdated;
         public event EventHandler<AcousticSimulationCompleteEventArgs> SimulationCompleted;
+        public bool EnableFrameCaching
+        {
+            get => enableFrameCaching;
+            set => enableFrameCaching = value;
+        }
 
+        public int CacheInterval
+        {
+            get => cacheInterval;
+            set => cacheInterval = Math.Max(1, value);
+        }
         #endregion
 
         #region constructor -------------------------------------------------------------
@@ -152,11 +170,29 @@ namespace CTS
 
             // Set minimum required steps for simulation to avoid premature termination
             minRequiredSteps = Math.Max(50, timeSteps / 10);
+            if (enableFrameCaching)
+            {
+                string cacheDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AcousticSimulator");
+                Directory.CreateDirectory(cacheDir);
+                cacheManager = new FrameCacheManager(cacheDir, width, height, depth);
+                Logger.Log($"[AcousticSimulator] Frame caching enabled, interval: {cacheInterval}");
+            }
         }
         #endregion
 
         #region public API --------------------------------------------------------------
-        public void StartSimulation() { Task.Run(() => Run(cts.Token)); }
+        public void StartSimulation()
+        {
+            // Capture the current SynchronizationContext (presumably the UI thread)
+            var context = SynchronizationContext.Current;
+
+            Task.Run(() =>
+            {
+                // Set the context for the worker thread so event marshaling works
+                SynchronizationContext.SetSynchronizationContext(context);
+                Run(cts.Token);
+            });
+        }
         public void CancelSimulation() { cts.Cancel(); }
         public (double[,,] vx, double[,,] vy, double[,,] vz) GetWaveFieldSnapshot() => (vx, vy, vz);
         #endregion
@@ -212,6 +248,12 @@ namespace CTS
                     UpdateStress();
                     UpdateVelocity();
                     stepCount++;
+
+                    // FRAME CACHING - Add this after each simulation step
+                    if (cacheManager != null && stepCount % cacheInterval == 0)
+                    {
+                        SaveFrameToCache();
+                    }
 
                     // Check for numerical instability (less frequently for full-face)
                     if (stepCount % 20 == 0)
@@ -334,16 +376,30 @@ namespace CTS
             if (token.IsCancellationRequested)       // user abort
             {
                 Logger.Log("[AcousticSimulator] Simulation cancelled by user");
-                ProgressUpdated?.Invoke(
-                    this,
-                    new AcousticSimulationProgressEventArgs(
-                        0, stepCount, "Cancelled", null, null));
+
+                var handler = ProgressUpdated;
+                if (handler != null)
+                {
+                    var args = new AcousticSimulationProgressEventArgs(
+                        0, stepCount, "Cancelled", null, null);
+
+                    var context = SynchronizationContext.Current;
+                    if (context != null)
+                    {
+                        context.Post(_ => handler(this, args), null);
+                    }
+                    else
+                    {
+                        handler(this, args);
+                    }
+                }
                 return;
             }
 
             ReportProgress("Finalising", 99);
             FinaliseAndRaiseEvent();                 // will use measured arrival
         }
+
         private double GetMaxFieldValue()
         {
             double maxVal = 0;
@@ -985,11 +1041,23 @@ namespace CTS
             float[,,] pWaveField = ConvertToFloat(vx, WAVE_VISUALIZATION_AMPLIFICATION);
             float[,,] sWaveField = ConvertToFloat(vy, WAVE_VISUALIZATION_AMPLIFICATION);
 
-            // Send actual wave field data
-            ProgressUpdated?.Invoke(
-                this,
-                new AcousticSimulationProgressEventArgs(
-                    percent, stepCount, text, pWaveField, sWaveField));
+            // Ensure we're on the UI thread when raising events
+            var handler = ProgressUpdated;
+            if (handler != null)
+            {
+                var args = new AcousticSimulationProgressEventArgs(
+                    percent, stepCount, text, pWaveField, sWaveField);
+
+                var context = SynchronizationContext.Current;
+                if (context != null)
+                {
+                    context.Post(_ => handler(this, args), null);
+                }
+                else
+                {
+                    handler(this, args);
+                }
+            }
         }
         private float[,,] ConvertToFloat(double[,,] src, double amplification = 1.0)
         {
@@ -1001,44 +1069,294 @@ namespace CTS
                         dst[x, y, z] = (float)(src[x, y, z] * amplification);
             return dst;
         }
-        private void LogVelocityStatistics()
+        private float[,] ComputeVelocityTomography(
+    int tx, int ty, int tz,
+    int rx, int ry, int rz,
+    double[,,] vx, double[,,] vy, double[,,] vz)
         {
-            double maxVx = 0, maxVy = 0, maxVz = 0;
-            int nonZeroVx = 0, nonZeroVy = 0, nonZeroVz = 0;
+            // Determine the primary direction of wave propagation
+            int dx = Math.Abs(rx - tx);
+            int dy = Math.Abs(ry - ty);
+            int dz = Math.Abs(rz - tz);
 
-            for (int z = 0; z < depth; z += 2) // Sample every other point for efficiency
+            float[,] tomography;
+
+            if (dx >= dy && dx >= dz) // X is primary axis
             {
-                for (int y = 0; y < height; y += 2)
+                // Use YZ plane at middle X
+                int midX = (tx + rx) / 2;
+                midX = Math.Max(0, Math.Min(midX, width - 1));
+
+                tomography = new float[height, depth];
+
+                for (int y = 0; y < height; y++)
                 {
-                    for (int x = 0; x < width; x += 2)
+                    for (int z = 0; z < depth; z++)
                     {
-                        double absVx = Math.Abs(vx[x, y, z]);
-                        double absVy = Math.Abs(vy[x, y, z]);
-                        double absVz = Math.Abs(vz[x, y, z]);
+                        double magnitude = Math.Sqrt(
+                            vx[midX, y, z] * vx[midX, y, z] +
+                            vy[midX, y, z] * vy[midX, y, z] +
+                            vz[midX, y, z] * vz[midX, y, z]);
 
-                        if (absVx > maxVx) maxVx = absVx;
-                        if (absVy > maxVy) maxVy = absVy;
-                        if (absVz > maxVz) maxVz = absVz;
+                        tomography[y, z] = (float)magnitude;
+                    }
+                }
+            }
+            else if (dy >= dx && dy >= dz) // Y is primary axis
+            {
+                // Use XZ plane at middle Y
+                int midY = (ty + ry) / 2;
+                midY = Math.Max(0, Math.Min(midY, height - 1));
 
-                        if (absVx > 1e-12) nonZeroVx++;
-                        if (absVy > 1e-12) nonZeroVy++;
-                        if (absVz > 1e-12) nonZeroVz++;
+                tomography = new float[width, depth];
+
+                for (int x = 0; x < width; x++)
+                {
+                    for (int z = 0; z < depth; z++)
+                    {
+                        double magnitude = Math.Sqrt(
+                            vx[x, midY, z] * vx[x, midY, z] +
+                            vy[x, midY, z] * vy[x, midY, z] +
+                            vz[x, midY, z] * vz[x, midY, z]);
+
+                        tomography[x, z] = (float)magnitude;
+                    }
+                }
+            }
+            else // Z is primary axis
+            {
+                // Use XY plane at middle Z
+                int midZ = (tz + rz) / 2;
+                midZ = Math.Max(0, Math.Min(midZ, depth - 1));
+
+                tomography = new float[width, height];
+
+                for (int x = 0; x < width; x++)
+                {
+                    for (int y = 0; y < height; y++)
+                    {
+                        double magnitude = Math.Sqrt(
+                            vx[x, y, midZ] * vx[x, y, midZ] +
+                            vy[x, y, midZ] * vy[x, y, midZ] +
+                            vz[x, y, midZ] * vz[x, y, midZ]);
+
+                        tomography[x, y] = (float)magnitude;
                     }
                 }
             }
 
-            Logger.Log($"[AcousticSimulator] Max values: Vx={maxVx:E6}, Vy={maxVy:E6}, Vz={maxVz:E6}");
-            Logger.Log($"[AcousticSimulator] Non-zero voxels: Vx={nonZeroVx}, Vy={nonZeroVy}, Vz={nonZeroVz}");
+            return NormalizeFieldData(tomography);
         }
 
-        private static float[,,] ConvertToFloat(double[,,] src)
+        
+
+        private float[,] NormalizeFieldData(float[,] field)
         {
-            int w = src.GetLength(0), h = src.GetLength(1), d = src.GetLength(2);
-            float[,,] dst = new float[w, h, d];
-            for (int z = 0; z < d; z++)
-                for (int y = 0; y < h; y++)
-                    for (int x = 0; x < w; x++) dst[x, y, z] = (float)src[x, y, z];
-            return dst;
+            int w = field.GetLength(0);
+            int h = field.GetLength(1);
+
+            // Find min/max values
+            float minVal = float.MaxValue;
+            float maxVal = float.MinValue;
+
+            for (int i = 0; i < w; i++)
+            {
+                for (int j = 0; j < h; j++)
+                {
+                    float val = field[i, j];
+                    if (!float.IsNaN(val) && !float.IsInfinity(val))
+                    {
+                        minVal = Math.Min(minVal, val);
+                        maxVal = Math.Max(maxVal, val);
+                    }
+                }
+            }
+
+            if (maxVal <= minVal)
+            {
+                return field;
+            }
+
+            // Normalize to 0-1 range
+            float[,] normalized = new float[w, h];
+            float range = maxVal - minVal;
+
+            for (int i = 0; i < w; i++)
+            {
+                for (int j = 0; j < h; j++)
+                {
+                    normalized[i, j] = (field[i, j] - minVal) / range;
+                }
+            }
+
+            return normalized;
+        }
+        
+        private float[,] ExtractCrossSection(
+            int tx, int ty, int tz,
+            int rx, int ry, int rz,
+            double[,,] vx, double[,,] vy, double[,,] vz)
+        {
+            // Determine the primary direction of wave propagation
+            int dx = Math.Abs(rx - tx);
+            int dy = Math.Abs(ry - ty);
+            int dz = Math.Abs(rz - tz);
+
+            float[,] crossSection;
+
+            if (dx >= dy && dx >= dz) // X is primary axis
+            {
+                // Take YZ plane perpendicular to X
+                int midX = (tx + rx) / 2;
+                midX = Math.Max(0, Math.Min(midX, width - 1));
+
+                crossSection = new float[height, depth];
+
+                for (int y = 0; y < height; y++)
+                {
+                    for (int z = 0; z < depth; z++)
+                    {
+                        double magnitude = Math.Sqrt(
+                            vx[midX, y, z] * vx[midX, y, z] +
+                            vy[midX, y, z] * vy[midX, y, z] +
+                            vz[midX, y, z] * vz[midX, y, z]);
+
+                        crossSection[y, z] = (float)magnitude;
+                    }
+                }
+            }
+            else if (dy >= dx && dy >= dz) // Y is primary axis
+            {
+                // Take XZ plane perpendicular to Y
+                int midY = (ty + ry) / 2;
+                midY = Math.Max(0, Math.Min(midY, height - 1));
+
+                crossSection = new float[width, depth];
+
+                for (int x = 0; x < width; x++)
+                {
+                    for (int z = 0; z < depth; z++)
+                    {
+                        double magnitude = Math.Sqrt(
+                            vx[x, midY, z] * vx[x, midY, z] +
+                            vy[x, midY, z] * vy[x, midY, z] +
+                            vz[x, midY, z] * vz[x, midY, z]);
+
+                        crossSection[x, z] = (float)magnitude;
+                    }
+                }
+            }
+            else // Z is primary axis
+            {
+                // Take XY plane perpendicular to Z
+                int midZ = (tz + rz) / 2;
+                midZ = Math.Max(0, Math.Min(midZ, depth - 1));
+
+                crossSection = new float[width, height];
+
+                for (int x = 0; x < width; x++)
+                {
+                    for (int y = 0; y < height; y++)
+                    {
+                        double magnitude = Math.Sqrt(
+                            vx[x, y, midZ] * vx[x, y, midZ] +
+                            vy[x, y, midZ] * vy[x, y, midZ] +
+                            vz[x, y, midZ] * vz[x, y, midZ]);
+
+                        crossSection[x, y] = (float)magnitude;
+                    }
+                }
+            }
+
+            return NormalizeFieldData(crossSection);
+        }
+
+        
+        private void SaveFrameToCache()
+        {
+            if (cacheManager == null)
+                return;
+
+            try
+            {
+                // Calculate tomography and cross-section
+                var tomography = ComputeVelocityTomography(tx, ty, tz, rx, ry, rz, vx, vy, vz);
+                var crossSection = ExtractCrossSection(tx, ty, tz, rx, ry, rz, vx, vy, vz);
+
+                // Determine main axis for wave detection
+                int mainAxis = Math.Abs(rx - tx) >= Math.Abs(ry - ty) && Math.Abs(rx - tx) >= Math.Abs(rz - tz) ? 0 :
+                               Math.Abs(ry - ty) >= Math.Abs(rx - tx) && Math.Abs(ry - ty) >= Math.Abs(rz - tz) ? 1 : 2;
+
+                // Get receiver values based on main axis
+                float pWaveValue, sWaveValue;
+                switch (mainAxis)
+                {
+                    case 0: // X-axis
+                        pWaveValue = (float)(vx[rx, ry, rz] * WAVE_VISUALIZATION_AMPLIFICATION);
+                        sWaveValue = (float)Math.Sqrt(vy[rx, ry, rz] * vy[rx, ry, rz] + vz[rx, ry, rz] * vz[rx, ry, rz]) * (float)WAVE_VISUALIZATION_AMPLIFICATION;
+                        break;
+                    case 1: // Y-axis
+                        pWaveValue = (float)(vy[rx, ry, rz] * WAVE_VISUALIZATION_AMPLIFICATION);
+                        sWaveValue = (float)Math.Sqrt(vx[rx, ry, rz] * vx[rx, ry, rz] + vz[rx, ry, rz] * vz[rx, ry, rz]) * (float)WAVE_VISUALIZATION_AMPLIFICATION;
+                        break;
+                    default: // Z-axis
+                        pWaveValue = (float)(vz[rx, ry, rz] * WAVE_VISUALIZATION_AMPLIFICATION);
+                        sWaveValue = (float)Math.Sqrt(vx[rx, ry, rz] * vx[rx, ry, rz] + vy[rx, ry, rz] * vy[rx, ry, rz]) * (float)WAVE_VISUALIZATION_AMPLIFICATION;
+                        break;
+                }
+
+                // Calculate progress
+                float pProgress = pWaveReceiverTouched ?
+                    Math.Min(1.0f, (float)(stepCount - pWaveTouchStep) / Math.Max(1, sWaveTouchStep - pWaveTouchStep)) : 0;
+                float sProgress = sWaveReceiverTouched ?
+                    Math.Min(1.0f, (float)(stepCount - sWaveTouchStep) / Math.Max(1, totalTimeSteps)) : 0;
+
+                // Convert to float arrays
+                float[,,] vxFloat = ConvertToFloat(vx, WAVE_VISUALIZATION_AMPLIFICATION);
+                float[,,] vyFloat = ConvertToFloat(vy, WAVE_VISUALIZATION_AMPLIFICATION);
+                float[,,] vzFloat = ConvertToFloat(vz, WAVE_VISUALIZATION_AMPLIFICATION);
+
+                // Build time series arrays
+                float[] pTimeSeries = BuildTimeSeries(pWaveValue, true);
+                float[] sTimeSeries = BuildTimeSeries(sWaveValue, false);
+
+                // Save to cache
+                cacheManager.SaveFrame(stepCount, vxFloat, vyFloat, vzFloat,
+                    tomography, crossSection, pWaveValue, sWaveValue,
+                    pProgress, sProgress, pTimeSeries, sTimeSeries);
+
+                if (stepCount % 100 == 0)
+                {
+                    Logger.Log($"[AcousticSimulator] Cached frame {stepCount}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[AcousticSimulator] Error caching frame: {ex.Message}");
+            }
+        }
+        public string GetCacheDirectory()
+        {
+            return cacheManager?.CacheDirectory;
+        }
+        private float[] BuildTimeSeries(float currentValue, bool isPWave)
+        {
+            const int maxSamples = 1000;
+
+            if (isPWave)
+            {
+                pWaveHistory.Add(currentValue);
+                if (pWaveHistory.Count > maxSamples)
+                    pWaveHistory.RemoveAt(0);
+                return pWaveHistory.ToArray();
+            }
+            else
+            {
+                sWaveHistory.Add(currentValue);
+                if (sWaveHistory.Count > maxSamples)
+                    sWaveHistory.RemoveAt(0);
+                return sWaveHistory.ToArray();
+            }
         }
 
         private void FinaliseAndRaiseEvent()
@@ -1047,6 +1365,13 @@ namespace CTS
                                    (ty - ry) * (ty - ry) +
                                    (tz - rz) * (tz - rz)) * pixelSize;
 
+            // LOG CACHE DIRECTORY INFO
+            if (cacheManager != null)
+            {
+                Logger.Log($"[AcousticSimulator] Simulation frames cached at: {cacheManager.CacheDirectory}");
+                Logger.Log($"[AcousticSimulator] Total frames cached: {cacheManager.FrameCount}");
+            }
+
             // If P-wave wasn't detected, use estimated values
             if (!pWaveReceiverTouched)
             {
@@ -1054,10 +1379,23 @@ namespace CTS
                 double rhoAvg = densityVolume.Cast<float>().Average();
                 double vp = Math.Sqrt((lambda0 + 2 * mu0) / rhoAvg);
                 double vs = Math.Sqrt(mu0 / rhoAvg);
-                SimulationCompleted?.Invoke(
-                    this,
-                    new AcousticSimulationCompleteEventArgs(
-                        vp, vs, vp / vs, stepCount / 3, stepCount / 2, stepCount));
+
+                var handler = SimulationCompleted;
+                if (handler != null)
+                {
+                    var args = new AcousticSimulationCompleteEventArgs(
+                        vp, vs, vp / vs, stepCount / 3, stepCount / 2, stepCount);
+
+                    var context = SynchronizationContext.Current;
+                    if (context != null)
+                    {
+                        context.Post(_ => handler(this, args), null);
+                    }
+                    else
+                    {
+                        handler(this, args);
+                    }
+                }
                 return;
             }
 
@@ -1067,11 +1405,24 @@ namespace CTS
                 Logger.Log("[AcousticSimulator] WARNING: S-wave arrival wasn't detected, using estimates");
                 double vp = dist / (pWaveTouchStep * dt);
                 double vs = vp * Math.Sqrt((1 - 2 * poissonRatio) / (2 - 2 * poissonRatio)); // Theoretical ratio
-                SimulationCompleted?.Invoke(
-                    this,
-                    new AcousticSimulationCompleteEventArgs(
+
+                var handler = SimulationCompleted;
+                if (handler != null)
+                {
+                    var args = new AcousticSimulationCompleteEventArgs(
                         vp, vs, vp / vs, pWaveTouchStep,
-                        (int)(pWaveTouchStep * (vp / vs)), stepCount));
+                        (int)(pWaveTouchStep * (vp / vs)), stepCount);
+
+                    var context = SynchronizationContext.Current;
+                    if (context != null)
+                    {
+                        context.Post(_ => handler(this, args), null);
+                    }
+                    else
+                    {
+                        handler(this, args);
+                    }
+                }
                 return;
             }
 
@@ -1083,10 +1434,36 @@ namespace CTS
             Logger.Log($"[AcousticSimulator] Final results: P-velocity={pVelocity:F2} m/s, S-velocity={sVelocity:F2} m/s, Vp/Vs={vpVsRatio:F3}");
             Logger.Log($"[AcousticSimulator] Travel times: P-wave={pWaveTouchStep} steps, S-wave={sWaveTouchStep} steps, Total={stepCount} steps");
 
-            SimulationCompleted?.Invoke(
-                this,
-                new AcousticSimulationCompleteEventArgs(
-                    pVelocity, sVelocity, vpVsRatio, pWaveTouchStep, sWaveTouchStep, stepCount));
+            var finalHandler = SimulationCompleted;
+            if (finalHandler != null)
+            {
+                var finalArgs = new AcousticSimulationCompleteEventArgs(
+                    pVelocity, sVelocity, vpVsRatio, pWaveTouchStep, sWaveTouchStep, stepCount);
+
+                var finalContext = SynchronizationContext.Current;
+                if (finalContext != null)
+                {
+                    finalContext.Post(_ => finalHandler(this, finalArgs), null);
+                }
+                else
+                {
+                    finalHandler(this, finalArgs);
+                }
+            }
+        }
+        public void SetCachePath(string path)
+        {
+            if (EnableFrameCaching && !string.IsNullOrWhiteSpace(path))
+            {
+                string cacheDir = path;
+                Directory.CreateDirectory(cacheDir);
+                if (cacheManager != null)
+                {
+                    cacheManager.Dispose();
+                }
+                cacheManager = new FrameCacheManager(cacheDir, width, height, depth);
+                Logger.Log($"[AcousticSimulator] Cache path set to: {cacheDir}");
+            }
         }
         #endregion
 

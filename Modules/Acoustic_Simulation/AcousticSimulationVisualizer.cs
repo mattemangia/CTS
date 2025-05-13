@@ -30,6 +30,9 @@ namespace CTS
         private bool[] _isPanelDetached;
         private Button[] _detachButtons;
         private Button _detachAllButton;
+        private FrameCacheManager cacheManager;
+        private bool usingCachedFrames = false;
+        private CachedFrame currentCachedFrame;
         // Simulation data
         private readonly object _dataLock = new object();
         private readonly List<SimulationFrame> _frames = new List<SimulationFrame>();
@@ -183,10 +186,51 @@ namespace CTS
 
             // Start UI update timer
             _uiUpdateTimer.Start();
+            Task.Delay(500).ContinueWith(_ =>
+            {
+                this.BeginInvoke((MethodInvoker)CheckForRecentCache);
+            });
         }
         #endregion
 
         #region CPU/GPU Simulator Handlers
+        private void CheckForRecentCache()
+        {
+            string cacheBaseDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AcousticSimulator");
+
+            if (Directory.Exists(cacheBaseDir))
+            {
+                var directories = Directory.GetDirectories(cacheBaseDir)
+                                          .OrderByDescending(d => Directory.GetCreationTime(d))
+                                          .Take(5);
+
+                if (directories.Any())
+                {
+                    this.BeginInvoke((MethodInvoker)delegate
+                    {
+                        var result = MessageBox.Show("Recent cached simulations found. Would you like to load one?",
+                                                   "Load Cached Simulation",
+                                                   MessageBoxButtons.YesNo,
+                                                   MessageBoxIcon.Question);
+
+                        if (result == DialogResult.Yes)
+                        {
+                            using (var dialog = new FolderBrowserDialog())
+                            {
+                                dialog.Description = "Select cache directory";
+                                dialog.SelectedPath = cacheBaseDir;
+
+                                if (dialog.ShowDialog() == DialogResult.OK)
+                                {
+                                    LoadFromCache(dialog.SelectedPath);
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+        }
+
         /// <summary>
         /// Connects to a CPU simulator
         /// </summary>
@@ -1222,6 +1266,8 @@ namespace CTS
         /// </summary>
         private void InitializeComponents()
         {
+            CreateMenuStrip();
+
             // Main panel for visualizations
             _mainPanel = new Panel
             {
@@ -1836,6 +1882,13 @@ namespace CTS
         /// </summary>
         private void UpdateVisualization()
         {
+            if (usingCachedFrames)
+            {
+                UpdateVisualizationFromCache();
+                return;
+            }
+
+            // Original UpdateVisualization code follows...
             lock (_dataLock)
             {
                 // Check if we have frames
@@ -1953,6 +2006,151 @@ namespace CTS
                 }
             }
         }
+        private void UpdateVisualizationFromCache()
+        {
+            lock (_dataLock)
+            {
+                if (cacheManager == null || _currentFrameIndex < 0 || _currentFrameIndex >= _frames.Count)
+                    return;
+
+                try
+                {
+                    // Load frame from cache
+                    currentCachedFrame = cacheManager.LoadFrame(_currentFrameIndex);
+                    if (currentCachedFrame == null)
+                    {
+                        Logger.Log($"[Visualizer] Failed to load cached frame {_currentFrameIndex}");
+                        return;
+                    }
+
+                    // Convert cached frame to visualization frame
+                    var frame = new SimulationFrame
+                    {
+                        TimeStep = currentCachedFrame.TimeStep,
+                        PWaveValue = currentCachedFrame.PWaveValue,
+                        SWaveValue = currentCachedFrame.SWaveValue,
+                        PWavePathProgress = currentCachedFrame.PWavePathProgress,
+                        SWavePathProgress = currentCachedFrame.SWavePathProgress,
+                        VelocityTomography = currentCachedFrame.Tomography,
+                        WavefieldCrossSection = currentCachedFrame.CrossSection,
+                        PWaveTimeSeries = currentCachedFrame.PWaveTimeSeries ?? new float[1],
+                        SWaveTimeSeries = currentCachedFrame.SWaveTimeSeries ?? new float[1],
+                        PWaveSpatialSeries = ExtractSpatialSeries(currentCachedFrame.VX, true),
+                        SWaveSpatialSeries = ExtractSpatialSeries(currentCachedFrame.VY, false)
+                    };
+
+                    // Store in frames list for consistency
+                    _frames[_currentFrameIndex] = frame;
+
+                    // Update all panels
+                    using (Graphics g = Graphics.FromImage(_panelBitmaps[0]))
+                    {
+                        DrawTimeSeries(g, frame.PWaveTimeSeries, 0);
+                    }
+
+                    using (Graphics g = Graphics.FromImage(_panelBitmaps[1]))
+                    {
+                        DrawTimeSeries(g, frame.SWaveTimeSeries, 1);
+                    }
+
+                    using (Graphics g = Graphics.FromImage(_panelBitmaps[2]))
+                    {
+                        DrawHeatmap(g, frame.VelocityTomography, 2);
+                    }
+
+                    using (Graphics g = Graphics.FromImage(_panelBitmaps[3]))
+                    {
+                        DrawHeatmap(g, frame.WavefieldCrossSection, 3);
+                    }
+
+                    using (Graphics g = Graphics.FromImage(_panelBitmaps[4]))
+                    {
+                        DrawCombinedWaveVisualization(g, frame);
+                    }
+
+                    using (Graphics g = Graphics.FromImage(_panelBitmaps[5]))
+                    {
+                        DrawInformationPanel(g);
+                    }
+
+                    // Update UI
+                    this.BeginInvoke((MethodInvoker)delegate
+                    {
+                        _timeStepLabel.Text = $"Step: {frame.TimeStep}";
+
+                        // Update trackbar if needed
+                        if (!_timelineTrackBar.Capture && _timelineTrackBar.Value != _currentFrameIndex)
+                        {
+                            _timelineTrackBar.Value = _currentFrameIndex;
+                        }
+
+                        // Update all display bitmaps
+                        for (int i = 0; i < 6; i++)
+                        {
+                            if (_displayBitmaps[i] != null && _displayBitmaps[i] != _panelBitmaps[i])
+                            {
+                                _displayBitmaps[i].Dispose();
+                            }
+
+                            _displayBitmaps[i] = (Bitmap)_panelBitmaps[i].Clone();
+
+                            if (!_isPanelDetached[i])
+                            {
+                                _pictureBoxes[i].Image = _displayBitmaps[i];
+                                _pictureBoxes[i].Refresh();
+                            }
+
+                            // Update detached windows
+                            if (_isPanelDetached[i] && _detachedWindows[i] != null && !_detachedWindows[i].IsDisposed)
+                            {
+                                foreach (Control control in _detachedWindows[i].Controls)
+                                {
+                                    if (control is PictureBox pictureBox)
+                                    {
+                                        if (pictureBox.Image != null)
+                                        {
+                                            pictureBox.Image.Dispose();
+                                        }
+                                        pictureBox.Image = (Bitmap)_displayBitmaps[i].Clone();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[Visualizer] Error updating from cache: {ex.Message}");
+                }
+            }
+        }
+        private float[] ExtractSpatialSeries(float[,,] field, bool isPWave)
+        {
+            if (field == null)
+                return new float[1];
+
+            const int PATH_SAMPLES = 100;
+            float[] series = new float[PATH_SAMPLES];
+
+            for (int i = 0; i < PATH_SAMPLES; i++)
+            {
+                float t = i / (float)(PATH_SAMPLES - 1);
+
+                int x = (int)Math.Round(_tx + (_rx - _tx) * t);
+                int y = (int)Math.Round(_ty + (_ry - _ty) * t);
+                int z = (int)Math.Round(_tz + (_rz - _tz) * t);
+
+                x = Math.Max(0, Math.Min(x, _width - 1));
+                y = Math.Max(0, Math.Min(y, _height - 1));
+                z = Math.Max(0, Math.Min(z, _depth - 1));
+
+                series[i] = field[x, y, z];
+            }
+
+            return series;
+        }
+
 
         /// <summary>
         /// Draw time series data with enhanced oscillation visibility
@@ -2199,6 +2397,50 @@ namespace CTS
                 return $"{value:0.0} m/s";
             else
                 return $"{value:0.0} m/s"; 
+        }
+        public void LoadFromCache(string cacheDirectory)
+        {
+            try
+            {
+                // Create cache manager and load metadata
+                cacheManager = new FrameCacheManager(cacheDirectory, _width, _height, _depth);
+                cacheManager.LoadMetadata();
+
+                usingCachedFrames = true;
+
+                // Update frames list with cache info
+                lock (_dataLock)
+                {
+                    _frames.Clear();
+                    int frameCount = cacheManager.FrameCount;
+
+                    // Create placeholder frames
+                    for (int i = 0; i < frameCount; i++)
+                    {
+                        _frames.Add(new SimulationFrame { TimeStep = i });
+                    }
+
+                    _currentFrameIndex = 0;
+                    _simulationCompleted = true; // Cached simulations are always complete
+                }
+
+                // Update UI
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    _timelineTrackBar.Maximum = _frames.Count - 1;
+                    _timelineTrackBar.Value = 0;
+                    this.Text = $"Acoustic Simulation Visualizer - Cached ({_frames.Count} frames)";
+                    UpdateVisualization();
+                });
+
+                Logger.Log($"[Visualizer] Loaded {_frames.Count} frames from cache at: {cacheDirectory}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[Visualizer] Error loading cache: {ex.Message}");
+                MessageBox.Show($"Error loading cached simulation: {ex.Message}",
+                                "Load Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
         /// <summary>
         /// Draw heatmap data on the specified graphics context
@@ -4363,6 +4605,13 @@ namespace CTS
         /// </summary>
         private void ExportAnimationAsWmv(string filePath, int fps, int quality, int totalFrames, ProgressForm progress)
         {
+            if (usingCachedFrames && cacheManager != null)
+            {
+                ExportCachedAnimationAsWmv(filePath, fps, quality, totalFrames, progress);
+                return;
+            }
+
+            // Original export code for non-cached simulations...
             lock (_dataLock)
             {
                 int frameCount = _frames.Count;
@@ -4507,6 +4756,195 @@ namespace CTS
                 }
             }
         }
+        private void ExportCachedAnimationAsWmv(string filePath, int fps, int quality, int totalFrames, ProgressForm progress)
+        {
+            lock (_dataLock)
+            {
+                int frameCount = _frames.Count;
+                if (frameCount == 0)
+                {
+                    throw new InvalidOperationException("No frames available to export");
+                }
+
+                Logger.Log($"[Visualizer] Exporting cached animation: {frameCount} frames at {fps} fps");
+
+                int currentIndex = _currentFrameIndex;
+                int width = _mainPanel.Width;
+                int height = _mainPanel.Height;
+
+                try
+                {
+                    WmvWriter wmvWriter = new WmvWriter(filePath, width, height, fps, quality);
+
+                    // Calculate frame distribution
+                    double frameStep = (double)(frameCount - 1) / (totalFrames - 1);
+
+                    for (int i = 0; i < totalFrames; i++)
+                    {
+                        // Calculate source frame index
+                        int sourceFrameIndex = (int)Math.Round(i * frameStep);
+                        sourceFrameIndex = Math.Max(0, Math.Min(frameCount - 1, sourceFrameIndex));
+
+                        // Update progress
+                        int progressPercent = (i + 1) * 100 / totalFrames;
+                        this.BeginInvoke((MethodInvoker)delegate
+                        {
+                            progress.UpdateProgress(progressPercent);
+                        });
+
+                        // Update to this frame
+                        _currentFrameIndex = sourceFrameIndex;
+
+                        // Update visualization with cached frame
+                        using (ManualResetEvent resetEvent = new ManualResetEvent(false))
+                        {
+                            this.BeginInvoke((MethodInvoker)delegate
+                            {
+                                try
+                                {
+                                    UpdateVisualizationFromCache();
+                                    Application.DoEvents(); // Allow UI to refresh
+                                }
+                                finally
+                                {
+                                    resetEvent.Set();
+                                }
+                            });
+
+                            if (!resetEvent.WaitOne(5000)) // 5 second timeout
+                            {
+                                Logger.Log($"[Visualizer] Warning: Visualization update timeout at frame {i}");
+                            }
+                        }
+
+                        // Give UI a moment to settle
+                        Thread.Sleep(10);
+
+                        // Create combined image
+                        Bitmap combined = CombinePanelsForExport();
+
+                        // Add frame to WMV
+                        wmvWriter.AddFrame(combined);
+
+                        // Dispose bitmap
+                        combined.Dispose();
+
+                        if (i % 10 == 0)
+                        {
+                            Logger.Log($"[Visualizer] Export progress: {progressPercent}%");
+                        }
+                    }
+
+                    // Finalize the WMV file
+                    wmvWriter.Close();
+
+                    Logger.Log($"[Visualizer] Export completed successfully");
+                }
+                finally
+                {
+                    // Restore original frame
+                    _currentFrameIndex = currentIndex;
+                    this.BeginInvoke((MethodInvoker)delegate
+                    {
+                        UpdateVisualization();
+                    });
+                }
+            }
+        }
+        private void AddCacheMenuItems()
+        {
+            // Create File menu if it doesn't exist
+            ToolStripMenuItem fileMenu = null;
+            foreach (ToolStripItem item in this.MainMenuStrip.Items)
+            {
+                if (item is ToolStripMenuItem menuItem && menuItem.Text == "&File")
+                {
+                    fileMenu = menuItem;
+                    break;
+                }
+            }
+
+            if (fileMenu == null)
+            {
+                fileMenu = new ToolStripMenuItem("&File");
+                this.MainMenuStrip.Items.Insert(0, fileMenu);
+            }
+
+            // Add separator if there are existing items
+            if (fileMenu.DropDownItems.Count > 0)
+            {
+                fileMenu.DropDownItems.Add(new ToolStripSeparator());
+            }
+
+            // Add Load Cached Simulation menu item
+            var loadCacheItem = new ToolStripMenuItem("Load Cached Simulation...");
+            loadCacheItem.ShortcutKeys = Keys.Control | Keys.O;
+            loadCacheItem.Click += (s, e) =>
+            {
+                using (var dialog = new FolderBrowserDialog())
+                {
+                    dialog.Description = "Select cache directory containing simulation frames";
+                    dialog.ShowNewFolderButton = false;
+
+                    if (dialog.ShowDialog() == DialogResult.OK)
+                    {
+                        LoadFromCache(dialog.SelectedPath);
+                    }
+                }
+            };
+            fileMenu.DropDownItems.Add(loadCacheItem);
+
+            // Add Export Cache Info menu item
+            var exportCacheInfoItem = new ToolStripMenuItem("Export Cache Info...");
+            exportCacheInfoItem.Click += (s, e) =>
+            {
+                if (!usingCachedFrames || cacheManager == null)
+                {
+                    MessageBox.Show("No cached simulation is currently loaded.",
+                                   "No Cache", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                using (var dialog = new SaveFileDialog())
+                {
+                    dialog.Filter = "Text Files|*.txt";
+                    dialog.FileName = "cache_info.txt";
+
+                    if (dialog.ShowDialog() == DialogResult.OK)
+                    {
+                        try
+                        {
+                            using (var writer = new StreamWriter(dialog.FileName))
+                            {
+                                writer.WriteLine($"Cache Directory: {cacheManager.CacheDirectory}");
+                                writer.WriteLine($"Frame Count: {cacheManager.FrameCount}");
+                                writer.WriteLine($"Simulation Dimensions: {_width}x{_height}x{_depth}");
+                                writer.WriteLine($"Created: {Directory.GetCreationTime(cacheManager.CacheDirectory)}");
+                            }
+
+                            MessageBox.Show("Cache information exported successfully.",
+                                           "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        }
+                        catch (Exception ex)
+                        {
+                            MessageBox.Show($"Error exporting cache info: {ex.Message}",
+                                           "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
+                    }
+                }
+            };
+            fileMenu.DropDownItems.Add(exportCacheInfoItem);
+        }
+        private void CreateMenuStrip()
+        {
+            this.MainMenuStrip = new MenuStrip();
+            this.MainMenuStrip.BackColor = Color.FromArgb(40, 40, 40);
+            this.MainMenuStrip.ForeColor = Color.White;
+            this.Controls.Add(this.MainMenuStrip);
+
+            AddCacheMenuItems();
+        }
+
         public void LoadSavedSimulationData(
     double pWaveVelocity, double sWaveVelocity, double vpVsRatio,
     int pWaveTravelTime, int sWaveTravelTime, int totalTimeSteps,
@@ -5093,9 +5531,19 @@ namespace CTS
                 }
             }
         }
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                cacheManager?.Dispose();
 
+             
+            }
+
+            base.Dispose(disposing);
+        }
 
         #endregion
-       
+
     }
 }

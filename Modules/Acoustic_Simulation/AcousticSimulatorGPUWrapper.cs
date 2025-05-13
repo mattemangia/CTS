@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Threading;
 using System.Threading.Tasks;
-
+using System.IO;
 
 namespace CTS
 {
@@ -34,6 +34,47 @@ namespace CTS
         private readonly double youngsModulusMPa, poissonRatio;
         private readonly int tx, ty, tz, rx, ry, rz;
         private readonly bool useFullFaceTransducers;
+        #endregion
+
+        #region Cache Control Properties
+        /// <summary>
+        /// Gets or sets whether frame caching is enabled
+        /// </summary>
+        public bool EnableFrameCaching
+        {
+            get { return gpuSimulator?.EnableFrameCaching ?? false; }
+            set
+            {
+                if (gpuSimulator != null)
+                    gpuSimulator.EnableFrameCaching = value;
+            }
+        }
+
+        /// <summary>
+        /// Gets or sets the interval at which frames are cached
+        /// When caching is disabled, this controls how often visualization updates
+        /// </summary>
+        public int CacheInterval
+        {
+            get { return gpuSimulator?.CacheInterval ?? 1; }
+            set
+            {
+                if (gpuSimulator != null)
+                    gpuSimulator.CacheInterval = value;
+            }
+        }
+
+        /// <summary>
+        /// Sets the path where cache files are stored
+        /// </summary>
+        /// <param name="path">Directory path for cache storage</param>
+        public void SetCachePath(string path)
+        {
+            if (gpuSimulator != null && !string.IsNullOrWhiteSpace(path))
+            {
+                gpuSimulator.SetCachePath(path);
+            }
+        }
         #endregion
 
         #region Constructor

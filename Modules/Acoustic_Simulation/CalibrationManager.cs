@@ -591,8 +591,8 @@ namespace CTS
                 MeasuredDensity = simulationForm.SelectedMaterial.Density,
                 MeasuredVolume = simulationForm.CalculateTotalVolume(),
                 AvgGrayValue = CalculateAverageGrayValue(),
-                YoungsModulus = (double)simulationForm.GetYoungsModulus(), // Assuming we have a getter
-                PoissonRatio = (double)simulationForm.GetPoissonRatio(),   // Assuming we have a getter
+                YoungsModulus = (double)simulationForm.GetYoungsModulus(), 
+                PoissonRatio = (double)simulationForm.GetPoissonRatio(),  
                 CalibrationDate = DateTime.Now
             };
 
@@ -610,7 +610,7 @@ namespace CTS
 
             if (point == null) return;
 
-            /* ---------- NEW : derive Poisson’s ratio from the user’s Vp/Vs ---------- */
+            /* ---------- NEW : derive Poisson's ratio from the user's Vp/Vs ---------- */
             if (knownVpVsRatio > 0.0)
                 point.PoissonRatio = PoissonFromVpVs(knownVpVsRatio);
 
@@ -638,7 +638,7 @@ namespace CTS
 
             if (point == null) return;
 
-            /* ---------- NEW : derive Poisson’s ratio from the user’s Vp / Vs ---------- */
+            /* ---------- NEW : derive Poisson's ratio from the user's Vp / Vs ---------- */
             if (knownVp > 0.0 && knownVs > 0.0)
                 point.PoissonRatio = PoissonFromVpVs(knownVp / knownVs);
             /* ------------------------------------------------------------------------- */
@@ -702,8 +702,7 @@ namespace CTS
         /// </summary>
         private double CalculateAverageGrayValue()
         {
-            // This should invoke the form's method to calculate average gray value
-            // We'll assume the form already has this capability
+            
             return simulationForm.CalculateAverageGrayValue();
         }
 
@@ -832,8 +831,19 @@ namespace CTS
             if (pts == null || pts.Count < 2)
                 return 0.25;                                 // fallback
 
+            // Validate all calibration points have valid Poisson's ratio values
+            var validPoints = pts.Where(p => p.PoissonRatio > 0 && p.PoissonRatio < 0.5
+                                           && !double.IsNaN(p.PoissonRatio)
+                                           && !double.IsInfinity(p.PoissonRatio)).ToList();
+
+            if (validPoints.Count < 2)
+            {
+                Logger.Log($"[CalibrationManager] Not enough valid calibration points with Poisson's ratio. Using default 0.25");
+                return 0.25;
+            }
+
             // sort once by ρ
-            var ordered = pts.OrderBy(p => p.MeasuredDensity).ToList();
+            var ordered = validPoints.OrderBy(p => p.MeasuredDensity).ToList();
 
             // clamp outside range
             if (density <= ordered.First().MeasuredDensity)
@@ -855,14 +865,38 @@ namespace CTS
 
             if (lower == null || upper == null) return 0.25;
 
+            // Check for identical density values to avoid division by zero
+            if (Math.Abs(upper.MeasuredDensity - lower.MeasuredDensity) < 1e-10)
+            {
+                Logger.Log($"[CalibrationManager] Identical density values found. Using average Poisson's ratio");
+                return (lower.PoissonRatio + upper.PoissonRatio) / 2.0;
+            }
+
             // linear interpolation
             double t = (density - lower.MeasuredDensity) /
                        (upper.MeasuredDensity - lower.MeasuredDensity);
 
+            // Validate t is within bounds
+            if (double.IsNaN(t) || double.IsInfinity(t))
+            {
+                Logger.Log($"[CalibrationManager] Invalid interpolation parameter. Using default 0.25");
+                return 0.25;
+            }
+
             double nu = lower.PoissonRatio + t * (upper.PoissonRatio - lower.PoissonRatio);
 
+            // Validate the result
+            if (double.IsNaN(nu) || double.IsInfinity(nu))
+            {
+                Logger.Log($"[CalibrationManager] Invalid interpolated Poisson's ratio. Using default 0.25");
+                return 0.25;
+            }
+
             // physical bounds
-            return Math.Max(0.0, Math.Min(0.49, nu));
+            nu = Math.Max(0.0, Math.Min(0.49, nu));
+
+            Logger.Log($"[CalibrationManager] Predicted Poisson's ratio: {nu:F4} for density {density:F1} kg/m³");
+            return nu;
         }
         /// <summary>
         /// Save calibration data to a file
@@ -925,7 +959,7 @@ namespace CTS
                 return false;
             }
         }
-        /// <summary>Compute Poisson’s ratio from a Vp/Vs ratio
+        /// <summary>Compute Poisson's ratio from a Vp/Vs ratio
         ///     (valid for an isotropic, elastic solid)</summary>
         internal static double PoissonFromVpVs(double vpVs)
         {

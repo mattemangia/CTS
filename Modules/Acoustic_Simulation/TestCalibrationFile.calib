@@ -1,198 +1,342 @@
 <?xml version="1.0" encoding="utf-8"?>
 <CalibrationDataset xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
-  <Name>Synthetic Rock Calibration Dataset</Name>
-  <Description>Demonstration calibration data for various rock types including limestone, sandstone, shale, and others</Description>
-  <CreationDate>2024-01-15T10:30:00</CreationDate>
-  <LastModifiedDate>2024-01-15T14:45:00</LastModifiedDate>
+  <Name>Rock Physics Calibration Dataset</Name>
+  <Description>Comprehensive calibration data for various rock types with multiple points at same confining pressures</Description>
+  <CreationDate>2025-05-13T09:00:00</CreationDate>
+  <LastModifiedDate>2025-05-13T09:00:00</LastModifiedDate>
   <CalibrationPoints>
-    <!-- Limestone samples -->
+    <!-- LIMESTONE SAMPLES - Confining Pressure 10 MPa -->
     <CalibrationPoint>
       <InputType>VpVsRatio</InputType>
-      <KnownVpVsRatio>1.850</KnownVpVsRatio>
-      <MeasuredDensity>2650</MeasuredDensity>
+      <KnownVpVsRatio>1.87</KnownVpVsRatio>
+      <MeasuredDensity>2710</MeasuredDensity>
       <MeasuredVolume>0.001</MeasuredVolume>
-      <ConfiningPressureMPa>5.0</ConfiningPressureMPa>
-      <KnownVp>5920</KnownVp>
-      <KnownVs>3200</KnownVs>
-      <YoungsModulus>62000</YoungsModulus>
-      <PoissonRatio>0.295</PoissonRatio>
-      <SimulatedVp>5890</SimulatedVp>
-      <SimulatedVs>3185</SimulatedVs>
-      <SimulatedVpVsRatio>1.849</SimulatedVpVsRatio>
+      <ConfiningPressureMPa>10.0</ConfiningPressureMPa>
+      <KnownVp>6000</KnownVp>
+      <KnownVs>3209</KnownVs>
+      <YoungsModulus>66000</YoungsModulus>
+      <PoissonRatio>0.30</PoissonRatio>
+      <SimulatedVp>5985</SimulatedVp>
+      <SimulatedVs>3198</SimulatedVs>
+      <SimulatedVpVsRatio>1.87</SimulatedVpVsRatio>
       <AvgGrayValue>195</AvgGrayValue>
       <MaterialName>Limestone</MaterialName>
       <MaterialID>2</MaterialID>
-      <CalibrationDate>2024-01-15T10:32:00</CalibrationDate>
-      <Notes>Indiana limestone sample, low pressure test</Notes>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Indiana limestone, medium porosity</Notes>
     </CalibrationPoint>
     
     <CalibrationPoint>
       <InputType>VpVsRatio</InputType>
-      <KnownVpVsRatio>1.880</KnownVpVsRatio>
-      <MeasuredDensity>2680</MeasuredDensity>
+      <KnownVpVsRatio>1.84</KnownVpVsRatio>
+      <MeasuredDensity>2650</MeasuredDensity>
       <MeasuredVolume>0.001</MeasuredVolume>
-      <ConfiningPressureMPa>20.0</ConfiningPressureMPa>
-      <KnownVp>6100</KnownVp>
-      <KnownVs>3245</KnownVs>
+      <ConfiningPressureMPa>10.0</ConfiningPressureMPa>
+      <KnownVp>5850</KnownVp>
+      <KnownVs>3179</KnownVs>
+      <YoungsModulus>62000</YoungsModulus>
+      <PoissonRatio>0.29</PoissonRatio>
+      <SimulatedVp>5835</SimulatedVp>
+      <SimulatedVs>3169</SimulatedVs>
+      <SimulatedVpVsRatio>1.84</SimulatedVpVsRatio>
+      <AvgGrayValue>190</AvgGrayValue>
+      <MaterialName>Limestone</MaterialName>
+      <MaterialID>2</MaterialID>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Salem limestone, higher porosity</Notes>
+    </CalibrationPoint>
+    
+    <!-- LIMESTONE SAMPLES - Confining Pressure 30 MPa -->
+    <CalibrationPoint>
+      <InputType>VpVsRatio</InputType>
+      <KnownVpVsRatio>1.89</KnownVpVsRatio>
+      <MeasuredDensity>2720</MeasuredDensity>
+      <MeasuredVolume>0.001</MeasuredVolume>
+      <ConfiningPressureMPa>30.0</ConfiningPressureMPa>
+      <KnownVp>6200</KnownVp>
+      <KnownVs>3280</KnownVs>
+      <YoungsModulus>70000</YoungsModulus>
+      <PoissonRatio>0.305</PoissonRatio>
+      <SimulatedVp>6185</SimulatedVp>
+      <SimulatedVs>3270</SimulatedVs>
+      <SimulatedVpVsRatio>1.89</SimulatedVpVsRatio>
+      <AvgGrayValue>200</AvgGrayValue>
+      <MaterialName>Limestone</MaterialName>
+      <MaterialID>2</MaterialID>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Indiana limestone, low porosity</Notes>
+    </CalibrationPoint>
+    
+    <CalibrationPoint>
+      <InputType>VpVsRatio</InputType>
+      <KnownVpVsRatio>1.91</KnownVpVsRatio>
+      <MeasuredDensity>2690</MeasuredDensity>
+      <MeasuredVolume>0.001</MeasuredVolume>
+      <ConfiningPressureMPa>30.0</ConfiningPressureMPa>
+      <KnownVp>6150</KnownVp>
+      <KnownVs>3220</KnownVs>
       <YoungsModulus>68000</YoungsModulus>
-      <PoissonRatio>0.302</PoissonRatio>
-      <SimulatedVp>6085</SimulatedVp>
-      <SimulatedVs>3235</SimulatedVs>
-      <SimulatedVpVsRatio>1.881</SimulatedVpVsRatio>
+      <PoissonRatio>0.31</PoissonRatio>
+      <SimulatedVp>6135</SimulatedVp>
+      <SimulatedVs>3211</SimulatedVs>
+      <SimulatedVpVsRatio>1.91</SimulatedVpVsRatio>
       <AvgGrayValue>198</AvgGrayValue>
       <MaterialName>Limestone</MaterialName>
       <MaterialID>2</MaterialID>
-      <CalibrationDate>2024-01-15T10:35:00</CalibrationDate>
-      <Notes>Indiana limestone sample, medium pressure test</Notes>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Dense crystalline limestone</Notes>
     </CalibrationPoint>
     
+    <!-- SANDSTONE SAMPLES - Confining Pressure 5 MPa -->
     <CalibrationPoint>
       <InputType>VpVsRatio</InputType>
-      <KnownVpVsRatio>1.900</KnownVpVsRatio>
-      <MeasuredDensity>2700</MeasuredDensity>
-      <MeasuredVolume>0.001</MeasuredVolume>
-      <ConfiningPressureMPa>40.0</ConfiningPressureMPa>
-      <KnownVp>6250</KnownVp>
-      <KnownVs>3289</KnownVs>
-      <YoungsModulus>72000</YoungsModulus>
-      <PoissonRatio>0.308</PoissonRatio>
-      <SimulatedVp>6230</SimulatedVp>
-      <SimulatedVs>3279</SimulatedVs>
-      <SimulatedVpVsRatio>1.900</SimulatedVpVsRatio>
-      <AvgGrayValue>202</AvgGrayValue>
-      <MaterialName>Limestone</MaterialName>
-      <MaterialID>2</MaterialID>
-      <CalibrationDate>2024-01-15T10:38:00</CalibrationDate>
-      <Notes>Dense limestone sample, high pressure test</Notes>
-    </CalibrationPoint>
-    
-    <!-- Sandstone samples -->
-    <CalibrationPoint>
-      <InputType>VpVsRatio</InputType>
-      <KnownVpVsRatio>1.650</KnownVpVsRatio>
+      <KnownVpVsRatio>1.65</KnownVpVsRatio>
       <MeasuredDensity>2350</MeasuredDensity>
       <MeasuredVolume>0.001</MeasuredVolume>
       <ConfiningPressureMPa>5.0</ConfiningPressureMPa>
-      <KnownVp>4300</KnownVp>
-      <KnownVs>2606</KnownVs>
+      <KnownVp>4200</KnownVp>
+      <KnownVs>2545</KnownVs>
       <YoungsModulus>28000</YoungsModulus>
-      <PoissonRatio>0.210</PoissonRatio>
-      <SimulatedVp>4285</SimulatedVp>
-      <SimulatedVs>2595</SimulatedVs>
-      <SimulatedVpVsRatio>1.651</SimulatedVpVsRatio>
+      <PoissonRatio>0.21</PoissonRatio>
+      <SimulatedVp>4185</SimulatedVp>
+      <SimulatedVs>2536</SimulatedVs>
+      <SimulatedVpVsRatio>1.65</SimulatedVpVsRatio>
       <AvgGrayValue>165</AvgGrayValue>
       <MaterialName>Sandstone</MaterialName>
       <MaterialID>3</MaterialID>
-      <CalibrationDate>2024-01-15T10:42:00</CalibrationDate>
-      <Notes>Berea sandstone, low pressure</Notes>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Berea sandstone, high porosity</Notes>
     </CalibrationPoint>
     
     <CalibrationPoint>
       <InputType>VpVsRatio</InputType>
-      <KnownVpVsRatio>1.720</KnownVpVsRatio>
+      <KnownVpVsRatio>1.62</KnownVpVsRatio>
       <MeasuredDensity>2400</MeasuredDensity>
+      <MeasuredVolume>0.001</MeasuredVolume>
+      <ConfiningPressureMPa>5.0</ConfiningPressureMPa>
+      <KnownVp>4400</KnownVp>
+      <KnownVs>2716</KnownVs>
+      <YoungsModulus>32000</YoungsModulus>
+      <PoissonRatio>0.19</PoissonRatio>
+      <SimulatedVp>4385</SimulatedVp>
+      <SimulatedVs>2706</SimulatedVs>
+      <SimulatedVpVsRatio>1.62</SimulatedVpVsRatio>
+      <AvgGrayValue>170</AvgGrayValue>
+      <MaterialName>Sandstone</MaterialName>
+      <MaterialID>3</MaterialID>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Fontainebleau sandstone, medium porosity</Notes>
+    </CalibrationPoint>
+    
+    <!-- SANDSTONE SAMPLES - Confining Pressure 20 MPa -->
+    <CalibrationPoint>
+      <InputType>VpVsRatio</InputType>
+      <KnownVpVsRatio>1.71</KnownVpVsRatio>
+      <MeasuredDensity>2380</MeasuredDensity>
       <MeasuredVolume>0.001</MeasuredVolume>
       <ConfiningPressureMPa>20.0</ConfiningPressureMPa>
       <KnownVp>4650</KnownVp>
-      <KnownVs>2703</KnownVs>
-      <YoungsModulus>35000</YoungsModulus>
-      <PoissonRatio>0.242</PoissonRatio>
+      <KnownVs>2719</KnownVs>
+      <YoungsModulus>36000</YoungsModulus>
+      <PoissonRatio>0.24</PoissonRatio>
       <SimulatedVp>4635</SimulatedVp>
-      <SimulatedVs>2695</SimulatedVs>
-      <SimulatedVpVsRatio>1.719</SimulatedVpVsRatio>
+      <SimulatedVs>2710</SimulatedVs>
+      <SimulatedVpVsRatio>1.71</SimulatedVpVsRatio>
       <AvgGrayValue>175</AvgGrayValue>
       <MaterialName>Sandstone</MaterialName>
       <MaterialID>3</MaterialID>
-      <CalibrationDate>2024-01-15T10:45:00</CalibrationDate>
-      <Notes>Consolidated sandstone, medium pressure</Notes>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Berea sandstone, pressure compacted</Notes>
     </CalibrationPoint>
     
-    <!-- Shale samples -->
     <CalibrationPoint>
       <InputType>VpVsRatio</InputType>
-      <KnownVpVsRatio>1.750</KnownVpVsRatio>
-      <MeasuredDensity>2250</MeasuredDensity>
+      <KnownVpVsRatio>1.73</KnownVpVsRatio>
+      <MeasuredDensity>2420</MeasuredDensity>
       <MeasuredVolume>0.001</MeasuredVolume>
-      <ConfiningPressureMPa>5.0</ConfiningPressureMPa>
-      <KnownVp>3800</KnownVp>
-      <KnownVs>2171</KnownVs>
-      <YoungsModulus>18000</YoungsModulus>
-      <PoissonRatio>0.257</PoissonRatio>
-      <SimulatedVp>3785</SimulatedVp>
-      <SimulatedVs>2162</SimulatedVs>
-      <SimulatedVpVsRatio>1.750</SimulatedVpVsRatio>
-      <AvgGrayValue>145</AvgGrayValue>
+      <ConfiningPressureMPa>20.0</ConfiningPressureMPa>
+      <KnownVp>4800</KnownVp>
+      <KnownVs>2775</KnownVs>
+      <YoungsModulus>38000</YoungsModulus>
+      <PoissonRatio>0.245</PoissonRatio>
+      <SimulatedVp>4785</SimulatedVp>
+      <SimulatedVs>2765</SimulatedVs>
+      <SimulatedVpVsRatio>1.73</SimulatedVpVsRatio>
+      <AvgGrayValue>178</AvgGrayValue>
+      <MaterialName>Sandstone</MaterialName>
+      <MaterialID>3</MaterialID>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Tight sandstone, low porosity</Notes>
+    </CalibrationPoint>
+    
+    <!-- SHALE SAMPLES - Confining Pressure 10 MPa -->
+    <CalibrationPoint>
+      <InputType>VpVsRatio</InputType>
+      <KnownVpVsRatio>1.85</KnownVpVsRatio>
+      <MeasuredDensity>2300</MeasuredDensity>
+      <MeasuredVolume>0.001</MeasuredVolume>
+      <ConfiningPressureMPa>10.0</ConfiningPressureMPa>
+      <KnownVp>4100</KnownVp>
+      <KnownVs>2216</KnownVs>
+      <YoungsModulus>22000</YoungsModulus>
+      <PoissonRatio>0.29</PoissonRatio>
+      <SimulatedVp>4085</SimulatedVp>
+      <SimulatedVs>2207</SimulatedVs>
+      <SimulatedVpVsRatio>1.85</SimulatedVpVsRatio>
+      <AvgGrayValue>150</AvgGrayValue>
       <MaterialName>Shale</MaterialName>
       <MaterialID>4</MaterialID>
-      <CalibrationDate>2024-01-15T10:50:00</CalibrationDate>
-      <Notes>Organic-rich shale, low pressure</Notes>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Organic-rich shale, Barnett</Notes>
     </CalibrationPoint>
     
     <CalibrationPoint>
       <InputType>VpVsRatio</InputType>
-      <KnownVpVsRatio>1.900</KnownVpVsRatio>
+      <KnownVpVsRatio>1.92</KnownVpVsRatio>
       <MeasuredDensity>2350</MeasuredDensity>
       <MeasuredVolume>0.001</MeasuredVolume>
-      <ConfiningPressureMPa>30.0</ConfiningPressureMPa>
-      <KnownVp>4350</KnownVp>
-      <KnownVs>2289</KnownVs>
-      <YoungsModulus>25000</YoungsModulus>
-      <PoissonRatio>0.308</PoissonRatio>
-      <SimulatedVp>4335</SimulatedVp>
-      <SimulatedVs>2281</SimulatedVs>
-      <SimulatedVpVsRatio>1.900</SimulatedVpVsRatio>
+      <ConfiningPressureMPa>10.0</ConfiningPressureMPa>
+      <KnownVp>4300</KnownVp>
+      <KnownVs>2240</KnownVs>
+      <YoungsModulus>24000</YoungsModulus>
+      <PoissonRatio>0.31</PoissonRatio>
+      <SimulatedVp>4285</SimulatedVp>
+      <SimulatedVs>2231</SimulatedVs>
+      <SimulatedVpVsRatio>1.92</SimulatedVpVsRatio>
       <AvgGrayValue>155</AvgGrayValue>
       <MaterialName>Shale</MaterialName>
       <MaterialID>4</MaterialID>
-      <CalibrationDate>2024-01-15T10:53:00</CalibrationDate>
-      <Notes>Compacted shale, high pressure</Notes>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Clay-rich marine shale</Notes>
     </CalibrationPoint>
     
-    <!-- Sand samples -->
+    <!-- SHALE SAMPLES - Confining Pressure 30 MPa -->
     <CalibrationPoint>
       <InputType>VpVsRatio</InputType>
-      <KnownVpVsRatio>1.580</KnownVpVsRatio>
-      <MeasuredDensity>1850</MeasuredDensity>
+      <KnownVpVsRatio>1.88</KnownVpVsRatio>
+      <MeasuredDensity>2380</MeasuredDensity>
       <MeasuredVolume>0.001</MeasuredVolume>
-      <ConfiningPressureMPa>1.0</ConfiningPressureMPa>
-      <KnownVp>2200</KnownVp>
-      <KnownVs>1392</KnownVs>
-      <YoungsModulus>8000</YoungsModulus>
-      <PoissonRatio>0.171</PoissonRatio>
-      <SimulatedVp>2185</SimulatedVp>
-      <SimulatedVs>1383</SimulatedVs>
-      <SimulatedVpVsRatio>1.580</SimulatedVpVsRatio>
-      <AvgGrayValue>110</AvgGrayValue>
+      <ConfiningPressureMPa>30.0</ConfiningPressureMPa>
+      <KnownVp>4650</KnownVp>
+      <KnownVs>2473</KnownVs>
+      <YoungsModulus>30000</YoungsModulus>
+      <PoissonRatio>0.303</PoissonRatio>
+      <SimulatedVp>4635</SimulatedVp>
+      <SimulatedVs>2464</SimulatedVs>
+      <SimulatedVpVsRatio>1.88</SimulatedVpVsRatio>
+      <AvgGrayValue>160</AvgGrayValue>
+      <MaterialName>Shale</MaterialName>
+      <MaterialID>4</MaterialID>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Mature Bakken shale</Notes>
+    </CalibrationPoint>
+    
+    <CalibrationPoint>
+      <InputType>VpVsRatio</InputType>
+      <KnownVpVsRatio>1.95</KnownVpVsRatio>
+      <MeasuredDensity>2400</MeasuredDensity>
+      <MeasuredVolume>0.001</MeasuredVolume>
+      <ConfiningPressureMPa>30.0</ConfiningPressureMPa>
+      <KnownVp>4800</KnownVp>
+      <KnownVs>2462</KnownVs>
+      <YoungsModulus>32000</YoungsModulus>
+      <PoissonRatio>0.32</PoissonRatio>
+      <SimulatedVp>4785</SimulatedVp>
+      <SimulatedVs>2453</SimulatedVs>
+      <SimulatedVpVsRatio>1.95</SimulatedVpVsRatio>
+      <AvgGrayValue>165</AvgGrayValue>
+      <MaterialName>Shale</MaterialName>
+      <MaterialID>4</MaterialID>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Indurated deep shale</Notes>
+    </CalibrationPoint>
+    
+    <!-- SAND SAMPLES - Confining Pressure 2 MPa -->
+    <CalibrationPoint>
+      <InputType>VpVsRatio</InputType>
+      <KnownVpVsRatio>1.58</KnownVpVsRatio>
+      <MeasuredDensity>1900</MeasuredDensity>
+      <MeasuredVolume>0.001</MeasuredVolume>
+      <ConfiningPressureMPa>2.0</ConfiningPressureMPa>
+      <KnownVp>2400</KnownVp>
+      <KnownVs>1519</KnownVs>
+      <YoungsModulus>9000</YoungsModulus>
+      <PoissonRatio>0.17</PoissonRatio>
+      <SimulatedVp>2385</SimulatedVp>
+      <SimulatedVs>1510</SimulatedVs>
+      <SimulatedVpVsRatio>1.58</SimulatedVpVsRatio>
+      <AvgGrayValue>115</AvgGrayValue>
       <MaterialName>Sand</MaterialName>
       <MaterialID>5</MaterialID>
-      <CalibrationDate>2024-01-15T11:00:00</CalibrationDate>
-      <Notes>Unconsolidated sand, very low pressure</Notes>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Unconsolidated clean sand</Notes>
     </CalibrationPoint>
     
     <CalibrationPoint>
       <InputType>VpVsRatio</InputType>
-      <KnownVpVsRatio>1.670</KnownVpVsRatio>
+      <KnownVpVsRatio>1.61</KnownVpVsRatio>
       <MeasuredDensity>1950</MeasuredDensity>
       <MeasuredVolume>0.001</MeasuredVolume>
-      <ConfiningPressureMPa>10.0</ConfiningPressureMPa>
-      <KnownVp>2850</KnownVp>
-      <KnownVs>1707</KnownVs>
-      <YoungsModulus>12000</YoungsModulus>
-      <PoissonRatio>0.220</PoissonRatio>
-      <SimulatedVp>2835</SimulatedVp>
-      <SimulatedVs>1697</SimulatedVs>
-      <SimulatedVpVsRatio>1.670</SimulatedVpVsRatio>
-      <AvgGrayValue>125</AvgGrayValue>
+      <ConfiningPressureMPa>2.0</ConfiningPressureMPa>
+      <KnownVp>2600</KnownVp>
+      <KnownVs>1615</KnownVs>
+      <YoungsModulus>10500</YoungsModulus>
+      <PoissonRatio>0.18</PoissonRatio>
+      <SimulatedVp>2585</SimulatedVp>
+      <SimulatedVs>1606</SimulatedVs>
+      <SimulatedVpVsRatio>1.61</SimulatedVpVsRatio>
+      <AvgGrayValue>120</AvgGrayValue>
       <MaterialName>Sand</MaterialName>
       <MaterialID>5</MaterialID>
-      <CalibrationDate>2024-01-15T11:03:00</CalibrationDate>
-      <Notes>Partially consolidated sand</Notes>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Ottawa sand, slightly compacted</Notes>
     </CalibrationPoint>
     
-    <!-- Conglomerate samples -->
+    <!-- SAND SAMPLES - Confining Pressure 10 MPa -->
     <CalibrationPoint>
       <InputType>VpVsRatio</InputType>
-      <KnownVpVsRatio>1.780</KnownVpVsRatio>
+      <KnownVpVsRatio>1.66</KnownVpVsRatio>
+      <MeasuredDensity>2000</MeasuredDensity>
+      <MeasuredVolume>0.001</MeasuredVolume>
+      <ConfiningPressureMPa>10.0</ConfiningPressureMPa>
+      <KnownVp>3100</KnownVp>
+      <KnownVs>1867</KnownVs>
+      <YoungsModulus>14000</YoungsModulus>
+      <PoissonRatio>0.22</PoissonRatio>
+      <SimulatedVp>3085</SimulatedVp>
+      <SimulatedVs>1857</SimulatedVs>
+      <SimulatedVpVsRatio>1.66</SimulatedVpVsRatio>
+      <AvgGrayValue>130</AvgGrayValue>
+      <MaterialName>Sand</MaterialName>
+      <MaterialID>5</MaterialID>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Semi-consolidated sand</Notes>
+    </CalibrationPoint>
+    
+    <CalibrationPoint>
+      <InputType>VpVsRatio</InputType>
+      <KnownVpVsRatio>1.69</KnownVpVsRatio>
+      <MeasuredDensity>2050</MeasuredDensity>
+      <MeasuredVolume>0.001</MeasuredVolume>
+      <ConfiningPressureMPa>10.0</ConfiningPressureMPa>
+      <KnownVp>3300</KnownVp>
+      <KnownVs>1953</KnownVs>
+      <YoungsModulus>15500</YoungsModulus>
+      <PoissonRatio>0.23</PoissonRatio>
+      <SimulatedVp>3285</SimulatedVp>
+      <SimulatedVs>1943</SimulatedVs>
+      <SimulatedVpVsRatio>1.69</SimulatedVpVsRatio>
+      <AvgGrayValue>135</AvgGrayValue>
+      <MaterialName>Sand</MaterialName>
+      <MaterialID>5</MaterialID>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Quartz-rich sand, cemented</Notes>
+    </CalibrationPoint>
+    
+    <!-- CONGLOMERATE SAMPLES - Confining Pressure 15 MPa -->
+    <CalibrationPoint>
+      <InputType>VpVsRatio</InputType>
+      <KnownVpVsRatio>1.78</KnownVpVsRatio>
       <MeasuredDensity>2500</MeasuredDensity>
       <MeasuredVolume>0.001</MeasuredVolume>
       <ConfiningPressureMPa>15.0</ConfiningPressureMPa>
@@ -202,17 +346,38 @@
       <PoissonRatio>0.268</PoissonRatio>
       <SimulatedVp>5085</SimulatedVp>
       <SimulatedVs>2857</SimulatedVs>
-      <SimulatedVpVsRatio>1.779</SimulatedVpVsRatio>
+      <SimulatedVpVsRatio>1.78</SimulatedVpVsRatio>
       <AvgGrayValue>185</AvgGrayValue>
       <MaterialName>Conglomerate</MaterialName>
       <MaterialID>6</MaterialID>
-      <CalibrationDate>2024-01-15T11:10:00</CalibrationDate>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
       <Notes>Well-cemented conglomerate</Notes>
     </CalibrationPoint>
     
     <CalibrationPoint>
       <InputType>VpVsRatio</InputType>
-      <KnownVpVsRatio>1.820</KnownVpVsRatio>
+      <KnownVpVsRatio>1.80</KnownVpVsRatio>
+      <MeasuredDensity>2450</MeasuredDensity>
+      <MeasuredVolume>0.001</MeasuredVolume>
+      <ConfiningPressureMPa>15.0</ConfiningPressureMPa>
+      <KnownVp>4950</KnownVp>
+      <KnownVs>2750</KnownVs>
+      <YoungsModulus>40000</YoungsModulus>
+      <PoissonRatio>0.275</PoissonRatio>
+      <SimulatedVp>4935</SimulatedVp>
+      <SimulatedVs>2742</SimulatedVs>
+      <SimulatedVpVsRatio>1.80</SimulatedVpVsRatio>
+      <AvgGrayValue>180</AvgGrayValue>
+      <MaterialName>Conglomerate</MaterialName>
+      <MaterialID>6</MaterialID>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Mixed clast conglomerate</Notes>
+    </CalibrationPoint>
+    
+    <!-- CONGLOMERATE SAMPLES - Confining Pressure 35 MPa -->
+    <CalibrationPoint>
+      <InputType>VpVsRatio</InputType>
+      <KnownVpVsRatio>1.82</KnownVpVsRatio>
       <MeasuredDensity>2550</MeasuredDensity>
       <MeasuredVolume>0.001</MeasuredVolume>
       <ConfiningPressureMPa>35.0</ConfiningPressureMPa>
@@ -222,18 +387,38 @@
       <PoissonRatio>0.283</PoissonRatio>
       <SimulatedVp>5435</SimulatedVp>
       <SimulatedVs>2985</SimulatedVs>
-      <SimulatedVpVsRatio>1.821</SimulatedVpVsRatio>
+      <SimulatedVpVsRatio>1.82</SimulatedVpVsRatio>
       <AvgGrayValue>190</AvgGrayValue>
       <MaterialName>Conglomerate</MaterialName>
       <MaterialID>6</MaterialID>
-      <CalibrationDate>2024-01-15T11:13:00</CalibrationDate>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
       <Notes>Dense conglomerate, high pressure</Notes>
     </CalibrationPoint>
     
-    <!-- Claystone samples -->
     <CalibrationPoint>
       <InputType>VpVsRatio</InputType>
-      <KnownVpVsRatio>1.920</KnownVpVsRatio>
+      <KnownVpVsRatio>1.84</KnownVpVsRatio>
+      <MeasuredDensity>2580</MeasuredDensity>
+      <MeasuredVolume>0.001</MeasuredVolume>
+      <ConfiningPressureMPa>35.0</ConfiningPressureMPa>
+      <KnownVp>5600</KnownVp>
+      <KnownVs>3043</KnownVs>
+      <YoungsModulus>50000</YoungsModulus>
+      <PoissonRatio>0.29</PoissonRatio>
+      <SimulatedVp>5585</SimulatedVp>
+      <SimulatedVs>3035</SimulatedVs>
+      <SimulatedVpVsRatio>1.84</SimulatedVpVsRatio>
+      <AvgGrayValue>195</AvgGrayValue>
+      <MaterialName>Conglomerate</MaterialName>
+      <MaterialID>6</MaterialID>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Quartzitic conglomerate, compacted</Notes>
+    </CalibrationPoint>
+    
+    <!-- CLAYSTONE SAMPLES - Confining Pressure 8 MPa -->
+    <CalibrationPoint>
+      <InputType>VpVsRatio</InputType>
+      <KnownVpVsRatio>1.92</KnownVpVsRatio>
       <MeasuredDensity>2150</MeasuredDensity>
       <MeasuredVolume>0.001</MeasuredVolume>
       <ConfiningPressureMPa>8.0</ConfiningPressureMPa>
@@ -243,58 +428,161 @@
       <PoissonRatio>0.314</PoissonRatio>
       <SimulatedVp>3385</SimulatedVp>
       <SimulatedVs>1762</SimulatedVs>
-      <SimulatedVpVsRatio>1.921</SimulatedVpVsRatio>
+      <SimulatedVpVsRatio>1.92</SimulatedVpVsRatio>
       <AvgGrayValue>135</AvgGrayValue>
       <MaterialName>Claystone</MaterialName>
       <MaterialID>7</MaterialID>
-      <CalibrationDate>2024-01-15T11:20:00</CalibrationDate>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
       <Notes>Soft claystone sample</Notes>
     </CalibrationPoint>
     
     <CalibrationPoint>
       <InputType>VpVsRatio</InputType>
-      <KnownVpVsRatio>2.050</KnownVpVsRatio>
+      <KnownVpVsRatio>1.98</KnownVpVsRatio>
+      <MeasuredDensity>2200</MeasuredDensity>
+      <MeasuredVolume>0.001</MeasuredVolume>
+      <ConfiningPressureMPa>8.0</ConfiningPressureMPa>
+      <KnownVp>3600</KnownVp>
+      <KnownVs>1818</KnownVs>
+      <YoungsModulus>18000</YoungsModulus>
+      <PoissonRatio>0.33</PoissonRatio>
+      <SimulatedVp>3585</SimulatedVp>
+      <SimulatedVs>1810</SimulatedVs>
+      <SimulatedVpVsRatio>1.98</SimulatedVpVsRatio>
+      <AvgGrayValue>140</AvgGrayValue>
+      <MaterialName>Claystone</MaterialName>
+      <MaterialID>7</MaterialID>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Montmorillonite-rich claystone</Notes>
+    </CalibrationPoint>
+    
+    <!-- CLAYSTONE SAMPLES - Confining Pressure 25 MPa -->
+    <CalibrationPoint>
+      <InputType>VpVsRatio</InputType>
+      <KnownVpVsRatio>2.05</KnownVpVsRatio>
       <MeasuredDensity>2280</MeasuredDensity>
       <MeasuredVolume>0.001</MeasuredVolume>
       <ConfiningPressureMPa>25.0</ConfiningPressureMPa>
       <KnownVp>4050</KnownVp>
       <KnownVs>1976</KnownVs>
       <YoungsModulus>22000</YoungsModulus>
-      <PoissonRatio>0.350</PoissonRatio>
+      <PoissonRatio>0.35</PoissonRatio>
       <SimulatedVp>4035</SimulatedVp>
       <SimulatedVs>1968</SimulatedVs>
-      <SimulatedVpVsRatio>2.050</SimulatedVpVsRatio>
+      <SimulatedVpVsRatio>2.05</SimulatedVpVsRatio>
       <AvgGrayValue>150</AvgGrayValue>
       <MaterialName>Claystone</MaterialName>
       <MaterialID>7</MaterialID>
-      <CalibrationDate>2024-01-15T11:23:00</CalibrationDate>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
       <Notes>Indurated claystone, high pressure</Notes>
     </CalibrationPoint>
     
-    <!-- Additional materials -->
     <CalibrationPoint>
       <InputType>VpVsRatio</InputType>
-      <KnownVpVsRatio>1.730</KnownVpVsRatio>
-      <MeasuredDensity>2850</MeasuredDensity>
+      <KnownVpVsRatio>2.00</KnownVpVsRatio>
+      <MeasuredDensity>2250</MeasuredDensity>
       <MeasuredVolume>0.001</MeasuredVolume>
-      <ConfiningPressureMPa>50.0</ConfiningPressureMPa>
-      <KnownVp>6600</KnownVp>
-      <KnownVs>3815</KnownVs>
-      <YoungsModulus>85000</YoungsModulus>
+      <ConfiningPressureMPa>25.0</ConfiningPressureMPa>
+      <KnownVp>3950</KnownVp>
+      <KnownVs>1975</KnownVs>
+      <YoungsModulus>21000</YoungsModulus>
+      <PoissonRatio>0.336</PoissonRatio>
+      <SimulatedVp>3935</SimulatedVp>
+      <SimulatedVs>1967</SimulatedVs>
+      <SimulatedVpVsRatio>2.00</SimulatedVpVsRatio>
+      <AvgGrayValue>145</AvgGrayValue>
+      <MaterialName>Claystone</MaterialName>
+      <MaterialID>7</MaterialID>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Compacted kaolinite claystone</Notes>
+    </CalibrationPoint>
+    
+    <!-- DOLOMITE SAMPLES - Confining Pressure 20 MPa -->
+    <CalibrationPoint>
+      <InputType>VpVsRatio</InputType>
+      <KnownVpVsRatio>1.73</KnownVpVsRatio>
+      <MeasuredDensity>2800</MeasuredDensity>
+      <MeasuredVolume>0.001</MeasuredVolume>
+      <ConfiningPressureMPa>20.0</ConfiningPressureMPa>
+      <KnownVp>6400</KnownVp>
+      <KnownVs>3699</KnownVs>
+      <YoungsModulus>78000</YoungsModulus>
       <PoissonRatio>0.245</PoissonRatio>
-      <SimulatedVp>6585</SimulatedVp>
-      <SimulatedVs>3805</SimulatedVs>
-      <SimulatedVpVsRatio>1.730</SimulatedVpVsRatio>
-      <AvgGrayValue>210</AvgGrayValue>
+      <SimulatedVp>6385</SimulatedVp>
+      <SimulatedVs>3690</SimulatedVs>
+      <SimulatedVpVsRatio>1.73</SimulatedVpVsRatio>
+      <AvgGrayValue>208</AvgGrayValue>
       <MaterialName>Dolomite</MaterialName>
       <MaterialID>8</MaterialID>
-      <CalibrationDate>2024-01-15T11:30:00</CalibrationDate>
-      <Notes>Crystalline dolomite, very high pressure</Notes>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Crystalline dolomite, medium pressure</Notes>
     </CalibrationPoint>
     
     <CalibrationPoint>
       <InputType>VpVsRatio</InputType>
-      <KnownVpVsRatio>1.550</KnownVpVsRatio>
+      <KnownVpVsRatio>1.75</KnownVpVsRatio>
+      <MeasuredDensity>2850</MeasuredDensity>
+      <MeasuredVolume>0.001</MeasuredVolume>
+      <ConfiningPressureMPa>20.0</ConfiningPressureMPa>
+      <KnownVp>6500</KnownVp>
+      <KnownVs>3714</KnownVs>
+      <YoungsModulus>80000</YoungsModulus>
+      <PoissonRatio>0.254</PoissonRatio>
+      <SimulatedVp>6485</SimulatedVp>
+      <SimulatedVs>3705</SimulatedVs>
+      <SimulatedVpVsRatio>1.75</SimulatedVpVsRatio>
+      <AvgGrayValue>212</AvgGrayValue>
+      <MaterialName>Dolomite</MaterialName>
+      <MaterialID>8</MaterialID>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Dense dolomite, low porosity</Notes>
+    </CalibrationPoint>
+    
+    <!-- DOLOMITE SAMPLES - Confining Pressure 50 MPa -->
+    <CalibrationPoint>
+      <InputType>VpVsRatio</InputType>
+      <KnownVpVsRatio>1.72</KnownVpVsRatio>
+      <MeasuredDensity>2870</MeasuredDensity>
+      <MeasuredVolume>0.001</MeasuredVolume>
+      <ConfiningPressureMPa>50.0</ConfiningPressureMPa>
+      <KnownVp>6700</KnownVp>
+      <KnownVs>3895</KnownVs>
+      <YoungsModulus>87000</YoungsModulus>
+      <PoissonRatio>0.24</PoissonRatio>
+      <SimulatedVp>6685</SimulatedVp>
+      <SimulatedVs>3886</SimulatedVs>
+      <SimulatedVpVsRatio>1.72</SimulatedVpVsRatio>
+      <AvgGrayValue>215</AvgGrayValue>
+      <MaterialName>Dolomite</MaterialName>
+      <MaterialID>8</MaterialID>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Pure dolomite, very high pressure</Notes>
+    </CalibrationPoint>
+    
+    <CalibrationPoint>
+      <InputType>VpVsRatio</InputType>
+      <KnownVpVsRatio>1.74</KnownVpVsRatio>
+      <MeasuredDensity>2880</MeasuredDensity>
+      <MeasuredVolume>0.001</MeasuredVolume>
+      <ConfiningPressureMPa>50.0</ConfiningPressureMPa>
+      <KnownVp>6800</KnownVp>
+      <KnownVs>3908</KnownVs>
+      <YoungsModulus>88000</YoungsModulus>
+      <PoissonRatio>0.248</PoissonRatio>
+      <SimulatedVp>6785</SimulatedVp>
+      <SimulatedVs>3899</SimulatedVs>
+      <SimulatedVpVsRatio>1.74</SimulatedVpVsRatio>
+      <AvgGrayValue>218</AvgGrayValue>
+      <MaterialName>Dolomite</MaterialName>
+      <MaterialID>8</MaterialID>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Very dense dolomite, maximum pressure</Notes>
+    </CalibrationPoint>
+    
+    <!-- VOLCANIC TUFF SAMPLES - Confining Pressure 3 MPa -->
+    <CalibrationPoint>
+      <InputType>VpVsRatio</InputType>
+      <KnownVpVsRatio>1.55</KnownVpVsRatio>
       <MeasuredDensity>2100</MeasuredDensity>
       <MeasuredVolume>0.001</MeasuredVolume>
       <ConfiningPressureMPa>3.0</ConfiningPressureMPa>
@@ -304,12 +592,73 @@
       <PoissonRatio>0.151</PoissonRatio>
       <SimulatedVp>2885</SimulatedVp>
       <SimulatedVs>1861</SimulatedVs>
-      <SimulatedVpVsRatio>1.550</SimulatedVpVsRatio>
+      <SimulatedVpVsRatio>1.55</SimulatedVpVsRatio>
       <AvgGrayValue>125</AvgGrayValue>
       <MaterialName>Volcanic Tuff</MaterialName>
       <MaterialID>9</MaterialID>
-      <CalibrationDate>2024-01-15T11:35:00</CalibrationDate>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
       <Notes>Porous volcanic tuff</Notes>
+    </CalibrationPoint>
+    
+    <CalibrationPoint>
+      <InputType>VpVsRatio</InputType>
+      <KnownVpVsRatio>1.58</KnownVpVsRatio>
+      <MeasuredDensity>2050</MeasuredDensity>
+      <MeasuredVolume>0.001</MeasuredVolume>
+      <ConfiningPressureMPa>3.0</ConfiningPressureMPa>
+      <KnownVp>2750</KnownVp>
+      <KnownVs>1741</KnownVs>
+      <YoungsModulus>12000</YoungsModulus>
+      <PoissonRatio>0.17</PoissonRatio>
+      <SimulatedVp>2735</SimulatedVp>
+      <SimulatedVs>1731</SimulatedVs>
+      <SimulatedVpVsRatio>1.58</SimulatedVpVsRatio>
+      <AvgGrayValue>120</AvgGrayValue>
+      <MaterialName>Volcanic Tuff</MaterialName>
+      <MaterialID>9</MaterialID>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Rhyolitic tuff, weathered</Notes>
+    </CalibrationPoint>
+    
+    <!-- VOLCANIC TUFF SAMPLES - Confining Pressure 15 MPa -->
+    <CalibrationPoint>
+      <InputType>VpVsRatio</InputType>
+      <KnownVpVsRatio>1.62</KnownVpVsRatio>
+      <MeasuredDensity>2200</MeasuredDensity>
+      <MeasuredVolume>0.001</MeasuredVolume>
+      <ConfiningPressureMPa>15.0</ConfiningPressureMPa>
+      <KnownVp>3850</KnownVp>
+      <KnownVs>2377</KnownVs>
+      <YoungsModulus>24000</YoungsModulus>
+      <PoissonRatio>0.19</PoissonRatio>
+      <SimulatedVp>3835</SimulatedVp>
+      <SimulatedVs>2367</SimulatedVs>
+      <SimulatedVpVsRatio>1.62</SimulatedVpVsRatio>
+      <AvgGrayValue>140</AvgGrayValue>
+      <MaterialName>Volcanic Tuff</MaterialName>
+      <MaterialID>9</MaterialID>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Welded tuff, compacted</Notes>
+    </CalibrationPoint>
+    
+    <CalibrationPoint>
+      <InputType>VpVsRatio</InputType>
+      <KnownVpVsRatio>1.64</KnownVpVsRatio>
+      <MeasuredDensity>2250</MeasuredDensity>
+      <MeasuredVolume>0.001</MeasuredVolume>
+      <ConfiningPressureMPa>15.0</ConfiningPressureMPa>
+      <KnownVp>4000</KnownVp>
+      <KnownVs>2439</KnownVs>
+      <YoungsModulus>26000</YoungsModulus>
+      <PoissonRatio>0.204</PoissonRatio>
+      <SimulatedVp>3985</SimulatedVp>
+      <SimulatedVs>2430</SimulatedVs>
+      <SimulatedVpVsRatio>1.64</SimulatedVpVsRatio>
+      <AvgGrayValue>145</AvgGrayValue>
+      <MaterialName>Volcanic Tuff</MaterialName>
+      <MaterialID>9</MaterialID>
+      <CalibrationDate>2025-05-13T09:00:00</CalibrationDate>
+      <Notes>Andesitic tuff, dense</Notes>
     </CalibrationPoint>
   </CalibrationPoints>
 </CalibrationDataset>

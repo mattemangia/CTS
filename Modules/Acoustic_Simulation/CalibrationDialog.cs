@@ -31,12 +31,18 @@ namespace CTS
         private KryptonPanel pnlInputMethod;
         private KryptonLabel lblVpVsValue;
         private KryptonButton btnExportPlot;
+        private KryptonLabel lblPoissonValue;
 
         public CalibrationDialog(CalibrationManager manager, AcousticSimulationForm form,
                          double vp, double vs, double vpVsRatio)
         {
             try
             {
+                // Ensure all parameters are valid first
+                this.calibrationManager = manager ?? throw new ArgumentNullException(nameof(manager));
+                this.simulationForm = form ?? throw new ArgumentNullException(nameof(form));
+
+                // Now safely get values from simulationForm
                 youngModulus = (double)simulationForm.GetYoungsModulus();
                 poissonRatio = (double)simulationForm.GetPoissonRatio();
 
@@ -45,18 +51,6 @@ namespace CTS
                 {
                     poissonRatio = 0.25; // Use default if invalid
                 }
-            }
-            catch (Exception)
-            {
-                // Default values if exception
-                youngModulus = 50000.0; // Default for limestone
-                poissonRatio = 0.25;
-            }
-            try
-            {
-                // Ensure all parameters are valid
-                this.calibrationManager = manager ?? throw new ArgumentNullException(nameof(manager));
-                this.simulationForm = form ?? throw new ArgumentNullException(nameof(form));
 
                 // Ensure we have reasonable values for wave velocities
                 this.simulatedVp = Math.Max(0, vp);
@@ -106,39 +100,47 @@ namespace CTS
                     "Initialization Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
-
         private void InitializeComponent()
         {
             try
             {
                 // Form settings
                 this.Text = "Acoustic Simulator Calibration";
-                this.Size = new Size(800, 800);
+                this.MinimumSize = new Size(800, 600);
+                this.Size = new Size(1000, 900);
                 this.StartPosition = FormStartPosition.CenterParent;
-                this.BackColor = Color.FromArgb(45, 45, 48); // Dark background
-                this.Icon = Properties.Resources.favicon; // Set the icon from resources
+                this.BackColor = Color.FromArgb(45, 45, 48);
+                this.Icon = Properties.Resources.favicon;
 
-                // Create main layout panel
+                // Create main panel with padding
                 KryptonPanel mainPanel = new KryptonPanel();
                 mainPanel.Dock = DockStyle.Fill;
+                mainPanel.Padding = new Padding(10);
                 mainPanel.StateCommon.Color1 = Color.FromArgb(45, 45, 48);
                 mainPanel.StateCommon.Color2 = Color.FromArgb(45, 45, 48);
+                this.Controls.Add(mainPanel);
 
-                // Create two main sections: existing calibration points (top) and add new point (bottom)
-                TableLayoutPanel layout = new TableLayoutPanel();
-                layout.Dock = DockStyle.Fill;
-                layout.RowCount = 2;
-                layout.ColumnCount = 1;
-                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
-                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
-                mainPanel.Controls.Add(layout);
+                // Create split container - DO NOT SET SPLITTER DISTANCE HERE
+                SplitContainer splitContainer = new SplitContainer();
+                splitContainer.Dock = DockStyle.Fill;
+                splitContainer.Orientation = Orientation.Horizontal;
+                splitContainer.Panel1MinSize = 100;  // Small minimum
+                splitContainer.Panel2MinSize = 100;  // Small minimum
+                splitContainer.BackColor = Color.FromArgb(45, 45, 48);
+                // IMPORTANT: Do not set SplitterDistance here
+                mainPanel.Controls.Add(splitContainer);
 
-                // === Existing Calibration Points Section ===
+                // === Top Panel - Existing Calibration Points ===
                 KryptonGroupBox existingPointsGroup = new KryptonGroupBox();
                 existingPointsGroup.Dock = DockStyle.Fill;
                 existingPointsGroup.Text = "Existing Calibration Points";
                 existingPointsGroup.StateCommon.Content.ShortText.Color1 = Color.White;
-                layout.Controls.Add(existingPointsGroup, 0, 0);
+                splitContainer.Panel1.Controls.Add(existingPointsGroup);
+
+                // Create a panel for the list and summary
+                KryptonPanel listPanel = new KryptonPanel();
+                listPanel.Dock = DockStyle.Fill;
+                existingPointsGroup.Panel.Controls.Add(listPanel);
 
                 // List to display existing calibration points
                 calibrationPointsList = new KryptonListBox();
@@ -146,167 +148,174 @@ namespace CTS
                 calibrationPointsList.Dock = DockStyle.Fill;
                 calibrationPointsList.StateCommon.Back.Color1 = Color.FromArgb(30, 30, 30);
                 calibrationPointsList.StateCommon.Item.Content.ShortText.Color1 = Color.White;
-                existingPointsGroup.Panel.Controls.Add(calibrationPointsList);
+                listPanel.Controls.Add(calibrationPointsList);
+
+                // Calibration summary panel with scrollable text
+                KryptonPanel summaryPanel = new KryptonPanel();
+                summaryPanel.Dock = DockStyle.Bottom;
+                summaryPanel.Height = 100;
+                summaryPanel.AutoScroll = true;
+                listPanel.Controls.Add(summaryPanel);
+
+                lblCalibrationSummary = new KryptonLabel();
+                lblCalibrationSummary.Name = "lblCalibrationSummary";
+                lblCalibrationSummary.Location = new Point(5, 5);
+                lblCalibrationSummary.AutoSize = true;
+                lblCalibrationSummary.MaximumSize = new Size(0, 0);
+                lblCalibrationSummary.StateCommon.ShortText.Color1 = Color.LightGreen;
+                lblCalibrationSummary.StateCommon.ShortText.Font = new Font("Segoe UI", 9, FontStyle.Regular);
+                lblCalibrationSummary.Text = "No calibration data available. Add at least 2 calibration points.";
+                summaryPanel.Controls.Add(lblCalibrationSummary);
 
                 // Button panel for calibration set actions
                 KryptonPanel calibrationActionPanel = new KryptonPanel();
                 calibrationActionPanel.Dock = DockStyle.Bottom;
-                calibrationActionPanel.Height = 40;
+                calibrationActionPanel.Height = 50;
                 calibrationActionPanel.StateCommon.Color1 = Color.FromArgb(45, 45, 48);
                 existingPointsGroup.Panel.Controls.Add(calibrationActionPanel);
 
-                // Add buttons for calibration dataset actions
+                // Flow layout panel for buttons
+                FlowLayoutPanel buttonFlow = new FlowLayoutPanel();
+                buttonFlow.Dock = DockStyle.Fill;
+                buttonFlow.FlowDirection = FlowDirection.LeftToRight;
+                buttonFlow.Padding = new Padding(5);
+                calibrationActionPanel.Controls.Add(buttonFlow);
+
+                // Add buttons
                 KryptonButton btnRemovePoint = new KryptonButton();
                 btnRemovePoint.Text = "Remove Point";
-                btnRemovePoint.Location = new Point(10, 5);
-                btnRemovePoint.Width = 120;
+                btnRemovePoint.AutoSize = true;
                 btnRemovePoint.Click += BtnRemovePoint_Click;
-                calibrationActionPanel.Controls.Add(btnRemovePoint);
+                buttonFlow.Controls.Add(btnRemovePoint);
 
                 KryptonButton btnSaveCalibration = new KryptonButton();
                 btnSaveCalibration.Text = "Save Calibration";
-                btnSaveCalibration.Location = new Point(140, 5);
-                btnSaveCalibration.Width = 120;
+                btnSaveCalibration.AutoSize = true;
                 btnSaveCalibration.Click += BtnSaveCalibration_Click;
-                calibrationActionPanel.Controls.Add(btnSaveCalibration);
+                buttonFlow.Controls.Add(btnSaveCalibration);
 
                 KryptonButton btnLoadCalibration = new KryptonButton();
                 btnLoadCalibration.Text = "Load Calibration";
-                btnLoadCalibration.Location = new Point(270, 5);
-                btnLoadCalibration.Width = 120;
+                btnLoadCalibration.AutoSize = true;
                 btnLoadCalibration.Click += BtnLoadCalibration_Click;
-                calibrationActionPanel.Controls.Add(btnLoadCalibration);
+                buttonFlow.Controls.Add(btnLoadCalibration);
 
                 KryptonButton btnApplyCalibration = new KryptonButton();
                 btnApplyCalibration.Text = "Apply Calibration";
-                btnApplyCalibration.Location = new Point(400, 5);
-                btnApplyCalibration.Width = 120;
+                btnApplyCalibration.AutoSize = true;
                 btnApplyCalibration.Click += BtnApplyCalibration_Click;
-                calibrationActionPanel.Controls.Add(btnApplyCalibration);
+                buttonFlow.Controls.Add(btnApplyCalibration);
 
                 btnExportPlot = new KryptonButton();
                 btnExportPlot.Text = "Export Plot";
-                btnExportPlot.Location = new Point(530, 5);
-                btnExportPlot.Width = 120;
+                btnExportPlot.AutoSize = true;
                 btnExportPlot.Click += BtnExportPlot_Click;
-                calibrationActionPanel.Controls.Add(btnExportPlot);
+                buttonFlow.Controls.Add(btnExportPlot);
 
-                // Calibration summary label
-                lblCalibrationSummary = new KryptonLabel();
-                lblCalibrationSummary.Name = "lblCalibrationSummary";
-                lblCalibrationSummary.Dock = DockStyle.Bottom;
-                lblCalibrationSummary.Height = 80;
-                lblCalibrationSummary.StateCommon.ShortText.Color1 = Color.LightGreen;
-                lblCalibrationSummary.StateCommon.ShortText.Font = new Font("Segoe UI", 9, FontStyle.Regular);
-                lblCalibrationSummary.Text = "No calibration data available. Add at least 2 calibration points.";
-                existingPointsGroup.Panel.Controls.Add(lblCalibrationSummary);
-
-                // === Add New Calibration Point Section ===
+                // === Bottom Panel - Add New Calibration Point ===
                 KryptonGroupBox addPointGroup = new KryptonGroupBox();
                 addPointGroup.Dock = DockStyle.Fill;
                 addPointGroup.Text = "Add New Calibration Point";
                 addPointGroup.StateCommon.Content.ShortText.Color1 = Color.White;
-                layout.Controls.Add(addPointGroup, 0, 1);
+                splitContainer.Panel2.Controls.Add(addPointGroup);
 
-                // Panel for inputs to add new calibration point
+                // Scrollable panel for content
                 KryptonPanel addPointPanel = new KryptonPanel();
                 addPointPanel.Dock = DockStyle.Fill;
+                addPointPanel.AutoScroll = true;
                 addPointPanel.StateCommon.Color1 = Color.FromArgb(45, 45, 48);
                 addPointGroup.Panel.Controls.Add(addPointPanel);
 
+                // Create inner panel for fixed layout
+                KryptonPanel innerPanel = new KryptonPanel();
+                innerPanel.Width = 750;
+                innerPanel.Height = 400;
+                innerPanel.Location = new Point(10, 10);
+                innerPanel.StateCommon.Color1 = Color.FromArgb(45, 45, 48);
+                addPointPanel.Controls.Add(innerPanel);
+
                 // Current material info
+                int yPosition = 10;
                 KryptonLabel lblCurrentMaterial = new KryptonLabel();
                 lblCurrentMaterial.Text = "Current Material:";
-                lblCurrentMaterial.Location = new Point(10, 20);
+                lblCurrentMaterial.Location = new Point(10, yPosition);
                 lblCurrentMaterial.StateCommon.ShortText.Color1 = Color.White;
-                addPointPanel.Controls.Add(lblCurrentMaterial);
+                innerPanel.Controls.Add(lblCurrentMaterial);
 
                 KryptonLabel lblMaterialValue = new KryptonLabel();
                 lblMaterialValue.Name = "lblMaterialValue";
-                lblMaterialValue.Location = new Point(150, 20);
+                lblMaterialValue.Location = new Point(150, yPosition);
                 lblMaterialValue.StateCommon.ShortText.Color1 = Color.LightYellow;
                 lblMaterialValue.Text = simulationForm.SelectedMaterial?.Name ?? "None";
-                addPointPanel.Controls.Add(lblMaterialValue);
+                innerPanel.Controls.Add(lblMaterialValue);
 
                 // Current density info
+                yPosition += 30;
                 KryptonLabel lblCurrentDensity = new KryptonLabel();
                 lblCurrentDensity.Text = "Current Density:";
-                lblCurrentDensity.Location = new Point(10, 50);
+                lblCurrentDensity.Location = new Point(10, yPosition);
                 lblCurrentDensity.StateCommon.ShortText.Color1 = Color.White;
-                addPointPanel.Controls.Add(lblCurrentDensity);
+                innerPanel.Controls.Add(lblCurrentDensity);
 
                 KryptonLabel lblDensityValue = new KryptonLabel();
                 lblDensityValue.Name = "lblDensityValue";
-                lblDensityValue.Location = new Point(150, 50);
+                lblDensityValue.Location = new Point(150, yPosition);
                 lblDensityValue.StateCommon.ShortText.Color1 = Color.White;
                 lblDensityValue.Text = $"{simulationForm.SelectedMaterial?.Density ?? 0:F1} kg/m³";
-                addPointPanel.Controls.Add(lblDensityValue);
+                innerPanel.Controls.Add(lblDensityValue);
 
                 // Simulated Vp/Vs ratio
+                yPosition += 30;
                 KryptonLabel lblSimulatedVpVs = new KryptonLabel();
                 lblSimulatedVpVs.Text = "Simulated Vp/Vs:";
-                lblSimulatedVpVs.Location = new Point(10, 80);
+                lblSimulatedVpVs.Location = new Point(10, yPosition);
                 lblSimulatedVpVs.StateCommon.ShortText.Color1 = Color.White;
-                addPointPanel.Controls.Add(lblSimulatedVpVs);
+                innerPanel.Controls.Add(lblSimulatedVpVs);
 
                 lblVpVsValue = new KryptonLabel();
                 lblVpVsValue.Name = "lblVpVsValue";
-                lblVpVsValue.Location = new Point(150, 80);
-                lblVpVsValue.StateCommon.ShortText.Color1 = Color.LightGreen; // Make it stand out more
+                lblVpVsValue.Location = new Point(150, yPosition);
+                lblVpVsValue.StateCommon.ShortText.Color1 = Color.LightGreen;
                 lblVpVsValue.Text = simulatedVpVsRatio > 0 ? $"{simulatedVpVsRatio:F3}" : "N/A";
-                addPointPanel.Controls.Add(lblVpVsValue);
+                innerPanel.Controls.Add(lblVpVsValue);
 
                 // Material elastic properties
-                double youngModulus = 0;
-                double poissonRatio = 0;
-
-                // Safely get values
-                try
-                {
-                    youngModulus = (double)simulationForm.GetYoungsModulus();
-                    poissonRatio = (double)simulationForm.GetPoissonRatio();
-                }
-                catch (Exception)
-                {
-                    // Default values if exception
-                    youngModulus = 0;
-                    poissonRatio = 0;
-                }
-
+                yPosition += 30;
                 KryptonLabel lblYoungsModulus = new KryptonLabel();
                 lblYoungsModulus.Text = "Young's Modulus:";
-                lblYoungsModulus.Location = new Point(10, 110);
+                lblYoungsModulus.Location = new Point(10, yPosition);
                 lblYoungsModulus.StateCommon.ShortText.Color1 = Color.White;
-                addPointPanel.Controls.Add(lblYoungsModulus);
+                innerPanel.Controls.Add(lblYoungsModulus);
 
                 KryptonLabel lblYoungsValue = new KryptonLabel();
                 lblYoungsValue.Name = "lblYoungsValue";
-                lblYoungsValue.Location = new Point(150, 110);
+                lblYoungsValue.Location = new Point(150, yPosition);
                 lblYoungsValue.StateCommon.ShortText.Color1 = Color.White;
                 lblYoungsValue.Text = $"{youngModulus:F2} MPa";
-                addPointPanel.Controls.Add(lblYoungsValue);
+                innerPanel.Controls.Add(lblYoungsValue);
 
+                yPosition += 30;
                 KryptonLabel lblPoisson = new KryptonLabel();
                 lblPoisson.Text = "Poisson's Ratio:";
-                lblPoisson.Location = new Point(10, 140);
+                lblPoisson.Location = new Point(10, yPosition);
                 lblPoisson.StateCommon.ShortText.Color1 = Color.White;
-                addPointPanel.Controls.Add(lblPoisson);
+                innerPanel.Controls.Add(lblPoisson);
 
                 lblPoissonValue = new KryptonLabel();
                 lblPoissonValue.Name = "lblPoissonValue";
-                lblPoissonValue.Location = new Point(150, 140);
+                lblPoissonValue.Location = new Point(150, yPosition);
                 lblPoissonValue.StateCommon.ShortText.Color1 = Color.White;
                 lblPoissonValue.Text = $"{poissonRatio:F4}";
-                addPointPanel.Controls.Add(lblPoissonValue);
+                innerPanel.Controls.Add(lblPoissonValue);
 
                 // Input method selection panel
                 pnlInputMethod = new KryptonPanel();
-                pnlInputMethod.Location = new Point(400, 20);
-                pnlInputMethod.Width = 350;
+                pnlInputMethod.Location = new Point(350, 10);
+                pnlInputMethod.Width = 380;
                 pnlInputMethod.Height = 250;
                 pnlInputMethod.StateCommon.Color1 = Color.FromArgb(45, 45, 48);
                 pnlInputMethod.StateCommon.Color2 = Color.FromArgb(45, 45, 48);
-                addPointPanel.Controls.Add(pnlInputMethod);
+                innerPanel.Controls.Add(pnlInputMethod);
 
                 // Header for input method
                 KryptonLabel lblInputMethod = new KryptonLabel();
@@ -404,37 +413,53 @@ namespace CTS
                 pnlInputMethod.Controls.Add(numConfiningPressure);
 
                 // Calibration note
+                yPosition = 175;
                 KryptonLabel lblNote = new KryptonLabel();
                 lblNote.Text = "Notes (optional):";
-                lblNote.Location = new Point(10, 175);
+                lblNote.Location = new Point(10, yPosition);
                 lblNote.StateCommon.ShortText.Color1 = Color.White;
-                addPointPanel.Controls.Add(lblNote);
+                innerPanel.Controls.Add(lblNote);
 
                 txtNote = new KryptonTextBox();
                 txtNote.Name = "txtNote";
-                txtNote.Location = new Point(10, 195);
-                txtNote.Width = 380;
+                txtNote.Location = new Point(10, yPosition + 20);
+                txtNote.Width = 320;
                 txtNote.Height = 60;
                 txtNote.Multiline = true;
-                addPointPanel.Controls.Add(txtNote);
+                innerPanel.Controls.Add(txtNote);
 
                 // Add Calibration button
                 KryptonButton btnAddCalibration = new KryptonButton();
                 btnAddCalibration.Text = "Add Calibration Point";
-                btnAddCalibration.Location = new Point(10, 270);
+                btnAddCalibration.Location = new Point(10, yPosition + 90);
                 btnAddCalibration.Width = 200;
                 btnAddCalibration.Height = 35;
                 btnAddCalibration.Click += BtnAddCalibration_Click;
-                addPointPanel.Controls.Add(btnAddCalibration);
+                innerPanel.Controls.Add(btnAddCalibration);
 
-                // Form close button
+                // Form close button panel at the very bottom
+                KryptonPanel bottomPanel = new KryptonPanel();
+                bottomPanel.Dock = DockStyle.Bottom;
+                bottomPanel.Height = 50;
+                bottomPanel.StateCommon.Color1 = Color.FromArgb(45, 45, 48);
+                this.Controls.Add(bottomPanel);
+
                 KryptonButton btnClose = new KryptonButton();
                 btnClose.Text = "Close";
-                btnClose.Dock = DockStyle.Bottom;
-                btnClose.Height = 40;
+                btnClose.Location = new Point((bottomPanel.Width - 100) / 2, 10);
+                btnClose.Width = 100;
+                btnClose.Height = 30;
                 btnClose.DialogResult = DialogResult.OK;
-                this.Controls.Add(btnClose);
-                this.Controls.Add(mainPanel);
+                btnClose.Anchor = AnchorStyles.None;
+                bottomPanel.Controls.Add(btnClose);
+
+                // Set splitter AFTER form is shown
+                this.Shown += (sender, e) => {
+                    if (splitContainer.Height > 0)
+                    {
+                        splitContainer.SplitterDistance = splitContainer.Height / 2;
+                    }
+                };
             }
             catch (Exception ex)
             {
@@ -461,7 +486,7 @@ namespace CTS
                 numKnownVs.ValueChanged += UpdateVpVsRatio;
             }
         }
-        private KryptonLabel lblPoissonValue;
+
         private void UpdateVpVsRatio(object sender, EventArgs e)
         {
             if (numKnownVs.Value > 0)
@@ -472,7 +497,8 @@ namespace CTS
                 lblPoissonValue.Text = nu.ToString("F4", CultureInfo.InvariantCulture);
             }
         }
-        // Use discrete methods for event handling instead of lambdas
+
+        // Event handlers
         private void BtnRemovePoint_Click(object sender, EventArgs e)
         {
             try
@@ -619,6 +645,138 @@ namespace CTS
             {
                 MessageBox.Show($"Error exporting plot: {ex.Message}",
                     "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // Additional methods
+        private void PopulateExistingCalibrationPoints()
+        {
+            try
+            {
+                // Ensure list exists and do null checks
+                if (calibrationPointsList == null || calibrationManager == null ||
+                    calibrationManager.CurrentCalibration == null ||
+                    calibrationManager.CurrentCalibration.CalibrationPoints == null)
+                    return;
+
+                calibrationPointsList.Items.Clear();
+
+                foreach (var point in calibrationManager.CurrentCalibration.CalibrationPoints)
+                {
+                    if (point != null)
+                        calibrationPointsList.Items.Add(point);
+                }
+
+                UpdateCalibrationSummary();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error populating points: {ex.Message}");
+                // Don't show message box as it would be annoying
+            }
+        }
+
+        private void UpdateCalibrationSummary()
+        {
+            try
+            {
+                // Null check on the label and calibration manager
+                if (lblCalibrationSummary == null || calibrationManager == null ||
+                    calibrationManager.CurrentCalibration == null)
+                    return;
+
+                if (calibrationManager.CurrentCalibration.CalibrationPoints == null ||
+                    calibrationManager.CurrentCalibration.CalibrationPoints.Count < 2)
+                {
+                    lblCalibrationSummary.Text = "Not enough calibration points. Add at least 2 points for calibration.";
+                    lblCalibrationSummary.StateCommon.ShortText.Color1 = Color.Yellow;
+                }
+                else
+                {
+                    string summary = calibrationManager.CurrentCalibration.GetCalibrationSummary();
+                    if (!string.IsNullOrEmpty(summary))
+                    {
+                        lblCalibrationSummary.Text = summary;
+                        lblCalibrationSummary.StateCommon.ShortText.Color1 = Color.LightGreen;
+                    }
+                    else
+                    {
+                        lblCalibrationSummary.Text = "Calibration data available but summary could not be generated.";
+                        lblCalibrationSummary.StateCommon.ShortText.Color1 = Color.Yellow;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error updating summary: {ex.Message}");
+                // Don't show message box as it would be annoying
+            }
+        }
+
+        private void SaveCalibration()
+        {
+            try
+            {
+                if (calibrationManager == null || calibrationManager.CurrentCalibration == null ||
+                    calibrationManager.CurrentCalibration.CalibrationPoints == null ||
+                    calibrationManager.CurrentCalibration.CalibrationPoints.Count == 0)
+                {
+                    MessageBox.Show("No calibration points to save.",
+                        "Save Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                using (SaveFileDialog saveDialog = new SaveFileDialog())
+                {
+                    saveDialog.Filter = "Calibration Files (*.calib)|*.calib";
+                    saveDialog.DefaultExt = "calib";
+                    saveDialog.Title = "Save Acoustic Simulator Calibration";
+
+                    if (saveDialog.ShowDialog() == DialogResult.OK)
+                    {
+                        if (calibrationManager.SaveCalibration(saveDialog.FileName))
+                        {
+                            MessageBox.Show("Calibration saved successfully.",
+                                "Save Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error saving calibration: {ex.Message}",
+                    "Save Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void LoadCalibration()
+        {
+            try
+            {
+                if (calibrationManager == null)
+                    return;
+
+                using (OpenFileDialog openDialog = new OpenFileDialog())
+                {
+                    openDialog.Filter = "Calibration Files (*.calib)|*.calib";
+                    openDialog.DefaultExt = "calib";
+                    openDialog.Title = "Load Acoustic Simulator Calibration";
+
+                    if (openDialog.ShowDialog() == DialogResult.OK)
+                    {
+                        if (calibrationManager.LoadCalibration(openDialog.FileName))
+                        {
+                            MessageBox.Show("Calibration loaded successfully.",
+                                "Load Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            PopulateExistingCalibrationPoints();
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading calibration: {ex.Message}",
+                    "Load Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -776,137 +934,6 @@ namespace CTS
             lineSeries.Points.AddXY(maxX, regression.slope * maxX + regression.intercept);
 
             chart.Series.Add(lineSeries);
-        }
-
-        private void PopulateExistingCalibrationPoints()
-        {
-            try
-            {
-                // Ensure list exists and do null checks
-                if (calibrationPointsList == null || calibrationManager == null ||
-                    calibrationManager.CurrentCalibration == null ||
-                    calibrationManager.CurrentCalibration.CalibrationPoints == null)
-                    return;
-
-                calibrationPointsList.Items.Clear();
-
-                foreach (var point in calibrationManager.CurrentCalibration.CalibrationPoints)
-                {
-                    if (point != null)
-                        calibrationPointsList.Items.Add(point);
-                }
-
-                UpdateCalibrationSummary();
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"Error populating points: {ex.Message}");
-                // Don't show message box as it would be annoying
-            }
-        }
-
-        private void UpdateCalibrationSummary()
-        {
-            try
-            {
-                // Null check on the label and calibration manager
-                if (lblCalibrationSummary == null || calibrationManager == null ||
-                    calibrationManager.CurrentCalibration == null)
-                    return;
-
-                if (calibrationManager.CurrentCalibration.CalibrationPoints == null ||
-                    calibrationManager.CurrentCalibration.CalibrationPoints.Count < 2)
-                {
-                    lblCalibrationSummary.Text = "Not enough calibration points. Add at least 2 points for calibration.";
-                    lblCalibrationSummary.StateCommon.ShortText.Color1 = Color.Yellow;
-                }
-                else
-                {
-                    string summary = calibrationManager.CurrentCalibration.GetCalibrationSummary();
-                    if (!string.IsNullOrEmpty(summary))
-                    {
-                        lblCalibrationSummary.Text = summary;
-                        lblCalibrationSummary.StateCommon.ShortText.Color1 = Color.LightGreen;
-                    }
-                    else
-                    {
-                        lblCalibrationSummary.Text = "Calibration data available but summary could not be generated.";
-                        lblCalibrationSummary.StateCommon.ShortText.Color1 = Color.Yellow;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"Error updating summary: {ex.Message}");
-                // Don't show message box as it would be annoying
-            }
-        }
-
-        private void SaveCalibration()
-        {
-            try
-            {
-                if (calibrationManager == null || calibrationManager.CurrentCalibration == null ||
-                    calibrationManager.CurrentCalibration.CalibrationPoints == null ||
-                    calibrationManager.CurrentCalibration.CalibrationPoints.Count == 0)
-                {
-                    MessageBox.Show("No calibration points to save.",
-                        "Save Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-
-                using (SaveFileDialog saveDialog = new SaveFileDialog())
-                {
-                    saveDialog.Filter = "Calibration Files (*.calib)|*.calib";
-                    saveDialog.DefaultExt = "calib";
-                    saveDialog.Title = "Save Acoustic Simulator Calibration";
-
-                    if (saveDialog.ShowDialog() == DialogResult.OK)
-                    {
-                        if (calibrationManager.SaveCalibration(saveDialog.FileName))
-                        {
-                            MessageBox.Show("Calibration saved successfully.",
-                                "Save Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Error saving calibration: {ex.Message}",
-                    "Save Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private void LoadCalibration()
-        {
-            try
-            {
-                if (calibrationManager == null)
-                    return;
-
-                using (OpenFileDialog openDialog = new OpenFileDialog())
-                {
-                    openDialog.Filter = "Calibration Files (*.calib)|*.calib";
-                    openDialog.DefaultExt = "calib";
-                    openDialog.Title = "Load Acoustic Simulator Calibration";
-
-                    if (openDialog.ShowDialog() == DialogResult.OK)
-                    {
-                        if (calibrationManager.LoadCalibration(openDialog.FileName))
-                        {
-                            MessageBox.Show("Calibration loaded successfully.",
-                                "Load Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                            PopulateExistingCalibrationPoints();
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Error loading calibration: {ex.Message}",
-                    "Load Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
         }
     }
 }

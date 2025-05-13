@@ -4227,6 +4227,13 @@ namespace CTS
         /// </summary>
         private void ExportAnimationButton_Click(object sender, EventArgs e)
         {
+            if (_frames.Count == 0)
+            {
+                MessageBox.Show("No simulation frames available to export.",
+                               "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
             // Show export options dialog
             using (ExportAnimationDialog exportDialog = new ExportAnimationDialog())
             {
@@ -4356,47 +4363,112 @@ namespace CTS
         /// </summary>
         private void ExportAnimationAsWmv(string filePath, int fps, int quality, int totalFrames, ProgressForm progress)
         {
-            int frameCount = _frames.Count;
-            int currentIndex = _currentFrameIndex; // Remember current position
-            int width = _mainPanel.Width;
-            int height = _mainPanel.Height;
-
-            // Import DirectShow.NET namespace in the class header
-            // using DirectShowLib;
-
-            try
+            lock (_dataLock)
             {
-                // Create WMV writer
-                WmvWriter wmvWriter = new WmvWriter(filePath, width, height, fps, quality);
+                int frameCount = _frames.Count;
 
-                // Calculate how many source frames to use per output frame to achieve desired duration
-                double frameStep = (double)frameCount / totalFrames;
-                if (frameStep < 1) frameStep = 1; // Use every frame if we have fewer than needed
-
-                // Render and add each frame
-                for (int i = 0; i < totalFrames; i++)
+                // Validate we have frames to export
+                if (frameCount == 0)
                 {
-                    // Calculate which source frame to use (with interpolation if needed)
-                    int sourceFrameIndex = Math.Min((int)(i * frameStep), frameCount - 1);
+                    throw new InvalidOperationException("No frames available to export");
+                }
 
-                    this.BeginInvoke((MethodInvoker)delegate
-                    {
-                        progress.UpdateProgress((i + 1) * 100 / totalFrames);
-                    });
+                Logger.Log($"[ExportAnimationAsWmv] Exporting {frameCount} frames as {totalFrames} output frames at {fps} fps");
 
-                    lock (_dataLock)
+                int currentIndex = _currentFrameIndex; // Remember current position
+                int width = _mainPanel.Width;
+                int height = _mainPanel.Height;
+
+                try
+                {
+                    // Create WMV writer
+                    WmvWriter wmvWriter = new WmvWriter(filePath, width, height, fps, quality);
+
+                    // Calculate frame distribution
+                    double frameStep;
+                    if (frameCount >= totalFrames)
                     {
+                        // Compress: Map many source frames to fewer output frames
+                        frameStep = (double)(frameCount - 1) / (totalFrames - 1);
+                    }
+                    else
+                    {
+                        // Stretch: Repeat source frames to fill output duration
+                        frameStep = (double)(frameCount - 1) / Math.Max(1, totalFrames - 1);
+                    }
+
+                    Logger.Log($"[ExportAnimationAsWmv] Frame step: {frameStep}");
+
+                    // Track last source frame to detect infinite loops
+                    int lastSourceFrame = -1;
+                    int sameFrameCount = 0;
+
+                    // Render and add each frame
+                    for (int i = 0; i < totalFrames; i++)
+                    {
+                        // Calculate which source frame to use
+                        int sourceFrameIndex;
+                        if (frameCount >= totalFrames)
+                        {
+                            // Normal mapping
+                            sourceFrameIndex = (int)Math.Round(i * frameStep);
+                        }
+                        else
+                        {
+                            // When stretching, repeat frames
+                            double position = i * frameStep;
+                            sourceFrameIndex = (int)Math.Floor(position);
+                        }
+
+                        // Ensure within bounds
+                        sourceFrameIndex = Math.Max(0, Math.Min(frameCount - 1, sourceFrameIndex));
+
+                        // Detect potential infinite loop
+                        if (sourceFrameIndex == lastSourceFrame)
+                        {
+                            sameFrameCount++;
+                            if (sameFrameCount > 100) // Arbitrary threshold
+                            {
+                                Logger.Log($"[ExportAnimationAsWmv] Warning: Potential infinite loop detected at frame {i}");
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            sameFrameCount = 0;
+                            lastSourceFrame = sourceFrameIndex;
+                        }
+
+                        // Update progress on UI thread
+                        int progressPercent = (i + 1) * 100 / totalFrames;
+                        this.BeginInvoke((MethodInvoker)delegate
+                        {
+                            progress.UpdateProgress(progressPercent);
+                        });
+
                         // Update to this frame
                         _currentFrameIndex = sourceFrameIndex;
 
-                        // Need to update visualization on UI thread
-                        ManualResetEvent resetEvent = new ManualResetEvent(false);
-                        this.BeginInvoke((MethodInvoker)delegate
+                        // Update visualization on UI thread and wait
+                        using (ManualResetEvent resetEvent = new ManualResetEvent(false))
                         {
-                            UpdateVisualization();
-                            resetEvent.Set();
-                        });
-                        resetEvent.WaitOne(1000); // Wait for visualization update, with timeout
+                            this.BeginInvoke((MethodInvoker)delegate
+                            {
+                                try
+                                {
+                                    UpdateVisualization();
+                                }
+                                finally
+                                {
+                                    resetEvent.Set();
+                                }
+                            });
+
+                            if (!resetEvent.WaitOne(5000)) // 5 second timeout
+                            {
+                                Logger.Log($"[ExportAnimationAsWmv] Warning: Visualization update timeout at frame {i}");
+                            }
+                        }
 
                         // Create combined image
                         Bitmap combined = CombinePanelsForExport();
@@ -4406,17 +4478,27 @@ namespace CTS
 
                         // Dispose bitmap
                         combined.Dispose();
-                    }
-                }
 
-                // Finalize the WMV file
-                wmvWriter.Close();
-            }
-            finally
-            {
-                // Restore original frame
-                lock (_dataLock)
+                        // Log progress occasionally
+                        if (i % 10 == 0)
+                        {
+                            Logger.Log($"[ExportAnimationAsWmv] Progress: {progressPercent}% (frame {i}/{totalFrames})");
+                        }
+                    }
+
+                    // Finalize the WMV file
+                    wmvWriter.Close();
+
+                    Logger.Log($"[ExportAnimationAsWmv] Export completed successfully");
+                }
+                catch (Exception ex)
                 {
+                    Logger.Log($"[ExportAnimationAsWmv] Error during export: {ex.Message}");
+                    throw;
+                }
+                finally
+                {
+                    // Restore original frame
                     _currentFrameIndex = currentIndex;
                     this.BeginInvoke((MethodInvoker)delegate
                     {

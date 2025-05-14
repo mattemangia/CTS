@@ -1073,7 +1073,7 @@ namespace CTS
             // Add items to Simulation menu
             simulationMenu.DropDownItems.Add(poreNetworkMenuItem);
             simulationMenu.DropDownItems.Add(acousticSimulationMenuItem);
-            simulationMenu.DropDownItems.Add(stressAnalysisMenuItem);
+            //simulationMenu.DropDownItems.Add(stressAnalysisMenuItem);
             simulationMenu.DropDownItems.Add(triaxialSimulationMenuItem);
             simulationMenu.DropDownItems.Add(nmrSimulationMenuItem);
         }

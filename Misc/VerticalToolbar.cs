@@ -236,7 +236,7 @@ namespace CTS
                 }
             });
 
-            AddButton("Stress", DrawStressIcon, "Stress Analysis", () =>
+            /*AddButton("Stress", DrawStressIcon, "Stress Analysis", () =>
             {
                 if (mainForm.volumeData == null || mainForm.volumeLabels == null)
                 {
@@ -255,7 +255,7 @@ namespace CTS
                     MessageBox.Show($"Error opening Stress Analysis form: {ex.Message}",
                         "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
-            });
+            });*/
 
             AddButton("Triaxial", DrawTriaxialIcon, "Triaxial Simulation", () =>
             {

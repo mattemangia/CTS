@@ -357,7 +357,7 @@ namespace CTS
                 numKnownVpVs.Maximum = 4.0m;
                 numKnownVpVs.Value = Math.Max(0.0m, Math.Min(4.0m, (decimal)simulatedVpVsRatio));
                 numKnownVpVs.Increment = 0.001m;
-                numKnownVpVs.ValueChanged += UpdateVpVsRatio;
+                numKnownVpVs.ValueChanged += NumKnownVpVs_ValueChanged;  // Fixed: Use correct event handler
                 pnlInputMethod.Controls.Add(numKnownVpVs);
 
                 // Separate Vp and Vs inputs
@@ -474,6 +474,10 @@ namespace CTS
                 numKnownVpVs.Visible = true;
                 numKnownVp.Visible = false;
                 numKnownVs.Visible = false;
+
+                // Remove value changed handlers from Vp and Vs when in ratio mode
+                numKnownVp.ValueChanged -= UpdateVpVsFromSeparateValues;
+                numKnownVs.ValueChanged -= UpdateVpVsFromSeparateValues;
             }
             else
             {
@@ -481,18 +485,34 @@ namespace CTS
                 numKnownVp.Visible = true;
                 numKnownVs.Visible = true;
 
-                // Auto-calculate Vp/Vs when Vp or Vs changes
-                numKnownVp.ValueChanged += UpdateVpVsRatio;
-                numKnownVs.ValueChanged += UpdateVpVsRatio;
+                // Add value changed handlers for Vp and Vs when in separate values mode
+                numKnownVp.ValueChanged += UpdateVpVsFromSeparateValues;
+                numKnownVs.ValueChanged += UpdateVpVsFromSeparateValues;
             }
         }
 
-        private void UpdateVpVsRatio(object sender, EventArgs e)
+        // Fixed: Separate event handler for when VpVs ratio is directly changed
+        private void NumKnownVpVs_ValueChanged(object sender, EventArgs e)
         {
-            if (numKnownVs.Value > 0)
+            if (rbVpVsRatio.Checked && numKnownVpVs.Value > 0)
             {
-                numKnownVpVs.Value = numKnownVp.Value / numKnownVs.Value;
                 double vpVs = (double)numKnownVpVs.Value;
+                double nu = CalibrationManager.PoissonFromVpVs(vpVs);
+                lblPoissonValue.Text = nu.ToString("F4", CultureInfo.InvariantCulture);
+            }
+        }
+
+        // Fixed: New event handler for when Vp or Vs values are changed
+        private void UpdateVpVsFromSeparateValues(object sender, EventArgs e)
+        {
+            if (rbSeparateValues.Checked && numKnownVs.Value > 0)
+            {
+                double vpVs = (double)(numKnownVp.Value / numKnownVs.Value);
+                // Update the VpVs display without triggering its ValueChanged event
+                numKnownVpVs.ValueChanged -= NumKnownVpVs_ValueChanged;
+                numKnownVpVs.Value = (decimal)vpVs;
+                numKnownVpVs.ValueChanged += NumKnownVpVs_ValueChanged;
+
                 double nu = CalibrationManager.PoissonFromVpVs(vpVs);
                 lblPoissonValue.Text = nu.ToString("F4", CultureInfo.InvariantCulture);
             }

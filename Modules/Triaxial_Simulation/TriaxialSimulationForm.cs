@@ -4083,95 +4083,114 @@ namespace CTS
             }
         }
         private void UpdateDiagramsForm()
-{
-    if (diagramsForm == null || diagramsForm.IsDisposed)
-        return;
+        {
+            if (diagramsForm == null || diagramsForm.IsDisposed)
+                return;
 
-    // Current stress in MPa
-    float currentStressMPa = stressStrainCurve.Count > 0 ? stressStrainCurve.Last().Y / 10.0f : 0;
+            // Current stress in MPa
+            float currentStressMPa = stressStrainCurve.Count > 0 ? stressStrainCurve.Last().Y / 10.0f : 0;
 
-    // Get confining pressures
-    float confiningPressureMPa = minPressure / 1000.0f; // kPa to MPa
-    float maxPressureMPa = maxPressure / 1000.0f; // kPa to MPa
+            // Get confining pressures
+            float confiningPressureMPa = minPressure / 1000.0f; // kPa to MPa
+            float maxPressureMPa = maxPressure / 1000.0f; // kPa to MPa
 
-    // Calculate pore pressure
-    float porePressureMPa = CalculatePorePressure(currentStrain);
+            // Calculate pore pressure
+            float porePressureMPa = CalculatePorePressure(currentStrain);
 
-    // Calculate principal stresses for triaxial state
-    float sigma3 = confiningPressureMPa;
-    float sigma1 = sigma3 + currentStressMPa;
+            // Calculate principal stresses for triaxial state
+            float sigma3 = confiningPressureMPa;
+            float sigma1 = sigma3 + currentStressMPa;
 
-    // Calculate effective stresses accounting for pore pressure
-    float biotCoeff = Biot(porosity);
-    float effSigma3 = sigma3 - porePressureMPa * biotCoeff;
-    float effSigma1 = sigma1 - porePressureMPa * biotCoeff;
+            // Calculate effective stresses accounting for pore pressure
+            float biotCoeff = Biot(porosity);
+            float effSigma3 = sigma3 - porePressureMPa * biotCoeff;
+            float effSigma1 = sigma1 - porePressureMPa * biotCoeff;
 
-    // Calculate volumetric strain
-    float volStrain = currentStrain * (1.0f - 2.0f * poissonRatio);
+            // Ensure effective stresses are valid (non-negative for normal stresses)
+            effSigma3 = Math.Max(0.01f, effSigma3);
+            effSigma1 = Math.Max(effSigma3, effSigma1); // sigma1 should be >= sigma3
 
-    // Calculate permeability change ratio
-    float initialPerm = 0.01f; // Default initial permeability
-    float permRatio = permeability / initialPerm;
+            // Calculate volumetric strain
+            float volStrain = currentStrain * (1.0f - 2.0f * poissonRatio);
 
-    // Calculate elastic energy stored
-    float elasticEnergyVal = elasticEnergy > 0 ? elasticEnergy : 0.5f * currentStressMPa * currentStrain;
+            // Calculate permeability change ratio
+            float initialPerm = 0.01f; // Default initial permeability
+            float permRatio = permeability / initialPerm;
 
-    // Calculate plastic energy dissipated
-    float plasticEnergyVal = plasticEnergy;
+            // Calculate elastic energy stored
+            float elasticEnergyVal = elasticEnergy > 0 ? elasticEnergy : 0.5f * currentStressMPa * currentStrain;
 
-    // Determine if failure occurred
-    bool failureOccurred = elementStresses.Any(kv => kv.Value < 0) || 
-                          (stressStrainCurve.Count > 10 && 
-                           stressStrainCurve.Last().Y < stressStrainCurve.Max(p => p.Y) * 0.9);
+            // Calculate plastic energy dissipated
+            float plasticEnergyVal = plasticEnergy;
 
-    // Get peak stress information
-    float peakStress = 0;
-    float strainAtPeak = 0;
-    
-    if (stressStrainCurve.Count > 0) {
-        // Find peak stress
-        int maxY = stressStrainCurve.Max(p => p.Y);
-        int peakIndex = stressStrainCurve.FindIndex(p => p.Y == maxY);
-        
-        if (peakIndex >= 0) {
-            peakStress = stressStrainCurve[peakIndex].Y / 10.0f;
-            strainAtPeak = stressStrainCurve[peakIndex].X / 10.0f;
+            // Determine if failure occurred
+            bool failureOccurred = elementStresses.Any(kv => kv.Value < 0) ||
+                                  (stressStrainCurve.Count > 10 &&
+                                   stressStrainCurve.Last().Y < stressStrainCurve.Max(p => p.Y) * 0.9);
+
+            // Get peak stress information
+            float peakStress = 0;
+            float strainAtPeak = 0;
+
+            if (stressStrainCurve.Count > 0)
+            {
+                // Find peak stress
+                int maxY = stressStrainCurve.Max(p => p.Y);
+                int peakIndex = stressStrainCurve.FindIndex(p => p.Y == maxY);
+
+                if (peakIndex >= 0)
+                {
+                    peakStress = stressStrainCurve[peakIndex].Y / 10.0f;
+                    strainAtPeak = stressStrainCurve[peakIndex].X / 10.0f;
+                }
+            }
+
+            // Call the enhanced data update method with all parameters
+            diagramsForm.UpdateEnhancedData(
+                stressStrainCurve,         // Stress-strain curve
+                currentStrain,             // Current strain value
+                currentStressMPa,          // Current stress in MPa
+                cohesion,                  // Cohesion
+                frictionAngle,             // Friction angle
+                normalStress,              // Normal stress (center of Mohr circle)
+                shearStress,               // Shear stress (radius of Mohr circle)
+                bulkDensity,               // Bulk density
+                porosity,                  // Current porosity
+                minPressure / 1000.0f,     // Confining pressure in MPa
+                maxPressure / 1000.0f,     // Max pressure in MPa
+                yieldStrength,             // Yield strength
+                brittleStrength,           // Brittle strength
+                isElasticEnabled,          // Elastic behavior enabled
+                isPlasticEnabled,          // Plastic behavior enabled
+                isBrittleEnabled,          // Brittle behavior enabled
+                simulationRunning,         // Simulation running status
+                porePressureMPa,           // Pore pressure in MPa
+                effSigma1,                 // Effective major principal stress
+                effSigma3,                 // Effective minor principal stress
+                permeability,              // Current permeability
+                permRatio,                 // Permeability change ratio
+                volStrain,                 // Volumetric strain
+                elasticEnergyVal,          // Elastic energy stored
+                plasticEnergyVal,          // Plastic energy dissipated
+                failureOccurred,           // Failure state
+                failureOccurred ? 100.0f : 0.0f,  // Percent of failure criterion
+                peakStress,                // Peak stress reached
+                strainAtPeak               // Strain at peak stress
+            );
         }
-    }
+        private float CalculateOptimalFailureAngle()
+        {
+            // The optimal failure angle for a material in triaxial compression
+            // is calculated from the Mohr-Coulomb theory:
+            // θ = 45° + φ/2
+            // where φ is the internal friction angle
 
-    // Call the enhanced data update method with all parameters
-    diagramsForm.UpdateEnhancedData(
-        stressStrainCurve,         // Stress-strain curve
-        currentStrain,             // Current strain value
-        currentStressMPa,          // Current stress in MPa
-        cohesion,                  // Cohesion
-        frictionAngle,             // Friction angle
-        normalStress,              // Normal stress (center of Mohr circle)
-        shearStress,               // Shear stress (radius of Mohr circle)
-        bulkDensity,               // Bulk density
-        porosity,                  // Current porosity
-        minPressure / 1000.0f,     // Confining pressure in MPa
-        maxPressure / 1000.0f,     // Max pressure in MPa
-        yieldStrength,             // Yield strength
-        brittleStrength,           // Brittle strength
-        isElasticEnabled,          // Elastic behavior enabled
-        isPlasticEnabled,          // Plastic behavior enabled
-        isBrittleEnabled,          // Brittle behavior enabled
-        simulationRunning,         // Simulation running status
-        porePressureMPa,           // Pore pressure in MPa
-        effSigma1,                 // Effective major principal stress
-        effSigma3,                 // Effective minor principal stress
-        permeability,              // Current permeability
-        permRatio,                 // Permeability change ratio
-        volStrain,                 // Volumetric strain
-        elasticEnergyVal,          // Elastic energy stored
-        plasticEnergyVal,          // Plastic energy dissipated
-        failureOccurred,           // Failure state
-        failureOccurred ? 100.0f : 0.0f,  // Percent of failure criterion
-        peakStress,                // Peak stress reached
-        strainAtPeak               // Strain at peak stress
-    );
-}
+            float frictionAngleRad = frictionAngle * (float)Math.PI / 180.0f;
+            float failureAngleRad = (float)Math.PI / 4.0f + frictionAngleRad / 2.0f;
+            float failureAngleDeg = failureAngleRad * 180.0f / (float)Math.PI;
+
+            return failureAngleDeg;
+        }
         /// <summary>
         /// Sets <paramref name="control"/>'s <see cref="KryptonNumericUpDown.Value"/>
         /// while automatically clamping the input to the control’s <c>Minimum</c> /
@@ -7289,6 +7308,7 @@ namespace CTS
                 csv.AppendLine($"Friction Angle (°),{frictionAngle}");
                 csv.AppendLine($"Porosity,{porosity}");
                 csv.AppendLine($"Permeability (mD),{permeability}");
+                csv.AppendLine($"Optimal Failure Angle (°),{CalculateOptimalFailureAngle()}");
                 csv.AppendLine();
 
                 // Add simulation parameters
@@ -7341,6 +7361,7 @@ namespace CTS
                 csv.AppendLine($"Final Porosity,{porosity:F4}");
                 csv.AppendLine($"Final Permeability (mD),{permeability:F6}");
                 csv.AppendLine($"Failure Status,{(failureState ? "Failed" : "Intact")}");
+                csv.AppendLine($"Optimal Failure Angle (°),{CalculateOptimalFailureAngle():F1}");
 
                 this.SafeInvokeAsync(() => progressForm.UpdateProgress(80));
 
@@ -7433,27 +7454,31 @@ namespace CTS
                 summarySheet.Cells[14, 1] = "Permeability (mD)";
                 summarySheet.Cells[14, 2] = permeability;
 
+                // Add optimal failure angle
+                summarySheet.Cells[15, 1] = "Optimal Failure Angle (°)";
+                summarySheet.Cells[15, 2] = CalculateOptimalFailureAngle();
+
                 // Add simulation parameters
-                summarySheet.Cells[16, 1] = "Simulation Parameters";
-                summarySheet.Cells[17, 1] = "Direction";
-                summarySheet.Cells[17, 2] = selectedDirection.ToString();
-                summarySheet.Cells[18, 1] = "Min Pressure (kPa)";
-                summarySheet.Cells[18, 2] = minPressure;
-                summarySheet.Cells[19, 1] = "Max Pressure (kPa)";
-                summarySheet.Cells[19, 2] = maxPressure;
-                summarySheet.Cells[20, 1] = "Elastic Behavior";
-                summarySheet.Cells[20, 2] = isElasticEnabled ? "Yes" : "No";
-                summarySheet.Cells[21, 1] = "Plastic Behavior";
-                summarySheet.Cells[21, 2] = isPlasticEnabled ? "Yes" : "No";
-                summarySheet.Cells[22, 1] = "Brittle Behavior";
-                summarySheet.Cells[22, 2] = isBrittleEnabled ? "Yes" : "No";
+                summarySheet.Cells[17, 1] = "Simulation Parameters";
+                summarySheet.Cells[18, 1] = "Direction";
+                summarySheet.Cells[18, 2] = selectedDirection.ToString();
+                summarySheet.Cells[19, 1] = "Min Pressure (kPa)";
+                summarySheet.Cells[19, 2] = minPressure;
+                summarySheet.Cells[20, 1] = "Max Pressure (kPa)";
+                summarySheet.Cells[20, 2] = maxPressure;
+                summarySheet.Cells[21, 1] = "Elastic Behavior";
+                summarySheet.Cells[21, 2] = isElasticEnabled ? "Yes" : "No";
+                summarySheet.Cells[22, 1] = "Plastic Behavior";
+                summarySheet.Cells[22, 2] = isPlasticEnabled ? "Yes" : "No";
+                summarySheet.Cells[23, 1] = "Brittle Behavior";
+                summarySheet.Cells[23, 2] = isBrittleEnabled ? "Yes" : "No";
 
                 this.SafeInvokeAsync(() => progressForm.UpdateProgress(50));
 
                 // Add final results
-                summarySheet.Cells[24, 1] = "Final Results";
-                summarySheet.Cells[25, 1] = "Max Strain (%)";
-                summarySheet.Cells[25, 2] = currentStrain * 100;
+                summarySheet.Cells[25, 1] = "Final Results";
+                summarySheet.Cells[26, 1] = "Max Strain (%)";
+                summarySheet.Cells[26, 2] = currentStrain * 100;
 
                 // Find peak stress
                 double peakStress = 0;
@@ -7470,18 +7495,22 @@ namespace CTS
                     }
                 }
 
-                summarySheet.Cells[26, 1] = "Peak Stress (MPa)";
-                summarySheet.Cells[26, 2] = peakStress;
-                summarySheet.Cells[27, 1] = "Strain at Peak (%)";
-                summarySheet.Cells[27, 2] = strainAtPeak;
-                summarySheet.Cells[28, 1] = "Volumetric Strain";
-                summarySheet.Cells[28, 2] = volumetricStrain;
-                summarySheet.Cells[29, 1] = "Final Porosity";
-                summarySheet.Cells[29, 2] = porosity;
-                summarySheet.Cells[30, 1] = "Final Permeability (mD)";
-                summarySheet.Cells[30, 2] = permeability;
-                summarySheet.Cells[31, 1] = "Failure Status";
-                summarySheet.Cells[31, 2] = failureState ? "Failed" : "Intact";
+                summarySheet.Cells[27, 1] = "Peak Stress (MPa)";
+                summarySheet.Cells[27, 2] = peakStress;
+                summarySheet.Cells[28, 1] = "Strain at Peak (%)";
+                summarySheet.Cells[28, 2] = strainAtPeak;
+                summarySheet.Cells[29, 1] = "Volumetric Strain";
+                summarySheet.Cells[29, 2] = volumetricStrain;
+                summarySheet.Cells[30, 1] = "Final Porosity";
+                summarySheet.Cells[30, 2] = porosity;
+                summarySheet.Cells[31, 1] = "Final Permeability (mD)";
+                summarySheet.Cells[31, 2] = permeability;
+                summarySheet.Cells[32, 1] = "Failure Status";
+                summarySheet.Cells[32, 2] = failureState ? "Failed" : "Intact";
+
+                // Add optimal failure angle to final results
+                summarySheet.Cells[33, 1] = "Optimal Failure Angle (°)";
+                summarySheet.Cells[33, 2] = CalculateOptimalFailureAngle();
 
                 // Format summary sheet
                 summarySheet.Columns.AutoFit();
@@ -7491,6 +7520,9 @@ namespace CTS
                 // Add stress-strain data to data sheet
                 dataSheet.Cells[1, 1] = "Strain (%)";
                 dataSheet.Cells[1, 2] = "Stress (MPa)";
+                dataSheet.Cells[1, 3] = "Porosity";
+                dataSheet.Cells[1, 4] = "Permeability (mD)";
+                dataSheet.Cells[1, 5] = "Volumetric Strain";
 
                 for (int i = 0; i < stressStrainCurve.Count; i++)
                 {
@@ -7500,6 +7532,11 @@ namespace CTS
 
                     dataSheet.Cells[i + 2, 1] = strain;
                     dataSheet.Cells[i + 2, 2] = stress;
+
+                    // Add additional data if available
+                    dataSheet.Cells[i + 2, 3] = porosity; // This could be tracked over time
+                    dataSheet.Cells[i + 2, 4] = permeability; // This could be tracked over time
+                    dataSheet.Cells[i + 2, 5] = volumetricStrain * (strain / (currentStrain * 100)); // Scaled volumetric strain
                 }
 
                 // Create chart of stress-strain curve
@@ -7509,7 +7546,7 @@ namespace CTS
                     Microsoft.Office.Interop.Excel.ChartObject chartObj = charts.Add(300, 10, 500, 300);
                     Microsoft.Office.Interop.Excel.Chart chart = chartObj.Chart;
 
-                    // Define data range for chart
+                    // Define data range for chart (only strain and stress columns)
                     Microsoft.Office.Interop.Excel.Range dataRange = dataSheet.Range[
                         dataSheet.Cells[2, 1],
                         dataSheet.Cells[stressStrainCurve.Count + 1, 2]
@@ -7525,7 +7562,82 @@ namespace CTS
                     chart.Axes(Microsoft.Office.Interop.Excel.XlAxisType.xlCategory).AxisTitle.Text = "Strain (%)";
                     chart.Axes(Microsoft.Office.Interop.Excel.XlAxisType.xlValue).HasTitle = true;
                     chart.Axes(Microsoft.Office.Interop.Excel.XlAxisType.xlValue).AxisTitle.Text = "Stress (MPa)";
+
+                    // Add subtitle with failure angle
+                    chart.ChartTitle.Text = $"Stress-Strain Curve\nOptimal Failure Angle: {CalculateOptimalFailureAngle():F1}°";
                 }
+
+                // Create additional failure analysis sheet
+                Microsoft.Office.Interop.Excel.Worksheet failureSheet = workbook.Sheets.Add();
+                failureSheet.Name = "Failure Analysis";
+
+                // Add failure analysis data
+                failureSheet.Cells[1, 1] = "Failure Analysis";
+                failureSheet.Cells[3, 1] = "Parameter";
+                failureSheet.Cells[3, 2] = "Value";
+                failureSheet.Cells[3, 3] = "Units";
+
+                failureSheet.Cells[4, 1] = "Friction Angle";
+                failureSheet.Cells[4, 2] = frictionAngle;
+                failureSheet.Cells[4, 3] = "degrees";
+
+                failureSheet.Cells[5, 1] = "Cohesion";
+                failureSheet.Cells[5, 2] = cohesion;
+                failureSheet.Cells[5, 3] = "MPa";
+
+                failureSheet.Cells[6, 1] = "Optimal Failure Angle";
+                failureSheet.Cells[6, 2] = CalculateOptimalFailureAngle();
+                failureSheet.Cells[6, 3] = "degrees";
+
+                failureSheet.Cells[7, 1] = "Failure Plane Orientation";
+                failureSheet.Cells[7, 2] = $"θ = 45° + φ/2 = 45° + {frictionAngle:F1}°/2";
+                failureSheet.Cells[7, 3] = "";
+
+                // Calculate effective stresses locally
+                if (stressStrainCurve.Count > 0)
+                {
+                    // Get current stress from the last point
+                    float currentStressMPa = stressStrainCurve.Last().Y / 10.0f;
+
+                    // Calculate principal stresses
+                    float confiningPressureMPa = minPressure / 1000.0f; // kPa to MPa
+                    float sigma3 = confiningPressureMPa;
+                    float sigma1 = sigma3 + currentStressMPa;
+
+                    // Calculate pore pressure
+                    float porePressureMPa = CalculatePorePressure(currentStrain);
+
+                    // Calculate effective stresses
+                    float biotCoeff = Biot(porosity);
+                    float localEffSigma3 = sigma3 - porePressureMPa * biotCoeff;
+                    float localEffSigma1 = sigma1 - porePressureMPa * biotCoeff;
+
+                    failureSheet.Cells[9, 1] = "Effective Principal Stresses at Failure";
+                    failureSheet.Cells[10, 1] = "σ'₁ (Major)";
+                    failureSheet.Cells[10, 2] = localEffSigma1;
+                    failureSheet.Cells[10, 3] = "MPa";
+
+                    failureSheet.Cells[11, 1] = "σ'₃ (Minor)";
+                    failureSheet.Cells[11, 2] = localEffSigma3;
+                    failureSheet.Cells[11, 3] = "MPa";
+
+                    // Add total stresses as well
+                    failureSheet.Cells[13, 1] = "Total Principal Stresses";
+                    failureSheet.Cells[14, 1] = "σ₁ (Major)";
+                    failureSheet.Cells[14, 2] = sigma1;
+                    failureSheet.Cells[14, 3] = "MPa";
+
+                    failureSheet.Cells[15, 1] = "σ₃ (Minor)";
+                    failureSheet.Cells[15, 2] = sigma3;
+                    failureSheet.Cells[15, 3] = "MPa";
+
+                    failureSheet.Cells[17, 1] = "Pore Pressure";
+                    failureSheet.Cells[17, 2] = porePressureMPa;
+                    failureSheet.Cells[17, 3] = "MPa";
+                }
+
+                // Format failure analysis sheet
+                failureSheet.Columns.AutoFit();
 
                 // Format data sheet
                 dataSheet.Columns.AutoFit();
@@ -7540,6 +7652,7 @@ namespace CTS
                 excelApp.Quit();
 
                 // Release COM objects to avoid memory leaks
+                System.Runtime.InteropServices.Marshal.ReleaseComObject(failureSheet);
                 System.Runtime.InteropServices.Marshal.ReleaseComObject(dataSheet);
                 System.Runtime.InteropServices.Marshal.ReleaseComObject(summarySheet);
                 System.Runtime.InteropServices.Marshal.ReleaseComObject(workbook);

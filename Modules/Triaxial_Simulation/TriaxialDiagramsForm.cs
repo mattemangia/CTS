@@ -376,7 +376,6 @@ namespace CTS
             // Draw yield and brittle strength lines if behaviors are enabled
             if (isPlasticEnabled || isBrittleEnabled)
             {
-                // Calculate max stress for scaling
                 float maxStressValue = Math.Max(1000, Math.Max(yieldStrength, brittleStrength) * 1.2f);
                 if (stressStrainCurve.Count > 0)
                 {
@@ -385,9 +384,8 @@ namespace CTS
                 }
                 maxStressValue = (float)Math.Ceiling(maxStressValue / 100) * 100;
 
-                int maxStress = (int)(maxStressValue * 10); // Convert to graph units
+                int maxStress = (int)(maxStressValue * 10);
 
-                // Draw yield strength line if plastic behavior is enabled
                 if (isPlasticEnabled && yieldStrength > 0)
                 {
                     using (Pen yieldPen = new Pen(Color.Orange, 1) { DashStyle = DashStyle.Dash })
@@ -399,7 +397,6 @@ namespace CTS
                     }
                 }
 
-                // Draw brittle strength line if brittle behavior is enabled
                 if (isBrittleEnabled && brittleStrength > 0)
                 {
                     using (Pen brittlePen = new Pen(Color.Red, 1) { DashStyle = DashStyle.Dash })
@@ -412,12 +409,11 @@ namespace CTS
                 }
             }
 
-            // Draw volumetric strain path if we have data
+            // Draw volumetric strain path
             if (stressStrainCurve.Count >= 2 && volumetricStrain != 0)
             {
                 using (Pen volStrainPen = new Pen(Color.Gold, 1) { DashStyle = DashStyle.Dot })
                 {
-                    // Calculate max stress for scaling
                     float maxStressValue = Math.Max(1000, Math.Max(yieldStrength, brittleStrength) * 1.2f);
                     if (stressStrainCurve.Count > 0)
                     {
@@ -426,19 +422,15 @@ namespace CTS
                     }
                     maxStressValue = (float)Math.Ceiling(maxStressValue / 100) * 100;
 
-                    // Scale points to fit in the graph
-                    int maxStrain = 200; // 20% strain
-                    int maxStress = (int)(maxStressValue * 10); // Convert to graph units
+                    int maxStrain = 200;
+                    int maxStress = (int)(maxStressValue * 10);
 
-                    // Create a path showing volumetric strain relationship to axial strain
                     List<Point> volStrainPoints = new List<Point>();
-                    float volStrainScale = 5.0f; // Scale factor to make volumetric strain visible
+                    float volStrainScale = 5.0f;
 
                     for (int i = 0; i < stressStrainCurve.Count; i += Math.Max(1, stressStrainCurve.Count / 20))
                     {
-                        // Use current strain point but modify height to show volumetric strain
-                        float axialStrain = stressStrainCurve[i].X / 10.0f; // % value
-                                                                            // Scale volumetric strain to be visible on the same scale
+                        float axialStrain = stressStrainCurve[i].X / 10.0f;
                         float scaledVolStrain = volumetricStrain * (axialStrain / currentStrain) * volStrainScale;
 
                         int x = padding + (int)(stressStrainCurve[i].X * width / maxStrain);
@@ -460,7 +452,6 @@ namespace CTS
             {
                 using (Pen curvePen = new Pen(Color.Cyan, 2))
                 {
-                    // Calculate max stress for scaling
                     float maxStressValue = Math.Max(1000, Math.Max(yieldStrength, brittleStrength) * 1.2f);
                     if (stressStrainCurve.Count > 0)
                     {
@@ -469,9 +460,8 @@ namespace CTS
                     }
                     maxStressValue = (float)Math.Ceiling(maxStressValue / 100) * 100;
 
-                    // Scale points to fit in the graph
-                    int maxStrain = 200; // 20% strain
-                    int maxStress = (int)(maxStressValue * 10); // Convert to graph units
+                    int maxStrain = 200;
+                    int maxStress = (int)(maxStressValue * 10);
 
                     List<Point> scaledPoints = new List<Point>();
                     foreach (var point in stressStrainCurve)
@@ -481,7 +471,6 @@ namespace CTS
                         scaledPoints.Add(new Point(x, y));
                     }
 
-                    // Draw curve
                     g.DrawLines(curvePen, scaledPoints.ToArray());
 
                     // Draw current point
@@ -492,118 +481,138 @@ namespace CTS
                         {
                             g.FillEllipse(pointBrush, lastPoint.X - 5, lastPoint.Y - 5, 10, 10);
                         }
+                    }
+                }
+            }
 
-                        // Display enhanced test parameters
-                        using (Font valueFont = new Font("Arial", 10, FontStyle.Bold))
+            // ========== STANDARDIZED INFO PANEL FOR BOTH GPU AND CPU ==========
+            if (stressStrainCurve.Count > 0 || simulationRunning)
+            {
+                using (Font valueFont = new Font("Arial", 10, FontStyle.Bold))
+                {
+                    float currentStressVal = stressStrainCurve.Count > 0 ?
+                        stressStrainCurve.Last().Y / 10.0f : 0; // Convert to MPa
+                    float currentStrainVal = stressStrainCurve.Count > 0 ?
+                        stressStrainCurve.Last().X / 10.0f : 0; // Convert to %
+
+                    string stressStr = $"{currentStressVal:F1} MPa";
+                    string strainStr = $"{currentStrainVal:F1}%";
+
+                    // Enhanced info panel with consistent layout
+                    int infoWidth = 260;
+                    int infoHeight = 350;
+
+                    // Background for readability
+                    using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(120, 0, 0, 0)))
+                    {
+                        g.FillRectangle(bgBrush, padding + 5, padding + 5, infoWidth, infoHeight);
+                    }
+
+                    // Draw border
+                    using (Pen borderPen = new Pen(Color.FromArgb(150, 150, 150), 1))
+                    {
+                        g.DrawRectangle(borderPen, padding + 5, padding + 5, infoWidth, infoHeight);
+                    }
+
+                    // Values section
+                    float textY = padding + 10;
+                    g.DrawString("Strain: " + strainStr, valueFont, Brushes.White, padding + 10, textY);
+                    textY += 25;
+                    g.DrawString("Stress: " + stressStr, valueFont, Brushes.White, padding + 10, textY);
+                    textY += 25;
+
+                    // Show active behaviors
+                    string behaviors = "Behaviors: ";
+                    if (isElasticEnabled) behaviors += "Elastic ";
+                    if (isPlasticEnabled) behaviors += "Plastic ";
+                    if (isBrittleEnabled) behaviors += "Brittle";
+                    g.DrawString(behaviors, valueFont, Brushes.Cyan, padding + 10, textY);
+                    textY += 25;
+
+                    // Volumetric strain
+                    string volStrainText = $"Vol. Strain: {volumetricStrain * 100:F2}%";
+                    Brush volStrainBrush = volumetricStrain < 0 ? Brushes.LightGreen : Brushes.Yellow;
+                    g.DrawString(volStrainText, valueFont, volStrainBrush, padding + 10, textY);
+                    textY += 25;
+
+                    // Energy calculations
+                    string elasticText = $"Elastic Energy: {elasticEnergy:F2} MJ/m³";
+                    g.DrawString(elasticText, valueFont, Brushes.LightGreen, padding + 10, textY);
+                    textY += 25;
+
+                    if (plasticEnergy > 0)
+                    {
+                        string plasticText = $"Plastic Energy: {plasticEnergy:F2} MJ/m³";
+                        g.DrawString(plasticText, valueFont, Brushes.Orange, padding + 10, textY);
+                        textY += 25;
+                    }
+
+                    // Pore pressure
+                    if (porePressure > 0.01f)
+                    {
+                        string poreText = $"Pore Pressure: {porePressure:F2} MPa";
+                        g.DrawString(poreText, valueFont, Brushes.Magenta, padding + 10, textY);
+                        textY += 25;
+                    }
+
+                    // Calculate measured Young's modulus from initial slope
+                    float measuredModulus = 0;
+                    if (stressStrainCurve.Count >= 10)
+                    {
+                        int samplePoints = Math.Min(10, stressStrainCurve.Count / 4);
+                        float earlyStrain = stressStrainCurve[samplePoints - 1].X / 10.0f / 100.0f; // Convert to decimal
+                        float earlyStress = stressStrainCurve[samplePoints - 1].Y / 10.0f; // MPa
+
+                        if (earlyStrain > 0.0001f)
                         {
-                            float currentStressVal = stressStrainCurve.Last().Y / 10.0f; // Convert to MPa
-                            float currentStrainVal = stressStrainCurve.Last().X / 10.0f; // Convert to %
-
-                            string stressStr = $"{currentStressVal:F1} MPa";
-                            string strainStr = $"{currentStrainVal:F1}%";
-
-                            // Enhanced info panel
-                            int infoWidth = 220;
-                            int infoHeight = 280;
-                            // Background for readability
-                            using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(120, 0, 0, 0)))
-                            {
-                                g.FillRectangle(bgBrush, padding + 5, padding + 5, infoWidth, infoHeight);
-                            }
-
-                            // Draw border
-                            using (Pen borderPen = new Pen(Color.FromArgb(150, 150, 150), 1))
-                            {
-                                g.DrawRectangle(borderPen, padding + 5, padding + 5, infoWidth, infoHeight);
-                            }
-
-                            // Values section
-                            float textY = padding + 10;
-                            g.DrawString("Strain: " + strainStr, valueFont, Brushes.White, padding + 10, textY);
+                            measuredModulus = earlyStress / earlyStrain;
+                            g.DrawString($"Measured E: {measuredModulus:F0} MPa", valueFont, Brushes.Green, padding + 10, textY);
                             textY += 25;
-                            g.DrawString("Stress: " + stressStr, valueFont, Brushes.White, padding + 10, textY);
-                            textY += 25;
-
-                            // Show active behaviors
-                            string behaviors = "Behaviors: ";
-                            if (isElasticEnabled) behaviors += "Elastic ";
-                            if (isPlasticEnabled) behaviors += "Plastic ";
-                            if (isBrittleEnabled) behaviors += "Brittle";
-                            g.DrawString(behaviors, valueFont, Brushes.Cyan, padding + 10, textY);
-                            textY += 25;
-
-                            // Enhanced parameters
-
-                            // Volumetric strain
-                            string volStrainText = $"Vol. Strain: {volumetricStrain * 100:F2}%";
-                            Brush volStrainBrush = volumetricStrain < 0 ? Brushes.LightGreen : Brushes.Yellow;
-                            g.DrawString(volStrainText, valueFont, volStrainBrush, padding + 10, textY);
-                            textY += 25;
-
-                            // Energy calculations
-                            string elasticText = $"Elastic Energy: {elasticEnergy:F2} MJ/m³";
-                            g.DrawString(elasticText, valueFont, Brushes.LightGreen, padding + 10, textY);
-                            textY += 25;
-
-                            if (plasticEnergy > 0)
-                            {
-                                string plasticText = $"Plastic Energy: {plasticEnergy:F2} MJ/m³";
-                                g.DrawString(plasticText, valueFont, Brushes.Orange, padding + 10, textY);
-                                textY += 25;
-                            }
-
-                            // Pore pressure
-                            if (porePressure > 0.01f)
-                            {
-                                string poreText = $"Pore Pressure: {porePressure:F2} MPa";
-                                g.DrawString(poreText, valueFont, Brushes.Magenta, padding + 10, textY);
-                                textY += 25;
-                            }
-
-                            // Permeability changes
-                            if (permeabilityRatio != 1.0f)
-                            {
-                                string permText = permeabilityRatio > 1.0f ?
-                                    $"Perm: ↑ {permeabilityRatio:F2}x" :
-                                    $"Perm: ↓ {1 / permeabilityRatio:F2}x";
-                                g.DrawString(permText, valueFont, Brushes.Cyan, padding + 10, textY);
-                                textY += 25;
-                            }
-
-                            // Failure state
-                            if (failurePercentage > 70 || failureState)
-                            {
-                                string failText = failureState ?
-                                    "FAILURE OCCURRED" :
-                                    $"Approaching Failure: {failurePercentage:F0}%";
-
-                                // Flash warning if close to failure or failed
-                                Brush failureBrush;
-                                if (failureState)
-                                {
-                                    // Red for failure
-                                    failureBrush = Brushes.Red;
-                                }
-                                else if (failurePercentage > 90)
-                                {
-                                    // Flashing for imminent failure
-                                    int flashMod = (int)(DateTime.Now.Millisecond / 250) % 2;
-                                    failureBrush = flashMod == 0 ? Brushes.Red : Brushes.Orange;
-                                }
-                                else
-                                {
-                                    // Orange for warning
-                                    failureBrush = Brushes.Orange;
-                                }
-
-                                // Draw with slightly larger font for emphasis
-                                using (Font warningFont = new Font("Arial", 11, FontStyle.Bold))
-                                {
-                                    g.DrawString(failText, warningFont, failureBrush, padding + 10, textY);
-                                }
-                                textY += 25;
-                            }
                         }
+                    }
+
+                    // Permeability changes
+                    if (permeabilityRatio != 1.0f)
+                    {
+                        string permText = permeabilityRatio > 1.0f ?
+                            $"Perm: ↑ {permeabilityRatio:F2}x" :
+                            $"Perm: ↓ {1 / permeabilityRatio:F2}x";
+                        g.DrawString(permText, valueFont, Brushes.Cyan, padding + 10, textY);
+                        textY += 25;
+                    }
+
+                    // Calculate optimal failure angle
+                    float optimalFailureAngle = CalculateOptimalFailureAngle();
+                    g.DrawString($"Failure Angle: {optimalFailureAngle:F1}°", valueFont, Brushes.LightBlue, padding + 10, textY);
+                    textY += 25;
+
+                    // Failure state
+                    if (failurePercentage > 70 || failureState)
+                    {
+                        string failText = failureState ?
+                            "FAILURE OCCURRED" :
+                            $"Approaching Failure: {failurePercentage:F0}%";
+
+                        Brush failureBrush;
+                        if (failureState)
+                        {
+                            failureBrush = Brushes.Red;
+                        }
+                        else if (failurePercentage > 90)
+                        {
+                            int flashMod = (int)(DateTime.Now.Millisecond / 250) % 2;
+                            failureBrush = flashMod == 0 ? Brushes.Red : Brushes.Orange;
+                        }
+                        else
+                        {
+                            failureBrush = Brushes.Orange;
+                        }
+
+                        using (Font warningFont = new Font("Arial", 11, FontStyle.Bold))
+                        {
+                            g.DrawString(failText, warningFont, failureBrush, padding + 10, textY);
+                        }
+                        textY += 25;
                     }
                 }
             }
@@ -613,16 +622,13 @@ namespace CTS
             {
                 using (Font summaryFont = new Font("Arial", 10, FontStyle.Bold))
                 {
-                    // Use stored peak stress if available, otherwise calculate it
                     float displayPeakStress;
                     float displayStrainAtPeak;
 
-                    // Calculate peak stress from curve data
                     if (stressStrainCurve.Count > 0)
                     {
-                        displayPeakStress = stressStrainCurve.Max(p => p.Y) / 10.0f; // Convert to MPa
+                        displayPeakStress = stressStrainCurve.Max(p => p.Y) / 10.0f;
 
-                        // Find strain at peak stress
                         int peakIndex = 0;
                         float maxY = stressStrainCurve.Max(p => p.Y);
                         for (int i = 0; i < stressStrainCurve.Count; i++)
@@ -634,7 +640,7 @@ namespace CTS
                             }
                         }
 
-                        displayStrainAtPeak = stressStrainCurve[peakIndex].X / 10.0f; // %
+                        displayStrainAtPeak = stressStrainCurve[peakIndex].X / 10.0f;
                     }
                     else
                     {
@@ -644,7 +650,7 @@ namespace CTS
 
                     // Draw summary box
                     int boxWidth = 250;
-                    int boxHeight = 120;
+                    int boxHeight = 150;
                     int boxX = stressStrainGraph.Width - boxWidth - padding;
                     int boxY = padding + 10;
 
@@ -653,129 +659,37 @@ namespace CTS
                         g.FillRectangle(bgBrush, boxX, boxY, boxWidth, boxHeight);
                     }
 
-                    // Add results
                     g.DrawString("TEST RESULTS", summaryFont, Brushes.White, boxX + 10, boxY + 10);
                     g.DrawString($"Peak Stress: {displayPeakStress:F1} MPa", summaryFont, Brushes.Cyan, boxX + 10, boxY + 35);
                     g.DrawString($"Strain at Peak: {displayStrainAtPeak:F2}%", summaryFont, Brushes.Cyan, boxX + 10, boxY + 60);
 
-                    // Show failure status
+                    // Calculate optimal failure angle for final result
+                    float finalFailureAngle = CalculateOptimalFailureAngle();
+                    g.DrawString($"Failure Angle: {finalFailureAngle:F1}°", summaryFont, Brushes.LightBlue, boxX + 10, boxY + 85);
+
                     if (failureState)
                     {
-                        g.DrawString("SAMPLE FAILED", summaryFont, Brushes.Red, boxX + 10, boxY + 85);
+                        g.DrawString("SAMPLE FAILED", summaryFont, Brushes.Red, boxX + 10, boxY + 110);
                     }
                     else
                     {
-                        g.DrawString("Test Completed (No Failure)", summaryFont, Brushes.Green, boxX + 10, boxY + 85);
+                        g.DrawString("Test Completed (No Failure)", summaryFont, Brushes.Green, boxX + 10, boxY + 110);
                     }
                 }
             }
+        }
+        private float CalculateOptimalFailureAngle()
+        {
+            // The optimal failure angle for a material in triaxial compression
+            // is calculated from the Mohr-Coulomb theory:
+            // θ = 45° + φ/2
+            // where φ is the internal friction angle
 
-            // Draw energy areas if we have significant elastic or plastic energy
-            if (elasticEnergy > 0 || plasticEnergy > 0)
-            {
-                // Calculate max stress for scaling (reusing the values)
-                float maxStressValue = Math.Max(1000, Math.Max(yieldStrength, brittleStrength) * 1.2f);
-                if (stressStrainCurve.Count > 0)
-                {
-                    float maxCurrentStress = stressStrainCurve.Max(p => p.Y) / 10.0f;
-                    maxStressValue = Math.Max(maxStressValue, maxCurrentStress * 1.2f);
-                }
-                maxStressValue = (float)Math.Ceiling(maxStressValue / 100) * 100;
+            float frictionAngleRad = frictionAngle * (float)Math.PI / 180.0f;
+            float failureAngleRad = (float)Math.PI / 4.0f + frictionAngleRad / 2.0f;
+            float failureAngleDeg = failureAngleRad * 180.0f / (float)Math.PI;
 
-                int maxStrain = 200; // 20% strain
-                int maxStress = (int)(maxStressValue * 10); // Convert to graph units
-
-                // Create filled regions for energy visualization
-                if (stressStrainCurve.Count > 10 && elasticEnergy > 0)
-                {
-                    // Find yield point index
-                    int yieldIndex = stressStrainCurve.Count - 1;
-                    if (isPlasticEnabled && yieldStrength > 0)
-                    {
-                        for (int i = 0; i < stressStrainCurve.Count; i++)
-                        {
-                            if (stressStrainCurve[i].Y / 10.0f >= yieldStrength)
-                            {
-                                yieldIndex = i;
-                                break;
-                            }
-                        }
-                    }
-
-                    // Create polygon points for elastic energy region
-                    List<Point> elasticRegion = new List<Point>();
-                    // Start at origin
-                    elasticRegion.Add(new Point(padding, stressStrainGraph.Height - padding));
-
-                    // Add points up to yield or end of curve
-                    int limitIndex = Math.Min(yieldIndex, stressStrainCurve.Count - 1);
-                    for (int i = 0; i <= limitIndex; i++)
-                    {
-                        int x = padding + (int)(stressStrainCurve[i].X * width / maxStrain);
-                        int y = stressStrainGraph.Height - padding - (int)(stressStrainCurve[i].Y * height / maxStress);
-                        elasticRegion.Add(new Point(x, y));
-                    }
-
-                    // Close polygon back to x-axis
-                    elasticRegion.Add(new Point(
-                        padding + (int)(stressStrainCurve[limitIndex].X * width / maxStrain),
-                        stressStrainGraph.Height - padding));
-
-                    // Draw elastic energy region with semi-transparent fill
-                    using (SolidBrush elasticBrush = new SolidBrush(Color.FromArgb(50, 0, 255, 0)))
-                    {
-                        g.FillPolygon(elasticBrush, elasticRegion.ToArray());
-                    }
-                }
-
-                // Draw plastic energy region if we have plastic deformation
-                if (stressStrainCurve.Count > 10 && plasticEnergy > 0 && isPlasticEnabled)
-                {
-                    // Find yield point index
-                    int yieldIndex = 0;
-                    for (int i = 0; i < stressStrainCurve.Count; i++)
-                    {
-                        if (stressStrainCurve[i].Y / 10.0f >= yieldStrength)
-                        {
-                            yieldIndex = i;
-                            break;
-                        }
-                    }
-
-                    // Create polygon for plastic region
-                    if (yieldIndex > 0 && yieldIndex < stressStrainCurve.Count - 1)
-                    {
-                        List<Point> plasticRegion = new List<Point>();
-
-                        // Start at yield point on x-axis
-                        int yieldX = padding + (int)(stressStrainCurve[yieldIndex].X * width / maxStrain);
-                        plasticRegion.Add(new Point(yieldX, stressStrainGraph.Height - padding));
-
-                        // Add yield point on curve
-                        int yieldY = stressStrainGraph.Height - padding - (int)(stressStrainCurve[yieldIndex].Y * height / maxStress);
-                        plasticRegion.Add(new Point(yieldX, yieldY));
-
-                        // Add points after yield
-                        for (int i = yieldIndex + 1; i < stressStrainCurve.Count; i++)
-                        {
-                            int x = padding + (int)(stressStrainCurve[i].X * width / maxStrain);
-                            int y = stressStrainGraph.Height - padding - (int)(stressStrainCurve[i].Y * height / maxStress);
-                            plasticRegion.Add(new Point(x, y));
-                        }
-
-                        // Close polygon back to x-axis
-                        plasticRegion.Add(new Point(
-                            padding + (int)(stressStrainCurve[stressStrainCurve.Count - 1].X * width / maxStrain),
-                            stressStrainGraph.Height - padding));
-
-                        // Draw plastic energy region
-                        using (SolidBrush plasticBrush = new SolidBrush(Color.FromArgb(60, 255, 128, 0)))
-                        {
-                            g.FillPolygon(plasticBrush, plasticRegion.ToArray());
-                        }
-                    }
-                }
-            }
+            return failureAngleDeg;
         }
         /// <summary>
         /// Enhanced method to update form data with advanced simulation parameters
@@ -858,34 +772,16 @@ namespace CTS
         private void MohrCoulombGraph_Paint(object sender, PaintEventArgs e)
         {
             Graphics g = e.Graphics;
-            g.Clear(Color.Black);
+            g.Clear(Color.White);
             g.SmoothingMode = SmoothingMode.AntiAlias;
 
             // Set up coordinate system with padding
-            int padding = 40;
+            int padding = 30;
             int width = mohrCoulombGraph.Width - 2 * padding;
             int height = mohrCoulombGraph.Height - 2 * padding;
 
-            // Draw grid
-            using (Pen gridPen = new Pen(Color.FromArgb(60, 60, 60), 1))
-            {
-                // Vertical grid lines (normal stress)
-                for (int i = 0; i <= 4; i++)
-                {
-                    int x = padding + i * width / 4;
-                    g.DrawLine(gridPen, x, padding, x, mohrCoulombGraph.Height - padding);
-                }
-
-                // Horizontal grid lines (shear stress)
-                for (int i = 0; i <= 4; i++)
-                {
-                    int y = mohrCoulombGraph.Height - padding - i * height / 4;
-                    g.DrawLine(gridPen, padding, y, mohrCoulombGraph.Width - padding, y);
-                }
-            }
-
             // Draw axes
-            using (Pen axisPen = new Pen(Color.White, 2))
+            using (Pen axisPen = new Pen(Color.Black, 2))
             {
                 // X-axis (normal stress)
                 g.DrawLine(axisPen, padding, mohrCoulombGraph.Height - padding,
@@ -897,16 +793,15 @@ namespace CTS
             }
 
             // Draw axis labels
-            using (Font labelFont = new Font("Arial", 9))
+            using (Font labelFont = new Font("Arial", 8))
             {
-                // X-axis label
-                g.DrawString("Normal Stress (MPa)", labelFont, Brushes.White,
-                            mohrCoulombGraph.Width / 2 - 50, mohrCoulombGraph.Height - 25);
+                g.DrawString("Normal Stress (MPa)", labelFont, Brushes.Black,
+                            mohrCoulombGraph.Width / 2, mohrCoulombGraph.Height - 15);
 
-                // Y-axis label (rotated)
+                // Rotate Y-axis label
                 g.TranslateTransform(15, mohrCoulombGraph.Height / 2);
                 g.RotateTransform(-90);
-                g.DrawString("Shear Stress (MPa)", labelFont, Brushes.White, 0, 0);
+                g.DrawString("Shear Stress (MPa)", labelFont, Brushes.Black, 0, 0);
                 g.ResetTransform();
             }
 
@@ -958,73 +853,127 @@ namespace CTS
                 }
             }
 
-            // Draw Mohr circles if simulation is running
-            if (simulationRunning && stressStrainCurve.Count > 0)
+            // Draw Mohr circles if we have stress data (not just when simulation is running)
+            if (stressStrainCurve.Count > 0 || effectiveSigma1 > 0 || effectiveSigma3 > 0)
             {
                 // Get current stress values for the Mohr circle
-                float sigma1 = maxPressure; // Major principal stress (vertical load)
-                float sigma3 = minPressure; // Minor principal stress (confining pressure)
+                float sigma1, sigma3;
 
-                float currentStressVal = stressStrainCurve.Last().Y / 10.0f; // Convert from graph units to MPa
+                // Use effective stresses if available (from enhanced data)
+                if (effectiveSigma1 > 0 || effectiveSigma3 > 0)
+                {
+                    sigma1 = effectiveSigma1;
+                    sigma3 = effectiveSigma3;
+                }
+                else
+                {
+                    // Fall back to calculating from stress curve and confining pressure
+                    sigma3 = minPressure; // Minor principal stress (confining pressure)
 
-                // For a triaxial test, major principal stress increases during loading
-                sigma1 = sigma3 + currentStressVal;
+                    float currentStressVal = stressStrainCurve.Count > 0 ?
+                        stressStrainCurve.Last().Y / 10.0f : currentStress; // Convert from graph units to MPa
+
+                    // For a triaxial test, major principal stress increases during loading
+                    sigma1 = sigma3 + currentStressVal;
+                }
 
                 // Calculate circle center and radius
                 float center = (sigma1 + sigma3) / 2;
                 float radius = (sigma1 - sigma3) / 2;
+
+                // Ensure radius is non-negative
+                radius = Math.Max(0, radius);
 
                 // Scale to pixel coordinates
                 int centerX = padding + (int)(center * width / maxStress);
                 int radiusPixels = (int)(radius * width / maxStress);
 
                 // Draw the Mohr circle
-                using (Pen circlePen = new Pen(Color.Cyan, 2))
+                using (Pen circlePen = new Pen(Color.Blue, 2))
                 {
-                    g.DrawEllipse(circlePen,
-                        centerX - radiusPixels,
-                        mohrCoulombGraph.Height - padding - radiusPixels,
-                        radiusPixels * 2,
-                        radiusPixels * 2);
+                    if (radiusPixels > 0)
+                    {
+                        g.DrawEllipse(circlePen,
+                            centerX - radiusPixels,
+                            mohrCoulombGraph.Height - padding - radiusPixels,
+                            radiusPixels * 2,
+                            radiusPixels * 2);
+                    }
                 }
 
                 // Draw the center line
                 using (Pen centerPen = new Pen(Color.Gray, 1))
                 {
-                    g.DrawLine(centerPen,
-                        centerX,
-                        mohrCoulombGraph.Height - padding - radiusPixels,
-                        centerX,
-                        mohrCoulombGraph.Height - padding + radiusPixels);
+                    if (radiusPixels > 0)
+                    {
+                        g.DrawLine(centerPen,
+                            centerX,
+                            mohrCoulombGraph.Height - padding - radiusPixels,
+                            centerX,
+                            mohrCoulombGraph.Height - padding + radiusPixels);
+                    }
                 }
 
                 // Label principal stresses
                 using (Font stressFont = new Font("Arial", 8))
                 {
-                    g.DrawString($"σ₃ = {sigma3:F1} MPa", stressFont, Brushes.Cyan,
-                        padding + (int)(sigma3 * width / maxStress) - 50,
-                        mohrCoulombGraph.Height - padding + 5);
+                    int sigma3X = padding + (int)(sigma3 * width / maxStress);
+                    int sigma1X = padding + (int)(sigma1 * width / maxStress);
 
-                    g.DrawString($"σ₁ = {sigma1:F1} MPa", stressFont, Brushes.Cyan,
-                        padding + (int)(sigma1 * width / maxStress) - 50,
-                        mohrCoulombGraph.Height - padding + 5);
+                    // Ensure labels are within bounds
+                    sigma3X = Math.Max(padding, Math.Min(mohrCoulombGraph.Width - padding - 50, sigma3X));
+                    sigma1X = Math.Max(padding, Math.Min(mohrCoulombGraph.Width - padding - 50, sigma1X));
+
+                    g.DrawString($"σ₃ = {sigma3:F1} MPa", stressFont, Brushes.Blue,
+                        sigma3X - 50, mohrCoulombGraph.Height - padding + 5);
+
+                    g.DrawString($"σ₁ = {sigma1:F1} MPa", stressFont, Brushes.Blue,
+                        sigma1X - 50, mohrCoulombGraph.Height - padding + 5);
                 }
 
                 // Display current stress state
                 using (Font valueFont = new Font("Arial", 10, FontStyle.Bold))
                 {
-                    g.DrawString($"Normal Stress: {center:F1} MPa", valueFont, Brushes.White, padding, padding);
-                    g.DrawString($"Shear Stress: {radius:F1} MPa", valueFont, Brushes.White, padding, padding + 20);
+                    g.DrawString($"Normal Stress: {center:F1} MPa", valueFont, Brushes.Black, padding, padding);
+                    g.DrawString($"Shear Stress: {radius:F1} MPa", valueFont, Brushes.Black, padding, padding + 20);
 
                     // Check if failure envelope is exceeded
                     float failureShear = cohesion + center * (float)Math.Tan(frictionAngle * Math.PI / 180.0);
+
+                    // The circle touches the failure envelope when the radius equals the failure shear stress
                     if (radius >= failureShear)
                     {
                         g.DrawString("Status: FAILURE", valueFont, Brushes.Red, padding, padding + 40);
+
+                        // Draw the tangent point where the circle touches the failure line
+                        if (radius > 0)
+                        {
+                            // Calculate the tangent point
+                            float tanPhi = (float)Math.Tan(frictionAngle * Math.PI / 180.0);
+                            float sinPhi = (float)Math.Sin(frictionAngle * Math.PI / 180.0);
+
+                            // The normal stress at the tangent point
+                            float normalStressAtTangent = (center + cohesion * sinPhi) / (1 + sinPhi * tanPhi);
+                            float shearStressAtTangent = cohesion + normalStressAtTangent * tanPhi;
+
+                            // Convert to screen coordinates
+                            int tangentX = padding + (int)(normalStressAtTangent * width / maxStress);
+                            int tangentY = mohrCoulombGraph.Height - padding - (int)(shearStressAtTangent * height / maxStress);
+
+                            // Draw the tangent point
+                            using (SolidBrush tangentBrush = new SolidBrush(Color.Red))
+                            {
+                                g.FillEllipse(tangentBrush, tangentX - 5, tangentY - 5, 10, 10);
+                            }
+                        }
                     }
                     else
                     {
                         g.DrawString("Status: Stable", valueFont, Brushes.Green, padding, padding + 40);
+
+                        // Calculate how close to failure (as percentage)
+                        float failureProximity = (radius / failureShear) * 100;
+                        g.DrawString($"Failure Proximity: {failureProximity:F1}%", valueFont, Brushes.DarkOrange, padding, padding + 60);
                     }
                 }
             }

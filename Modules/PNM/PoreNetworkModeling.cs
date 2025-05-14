@@ -1521,8 +1521,62 @@ namespace CTS
                     try
                     {
                         // Create a copy of the current network image
-                        using (Bitmap screenshot = new Bitmap(networkPictureBox.Image))
+                        using (Bitmap originalImage = new Bitmap(networkPictureBox.Image))
                         {
+                            // Create a new bitmap with additional space for information at the bottom
+                            Bitmap screenshotWithInfo = new Bitmap(
+                                originalImage.Width,
+                                originalImage.Height + 50); // Add 50 pixels for info bar
+
+                            using (Graphics g = Graphics.FromImage(screenshotWithInfo))
+                            {
+                                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+
+                                // Draw the original network image
+                                g.DrawImage(originalImage, 0, 0, originalImage.Width, originalImage.Height);
+
+                                // Draw a black background for the info area
+                                g.FillRectangle(new SolidBrush(Color.Black),
+                                    0, originalImage.Height, originalImage.Width, 50);
+
+                                // Add network information
+                                int yPos = originalImage.Height + 5;
+
+                                // Line 1: Basic network info
+                                g.DrawString($"Pores: {networkModel.Pores.Count} | " +
+                                            $"Throats: {networkModel.Throats.Count} | " +
+                                            $"Porosity: {networkModel.Porosity:P2}",
+                                    new Font("Arial", 9, FontStyle.Bold),
+                                    Brushes.White,
+                                    new Point(10, yPos));
+
+                                // Line 2: Tortuosity and average stats
+                                yPos += 20;
+
+                                double avgRadius = networkModel.Pores.Count > 0 ?
+                                    networkModel.Pores.Average(p => p.Radius) : 0;
+                                double avgConnections = networkModel.Pores.Count > 0 ?
+                                    networkModel.Pores.Average(p => p.ConnectionCount) : 0;
+
+                                g.DrawString($"Tortuosity: {networkModel.Tortuosity:F2}",
+                                    new Font("Arial", 9, FontStyle.Bold),
+                                    Brushes.Yellow, // Highlight tortuosity in yellow
+                                    new Point(10, yPos));
+
+                                g.DrawString($"Avg. Radius: {avgRadius:F2} µm | " +
+                                            $"Avg. Connections: {avgConnections:F1}",
+                                    new Font("Arial", 9, FontStyle.Bold),
+                                    Brushes.White,
+                                    new Point(150, yPos));
+
+                                // Add timestamp in the corner
+                                g.DrawString($"Date: {DateTime.Now:yyyy-MM-dd HH:mm:ss}",
+                                    new Font("Arial", 8),
+                                    Brushes.Gray,
+                                    new Point(originalImage.Width - 200, yPos));
+                            }
+
                             // Save the image in the format specified by the file extension
                             string extension = Path.GetExtension(saveDialog.FileName).ToLower();
                             ImageFormat format = ImageFormat.Png; // Default
@@ -1532,7 +1586,7 @@ namespace CTS
                             else if (extension == ".bmp")
                                 format = ImageFormat.Bmp;
 
-                            screenshot.Save(saveDialog.FileName, format);
+                            screenshotWithInfo.Save(saveDialog.FileName, format);
 
                             // Notify the user of success
                             statusLabel.Text = "Screenshot saved successfully.";
@@ -4361,10 +4415,10 @@ namespace CTS
                         // Create a copy of the current visualization with added scalebar
                         using (Bitmap originalImage = new Bitmap(permeabilityPictureBox.Image))
                         {
-                            // Create a new bitmap with space for the scale bar
+                            // Create a new bitmap with space for the scale bar and info
                             Bitmap screenshotWithScale = new Bitmap(
                                 originalImage.Width,
-                                originalImage.Height + 50);
+                                originalImage.Height + 70); // Increased height to accommodate multiple lines
 
                             using (Graphics g = Graphics.FromImage(screenshotWithScale))
                             {
@@ -4376,11 +4430,11 @@ namespace CTS
 
                                 // Draw a black background for the scale bar area
                                 g.FillRectangle(new SolidBrush(Color.Black),
-                                    0, originalImage.Height, originalImage.Width, 50);
+                                    0, originalImage.Height, originalImage.Width, 70);
 
                                 // Draw pressure scale bar
                                 DrawPressureScaleBar(g,
-                                    new Rectangle(50, originalImage.Height + 5, originalImage.Width - 100, 40),
+                                    new Rectangle(50, originalImage.Height + 35, originalImage.Width - 100, 30),
                                     permeabilityResult.InputPressure,
                                     permeabilityResult.OutputPressure);
 
@@ -4390,12 +4444,29 @@ namespace CTS
                                     Brushes.White,
                                     new Point(originalImage.Width - 200, originalImage.Height + 5));
 
-                                // Draw permeability value
+                                // Draw permeability values with tortuosity on multiple lines
+                                int yPos = originalImage.Height + 5;
+
+                                // Line 1: Original permeability
                                 g.DrawString($"Permeability: {permeabilityResult.PermeabilityDarcy:F3} Darcy " +
                                             $"({permeabilityResult.PermeabilityMilliDarcy:F1} mD)",
                                     new Font("Arial", 8, FontStyle.Bold),
                                     Brushes.White,
-                                    new Point(50, originalImage.Height + 5));
+                                    new Point(50, yPos));
+
+                                // Line 2: Tortuosity and corrected permeability
+                                yPos += 15; // Move down for next line
+
+                                g.DrawString($"Tortuosity: {permeabilityResult.Tortuosity:F2}",
+                                    new Font("Arial", 8, FontStyle.Bold),
+                                    Brushes.Yellow, // Use yellow to highlight tortuosity
+                                    new Point(50, yPos));
+
+                                g.DrawString($"Corrected k: {permeabilityResult.CorrectedPermeabilityDarcy:F3} Darcy " +
+                                            $"({permeabilityResult.CorrectedPermeabilityDarcy * 1000:F1} mD)",
+                                    new Font("Arial", 8, FontStyle.Bold),
+                                    Brushes.LightGreen, // Use light green for corrected permeability
+                                    new Point(200, yPos)); // Offset to the right
                             }
 
                             // Save the image with the scale bar

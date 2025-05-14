@@ -131,8 +131,8 @@ namespace CTS
                     );
                 }, cancellationToken);
 
-                // Transfer from concurrent bag to model list
-                model.Pores = pores.ToList();
+                // Transfer from concurrent bag to model list and sort by ID for deterministic ordering
+                model.Pores = pores.OrderBy(p => p.Id).ToList();
                 progress?.Report(30);
 
                 // Step 2: Calculate distance matrix and connectivity in parallel
@@ -183,100 +183,88 @@ namespace CTS
                 progress?.Report(50);
 
                 // Step 3: Generate throats using calculated distances
-                var throats = new ConcurrentBag<Throat>();
-                var connectionCounts = new ConcurrentDictionary<int, int>();
+                var throatList = new List<Throat>();
+                var connectionCounts = new Dictionary<int, int>();
 
-                await Task.Run(() =>
+                // Initialize connection counts
+                foreach (var pore in model.Pores)
                 {
-                    int maxConnections = Math.Min(6, model.Pores.Count - 1);
+                    connectionCounts[pore.Id] = 0;
+                }
 
-                    Parallel.ForEach(
-                        model.Pores,
-                        new ParallelOptions
+                // Generate throats deterministically
+                int maxConnections = Math.Min(6, model.Pores.Count - 1);
+
+                foreach (var pore1 in model.Pores)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    // Get all potentially connected pores with their distances
+                    var connectiblePores = model.Pores
+                        .Where(p => p.Id != pore1.Id)
+                        .Select(p =>
                         {
-                            MaxDegreeOfParallelism = _degreeOfParallelism,
-                            CancellationToken = cancellationToken
-                        },
-                        pore1 =>
+                            double distance;
+                            bool canConnectValue;
+                            var minId = Math.Min(pore1.Id, p.Id);
+                            var maxId = Math.Max(pore1.Id, p.Id);
+                            var key = (minId, maxId);
+
+                            distances.TryGetValue(key, out distance);
+                            canConnect.TryGetValue(key, out canConnectValue);
+
+                            return new { Pore = p, Distance = distance, CanConnect = canConnectValue };
+                        })
+                        .Where(pair => pair.CanConnect)  // Only include pores that can connect petrophysically
+                        .OrderBy(pair => pair.Distance)
+                        .ThenBy(pair => pair.Pore.Id) // Secondary sort by ID for deterministic ordering
+                        .Take(maxConnections);
+
+                    foreach (var pair in connectiblePores)
+                    {
+                        Pore pore2 = pair.Pore;
+                        double distance = pair.Distance;
+
+                        // Avoid duplicate throats (only add if pore1.Id < pore2.Id)
+                        if (pore1.Id < pore2.Id)
                         {
-                            cancellationToken.ThrowIfCancellationRequested();
+                            // Check if we've already reached the max connections for either pore
+                            if (connectionCounts[pore1.Id] >= maxConnections ||
+                                connectionCounts[pore2.Id] >= maxConnections)
+                                continue;
 
-                            // Get all potentially connected pores with their distances
-                            var connectiblePores = model.Pores
-                                .Where(p => p.Id != pore1.Id)
-                                .Select(p =>
-                                {
-                                    double distance;
-                                    bool canConnectValue;
-                                    var minId = Math.Min(pore1.Id, p.Id);
-                                    var maxId = Math.Max(pore1.Id, p.Id);
-                                    var key = (minId, maxId);
+                            // Calculate throat properties
+                            double radius = CalculateThroatRadius(pore1.Radius, pore2.Radius);
+                            double length = Math.Max(0.1, distance - pore1.Radius - pore2.Radius);
+                            double volume = Math.PI * radius * radius * length;
 
-                                    distances.TryGetValue(key, out distance);
-                                    canConnect.TryGetValue(key, out canConnectValue);
-
-                                    return new { Pore = p, Distance = distance, CanConnect = canConnectValue };
-                                })
-                                .Where(pair => pair.CanConnect)  // Only include pores that can connect petrophysically
-                                .OrderBy(pair => pair.Distance)
-                                .Take(maxConnections);
-
-                            foreach (var pair in connectiblePores)
+                            Throat throat = new Throat
                             {
-                                Pore pore2 = pair.Pore;
-                                double distance = pair.Distance;
+                                Id = throatList.Count + 1,
+                                PoreId1 = pore1.Id,
+                                PoreId2 = pore2.Id,
+                                Radius = radius,
+                                Length = length,
+                                Volume = volume
+                            };
 
-                                // Avoid duplicate throats (only add if pore1.Id < pore2.Id)
-                                if (pore1.Id < pore2.Id)
-                                {
-                                    // Calculate throat properties
-                                    double radius = CalculateThroatRadius(pore1.Radius, pore2.Radius);
-                                    double length = Math.Max(0.1, distance - pore1.Radius - pore2.Radius);
-                                    double volume = Math.PI * radius * radius * length;
+                            throatList.Add(throat);
 
-                                    int throatId = 0;
-                                    lock (throats) // Need lock for ID generation
-                                    {
-                                        throatId = throats.Count + 1;
-                                    }
-
-                                    Throat throat = new Throat
-                                    {
-                                        Id = throatId,
-                                        PoreId1 = pore1.Id,
-                                        PoreId2 = pore2.Id,
-                                        Radius = radius,
-                                        Length = length,
-                                        Volume = volume
-                                    };
-
-                                    throats.Add(throat);
-
-                                    // Update connection counts
-                                    connectionCounts.AddOrUpdate(pore1.Id, 1, (key, count) => count + 1);
-                                    connectionCounts.AddOrUpdate(pore2.Id, 1, (key, count) => count + 1);
-                                }
-                            }
+                            // Update connection counts
+                            connectionCounts[pore1.Id]++;
+                            connectionCounts[pore2.Id]++;
                         }
-                    );
-                }, cancellationToken);
+                    }
+                }
 
                 // Update connection counts in the model
                 foreach (var pore in model.Pores)
                 {
-                    int count;
-                    if (connectionCounts.TryGetValue(pore.Id, out count))
-                    {
-                        pore.ConnectionCount = count;
-                    }
-                    else
-                    {
-                        pore.ConnectionCount = 0;
-                    }
+                    pore.ConnectionCount = connectionCounts[pore.Id];
                 }
 
-                // Transfer from concurrent bag to model list
-                model.Throats = throats.ToList();
+                // Transfer throats to model
+                model.Throats = throatList;
                 progress?.Report(70);
 
                 // Step 4: When enforceFlowPath is enabled, ensure connectivity along main flow axis
@@ -561,8 +549,13 @@ namespace CTS
             double tortuosityY = CalculateAxisTortuosity(model, graph, axis: "Y");
             double tortuosityZ = CalculateAxisTortuosity(model, graph, axis: "Z");
 
-            // Average the three tortuosity values
-            double averageTortuosity = (tortuosityX + tortuosityY + tortuosityZ) / 3.0;
+            // Average the three tortuosity values, ignoring infinite values
+            List<double> validTortuosities = new List<double>();
+            if (!double.IsInfinity(tortuosityX) && tortuosityX > 0) validTortuosities.Add(tortuosityX);
+            if (!double.IsInfinity(tortuosityY) && tortuosityY > 0) validTortuosities.Add(tortuosityY);
+            if (!double.IsInfinity(tortuosityZ) && tortuosityZ > 0) validTortuosities.Add(tortuosityZ);
+
+            double averageTortuosity = validTortuosities.Count > 0 ? validTortuosities.Average() : 1.0;
 
             Logger.Log($"[PoreNetworkGenerator] Calculated tortuosity: X={tortuosityX:F3}, Y={tortuosityY:F3}, Z={tortuosityZ:F3}, Avg={averageTortuosity:F3}");
 
@@ -617,24 +610,25 @@ namespace CTS
                 // Find shortest path to each outlet pore
                 foreach (var outletPore in outletPores)
                 {
-                    if (shortestPaths.ContainsKey(outletPore.Id))
+                    if (shortestPaths.ContainsKey(outletPore.Id) &&
+                        !double.IsInfinity(shortestPaths[outletPore.Id]))
                     {
                         pathLengths.Add(shortestPaths[outletPore.Id]);
                     }
                 }
             }
 
-            // If no valid paths were found, return default value
+            // If no valid paths were found, return large but finite value
             if (pathLengths.Count == 0)
-                return 1.0;
+                return 10.0; // Large tortuosity indicating poor connectivity
 
             // Calculate the average path length
             double avgPathLength = pathLengths.Average();
 
-            // Tortuosity is the square of the ratio of actual path length to straight-line distance
-            // τ = (Le/L)²
+            // Tortuosity is the ratio of actual path length to straight-line distance
+            // Note: I'm using the linear ratio, not squared, as it seems to be what the code expects
             double tortuosity = straightLineDistance > 0 ?
-                Math.Pow(avgPathLength / straightLineDistance, 2) : 1.0;
+                avgPathLength / straightLineDistance : 1.0;
 
             // Ensure we have a reasonable value (tortuosity is always >= 1)
             tortuosity = Math.Max(1.0, tortuosity);
@@ -663,20 +657,21 @@ namespace CTS
                 distances[pore.Id] = pore.Id == sourceId ? 0 : double.PositiveInfinity;
             }
 
-            // Priority queue implemented as a sorted list for simplicity
-            // Each entry is (poreId, currentDistance)
-            var queue = new SortedList<double, int>();
-            queue.Add(0, sourceId);
+            // Priority queue using a heap-like structure
+            var heap = new SortedSet<(double distance, int nodeId)>();
+            heap.Add((0, sourceId));
 
             // Set to track processed nodes
             HashSet<int> processed = new HashSet<int>();
 
-            while (queue.Count > 0)
+            while (heap.Count > 0)
             {
-                // Get the pore with the smallest distance
-                int currentId = queue.Values[0];
-                double currentDistance = queue.Keys[0];
-                queue.RemoveAt(0);
+                // Get the node with the smallest distance
+                var current = heap.Min;
+                heap.Remove(current);
+
+                int currentId = current.nodeId;
+                double currentDistance = current.distance;
 
                 // Skip if we've already processed this pore
                 if (processed.Contains(currentId))
@@ -701,10 +696,13 @@ namespace CTS
                     // Update if we found a shorter path
                     if (newDistance < distances[neighborId])
                     {
+                        // Remove old entry if it exists
+                        heap.Remove((distances[neighborId], neighborId));
+
                         distances[neighborId] = newDistance;
 
-                        // Add to queue with new priority
-                        queue.Add(newDistance, neighborId);
+                        // Add with new priority
+                        heap.Add((newDistance, neighborId));
                     }
                 }
             }

@@ -249,8 +249,8 @@ namespace CTS
                     UpdateVelocity();
                     stepCount++;
 
-                    // FRAME CACHING - Add this after each simulation step
-                    if (cacheManager != null && stepCount % cacheInterval == 0)
+                    
+                    if (enableFrameCaching && cacheManager != null && stepCount % cacheInterval == 0)
                     {
                         SaveFrameToCache();
                     }
@@ -1274,7 +1274,7 @@ namespace CTS
         
         private void SaveFrameToCache()
         {
-            if (cacheManager == null)
+            if (!enableFrameCaching || cacheManager == null)
                 return;
 
             try

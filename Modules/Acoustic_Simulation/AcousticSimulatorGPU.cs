@@ -976,8 +976,8 @@ namespace CTS
                     // Use Interlocked for thread-safe increment
                     Interlocked.Increment(ref stepCount);
 
-                    // FRAME CACHING - Add this after each simulation step
-                    if (cacheManager != null && stepCount % cacheInterval == 0)
+                    
+                    if (enableFrameCaching && cacheManager != null && stepCount % cacheInterval == 0)
                     {
                         SaveFrameToCache();
                     }
@@ -1783,7 +1783,7 @@ namespace CTS
         }
         private void SaveFrameToCache()
         {
-            if (cacheManager == null || isDisposed)
+            if (!enableFrameCaching || cacheManager == null || isDisposed)
                 return;
 
             try

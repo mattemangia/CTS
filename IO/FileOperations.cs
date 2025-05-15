@@ -60,14 +60,20 @@ namespace CTS
                         // Find source images in the folder
                         var imageFiles = Directory.GetFiles(path)
                             .Where(f => IsImageFile(f))
-                            .OrderBy(f => GetImageNumber(f))
+                            .Select(f => new {
+                                Path = f,
+                                Name = Path.GetFileNameWithoutExtension(f),
+                                Number = int.TryParse(new string(Path.GetFileNameWithoutExtension(f).Where(char.IsDigit).ToArray()), out int n) ? n : 0
+                            })
+                            .OrderBy(x => x.Number)
+                            .Select(x => x.Path)
                             .ToList();
 
                         if (imageFiles.Count() > 0)
                         {
                             Logger.Log($"[FileOperations] Found {imageFiles.Count()} images to bin");
 
-                            // Declare dimensions outside the using block
+                            // Declare dimensions
                             int origWidth, origHeight, origDepth;
 
                             // Get dimensions from first image
@@ -81,7 +87,7 @@ namespace CTS
                             // Calculate binned dimensions - INCLUDING DEPTH!
                             width = Math.Max(1, origWidth / binningFactor);
                             height = Math.Max(1, origHeight / binningFactor);
-                            depth = Math.Max(1, origDepth / binningFactor);  // THIS IS THE KEY CHANGE!
+                            depth = Math.Max(1, origDepth / binningFactor);
 
                             Logger.Log($"[FileOperations] 3D Binning {origWidth}x{origHeight}x{origDepth} -> {width}x{height}x{depth}");
 
@@ -94,46 +100,35 @@ namespace CTS
                             // Process images with 3D binning
                             await ProcessImagesWithBinning(imageFiles, binnedFolder, binningFactor, width, height, progress);
 
-                            // Create volume from binned images
+                            // IMPORTANT: Create volume with properly aligned dimensions
                             ChunkedVolume tempVolume = null;
                             try
                             {
                                 Logger.Log("[FileOperations] Creating volume from binned images");
+
+                                // Create volume from folder - let it handle chunk alignment
                                 tempVolume = (ChunkedVolume)ChunkedVolume.FromFolder(binnedFolder, CHUNK_DIM, (ProgressForm)progress, false);
 
+                                // Get the actual dimensions after chunk alignment
                                 width = tempVolume.Width;
                                 height = tempVolume.Height;
                                 depth = tempVolume.Depth;
 
-                                Logger.Log($"[FileOperations] Volume created: {width}x{height}x{depth}");
+                                Logger.Log($"[FileOperations] Volume created with aligned dimensions: {width}x{height}x{depth}");
 
                                 // Save the volume to the main folder
                                 Logger.Log("[FileOperations] Saving volume to main folder");
                                 tempVolume.SaveAsBin(volumeBinPath);
 
                                 // Update pixel size
-                                if (pixelSize <= 0 && File.Exists(volumeChkPath))
-                                {
-                                    var header = ReadVolumeChk(path);
-                                    pixelSize = header.pixelSize * binningFactor;
-                                }
-                                else if (pixelSize <= 0)
-                                {
-                                    pixelSize = 1e-6 * binningFactor;
-                                }
-                                else
-                                {
-                                    pixelSize = pixelSize * binningFactor;
-                                }
+                                pixelSize = (pixelSize <= 0 ? 1e-6 : pixelSize) * binningFactor;
 
-                                // Create volume.chk
+                                // Create volume.chk with the actual dimensions
                                 CreateVolumeChk(path, width, height, depth, CHUNK_DIM, pixelSize);
 
-                                // Dispose the temp volume to release file locks
+                                // Dispose the temp volume
                                 tempVolume.Dispose();
                                 tempVolume = null;
-
-                                Logger.Log("[FileOperations] Volume saved, cleaning up temp folder");
                             }
                             finally
                             {
@@ -152,7 +147,7 @@ namespace CTS
                             // Wait for file locks to be released
                             await Task.Delay(500);
 
-                            // Now delete the temp folder
+                            // Delete the temp folder
                             try
                             {
                                 Directory.Delete(binnedFolder, true);
@@ -164,13 +159,13 @@ namespace CTS
                             }
 
                             // Create binned marker
-                            File.WriteAllText(binnedMarker, $"3D Binned with factor {binningFactor} at {DateTime.Now}\n{origWidth}x{origHeight}x{origDepth} -> {width}x{height}x{depth}");
+                            File.WriteAllText(binnedMarker, $"3D Binned with factor {binningFactor} at {DateTime.Now}\nOriginal: {origWidth}x{origHeight}x{origDepth}\nFinal: {width}x{height}x{depth}");
 
                             // Load the saved volume
                             Logger.Log("[FileOperations] Loading saved volume");
                             volumeData = LoadVolumeBin(volumeBinPath, useMemoryMapping);
 
-                            // Create empty labels
+                            // Create empty labels with the same dimensions
                             CreateBlankLabelsFile(labelsBinPath, width, height, depth, CHUNK_DIM);
                             volumeLabels = LoadLabelsBin(labelsBinPath, useMemoryMapping);
 
@@ -439,190 +434,144 @@ namespace CTS
         {
             int processedCount = 0;
             int origDepth = imageFiles.Count;
-            int newDepth = Math.Max(1, origDepth / binFactor);
+
+            // CRITICAL FIX: Handle the depth calculation properly for middle alignment
+            int newDepth = (origDepth + binFactor - 1) / binFactor; // Ceiling division
 
             Logger.Log($"[ProcessImagesWithBinning] 3D Binning: {imageFiles.Count} images -> {newDepth} slices");
-            Logger.Log($"[ProcessImagesWithBinning] Depth reduction: {origDepth} -> {newDepth}");
+            Logger.Log($"[ProcessImagesWithBinning] Binning factor: {binFactor}");
+            Logger.Log($"[ProcessImagesWithBinning] Original depth: {origDepth}, New depth: {newDepth}");
 
-            // Create output array to ensure proper ordering
-            string[] outputPaths = new string[newDepth];
-            for (int i = 0; i < newDepth; i++)
+            // Sort images by numeric value
+            var sortedImages = imageFiles
+                .Select(f => new {
+                    Path = f,
+                    Number = ExtractNumberFromFilename(Path.GetFileNameWithoutExtension(f))
+                })
+                .OrderBy(x => x.Number)
+                .Select(x => x.Path)
+                .ToArray();
+
+            // Create output images sequentially to avoid ordering issues
+            for (int newZ = 0; newZ < newDepth; newZ++)
             {
-                outputPaths[i] = Path.Combine(outputFolder, $"{i:D5}.bmp");
-            }
-
-            await Task.Run(() =>
-            {
-                // Use standard for loop to ensure correct ordering
-                object lockObj = new object();
-
-                Parallel.For(0, newDepth, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
-                newZ =>
+                try
                 {
-                    try
+                    // CRITICAL FIX: Calculate the exact source range for proper middle alignment
+                    int srcZStart = newZ * binFactor;
+                    int srcZEnd = Math.Min(srcZStart + binFactor, origDepth);
+                    int actualSlicesToProcess = srcZEnd - srcZStart;
+
+                    Logger.Log($"[ProcessImagesWithBinning] Binned slice {newZ}: processing source slices {srcZStart} to {srcZEnd - 1} ({actualSlicesToProcess} slices)");
+
+                    // Create accumulator arrays
+                    float[,] accumulator = new float[newWidth, newHeight];
+                    int[,] counts = new int[newWidth, newHeight];
+
+                    // Process each source slice
+                    for (int srcZ = srcZStart; srcZ < srcZEnd; srcZ++)
                     {
-                        // Create binned slice by combining multiple source slices
-                        Bitmap binnedSlice = new Bitmap(newWidth, newHeight, PixelFormat.Format24bppRgb);
-
-                        // Use high-precision accumulator
-                        double[,] accumulator = new double[newWidth, newHeight];
-                        int[,] counts = new int[newWidth, newHeight];
-
-                        // Calculate exact source slice range
-                        int srcZStart = newZ * binFactor;
-                        int srcZEnd = Math.Min(srcZStart + binFactor, origDepth);
-
-                        Logger.Log($"[ProcessImagesWithBinning] Processing slice {newZ}: combining source slices {srcZStart}-{srcZEnd - 1}");
-
-                        // Process each source slice that contributes to this binned slice
-                        for (int srcZ = srcZStart; srcZ < srcZEnd; srcZ++)
+                        if (srcZ >= sortedImages.Length)
                         {
-                            if (srcZ >= imageFiles.Count)
-                            {
-                                Logger.Log($"[ProcessImagesWithBinning] Warning: Source slice {srcZ} out of bounds");
-                                break;
-                            }
-
-                            string imagePath = imageFiles[srcZ];
-
-                            using (Bitmap sourceImage = new Bitmap(imagePath))
-                            {
-                                // Ensure correct dimensions
-                                if (sourceImage.Width == 0 || sourceImage.Height == 0)
-                                {
-                                    Logger.Log($"[ProcessImagesWithBinning] Warning: Invalid image dimensions for {imagePath}");
-                                    continue;
-                                }
-
-                                // Process with proper scaling
-                                using (Bitmap tempScaled = new Bitmap(newWidth, newHeight, PixelFormat.Format24bppRgb))
-                                {
-                                    using (Graphics g = Graphics.FromImage(tempScaled))
-                                    {
-                                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-                                        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
-                                        g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
-                                        g.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
-
-                                        // Clear background first
-                                        g.Clear(Color.Black);
-
-                                        // Draw scaled image
-                                        g.DrawImage(sourceImage, 0, 0, newWidth, newHeight);
-                                    }
-
-                                    // Accumulate pixel values using BitmapData for speed
-                                    BitmapData bmpData = tempScaled.LockBits(
-                                        new Rectangle(0, 0, newWidth, newHeight),
-                                        ImageLockMode.ReadOnly,
-                                        PixelFormat.Format24bppRgb);
-
-                                    try
-                                    {
-                                        unsafe
-                                        {
-                                            for (int y = 0; y < newHeight; y++)
-                                            {
-                                                byte* row = (byte*)bmpData.Scan0 + (y * bmpData.Stride);
-
-                                                for (int x = 0; x < newWidth; x++)
-                                                {
-                                                    int offset = x * 3;
-                                                    byte b = row[offset];
-                                                    byte g = row[offset + 1];
-                                                    byte r = row[offset + 2];
-
-                                                    // Convert to grayscale
-                                                    double gray = 0.299 * r + 0.587 * g + 0.114 * b;
-
-                                                    accumulator[x, y] += gray;
-                                                    counts[x, y]++;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    finally
-                                    {
-                                        tempScaled.UnlockBits(bmpData);
-                                    }
-                                }
-                            }
+                            Logger.Log($"[ProcessImagesWithBinning] Warning: Source index {srcZ} out of bounds (max: {sortedImages.Length - 1})");
+                            break;
                         }
 
-                        // Create final binned slice
-                        BitmapData binnedData = binnedSlice.LockBits(
-                            new Rectangle(0, 0, newWidth, newHeight),
-                            ImageLockMode.WriteOnly,
-                            PixelFormat.Format24bppRgb);
-
-                        try
+                        using (Bitmap sourceImage = new Bitmap(sortedImages[srcZ]))
                         {
-                            unsafe
+                            // Check if image dimensions match expected
+                            if (sourceImage.Width == 0 || sourceImage.Height == 0)
                             {
+                                Logger.Log($"[ProcessImagesWithBinning] Warning: Invalid image at index {srcZ}");
+                                continue;
+                            }
+
+                            // Scale the image
+                            using (Bitmap scaledImage = new Bitmap(newWidth, newHeight))
+                            {
+                                using (Graphics g = Graphics.FromImage(scaledImage))
+                                {
+                                    g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+                                    g.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
+                                    g.DrawImage(sourceImage, 0, 0, newWidth, newHeight);
+                                }
+
+                                // Accumulate pixel values
                                 for (int y = 0; y < newHeight; y++)
                                 {
-                                    byte* row = (byte*)binnedData.Scan0 + (y * binnedData.Stride);
-
                                     for (int x = 0; x < newWidth; x++)
                                     {
-                                        int value = 0;
-                                        if (counts[x, y] > 0)
-                                        {
-                                            value = (int)Math.Round(accumulator[x, y] / counts[x, y]);
-                                            value = Math.Max(0, Math.Min(255, value));
-                                        }
-
-                                        int offset = x * 3;
-                                        row[offset] = (byte)value;     // B
-                                        row[offset + 1] = (byte)value; // G
-                                        row[offset + 2] = (byte)value; // R
+                                        Color pixel = scaledImage.GetPixel(x, y);
+                                        float gray = 0.299f * pixel.R + 0.587f * pixel.G + 0.114f * pixel.B;
+                                        accumulator[x, y] += gray;
+                                        counts[x, y]++;
                                     }
                                 }
                             }
                         }
-                        finally
+                    }
+
+                    // Create final binned image
+                    using (Bitmap binnedImage = new Bitmap(newWidth, newHeight))
+                    {
+                        for (int y = 0; y < newHeight; y++)
                         {
-                            binnedSlice.UnlockBits(binnedData);
+                            for (int x = 0; x < newWidth; x++)
+                            {
+                                int value = 0;
+                                if (counts[x, y] > 0)
+                                {
+                                    value = (int)Math.Round(accumulator[x, y] / counts[x, y]);
+                                    value = Math.Max(0, Math.Min(255, value));
+                                }
+                                Color grayColor = Color.FromArgb(value, value, value);
+                                binnedImage.SetPixel(x, y, grayColor);
+                            }
                         }
 
-                        // Convert to 8-bit grayscale
-                        Bitmap grayscaleSlice = ConvertToGrayscale(binnedSlice);
-
-                        // Save with proper synchronization
-                        lock (lockObj)
-                        {
-                            // Use the pre-calculated path to ensure correct ordering
-                            grayscaleSlice.Save(outputPaths[newZ], ImageFormat.Bmp);
-                            Logger.Log($"[ProcessImagesWithBinning] Saved binned slice {newZ} to {outputPaths[newZ]}");
-                        }
-
-                        // Clean up
-                        grayscaleSlice.Dispose();
-                        binnedSlice.Dispose();
-
-                        // Update progress
-                        int currentCount = System.Threading.Interlocked.Add(ref processedCount, srcZEnd - srcZStart);
-                        progress?.Report((currentCount * 100) / origDepth);
+                        // Convert to 8-bit indexed grayscale
+                        Bitmap grayscale = ConvertToGrayscale(binnedImage);
+                        string outputPath = Path.Combine(outputFolder, $"{newZ:D5}.bmp");
+                        grayscale.Save(outputPath, ImageFormat.Bmp);
+                        grayscale.Dispose();
                     }
-                    catch (Exception ex)
-                    {
-                        Logger.Log($"[ProcessImagesWithBinning] Error creating slice {newZ}: {ex.Message}");
-                        throw;
-                    }
-                });
 
-                // Verify all files were created
-                for (int i = 0; i < newDepth; i++)
-                {
-                    if (!File.Exists(outputPaths[i]))
-                    {
-                        Logger.Log($"[ProcessImagesWithBinning] Error: Missing output file {outputPaths[i]}");
-                        throw new Exception($"Binning failed: missing slice {i}");
-                    }
+                    processedCount += actualSlicesToProcess;
+                    progress?.Report((processedCount * 100) / origDepth);
                 }
-            });
+                catch (Exception ex)
+                {
+                    Logger.Log($"[ProcessImagesWithBinning] Error creating slice {newZ}: {ex.Message}");
+                    throw;
+                }
+            }
 
             Logger.Log($"[ProcessImagesWithBinning] 3D binning completed: {newDepth} slices created");
+        }
+        private static int ExtractNumberFromFilename(string filename)
+        {
+            // Extract all digits from the filename
+            string digits = new string(filename.Where(char.IsDigit).ToArray());
+
+            if (string.IsNullOrEmpty(digits))
+            {
+                // Try to find a number pattern using regex
+                var match = System.Text.RegularExpressions.Regex.Match(filename, @"\d+");
+                if (match.Success)
+                {
+                    return int.Parse(match.Value);
+                }
+                return 0;
+            }
+
+            // Parse the digits as integer
+            if (int.TryParse(digits, out int number))
+            {
+                return number;
+            }
+
+            return 0;
         }
         private static void ProcessSingleImage(string imagePath, string outputFolder, int binFactor, int newWidth, int newHeight)
         {

@@ -1556,9 +1556,24 @@ namespace CTS.Modules.ArtificialIntelligence.GroundingDINO
                 x2 = Math.Max(0, Math.Min(1, x2));
                 y2 = Math.Max(0, Math.Min(1, y2));
 
-                // Convert normalized coordinates to pixel coordinates
-                int imgWidth = mainForm.GetWidth();
-                int imgHeight = mainForm.GetHeight();
+                // Convert normalized coordinates to pixel coordinates based on current view mode
+                int imgWidth, imgHeight;
+                switch (currentViewMode)
+                {
+                    case ViewMode.XZ:
+                        imgWidth = mainForm.GetWidth();
+                        imgHeight = mainForm.GetDepth();
+                        break;
+                    case ViewMode.YZ:
+                        imgWidth = mainForm.GetDepth();
+                        imgHeight = mainForm.GetHeight();
+                        break;
+                    case ViewMode.XY:
+                    default:
+                        imgWidth = mainForm.GetWidth();
+                        imgHeight = mainForm.GetHeight();
+                        break;
+                }
 
                 int pixelX1 = (int)(x1 * imgWidth);
                 int pixelY1 = (int)(y1 * imgHeight);
@@ -1579,7 +1594,6 @@ namespace CTS.Modules.ArtificialIntelligence.GroundingDINO
 
                 Rectangle box = new Rectangle(pixelX1, pixelY1, boxWidth, boxHeight);
 
-              
                 string label = $"{promptTextBox.Text} ({maxProb:F2})";
 
                 // Add to results
@@ -1597,7 +1611,6 @@ namespace CTS.Modules.ArtificialIntelligence.GroundingDINO
 
             return filteredResult.OrderByDescending(d => d.Score).ToList();
         }
-
         private List<Detection> ApplyNonMaximumSuppression(List<Detection> detections, float iouThreshold = 0.5f)
         {
             List<Detection> result = new List<Detection>();
@@ -1676,8 +1689,23 @@ namespace CTS.Modules.ArtificialIntelligence.GroundingDINO
 
         private unsafe DenseTensor<float> PreprocessImage()
         {
-            // Get the current slice as a bitmap
-            using (Bitmap sliceBitmap = CreateSliceBitmap(currentSlice))
+            // Get the appropriate bitmap based on current view mode
+            Bitmap sliceBitmap;
+            switch (currentViewMode)
+            {
+                case ViewMode.XZ:
+                    sliceBitmap = CreateXZSliceBitmap();
+                    break;
+                case ViewMode.YZ:
+                    sliceBitmap = CreateYZSliceBitmap();
+                    break;
+                case ViewMode.XY:
+                default:
+                    sliceBitmap = CreateSliceBitmap(currentSlice);
+                    break;
+            }
+
+            using (sliceBitmap)
             {
                 // Create a tensor with shape [1, 3, 800, 800]
                 DenseTensor<float> inputTensor = new DenseTensor<float>(new[] { 1, 3, 800, 800 });

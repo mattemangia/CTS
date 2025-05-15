@@ -127,15 +127,35 @@ namespace CTS
 
                 // Try to get the best accelerator
                 Accelerator bestAccelerator = null;
+                bool foundNvidia = false;
 
-                // First try to find a GPU accelerator
+                // First, specifically look for NVIDIA GPU
                 foreach (var device in gpuContext.Devices)
                 {
-                    if (device.AcceleratorType != AcceleratorType.CPU)
+                    string deviceName = device.Name.ToLower();
+                    if (device.AcceleratorType != AcceleratorType.CPU &&
+                        (deviceName.Contains("nvidia") || deviceName.Contains("geforce") ||
+                         deviceName.Contains("quadro") || deviceName.Contains("rtx") ||
+                         deviceName.Contains("gtx")))
                     {
+                        Logger.Log($"[TextureClassifier] Found NVIDIA GPU: {device.Name}");
                         bestAccelerator = device.CreateAccelerator(gpuContext);
-                        Logger.Log($"[TextureClassifier] Using GPU accelerator: {device.Name}");
+                        foundNvidia = true;
                         break;
+                    }
+                }
+
+                // If no NVIDIA device found, try any other GPU
+                if (!foundNvidia)
+                {
+                    foreach (var device in gpuContext.Devices)
+                    {
+                        if (device.AcceleratorType != AcceleratorType.CPU)
+                        {
+                            Logger.Log($"[TextureClassifier] Using non-NVIDIA GPU accelerator: {device.Name}");
+                            bestAccelerator = device.CreateAccelerator(gpuContext);
+                            break;
+                        }
                     }
                 }
 
@@ -224,7 +244,7 @@ namespace CTS
                 Size = new Size(1100, 850),
                 StartPosition = FormStartPosition.CenterScreen,
                 FormBorderStyle = FormBorderStyle.Sizable,
-                Icon=Properties.Resources.favicon
+                Icon = Properties.Resources.favicon
             };
 
             // Main layout with 2x2 grid
@@ -366,7 +386,7 @@ namespace CTS
             };
             controlPanel.Controls.Add(lblPatchSize);
 
-            CheckBox chkQuantization = new CheckBox
+            chkQuantization = new CheckBox
             {
                 Text = "Use Quantization (faster)",
                 Location = new Point(10, 95),
@@ -384,7 +404,7 @@ namespace CTS
             };
             grpParameters.Controls.Add(lblQuantizationLevels);
 
-            NumericUpDown numQuantizationLevels = new NumericUpDown
+            numQuantizationLevels = new NumericUpDown
             {
                 Location = new Point(280, 93),
                 Width = 60,
@@ -509,6 +529,7 @@ namespace CTS
                 trkThreshold.Value = (int)(threshold * 100);
             };
             controlPanel.Controls.Add(numThreshold);
+
             chkUseGPU = new CheckBox
             {
                 Text = "Use GPU acceleration (initializing...)",
@@ -524,12 +545,14 @@ namespace CTS
                 Logger.Log($"[TextureClassifier] GPU acceleration set to: {useGPU}");
             };
             controlPanel.Controls.Add(chkUseGPU);
+
             Task.Run(() => InitializeGPU());
+
             // Action buttons
             btnTrain = new Button
             {
                 Text = "Extract Features",
-                Location = new Point(10, 465), // Increased Y position from 450 to 465
+                Location = new Point(10, 465),
                 Width = 140,
                 Height = 30
             };
@@ -539,7 +562,7 @@ namespace CTS
             btnApply = new Button
             {
                 Text = "Apply Classification",
-                Location = new Point(160, 465), // Increased Y position from 450 to 465
+                Location = new Point(160, 465),
                 Width = 140,
                 Height = 30,
                 Enabled = false
@@ -550,7 +573,7 @@ namespace CTS
             btnClose = new Button
             {
                 Text = "Close",
-                Location = new Point(10, 505), // Increased Y position from 490 to 505
+                Location = new Point(10, 505),
                 Width = 100,
                 Height = 30
             };
@@ -560,7 +583,7 @@ namespace CTS
             statusLabel = new Label
             {
                 Text = "Draw a rectangle to select texture region",
-                Location = new Point(10, 545), // Increased Y position from 530 to 545
+                Location = new Point(10, 545),
                 AutoSize = true
             };
             controlPanel.Controls.Add(statusLabel);
@@ -752,11 +775,11 @@ namespace CTS
                 xyViewer.Image?.Dispose();
                 xzViewer.Image?.Dispose();
                 yzViewer.Image?.Dispose();
+                DisposeGPU();
 
                 Logger.Log("[TextureClassifier] Form closing, resources cleaned up");
             };
-            this.chkQuantization = chkQuantization;
-            this.numQuantizationLevels = numQuantizationLevels;
+
             chkQuantization.CheckedChanged += (s, e) =>
             {
                 useQuantization = chkQuantization.Checked;
@@ -767,6 +790,7 @@ namespace CTS
             {
                 quantizationLevels = (int)numQuantizationLevels.Value;
             };
+
             // Initially load the slices
             UpdateViewers();
         }
@@ -778,7 +802,7 @@ namespace CTS
             btnYZView.BackColor = currentActiveView == ActiveView.YZ ? Color.LightSkyBlue : SystemColors.Control;
         }
 
-        private double[] ExtractGLCMFeaturesGPU()
+        private double[] ExtractGLCMFeaturesGPU(byte[,] region, int width, int height)
         {
             // Safe UI update method
             void UpdateProgress(string message)
@@ -798,17 +822,7 @@ namespace CTS
                 }
             }
 
-            // Report progress at the start
             UpdateProgress("Getting region data...");
-
-            // Get the region of interest from the current slice
-            int x = selectionRectangle.X;
-            int y = selectionRectangle.Y;
-            int width = selectionRectangle.Width;
-            int height = selectionRectangle.Height;
-
-            if (width < 3 || height < 3)
-                throw new ArgumentException("Selected region is too small for GLCM analysis");
 
             // Determine if sampling should be used for large regions
             int pixelCount = width * height;
@@ -823,33 +837,39 @@ namespace CTS
                 UpdateProgress($"Large region detected ({pixelCount} pixels). Using sampling 1:{sampleStep}");
             }
 
+            // Get selection region
+            int x = Math.Min(selectionRectangle.X, width - 1);
+            int y = Math.Min(selectionRectangle.Y, height - 1);
+            int selWidth = Math.Min(selectionRectangle.Width, width - x);
+            int selHeight = Math.Min(selectionRectangle.Height, height - y);
+
             // Calculate new dimensions after sampling
-            int sampledWidth = width / sampleStep;
-            int sampledHeight = height / sampleStep;
+            int sampledWidth = selWidth / sampleStep;
+            int sampledHeight = selHeight / sampleStep;
 
             // Determine matrix size based on quantization settings
             int matrixSize = useQuantization ? quantizationLevels : 256;
 
             UpdateProgress($"Preparing pixel data" +
-                           (useQuantization ? $" with quantization ({quantizationLevels} levels)" : ""));
+                         (useQuantization ? $" with quantization ({quantizationLevels} levels)" : ""));
 
-            // Extract the pixel values with sampling and optionally quantize
-            byte[] region = new byte[sampledWidth * sampledHeight];
+            // Extract the pixel values from the region with sampling and optionally quantize
+            byte[] sampledData = new byte[sampledWidth * sampledHeight];
             int idx = 0;
-            for (int j = 0; j < height; j += sampleStep)
+            for (int j = 0; j < selHeight; j += sampleStep)
             {
                 if (j / sampleStep >= sampledHeight) continue;
 
-                for (int i = 0; i < width; i += sampleStep)
+                for (int i = 0; i < selWidth; i += sampleStep)
                 {
                     if (i / sampleStep >= sampledWidth) continue;
 
                     int pixelX = x + i;
                     int pixelY = y + j;
 
-                    if (pixelX < mainForm.GetWidth() && pixelY < mainForm.GetHeight())
+                    if (pixelX < width && pixelY < height)
                     {
-                        byte value = mainForm.volumeData[pixelX, pixelY, xySlice];
+                        byte value = region[pixelX, pixelY];
 
                         // Apply quantization if enabled
                         if (useQuantization)
@@ -857,7 +877,7 @@ namespace CTS
                             value = (byte)(value * quantizationLevels / 256);
                         }
 
-                        region[idx++] = value;
+                        sampledData[idx++] = value;
                     }
                 }
             }
@@ -871,7 +891,7 @@ namespace CTS
             int[] glcm135 = new int[matrixSize * matrixSize];
 
             // Prepare GPU memory
-            var regionBuffer = accelerator.Allocate1D(region);
+            var regionBuffer = accelerator.Allocate1D(sampledData);
             var glcm0Buffer = accelerator.Allocate1D(glcm0);
             var glcm45Buffer = accelerator.Allocate1D(glcm45);
             var glcm90Buffer = accelerator.Allocate1D(glcm90);
@@ -882,14 +902,15 @@ namespace CTS
                 UpdateProgress("Preparing GPU kernel...");
 
                 // Setup kernel with matrix size parameter
-                var kernel = accelerator.LoadAutoGroupedStreamKernel<
-                    Index1D,
-                    ArrayView1D<byte, Stride1D.Dense>,
-                    ArrayView1D<int, Stride1D.Dense>,
-                    ArrayView1D<int, Stride1D.Dense>,
-                    ArrayView1D<int, Stride1D.Dense>,
-                    ArrayView1D<int, Stride1D.Dense>,
-                    int, int, int>(CalculateQuantizedGLCMKernel);
+                Action<Index1D,
+      ArrayView1D<byte, Stride1D.Dense>,
+      ArrayView1D<int, Stride1D.Dense>,
+      ArrayView1D<int, Stride1D.Dense>,
+      ArrayView1D<int, Stride1D.Dense>,
+      ArrayView1D<int, Stride1D.Dense>,
+      int, int, int> glcmKernelAction = CalculateQuantizedGLCMKernel;
+                var kernel = accelerator.LoadAutoGroupedStreamKernel(glcmKernelAction);
+
 
                 UpdateProgress("Executing GPU kernel...");
 
@@ -1014,7 +1035,6 @@ namespace CTS
         }
 
         // GPU kernel for GLCM calculation
-        // Updated GPU kernel for GLCM calculation
         private static void CalculateGLCMKernel(
             Index1D index,
             ArrayView1D<byte, Stride1D.Dense> region,
@@ -1063,47 +1083,47 @@ namespace CTS
             }
         }
 
-        private double[] ExtractLBPFeaturesGPU()
+        private double[] ExtractLBPFeaturesGPU(byte[,] region, int width, int height)
         {
             // Get the region of interest
-            int x = selectionRectangle.X;
-            int y = selectionRectangle.Y;
-            int width = selectionRectangle.Width;
-            int height = selectionRectangle.Height;
+            int x = Math.Min(selectionRectangle.X, width - 1);
+            int y = Math.Min(selectionRectangle.Y, height - 1);
+            int selWidth = Math.Min(selectionRectangle.Width, width - x);
+            int selHeight = Math.Min(selectionRectangle.Height, height - y);
 
-            if (width < 3 || height < 3)
+            if (selWidth < 3 || selHeight < 3)
                 throw new ArgumentException("Selected region is too small for LBP analysis");
 
-            // Extract the pixel values
-            byte[] region = new byte[width * height];
-            for (int j = 0; j < height; j++)
+            // Extract the pixel values to a 1D array
+            byte[] regionData = new byte[selWidth * selHeight];
+            int idx = 0;
+            for (int j = 0; j < selHeight; j++)
             {
-                for (int i = 0; i < width; i++)
+                for (int i = 0; i < selWidth; i++)
                 {
-                    int pixelX = x + i;
-                    int pixelY = y + j;
-
-                    if (pixelX < mainForm.GetWidth() && pixelY < mainForm.GetHeight())
-                        region[j * width + i] = mainForm.volumeData[pixelX, pixelY, xySlice];
+                    int srcX = x + i;
+                    int srcY = y + j;
+                    if (srcX < width && srcY < height)
+                        regionData[idx++] = region[srcX, srcY];
                 }
             }
 
             // Prepare GPU memory
-            var regionBuffer = accelerator.Allocate1D(region);
+            var regionBuffer = accelerator.Allocate1D(regionData);
             var histogramBuffer = accelerator.Allocate1D<int>(256);
 
             try
             {
                 // Setup kernel
-                var kernel = accelerator.LoadAutoGroupedStreamKernel<
-                    Index1D,
-                    ArrayView1D<byte, Stride1D.Dense>,
-                    ArrayView1D<int, Stride1D.Dense>,
-                    int, int>(CalculateLBPKernel);
+                Action<Index1D,
+      ArrayView1D<byte, Stride1D.Dense>,
+      ArrayView1D<int, Stride1D.Dense>,
+      int, int> lbpKernelAction = CalculateLBPKernel;
+                var kernel = accelerator.LoadAutoGroupedStreamKernel(lbpKernelAction);
 
                 // Launch kernel
-                kernel(new Index1D((width - 2) * (height - 2)), regionBuffer.View,
-                       histogramBuffer.View, width, height);
+                kernel(new Index1D((selWidth - 2) * (selHeight - 2)), regionBuffer.View,
+                       histogramBuffer.View, selWidth, selHeight);
 
                 // Synchronize
                 accelerator.Synchronize();
@@ -1113,7 +1133,7 @@ namespace CTS
 
                 // Normalize the histogram
                 double[] normalizedHistogram = new double[256];
-                int totalPixels = (width - 2) * (height - 2);
+                int totalPixels = (selWidth - 2) * (selHeight - 2);
 
                 if (totalPixels > 0)
                 {
@@ -1174,45 +1194,45 @@ namespace CTS
             }
         }
 
-        private double[] ExtractHistogramFeaturesGPU()
+        private double[] ExtractHistogramFeaturesGPU(byte[,] region, int width, int height)
         {
             // Get the region of interest
-            int x = selectionRectangle.X;
-            int y = selectionRectangle.Y;
-            int width = selectionRectangle.Width;
-            int height = selectionRectangle.Height;
+            int x = Math.Min(selectionRectangle.X, width - 1);
+            int y = Math.Min(selectionRectangle.Y, height - 1);
+            int selWidth = Math.Min(selectionRectangle.Width, width - x);
+            int selHeight = Math.Min(selectionRectangle.Height, height - y);
 
-            if (width <= 0 || height <= 0)
+            if (selWidth <= 0 || selHeight <= 0)
                 throw new ArgumentException("Selected region is empty");
 
-            // Extract the pixel values
-            byte[] region = new byte[width * height];
-            for (int j = 0; j < height; j++)
+            // Extract the pixel values to a 1D array
+            byte[] regionData = new byte[selWidth * selHeight];
+            int idx = 0;
+            for (int j = 0; j < selHeight; j++)
             {
-                for (int i = 0; i < width; i++)
+                for (int i = 0; i < selWidth; i++)
                 {
-                    int pixelX = x + i;
-                    int pixelY = y + j;
-
-                    if (pixelX < mainForm.GetWidth() && pixelY < mainForm.GetHeight())
-                        region[j * width + i] = mainForm.volumeData[pixelX, pixelY, xySlice];
+                    int srcX = x + i;
+                    int srcY = y + j;
+                    if (srcX < width && srcY < height)
+                        regionData[idx++] = region[srcX, srcY];
                 }
             }
 
             // Prepare GPU memory
-            var regionBuffer = accelerator.Allocate1D(region);
+            var regionBuffer = accelerator.Allocate1D(regionData);
             var histogramBuffer = accelerator.Allocate1D<int>(256);
 
             try
             {
                 // Setup kernel
-                var kernel = accelerator.LoadAutoGroupedStreamKernel<
-                    Index1D,
-                    ArrayView1D<byte, Stride1D.Dense>,
-                    ArrayView1D<int, Stride1D.Dense>>(CalculateHistogramKernel);
+                Action<Index1D,
+      ArrayView1D<byte, Stride1D.Dense>,
+      ArrayView1D<int, Stride1D.Dense>> histogramKernelAction = CalculateHistogramKernel;
+                var kernel = accelerator.LoadAutoGroupedStreamKernel(histogramKernelAction);
 
                 // Launch kernel
-                kernel(new Index1D(width * height), regionBuffer.View, histogramBuffer.View);
+                kernel(new Index1D(selWidth * selHeight), regionBuffer.View, histogramBuffer.View);
 
                 // Synchronize
                 accelerator.Synchronize();
@@ -1222,7 +1242,7 @@ namespace CTS
 
                 // Calculate statistical features
                 double[] normalizedHistogram = new double[256];
-                int totalPixels = width * height;
+                int totalPixels = selWidth * selHeight;
 
                 if (totalPixels > 0)
                 {
@@ -1416,6 +1436,8 @@ namespace CTS
                     {
                         // Start rectangle drawing
                         isSelectingRectangle = true;
+                        currentActiveView = ActiveView.XY; // Set active view to XY
+                        UpdateActiveViewButtons();
                         startPoint = new Point((int)pointX, (int)pointY);
                         endPoint = startPoint;
                         statusLabel.Text = "Drawing selection rectangle...";
@@ -1431,7 +1453,7 @@ namespace CTS
 
             xyViewer.MouseMove += (s, e) =>
             {
-                if (isSelectingRectangle)
+                if (isSelectingRectangle && currentActiveView == ActiveView.XY)
                 {
                     // Update the end point of the rectangle as the mouse moves
                     float pointX = (e.X - xyPan.X) / xyZoom;
@@ -1470,7 +1492,7 @@ namespace CTS
 
             xyViewer.MouseUp += (s, e) =>
             {
-                if (isSelectingRectangle && e.Button == MouseButtons.Left)
+                if (isSelectingRectangle && e.Button == MouseButtons.Left && currentActiveView == ActiveView.XY)
                 {
                     isSelectingRectangle = false;
 
@@ -1515,7 +1537,7 @@ namespace CTS
                         ));
 
                     // If we have an active selection rectangle, draw it
-                    if (selectionRectangle != Rectangle.Empty)
+                    if (selectionRectangle != Rectangle.Empty && currentActiveView == ActiveView.XY)
                     {
                         // Convert image coordinates to screen coordinates
                         int x = (int)(selectionRectangle.X * xyZoom) + xyPan.X;
@@ -1530,7 +1552,7 @@ namespace CTS
                     }
 
                     // If we have a classification mask, overlay it
-                    if (classificationMask != null)
+                    if (classificationMask != null && currentActiveView == ActiveView.XY)
                     {
                         // Overlay the mask on the image
                         int width = Math.Min(imgWidth, classificationMask.GetLength(0));
@@ -1595,13 +1617,32 @@ namespace CTS
                 xzViewer.Invalidate();
             };
 
-            // XZ viewer mouse events for panning
+            // XZ viewer mouse events for panning and rectangle selection
             Point lastPos = Point.Empty;
             bool isPanning = false;
 
             xzViewer.MouseDown += (s, e) =>
             {
-                if (e.Button == MouseButtons.Right)
+                if (e.Button == MouseButtons.Left)
+                {
+                    // Convert mouse coordinates to image coordinates
+                    float pointX = (e.X - xzPan.X) / xzZoom;
+                    float pointY = (e.Y - xzPan.Y) / xzZoom;
+
+                    // Check if within image bounds
+                    if (pointX >= 0 && pointX < mainForm.GetWidth() &&
+                        pointY >= 0 && pointY < mainForm.GetDepth())
+                    {
+                        // Start rectangle drawing
+                        isSelectingRectangle = true;
+                        currentActiveView = ActiveView.XZ; // Set active view to XZ
+                        UpdateActiveViewButtons();
+                        startPoint = new Point((int)pointX, (int)pointY);
+                        endPoint = startPoint;
+                        statusLabel.Text = "Drawing selection rectangle in XZ view...";
+                    }
+                }
+                else if (e.Button == MouseButtons.Right)
                 {
                     isPanning = true;
                     lastPos = e.Location;
@@ -1610,7 +1651,28 @@ namespace CTS
 
             xzViewer.MouseMove += (s, e) =>
             {
-                if (isPanning && e.Button == MouseButtons.Right)
+                if (isSelectingRectangle && currentActiveView == ActiveView.XZ)
+                {
+                    // Update the end point of the rectangle as the mouse moves
+                    float pointX = (e.X - xzPan.X) / xzZoom;
+                    float pointY = (e.Y - xzPan.Y) / xzZoom;
+
+                    // Constrain to image boundaries
+                    pointX = Math.Max(0, Math.Min(pointX, mainForm.GetWidth() - 1));
+                    pointY = Math.Max(0, Math.Min(pointY, mainForm.GetDepth() - 1));
+
+                    endPoint = new Point((int)pointX, (int)pointY);
+
+                    // Calculate the selection rectangle
+                    int x = Math.Min(startPoint.X, endPoint.X);
+                    int y = Math.Min(startPoint.Y, endPoint.Y);
+                    int width = Math.Abs(endPoint.X - startPoint.X);
+                    int height = Math.Abs(endPoint.Y - startPoint.Y);
+
+                    selectionRectangle = new Rectangle(x, y, width, height);
+                    xzViewer.Invalidate();
+                }
+                else if (isPanning && e.Button == MouseButtons.Right)
                 {
                     int dx = e.X - lastPos.X;
                     int dy = e.Y - lastPos.Y;
@@ -1626,7 +1688,24 @@ namespace CTS
 
             xzViewer.MouseUp += (s, e) =>
             {
-                if (e.Button == MouseButtons.Right)
+                if (isSelectingRectangle && e.Button == MouseButtons.Left && currentActiveView == ActiveView.XZ)
+                {
+                    isSelectingRectangle = false;
+
+                    // Finalize the selection rectangle
+                    if (selectionRectangle.Width > 5 && selectionRectangle.Height > 5)
+                    {
+                        statusLabel.Text = $"Selected XZ region: ({selectionRectangle.X}, {selectionRectangle.Y}, {selectionRectangle.Width}x{selectionRectangle.Height})";
+                    }
+                    else
+                    {
+                        selectionRectangle = Rectangle.Empty;
+                        statusLabel.Text = "Selection too small. Please select a larger region.";
+                    }
+
+                    xzViewer.Invalidate();
+                }
+                else if (e.Button == MouseButtons.Right)
                 {
                     isPanning = false;
                 }
@@ -1650,6 +1729,48 @@ namespace CTS
                             (int)(imgWidth * xzZoom),
                             (int)(imgHeight * xzZoom)
                         ));
+
+                    // If we have an active selection rectangle, draw it
+                    if (selectionRectangle != Rectangle.Empty && currentActiveView == ActiveView.XZ)
+                    {
+                        // Convert image coordinates to screen coordinates
+                        int x = (int)(selectionRectangle.X * xzZoom) + xzPan.X;
+                        int y = (int)(selectionRectangle.Y * xzZoom) + xzPan.Y;
+                        int width = (int)(selectionRectangle.Width * xzZoom);
+                        int height = (int)(selectionRectangle.Height * xzZoom);
+
+                        using (Pen pen = new Pen(Color.Yellow, 2))
+                        {
+                            e.Graphics.DrawRectangle(pen, x, y, width, height);
+                        }
+                    }
+
+                    // If we have a classification mask, overlay it
+                    if (classificationMask != null && currentActiveView == ActiveView.XZ)
+                    {
+                        // Overlay the mask on the image
+                        int width = Math.Min(imgWidth, classificationMask.GetLength(0));
+                        int height = Math.Min(imgHeight, classificationMask.GetLength(1));
+
+                        for (int y = 0; y < height; y++)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                if (classificationMask[x, y] > 0)
+                                {
+                                    // Convert to screen coordinates
+                                    int screenX = (int)(x * xzZoom) + xzPan.X;
+                                    int screenY = (int)(y * xzZoom) + xzPan.Y;
+
+                                    // Draw a semi-transparent overlay for matched pixels
+                                    using (SolidBrush brush = new SolidBrush(Color.FromArgb(100, selectedMaterial.Color)))
+                                    {
+                                        e.Graphics.FillRectangle(brush, screenX, screenY, (int)xzZoom, (int)xzZoom);
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     // Draw header and slice info
                     using (Font font = new Font("Arial", 12, FontStyle.Bold))
@@ -1690,13 +1811,32 @@ namespace CTS
                 yzViewer.Invalidate();
             };
 
-            // YZ viewer mouse events for panning
+            // YZ viewer mouse events for panning and selection
             Point lastPos = Point.Empty;
             bool isPanning = false;
 
             yzViewer.MouseDown += (s, e) =>
             {
-                if (e.Button == MouseButtons.Right)
+                if (e.Button == MouseButtons.Left)
+                {
+                    // Convert mouse coordinates to image coordinates
+                    float pointX = (e.X - yzPan.X) / yzZoom;
+                    float pointY = (e.Y - yzPan.Y) / yzZoom;
+
+                    // Check if within image bounds
+                    if (pointX >= 0 && pointX < mainForm.GetDepth() &&
+                        pointY >= 0 && pointY < mainForm.GetHeight())
+                    {
+                        // Start rectangle drawing
+                        isSelectingRectangle = true;
+                        currentActiveView = ActiveView.YZ; // Set active view to YZ
+                        UpdateActiveViewButtons();
+                        startPoint = new Point((int)pointX, (int)pointY);
+                        endPoint = startPoint;
+                        statusLabel.Text = "Drawing selection rectangle in YZ view...";
+                    }
+                }
+                else if (e.Button == MouseButtons.Right)
                 {
                     isPanning = true;
                     lastPos = e.Location;
@@ -1705,7 +1845,28 @@ namespace CTS
 
             yzViewer.MouseMove += (s, e) =>
             {
-                if (isPanning && e.Button == MouseButtons.Right)
+                if (isSelectingRectangle && currentActiveView == ActiveView.YZ)
+                {
+                    // Update the end point of the rectangle as the mouse moves
+                    float pointX = (e.X - yzPan.X) / yzZoom;
+                    float pointY = (e.Y - yzPan.Y) / yzZoom;
+
+                    // Constrain to image boundaries
+                    pointX = Math.Max(0, Math.Min(pointX, mainForm.GetDepth() - 1));
+                    pointY = Math.Max(0, Math.Min(pointY, mainForm.GetHeight() - 1));
+
+                    endPoint = new Point((int)pointX, (int)pointY);
+
+                    // Calculate the selection rectangle
+                    int x = Math.Min(startPoint.X, endPoint.X);
+                    int y = Math.Min(startPoint.Y, endPoint.Y);
+                    int width = Math.Abs(endPoint.X - startPoint.X);
+                    int height = Math.Abs(endPoint.Y - startPoint.Y);
+
+                    selectionRectangle = new Rectangle(x, y, width, height);
+                    yzViewer.Invalidate();
+                }
+                else if (isPanning && e.Button == MouseButtons.Right)
                 {
                     int dx = e.X - lastPos.X;
                     int dy = e.Y - lastPos.Y;
@@ -1721,7 +1882,24 @@ namespace CTS
 
             yzViewer.MouseUp += (s, e) =>
             {
-                if (e.Button == MouseButtons.Right)
+                if (isSelectingRectangle && e.Button == MouseButtons.Left && currentActiveView == ActiveView.YZ)
+                {
+                    isSelectingRectangle = false;
+
+                    // Finalize the selection rectangle
+                    if (selectionRectangle.Width > 5 && selectionRectangle.Height > 5)
+                    {
+                        statusLabel.Text = $"Selected YZ region: ({selectionRectangle.X}, {selectionRectangle.Y}, {selectionRectangle.Width}x{selectionRectangle.Height})";
+                    }
+                    else
+                    {
+                        selectionRectangle = Rectangle.Empty;
+                        statusLabel.Text = "Selection too small. Please select a larger region.";
+                    }
+
+                    yzViewer.Invalidate();
+                }
+                else if (e.Button == MouseButtons.Right)
                 {
                     isPanning = false;
                 }
@@ -1745,6 +1923,48 @@ namespace CTS
                             (int)(imgWidth * yzZoom),
                             (int)(imgHeight * yzZoom)
                         ));
+
+                    // If we have an active selection rectangle, draw it
+                    if (selectionRectangle != Rectangle.Empty && currentActiveView == ActiveView.YZ)
+                    {
+                        // Convert image coordinates to screen coordinates
+                        int x = (int)(selectionRectangle.X * yzZoom) + yzPan.X;
+                        int y = (int)(selectionRectangle.Y * yzZoom) + yzPan.Y;
+                        int width = (int)(selectionRectangle.Width * yzZoom);
+                        int height = (int)(selectionRectangle.Height * yzZoom);
+
+                        using (Pen pen = new Pen(Color.Yellow, 2))
+                        {
+                            e.Graphics.DrawRectangle(pen, x, y, width, height);
+                        }
+                    }
+
+                    // If we have a classification mask, overlay it
+                    if (classificationMask != null && currentActiveView == ActiveView.YZ)
+                    {
+                        // Overlay the mask on the image
+                        int width = Math.Min(imgWidth, classificationMask.GetLength(0));
+                        int height = Math.Min(imgHeight, classificationMask.GetLength(1));
+
+                        for (int y = 0; y < height; y++)
+                        {
+                            for (int x = 0; x < width; x++)
+                            {
+                                if (classificationMask[x, y] > 0)
+                                {
+                                    // Convert to screen coordinates
+                                    int screenX = (int)(x * yzZoom) + yzPan.X;
+                                    int screenY = (int)(y * yzZoom) + yzPan.Y;
+
+                                    // Draw a semi-transparent overlay for matched pixels
+                                    using (SolidBrush brush = new SolidBrush(Color.FromArgb(100, selectedMaterial.Color)))
+                                    {
+                                        e.Graphics.FillRectangle(brush, screenX, screenY, (int)yzZoom, (int)yzZoom);
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     // Draw header and slice info
                     using (Font font = new Font("Arial", 12, FontStyle.Bold))
@@ -2120,44 +2340,112 @@ namespace CTS
         {
             try
             {
+                // Get view data based on active view
+                byte[,] viewData;
+                int width, height;
+
+                switch (currentActiveView)
+                {
+                    case ActiveView.XZ:
+                        viewData = GetXZViewData();
+                        width = mainForm.GetWidth();
+                        height = mainForm.GetDepth();
+                        break;
+                    case ActiveView.YZ:
+                        viewData = GetYZViewData();
+                        width = mainForm.GetDepth();
+                        height = mainForm.GetHeight();
+                        break;
+                    case ActiveView.XY:
+                    default:
+                        viewData = GetXYViewData();
+                        width = mainForm.GetWidth();
+                        height = mainForm.GetHeight();
+                        break;
+                }
+
                 // Try GPU if enabled and initialized
                 if (useGPU && gpuInitialized)
                 {
                     if (rbGlcm.Checked)
-                        return ExtractGLCMFeaturesGPU();
+                        return ExtractGLCMFeaturesGPU(viewData, width, height);
                     else if (rbLbp.Checked)
-                        return ExtractLBPFeaturesGPU();
+                        return ExtractLBPFeaturesGPU(viewData, width, height);
                     else if (rbHistogram.Checked)
-                        return ExtractHistogramFeaturesGPU();
+                        return ExtractHistogramFeaturesGPU(viewData, width, height);
                     else
-                        return ExtractGLCMFeaturesGPU(); // Default
+                        return ExtractGLCMFeaturesGPU(viewData, width, height); // Default
                 }
+
+                // Use CPU implementation if GPU failed or not available
+                if (rbGlcm.Checked)
+                    return ExtractGLCMFeatures(viewData, width, height);
+                else if (rbLbp.Checked)
+                    return ExtractLBPFeatures(viewData, width, height);
+                else if (rbHistogram.Checked)
+                    return ExtractHistogramFeatures(viewData, width, height);
+                else
+                    return ExtractGLCMFeatures(viewData, width, height); // Default
             }
             catch (Exception ex)
             {
-                Logger.Log($"[TextureClassifier] GPU feature extraction failed: {ex.Message}. Falling back to CPU.");
-                // Fall back to CPU
+                Logger.Log($"[TextureClassifier] Feature extraction failed: {ex.Message}. Falling back to basic method.");
+                // Fall back to basic method
+                return ExtractHistogramFeaturesBasic();
             }
-
-            // Use CPU implementation
-            if (rbGlcm.Checked)
-                return ExtractGLCMFeatures();
-            else if (rbLbp.Checked)
-                return ExtractLBPFeatures();
-            else if (rbHistogram.Checked)
-                return ExtractHistogramFeatures();
-            else
-                return ExtractGLCMFeatures(); // Default
         }
 
-        private double[] ExtractGLCMFeatures()
+        // Get view data methods
+        private byte[,] GetXYViewData()
         {
-            // Get the region of interest from the current slice
-            int x = selectionRectangle.X;
-            int y = selectionRectangle.Y;
-            int width = selectionRectangle.Width;
-            int height = selectionRectangle.Height;
+            int width = mainForm.GetWidth();
+            int height = mainForm.GetHeight();
+            byte[,] data = new byte[width, height];
 
+            Parallel.For(0, height, y => {
+                for (int x = 0; x < width; x++)
+                {
+                    data[x, y] = mainForm.volumeData[x, y, xySlice];
+                }
+            });
+
+            return data;
+        }
+
+        private byte[,] GetXZViewData()
+        {
+            int width = mainForm.GetWidth();
+            int depth = mainForm.GetDepth();
+            byte[,] data = new byte[width, depth];
+
+            Parallel.For(0, depth, z => {
+                for (int x = 0; x < width; x++)
+                {
+                    data[x, z] = mainForm.volumeData[x, xzRow, z];
+                }
+            });
+
+            return data;
+        }
+
+        private byte[,] GetYZViewData()
+        {
+            int depth = mainForm.GetDepth();
+            int height = mainForm.GetHeight();
+            byte[,] data = new byte[depth, height];
+
+            Parallel.For(0, height, y => {
+                for (int z = 0; z < depth; z++)
+                {
+                    data[z, y] = mainForm.volumeData[yzCol, y, z];
+                }
+            });
+
+            return data;
+        }
+
+        private double[] ExtractGLCMFeatures(byte[,] region, int width, int height)
+        {
             // Sample only a subset of pixels for large regions
             const int MAX_PIXELS = 10000; // Set a reasonable limit
 
@@ -2172,34 +2460,79 @@ namespace CTS
                 Application.DoEvents();
             }
 
-            // Extract only sampled pixels
-            byte[,] region = new byte[width / sampleStep, height / sampleStep];
-            for (int j = 0; j < height; j += sampleStep)
-            {
-                for (int i = 0; i < width; i += sampleStep)
-                {
-                    if (i / sampleStep < region.GetLength(0) && j / sampleStep < region.GetLength(1))
-                    {
-                        int pixelX = x + i;
-                        int pixelY = y + j;
+            // Extract only sampled pixels with actual selection rectangle
+            int x = Math.Min(selectionRectangle.X, width - 1);
+            int y = Math.Min(selectionRectangle.Y, height - 1);
+            int selWidth = Math.Min(selectionRectangle.Width, width - x);
+            int selHeight = Math.Min(selectionRectangle.Height, height - y);
 
-                        if (pixelX < mainForm.GetWidth() && pixelY < mainForm.GetHeight())
-                            region[i / sampleStep, j / sampleStep] = mainForm.volumeData[pixelX, pixelY, xySlice];
-                    }
+            int sampledWidth = Math.Max(1, selWidth / sampleStep);
+            int sampledHeight = Math.Max(1, selHeight / sampleStep);
+            byte[,] sampledRegion = new byte[sampledWidth, sampledHeight];
+
+            // Sample from the selection region
+            for (int j = 0; j < selHeight; j += sampleStep)
+            {
+                int sampledY = j / sampleStep;
+                if (sampledY >= sampledHeight) continue;
+
+                for (int i = 0; i < selWidth; i += sampleStep)
+                {
+                    int sampledX = i / sampleStep;
+                    if (sampledX >= sampledWidth) continue;
+
+                    int srcX = x + i;
+                    int srcY = y + j;
+
+                    if (srcX < width && srcY < height)
+                        sampledRegion[sampledX, sampledY] = region[srcX, srcY];
                 }
             }
 
-            // Calculate GLCM matrices in 4 directions (0°, 45°, 90°, 135°)
-            int[,] glcm0 = CalculateGLCM(region, 1, 0);   // 0°
-            int[,] glcm45 = CalculateGLCM(region, 1, 1);  // 45°
-            int[,] glcm90 = CalculateGLCM(region, 0, 1);  // 90°
-            int[,] glcm135 = CalculateGLCM(region, -1, 1); // 135°
+            // Initialize the GLCM matrices before parallel processing
+            int[,] glcm0 = null;
+            int[,] glcm45 = null;
+            int[,] glcm90 = null;
+            int[,] glcm135 = null;
 
-            // Extract features from each GLCM matrix
-            double[] features0 = ExtractGLCMFeatures(glcm0);
-            double[] features45 = ExtractGLCMFeatures(glcm45);
-            double[] features90 = ExtractGLCMFeatures(glcm90);
-            double[] features135 = ExtractGLCMFeatures(glcm135);
+            // Calculate all GLCMs in parallel
+            Parallel.Invoke(
+                () => { glcm0 = CalculateGLCM(sampledRegion, 1, 0); },   // 0°
+                () => { glcm45 = CalculateGLCM(sampledRegion, 1, 1); },  // 45°
+                () => { glcm90 = CalculateGLCM(sampledRegion, 0, 1); },  // 90°
+                () => { glcm135 = CalculateGLCM(sampledRegion, -1, 1); } // 135°
+            );
+
+            // Initialize the feature arrays before parallel processing
+            double[] features0 = null;
+            double[] features45 = null;
+            double[] features90 = null;
+            double[] features135 = null;
+
+            // Extract features in parallel
+            Parallel.Invoke(
+                () => { features0 = ExtractGLCMFeatures(glcm0); },
+                () => { features45 = ExtractGLCMFeatures(glcm45); },
+                () => { features90 = ExtractGLCMFeatures(glcm90); },
+                () => { features135 = ExtractGLCMFeatures(glcm135); }
+            );
+
+            // Null safety check
+            if (features0 == null || features45 == null || features90 == null || features135 == null)
+            {
+                // Fallback to sequential processing if parallel failed
+                Logger.Log("[TextureClassifier] Parallel GLCM processing failed, falling back to sequential");
+
+                if (glcm0 == null) glcm0 = CalculateGLCM(sampledRegion, 1, 0);
+                if (glcm45 == null) glcm45 = CalculateGLCM(sampledRegion, 1, 1);
+                if (glcm90 == null) glcm90 = CalculateGLCM(sampledRegion, 0, 1);
+                if (glcm135 == null) glcm135 = CalculateGLCM(sampledRegion, -1, 1);
+
+                features0 = ExtractGLCMFeatures(glcm0);
+                features45 = ExtractGLCMFeatures(glcm45);
+                features90 = ExtractGLCMFeatures(glcm90);
+                features135 = ExtractGLCMFeatures(glcm135);
+            }
 
             // Average the features from all directions
             double[] combinedFeatures = new double[features0.Length];
@@ -2315,58 +2648,57 @@ namespace CTS
             return new double[] { contrast, dissimilarity, homogeneity, energy, correlation };
         }
 
-        private double[] ExtractLBPFeatures()
+        private double[] ExtractLBPFeatures(byte[,] region, int width, int height)
         {
-            // Get the region of interest from the current slice
-            int x = selectionRectangle.X;
-            int y = selectionRectangle.Y;
-            int width = selectionRectangle.Width;
-            int height = selectionRectangle.Height;
+            // Get the region of interest from the current active view
+            int x = Math.Min(selectionRectangle.X, width - 1);
+            int y = Math.Min(selectionRectangle.Y, height - 1);
+            int selWidth = Math.Min(selectionRectangle.Width, width - x);
+            int selHeight = Math.Min(selectionRectangle.Height, height - y);
 
-            if (width < 3 || height < 3)
+            if (selWidth < 3 || selHeight < 3)
                 throw new ArgumentException("Selected region is too small for LBP analysis");
 
             // Extract the pixel values
-            byte[,] region = new byte[width, height];
-            for (int j = 0; j < height; j++)
+            byte[,] sampledRegion = new byte[selWidth, selHeight];
+            for (int j = 0; j < selHeight; j++)
             {
-                for (int i = 0; i < width; i++)
+                for (int i = 0; i < selWidth; i++)
                 {
-                    int pixelX = x + i;
-                    int pixelY = y + j;
-
-                    if (pixelX < mainForm.GetWidth() && pixelY < mainForm.GetHeight())
-                        region[i, j] = mainForm.volumeData[pixelX, pixelY, xySlice];
+                    int srcX = x + i;
+                    int srcY = y + j;
+                    if (srcX < width && srcY < height)
+                        sampledRegion[i, j] = region[srcX, srcY];
                 }
             }
 
             // Compute LBP
             int[] histogram = new int[256]; // For 8 neighbors, we have 2^8 = 256 possible patterns
 
-            for (int j = 1; j < height - 1; j++)
-            {
-                for (int i = 1; i < width - 1; i++)
+            Parallel.For(1, selHeight - 1, j => {
+                for (int i = 1; i < selWidth - 1; i++)
                 {
-                    byte centerValue = region[i, j];
+                    byte centerValue = sampledRegion[i, j];
                     byte lbpValue = 0;
 
                     // Check all 8 neighbors
-                    if (region[i - 1, j - 1] >= centerValue) lbpValue |= 0x01;  // Top-left
-                    if (region[i, j - 1] >= centerValue) lbpValue |= 0x02;  // Top
-                    if (region[i + 1, j - 1] >= centerValue) lbpValue |= 0x04;  // Top-right
-                    if (region[i + 1, j] >= centerValue) lbpValue |= 0x08;  // Right
-                    if (region[i + 1, j + 1] >= centerValue) lbpValue |= 0x10;  // Bottom-right
-                    if (region[i, j + 1] >= centerValue) lbpValue |= 0x20;  // Bottom
-                    if (region[i - 1, j + 1] >= centerValue) lbpValue |= 0x40;  // Bottom-left
-                    if (region[i - 1, j] >= centerValue) lbpValue |= 0x80;  // Left
+                    if (sampledRegion[i - 1, j - 1] >= centerValue) lbpValue |= 0x01;  // Top-left
+                    if (sampledRegion[i, j - 1] >= centerValue) lbpValue |= 0x02;  // Top
+                    if (sampledRegion[i + 1, j - 1] >= centerValue) lbpValue |= 0x04;  // Top-right
+                    if (sampledRegion[i + 1, j] >= centerValue) lbpValue |= 0x08;  // Right
+                    if (sampledRegion[i + 1, j + 1] >= centerValue) lbpValue |= 0x10;  // Bottom-right
+                    if (sampledRegion[i, j + 1] >= centerValue) lbpValue |= 0x20;  // Bottom
+                    if (sampledRegion[i - 1, j + 1] >= centerValue) lbpValue |= 0x40;  // Bottom-left
+                    if (sampledRegion[i - 1, j] >= centerValue) lbpValue |= 0x80;  // Left
 
-                    histogram[lbpValue]++;
+                    // Thread-safe update of histogram
+                    System.Threading.Interlocked.Increment(ref histogram[lbpValue]);
                 }
-            }
+            });
 
             // Normalize the histogram
             double[] normalizedHistogram = new double[256];
-            int totalPixels = (width - 2) * (height - 2); // Excluding border pixels
+            int totalPixels = (selWidth - 2) * (selHeight - 2); // Excluding border pixels
 
             if (totalPixels > 0)
             {
@@ -2379,38 +2711,37 @@ namespace CTS
             return normalizedHistogram;
         }
 
-        private double[] ExtractHistogramFeatures()
+        private double[] ExtractHistogramFeatures(byte[,] region, int width, int height)
         {
-            // Get the region of interest from the current slice
-            int x = selectionRectangle.X;
-            int y = selectionRectangle.Y;
-            int width = selectionRectangle.Width;
-            int height = selectionRectangle.Height;
+            // Get the region of interest
+            int x = Math.Min(selectionRectangle.X, width - 1);
+            int y = Math.Min(selectionRectangle.Y, height - 1);
+            int selWidth = Math.Min(selectionRectangle.Width, width - x);
+            int selHeight = Math.Min(selectionRectangle.Height, height - y);
 
-            if (width <= 0 || height <= 0)
+            if (selWidth <= 0 || selHeight <= 0)
                 throw new ArgumentException("Selected region is empty");
 
             // Compute histogram with 256 bins (one for each gray level)
             int[] histogram = new int[256];
 
-            for (int j = 0; j < height; j++)
-            {
-                for (int i = 0; i < width; i++)
+            // Use parallel processing for better performance
+            Parallel.For(0, selHeight, j => {
+                for (int i = 0; i < selWidth; i++)
                 {
-                    int pixelX = x + i;
-                    int pixelY = y + j;
-
-                    if (pixelX < mainForm.GetWidth() && pixelY < mainForm.GetHeight())
+                    int srcX = x + i;
+                    int srcY = y + j;
+                    if (srcX < width && srcY < height)
                     {
-                        byte value = mainForm.volumeData[pixelX, pixelY, xySlice];
-                        histogram[value]++;
+                        byte value = region[srcX, srcY];
+                        System.Threading.Interlocked.Increment(ref histogram[value]);
                     }
                 }
-            }
+            });
 
             // Normalize the histogram
             double[] normalizedHistogram = new double[256];
-            int totalPixels = width * height;
+            int totalPixels = selWidth * selHeight;
 
             if (totalPixels > 0)
             {
@@ -2459,22 +2790,129 @@ namespace CTS
             return new double[] { mean, stdDev, skewness, kurtosis, energy, entropy };
         }
 
+        private double[] ExtractHistogramFeaturesBasic()
+        {
+            // Fallback method when other methods fail
+            int[] histogram = new int[256];
+            int totalPixels = 0;
+
+            // Get data based on active view
+            switch (currentActiveView)
+            {
+                case ActiveView.XZ:
+                    // XZ view: x = x, y = z
+                    {
+                        int x = selectionRectangle.X;
+                        int z = selectionRectangle.Y;
+                        int width = selectionRectangle.Width;
+                        int height = selectionRectangle.Height;
+
+                        for (int dz = 0; dz < height && z + dz < mainForm.GetDepth(); dz++)
+                        {
+                            for (int dx = 0; dx < width && x + dx < mainForm.GetWidth(); dx++)
+                            {
+                                histogram[mainForm.volumeData[x + dx, xzRow, z + dz]]++;
+                                totalPixels++;
+                            }
+                        }
+                    }
+                    break;
+
+                case ActiveView.YZ:
+                    // YZ view: x = z, y = y
+                    {
+                        int z = selectionRectangle.X;
+                        int y = selectionRectangle.Y;
+                        int width = selectionRectangle.Width;
+                        int height = selectionRectangle.Height;
+
+                        for (int dy = 0; dy < height && y + dy < mainForm.GetHeight(); dy++)
+                        {
+                            for (int dz = 0; dz < width && z + dz < mainForm.GetDepth(); dz++)
+                            {
+                                histogram[mainForm.volumeData[yzCol, y + dy, z + dz]]++;
+                                totalPixels++;
+                            }
+                        }
+                    }
+                    break;
+
+                case ActiveView.XY:
+                default:
+                    // XY view: x = x, y = y
+                    {
+                        int x = selectionRectangle.X;
+                        int y = selectionRectangle.Y;
+                        int width = selectionRectangle.Width;
+                        int height = selectionRectangle.Height;
+
+                        for (int dy = 0; dy < height && y + dy < mainForm.GetHeight(); dy++)
+                        {
+                            for (int dx = 0; dx < width && x + dx < mainForm.GetWidth(); dx++)
+                            {
+                                histogram[mainForm.volumeData[x + dx, y + dy, xySlice]]++;
+                                totalPixels++;
+                            }
+                        }
+                    }
+                    break;
+            }
+
+            // Calculate basic statistics
+            double[] features = new double[6]; // mean, stdDev, skewness, kurtosis, energy, entropy
+            double mean = 0.0;
+
+            // Normalize and calculate mean
+            double[] normalizedHistogram = new double[256];
+            if (totalPixels > 0)
+            {
+                for (int i = 0; i < 256; i++)
+                {
+                    normalizedHistogram[i] = histogram[i] / (double)totalPixels;
+                    mean += i * normalizedHistogram[i];
+                }
+            }
+
+            features[0] = mean;
+
+            // Calculate other features
+            double stdDev = 0;
+            for (int i = 0; i < 256; i++)
+            {
+                stdDev += Math.Pow(i - mean, 2) * normalizedHistogram[i];
+                features[4] += normalizedHistogram[i] * normalizedHistogram[i]; // energy
+
+                if (normalizedHistogram[i] > 0)
+                    features[5] -= normalizedHistogram[i] * Math.Log(normalizedHistogram[i], 2); // entropy
+            }
+
+            features[1] = Math.Sqrt(stdDev);
+
+            // Skip complex calculations for skewness and kurtosis if stdDev is too small
+            if (features[1] > 0.0001)
+            {
+                for (int i = 0; i < 256; i++)
+                {
+                    features[2] += Math.Pow((i - mean) / features[1], 3) * normalizedHistogram[i]; // skewness
+                    features[3] += Math.Pow((i - mean) / features[1], 4) * normalizedHistogram[i]; // kurtosis
+                }
+                features[3] -= 3; // excess kurtosis
+            }
+
+            return features;
+        }
+
         private double CalculateSimilarity(double[] featuresA, double[] featuresB)
         {
             // Different similarity metrics depending on the feature type
-            if (rbHistogram.Checked)
+            if (rbHistogram.Checked || rbLbp.Checked)
             {
-                // For histograms: Histogram intersection or chi-square distance
+                // For histograms and LBP: Histogram intersection
                 return CalculateHistogramIntersection(featuresA, featuresB);
             }
-            else if (rbLbp.Checked)
+            else // GLCM
             {
-                // For LBP: Histogram intersection is a good metric
-                return CalculateHistogramIntersection(featuresA, featuresB);
-            }
-            else // GLCM or others
-            {
-                // For GLCM features: Euclidean similarity or cosine similarity
+                // For GLCM features: Cosine similarity
                 return CalculateCosineSimilarity(featuresA, featuresB);
             }
         }
@@ -2525,21 +2963,42 @@ namespace CTS
             {
                 statusLabel.Text = "Classifying current slice...";
 
-                // Create a mask for the results
-                int width = mainForm.GetWidth();
-                int height = mainForm.GetHeight();
+                // Create a mask for the results based on active view
+                int width, height;
+                byte[,] viewData;
+
+                switch (currentActiveView)
+                {
+                    case ActiveView.XZ:
+                        width = mainForm.GetWidth();
+                        height = mainForm.GetDepth();
+                        viewData = GetXZViewData();
+                        break;
+                    case ActiveView.YZ:
+                        width = mainForm.GetDepth();
+                        height = mainForm.GetHeight();
+                        viewData = GetYZViewData();
+                        break;
+                    case ActiveView.XY:
+                    default:
+                        width = mainForm.GetWidth();
+                        height = mainForm.GetHeight();
+                        viewData = GetXYViewData();
+                        break;
+                }
+
                 classificationMask = new byte[width, height];
 
-                // Use the specified patch size if odd, or default to 7
+                // Use the specified patch size
                 int patchRadius = patchSize / 2;
 
-                // Process each pixel with a sliding window
-                for (int y = patchRadius; y < height - patchRadius; y++)
+                // Process each pixel with a sliding window in parallel
+                Parallel.For(patchRadius, height - patchRadius, y =>
                 {
-                    for (int x = patchRadius; x < width - patchRadius; x++)
+                    for (int x = patchRadius; x < width - patchRadius; x += 2) // Use stride of 2 for speed
                     {
                         // Extract features from this local region
-                        double[] localFeatures = ExtractFeaturesFromPatch(x, y, xySlice, patchSize);
+                        double[] localFeatures = ExtractFeaturesFromPatch(viewData, x, y);
 
                         // Calculate similarity to the reference features
                         double similarity = CalculateSimilarity(localFeatures, referenceFeatures);
@@ -2547,13 +3006,39 @@ namespace CTS
                         // If similarity is above threshold, mark this pixel
                         if (similarity >= threshold)
                         {
-                            classificationMask[x, y] = selectedMaterial.ID;
+                            // Mark a block for better visibility
+                            for (int dy = -1; dy <= 1; dy++)
+                            {
+                                for (int dx = -1; dx <= 1; dx++)
+                                {
+                                    int nx = x + dx;
+                                    int ny = y + dy;
+
+                                    if (nx >= 0 && nx < width && ny >= 0 && ny < height)
+                                    {
+                                        classificationMask[nx, ny] = selectedMaterial.ID;
+                                    }
+                                }
+                            }
                         }
                     }
+                });
+
+                // Update the relevant viewer based on active view
+                switch (currentActiveView)
+                {
+                    case ActiveView.XZ:
+                        xzViewer.Invalidate();
+                        break;
+                    case ActiveView.YZ:
+                        yzViewer.Invalidate();
+                        break;
+                    case ActiveView.XY:
+                    default:
+                        xyViewer.Invalidate();
+                        break;
                 }
 
-                // Update the display
-                xyViewer.Invalidate();
                 statusLabel.Text = "Classification complete. Adjust threshold if needed.";
             }
             catch (Exception ex)
@@ -2564,7 +3049,7 @@ namespace CTS
             }
         }
 
-        private double[] ExtractFeaturesFromPatch(int centerX, int centerY, int sliceZ, int patchSize)
+        private double[] ExtractFeaturesFromPatch(byte[,] viewData, int centerX, int centerY)
         {
             int radius = patchSize / 2;
             byte[,] patch = new byte[patchSize, patchSize];
@@ -2577,23 +3062,24 @@ namespace CTS
                     int pixelX = centerX - radius + x;
                     int pixelY = centerY - radius + y;
 
-                    if (pixelX >= 0 && pixelX < mainForm.GetWidth() &&
-                        pixelY >= 0 && pixelY < mainForm.GetHeight())
+                    if (pixelX >= 0 && pixelX < viewData.GetLength(0) &&
+                        pixelY >= 0 && pixelY < viewData.GetLength(1))
                     {
-                        patch[x, y] = mainForm.volumeData[pixelX, pixelY, sliceZ];
+                        patch[x, y] = viewData[pixelX, pixelY];
                     }
                 }
             }
 
-            // Extract features from this patch based on selected method
+            // Extract features based on selected method
             if (rbGlcm.Checked)
             {
+                // For GLCM, just compute one direction for efficiency
                 int[,] glcm = CalculateGLCM(patch, 1, 0);  // 0° direction
                 return ExtractGLCMFeatures(glcm);
             }
             else if (rbLbp.Checked)
             {
-                // Calculate LBP for the patch
+                // LBP histogram
                 int[] histogram = new int[256];
 
                 for (int y = 1; y < patchSize - 1; y++)
@@ -2632,6 +3118,7 @@ namespace CTS
             }
             else // Histogram
             {
+                // Basic histogram statistics
                 int[] histogram = new int[256];
 
                 for (int y = 0; y < patchSize; y++)
@@ -2642,7 +3129,7 @@ namespace CTS
                     }
                 }
 
-                // Normalize the histogram
+                // Normalize
                 double[] normalizedHistogram = new double[256];
                 int totalPixels = patchSize * patchSize;
 
@@ -2654,21 +3141,14 @@ namespace CTS
                     }
                 }
 
-                // Extract histogram statistics
+                // Statistical features
                 double mean = 0.0;
+                for (int i = 0; i < 256; i++) mean += i * normalizedHistogram[i];
+
                 double stdDev = 0.0;
-                double skewness = 0.0;
-                double kurtosis = 0.0;
                 double energy = 0.0;
                 double entropy = 0.0;
 
-                // Calculate mean
-                for (int i = 0; i < 256; i++)
-                {
-                    mean += i * normalizedHistogram[i];
-                }
-
-                // Calculate standard deviation, energy, and entropy
                 for (int i = 0; i < 256; i++)
                 {
                     stdDev += Math.Pow(i - mean, 2) * normalizedHistogram[i];
@@ -2679,7 +3159,9 @@ namespace CTS
                 }
                 stdDev = Math.Sqrt(stdDev);
 
-                // Calculate skewness and kurtosis
+                double skewness = 0.0;
+                double kurtosis = 0.0;
+
                 if (stdDev > 0)
                 {
                     for (int i = 0; i < 256; i++)
@@ -2688,10 +3170,104 @@ namespace CTS
                         kurtosis += Math.Pow((i - mean) / stdDev, 4) * normalizedHistogram[i];
                     }
                 }
-                kurtosis -= 3.0; // Excess kurtosis
+                kurtosis -= 3.0;
 
                 return new double[] { mean, stdDev, skewness, kurtosis, energy, entropy };
             }
+        }
+
+        private byte[,] ClassifySlice(int sliceZ)
+        {
+            // Get data for the specified slice
+            byte[,] sliceData;
+            int width, height;
+
+            switch (currentActiveView)
+            {
+                case ActiveView.XZ:
+                    // For XZ view, we need to classify a constant-Y plane
+                    width = mainForm.GetWidth();
+                    height = mainForm.GetDepth();
+                    sliceData = new byte[width, height];
+
+                    Parallel.For(0, height, z => {
+                        for (int x = 0; x < width; x++)
+                        {
+                            sliceData[x, z] = mainForm.volumeData[x, xzRow, z];
+                        }
+                    });
+                    break;
+
+                case ActiveView.YZ:
+                    // For YZ view, we need to classify a constant-X plane
+                    width = mainForm.GetDepth();
+                    height = mainForm.GetHeight();
+                    sliceData = new byte[width, height];
+
+                    Parallel.For(0, height, y => {
+                        for (int z = 0; z < width; z++)
+                        {
+                            sliceData[z, y] = mainForm.volumeData[yzCol, y, z];
+                        }
+                    });
+                    break;
+
+                case ActiveView.XY:
+                default:
+                    // For XY view, we need a horizontal slice
+                    width = mainForm.GetWidth();
+                    height = mainForm.GetHeight();
+                    sliceData = new byte[width, height];
+
+                    Parallel.For(0, height, y => {
+                        for (int x = 0; x < width; x++)
+                        {
+                            sliceData[x, y] = mainForm.volumeData[x, y, sliceZ];
+                        }
+                    });
+                    break;
+            }
+
+            // Create mask to store classification results
+            byte[,] sliceMask = new byte[width, height];
+
+            // Use the specified patch size
+            int patchRadius = patchSize / 2;
+
+            // Process each pixel with a sliding window in parallel
+            Parallel.For(patchRadius, height - patchRadius, y =>
+            {
+                // Skip some pixels for speed (stride of 2)
+                for (int x = patchRadius; x < width - patchRadius; x += 2)
+                {
+                    // Extract features from this local region
+                    double[] localFeatures = ExtractFeaturesFromPatch(sliceData, x, y);
+
+                    // Calculate similarity to the reference features
+                    double similarity = CalculateSimilarity(localFeatures, referenceFeatures);
+
+                    // If similarity is above threshold, mark this pixel
+                    if (similarity >= threshold)
+                    {
+                        // Mark a block of pixels for efficiency
+                        for (int dy = -1; dy <= 1; dy++)
+                        {
+                            for (int dx = -1; dx <= 1; dx++)
+                            {
+                                int nx = x + dx;
+                                int ny = y + dy;
+
+                                if (nx >= 0 && nx < width && ny >= 0 && ny < height)
+                                {
+                                    sliceMask[nx, ny] = selectedMaterial.ID;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            return sliceMask;
         }
 
         private async void ApplyClassification()
@@ -2734,29 +3310,78 @@ namespace CTS
                 // Total work to do
                 int totalWork = endSlice - startSlice + 1;
                 int completedWork = 0;
+                object progressLock = new object();
 
-                // Process each slice in the range
-                await Task.Run(() =>
-                {
-                    for (int z = startSlice; z <= endSlice; z++)
+                // Process slices based on active view
+                await Task.Run(() => {
+                    switch (currentActiveView)
                     {
-                        byte[,] sliceMask = ClassifySlice(z);
-
-                        // Apply the classification mask to the volume labels
-                        for (int y = 0; y < mainForm.GetHeight(); y++)
-                        {
-                            for (int x = 0; x < mainForm.GetWidth(); x++)
+                        case ActiveView.XZ:
+                            // For XZ view (constant Y), we process each slice by varying Y
+                            Parallel.For(0, mainForm.GetHeight(), new ParallelOptions
+                            { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount - 1) }, y =>
                             {
-                                if (sliceMask[x, y] > 0)
-                                {
-                                    mainForm.volumeLabels[x, y, z] = selectedMaterial.ID;
-                                }
-                            }
-                        }
+                                byte[,] resultMask = ClassifyXZSlice(y);
 
-                        // Update progress
-                        completedWork++;
-                        progressForm.SafeUpdateProgress(completedWork, totalWork, $"Processing slice {z}...");
+                                // Apply the results to the volume
+                                ApplyXZResultToVolume(resultMask, y);
+
+                                // Update progress
+                                lock (progressLock)
+                                {
+                                    completedWork++;
+                                    progressForm.SafeUpdateProgress(completedWork, mainForm.GetHeight(), $"Processing XZ slice at Y={y}...");
+                                }
+                            });
+                            break;
+
+                        case ActiveView.YZ:
+                            // For YZ view (constant X), we process each slice by varying X
+                            Parallel.For(0, mainForm.GetWidth(), new ParallelOptions
+                            { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount - 1) }, x =>
+                            {
+                                byte[,] resultMask = ClassifyYZSlice(x);
+
+                                // Apply the results to the volume
+                                ApplyYZResultToVolume(resultMask, x);
+
+                                // Update progress
+                                lock (progressLock)
+                                {
+                                    completedWork++;
+                                    progressForm.SafeUpdateProgress(completedWork, mainForm.GetWidth(), $"Processing YZ slice at X={x}...");
+                                }
+                            });
+                            break;
+
+                        case ActiveView.XY:
+                        default:
+                            // For XY view, process a range of Z slices
+                            Parallel.For(startSlice, endSlice + 1, new ParallelOptions
+                            { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount - 1) }, z =>
+                            {
+                                byte[,] sliceMask = ClassifySlice(z);
+
+                                // Apply the classification mask to the volume labels
+                                for (int y = 0; y < mainForm.GetHeight(); y++)
+                                {
+                                    for (int x = 0; x < mainForm.GetWidth(); x++)
+                                    {
+                                        if (sliceMask[x, y] > 0)
+                                        {
+                                            mainForm.volumeLabels[x, y, z] = selectedMaterial.ID;
+                                        }
+                                    }
+                                }
+
+                                // Update progress with thread safety
+                                lock (progressLock)
+                                {
+                                    completedWork++;
+                                    progressForm.SafeUpdateProgress(completedWork, totalWork, $"Processing slice {z}...");
+                                }
+                            });
+                            break;
                     }
                 });
 
@@ -2781,40 +3406,51 @@ namespace CTS
             }
         }
 
-        private byte[,] ClassifySlice(int sliceZ)
+        private byte[,] ClassifyXZSlice(int yPos)
         {
+            // Create a slice for the XZ plane at the given Y position
             int width = mainForm.GetWidth();
-            int height = mainForm.GetHeight();
-            byte[,] sliceMask = new byte[width, height];
+            int depth = mainForm.GetDepth();
+            byte[,] sliceData = new byte[width, depth];
+
+            for (int z = 0; z < depth; z++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    sliceData[x, z] = mainForm.volumeData[x, yPos, z];
+                }
+            }
+
+            // Use the same classification logic
+            byte[,] resultMask = new byte[width, depth];
 
             // Use the specified patch size
             int patchRadius = patchSize / 2;
 
-            // Process each pixel with a sliding window
-            for (int y = patchRadius; y < height - patchRadius; y += 2) // Step by 2 for faster processing
+            // Process with a stride of 2 for speed
+            for (int z = patchRadius; z < depth - patchRadius; z += 2)
             {
                 for (int x = patchRadius; x < width - patchRadius; x += 2)
                 {
-                    // Extract features from this local region
-                    double[] localFeatures = ExtractFeaturesFromPatch(x, y, sliceZ, patchSize);
+                    // Get features for this patch
+                    double[] features = ExtractFeaturesFromPatch(sliceData, x, z);
 
-                    // Calculate similarity to the reference features
-                    double similarity = CalculateSimilarity(localFeatures, referenceFeatures);
+                    // Check similarity
+                    double similarity = CalculateSimilarity(features, referenceFeatures);
 
-                    // If similarity is above threshold, mark this pixel
                     if (similarity >= threshold)
                     {
-                        // Mark a block of pixels for faster processing
-                        for (int dy = -1; dy <= 1; dy++)
+                        // Mark a block
+                        for (int dz = -1; dz <= 1; dz++)
                         {
                             for (int dx = -1; dx <= 1; dx++)
                             {
                                 int nx = x + dx;
-                                int ny = y + dy;
+                                int nz = z + dz;
 
-                                if (nx >= 0 && nx < width && ny >= 0 && ny < height)
+                                if (nx >= 0 && nx < width && nz >= 0 && nz < depth)
                                 {
-                                    sliceMask[nx, ny] = selectedMaterial.ID;
+                                    resultMask[nx, nz] = selectedMaterial.ID;
                                 }
                             }
                         }
@@ -2822,7 +3458,96 @@ namespace CTS
                 }
             }
 
-            return sliceMask;
+            return resultMask;
+        }
+
+        private void ApplyXZResultToVolume(byte[,] resultMask, int yPos)
+        {
+            int width = mainForm.GetWidth();
+            int depth = mainForm.GetDepth();
+
+            for (int z = 0; z < depth; z++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    if (resultMask[x, z] > 0)
+                    {
+                        mainForm.volumeLabels[x, yPos, z] = selectedMaterial.ID;
+                    }
+                }
+            }
+        }
+
+        private byte[,] ClassifyYZSlice(int xPos)
+        {
+            // Create a slice for the YZ plane at the given X position
+            int height = mainForm.GetHeight();
+            int depth = mainForm.GetDepth();
+            byte[,] sliceData = new byte[depth, height];
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int z = 0; z < depth; z++)
+                {
+                    sliceData[z, y] = mainForm.volumeData[xPos, y, z];
+                }
+            }
+
+            // Use the same classification logic
+            byte[,] resultMask = new byte[depth, height];
+
+            // Use the specified patch size
+            int patchRadius = patchSize / 2;
+
+            // Process with a stride of 2 for speed
+            for (int y = patchRadius; y < height - patchRadius; y += 2)
+            {
+                for (int z = patchRadius; z < depth - patchRadius; z += 2)
+                {
+                    // Get features for this patch
+                    double[] features = ExtractFeaturesFromPatch(sliceData, z, y);
+
+                    // Check similarity
+                    double similarity = CalculateSimilarity(features, referenceFeatures);
+
+                    if (similarity >= threshold)
+                    {
+                        // Mark a block
+                        for (int dy = -1; dy <= 1; dy++)
+                        {
+                            for (int dz = -1; dz <= 1; dz++)
+                            {
+                                int nz = z + dz;
+                                int ny = y + dy;
+
+                                if (nz >= 0 && nz < depth && ny >= 0 && ny < height)
+                                {
+                                    resultMask[nz, ny] = selectedMaterial.ID;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            return resultMask;
+        }
+
+        private void ApplyYZResultToVolume(byte[,] resultMask, int xPos)
+        {
+            int height = mainForm.GetHeight();
+            int depth = mainForm.GetDepth();
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int z = 0; z < depth; z++)
+                {
+                    if (resultMask[z, y] > 0)
+                    {
+                        mainForm.volumeLabels[xPos, y, z] = selectedMaterial.ID;
+                    }
+                }
+            }
         }
 
         public void Show()

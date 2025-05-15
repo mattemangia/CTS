@@ -12,7 +12,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-
+using static CTS.FrameCacheManager;
 using Timer = System.Windows.Forms.Timer;
 
 namespace CTS

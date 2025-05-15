@@ -1363,6 +1363,21 @@ namespace CTS
 
         private void FinaliseAndRaiseEvent()
         {
+            if (cacheManager != null)
+            {
+                Logger.Log("[AcousticSimulator] Waiting for all frames to be saved...");
+
+                bool allSaved = cacheManager.WaitForAllFramesToSave(120, (saved, total) =>
+                {
+                    int percent = (int)((saved * 100.0) / total);
+                    ReportProgress($"Saving frames... {percent}%", 95 + (percent / 20));
+                });
+
+                if (!allSaved)
+                {
+                    Logger.Log("[AcousticSimulator] Warning: Not all frames were saved");
+                }
+            }
             double dist = Math.Sqrt((tx - rx) * (tx - rx) +
                                    (ty - ry) * (ty - ry) +
                                    (tz - rz) * (tz - rz)) * pixelSize;

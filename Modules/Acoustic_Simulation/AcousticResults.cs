@@ -1658,12 +1658,12 @@ namespace CTS
         private void WaveformPictureBox_Paint(object sender, PaintEventArgs e)
         {
             Graphics g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
             g.Clear(Color.FromArgb(20, 20, 20));
 
             // If no simulation results, show info message
             if (simulationResults == null)
             {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
                 using (Font font = new Font("Segoe UI", 12))
                 using (Brush brush = new SolidBrush(Color.White))
                 {
@@ -1680,19 +1680,13 @@ namespace CTS
             int height = waveformPictureBox.Height;
 
             // Draw grid
+            g.SmoothingMode = SmoothingMode.None;
             using (Pen gridPen = new Pen(Color.FromArgb(40, 40, 40)))
             {
-                // Vertical grid lines
                 for (int x = 0; x < width; x += 50)
-                {
                     g.DrawLine(gridPen, x, 0, x, height);
-                }
-
-                // Horizontal grid lines
                 for (int y = 0; y < height; y += 50)
-                {
                     g.DrawLine(gridPen, 0, y, width, y);
-                }
             }
 
             // Draw center line
@@ -1706,49 +1700,41 @@ namespace CTS
             float[] pWaveSeries = GenerateWaveformData(true);
             float[] sWaveSeries = GenerateWaveformData(false);
 
+            if (pWaveSeries == null || sWaveSeries == null || pWaveSeries.Length == 0 || sWaveSeries.Length == 0)
+                return;
+
             int centerY = height / 2;
 
-            // Ensure we include both P and S wave arrivals in the display
-            int maxDataLength = Math.Max(pWaveSeries.Length, sWaveSeries.Length);
+            // Calculate display range based on zoom
+            int dataLength = Math.Max(pWaveSeries.Length, sWaveSeries.Length);
+            int pointsToShow = (int)(dataLength / waveformZoom);
+            int endIndex = dataLength - 1;
+            int startIndex = Math.Max(0, endIndex - pointsToShow);
 
-            // Calculate the visible range based on zoom and ensure it includes both arrivals
-            int endDataIndex = maxDataLength - 1;
-            int visiblePoints = (int)(endDataIndex / waveformZoom);
-            int startDataIndex = Math.Max(0, endDataIndex - visiblePoints);
+            // Ensure we include both P and S arrivals in view
+            startIndex = Math.Min(startIndex, simulationResults.PWaveTravelTime - 50);
+            endIndex = Math.Max(endIndex, simulationResults.SWaveTravelTime + 100);
+            endIndex = Math.Min(endIndex, dataLength - 1);
 
-            // If S-wave arrival is beyond current view, adjust to include it
-            if (simulationResults.SWaveTravelTime > endDataIndex)
-            {
-                endDataIndex = simulationResults.SWaveTravelTime + 100; // Add some margin
-                startDataIndex = Math.Max(0, (int)(endDataIndex - width / waveformZoom));
-            }
+            // Calculate x-axis scaling
+            float xScale = (float)width / Math.Max(1, endIndex - startIndex);
 
-            // Calculate x-scaling based on visible range
-            float xScale = (float)width / Math.Max(1, endDataIndex - startDataIndex);
+            // Calculate P and S arrival X positions
+            float pArrivalX = (simulationResults.PWaveTravelTime - startIndex) * xScale;
+            float sArrivalX = (simulationResults.SWaveTravelTime - startIndex) * xScale;
 
-            // Find max amplitude for scaling
+            // Find max amplitude for y-scaling
             float maxAmplitude = 0.1f;
-            for (int i = startDataIndex; i <= endDataIndex; i++)
-            {
-                if (i < pWaveSeries.Length)
-                    maxAmplitude = Math.Max(maxAmplitude, Math.Abs(pWaveSeries[i]));
+            for (int i = startIndex; i <= endIndex && i < pWaveSeries.Length; i++)
+                maxAmplitude = Math.Max(maxAmplitude, Math.Abs(pWaveSeries[i]));
+            for (int i = startIndex; i <= endIndex && i < sWaveSeries.Length; i++)
+                maxAmplitude = Math.Max(maxAmplitude, Math.Abs(sWaveSeries[i]));
 
-                if (i < sWaveSeries.Length)
-                    maxAmplitude = Math.Max(maxAmplitude, Math.Abs(sWaveSeries[i]));
-            }
-
-            // Calculate y-scaling to use 80% of the panel height
             float yScale = (height * 0.4f) / Math.Max(0.1f, maxAmplitude);
 
-            // Calculate P and S arrival positions
-            int pArrivalPos = simulationResults.PWaveTravelTime;
-            int sArrivalPos = simulationResults.SWaveTravelTime;
-
-            float pArrivalX = (pArrivalPos - startDataIndex) * xScale;
-            float sArrivalX = (sArrivalPos - startDataIndex) * xScale;
-
-            // Draw dead time region if enabled
-            if (chkShowDeadTime.Checked && pArrivalX < width && sArrivalX > 0)
+            // Draw dead time region
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            if (chkShowDeadTime.Checked && pArrivalX >= 0 && sArrivalX <= width)
             {
                 using (Brush deadTimeBrush = new SolidBrush(DeadTimeColor))
                 {
@@ -1758,14 +1744,12 @@ namespace CTS
                     {
                         g.FillRectangle(deadTimeBrush, startX, 0, endX - startX, height);
 
-                        // Draw "Dead Time" label
-                        using (Font font = new Font("Segoe UI", 9, FontStyle.Bold))
+                        using (Font font = new Font("Arial", 9, FontStyle.Bold))
                         using (Brush textBrush = new SolidBrush(Color.Black))
                         {
                             string deadTimeText = "Dead Time";
                             SizeF textSize = g.MeasureString(deadTimeText, font);
 
-                            // Only draw if there's enough space
                             if (endX - startX > textSize.Width + 10)
                             {
                                 float textX = startX + (endX - startX - textSize.Width) / 2;
@@ -1776,6 +1760,9 @@ namespace CTS
                 }
             }
 
+            // Draw arrival lines
+            g.SmoothingMode = SmoothingMode.None;
+
             // Draw P-wave arrival line
             if (pArrivalX >= 0 && pArrivalX < width)
             {
@@ -1783,13 +1770,6 @@ namespace CTS
                 {
                     arrivalPen.DashStyle = DashStyle.Dash;
                     g.DrawLine(arrivalPen, pArrivalX, 0, pArrivalX, height);
-
-                    // Draw label
-                    using (Font font = new Font("Segoe UI", 9, FontStyle.Bold))
-                    using (Brush textBrush = new SolidBrush(PWaveColor))
-                    {
-                        g.DrawString("P-Wave Arrival", font, textBrush, pArrivalX + 5, height - 40);
-                    }
                 }
             }
 
@@ -1800,48 +1780,69 @@ namespace CTS
                 {
                     arrivalPen.DashStyle = DashStyle.Dash;
                     g.DrawLine(arrivalPen, sArrivalX, 0, sArrivalX, height);
-
-                    // Draw label
-                    using (Font font = new Font("Segoe UI", 9, FontStyle.Bold))
-                    using (Brush textBrush = new SolidBrush(SWaveColor))
-                    {
-                        g.DrawString("S-Wave Arrival", font, textBrush, sArrivalX + 5, height - 20);
-                    }
                 }
             }
+
+            // Draw waveforms
+            g.SmoothingMode = SmoothingMode.None;
 
             // Draw P-wave
             if (chkShowPWave.Checked)
             {
-                DrawWaveform(g, pWaveSeries, startDataIndex, endDataIndex, xScale, yScale, centerY, PWaveColor);
+                DrawWaveform(g, pWaveSeries, startIndex, endIndex, xScale, yScale, centerY, PWaveColor);
             }
 
             // Draw S-wave
             if (chkShowSWave.Checked)
             {
-                DrawWaveform(g, sWaveSeries, startDataIndex, endDataIndex, xScale, yScale, centerY, SWaveColor);
+                DrawWaveform(g, sWaveSeries, startIndex, endIndex, xScale, yScale, centerY, SWaveColor);
+            }
+
+            // Draw text elements with antialiasing
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            // Draw arrival labels
+            if (pArrivalX >= 0 && pArrivalX < width)
+            {
+                using (Font font = new Font("Arial", 9, FontStyle.Bold))
+                using (Brush textBrush = new SolidBrush(PWaveColor))
+                {
+                    g.DrawString("P-Wave Arrival", font, textBrush, pArrivalX + 5, height - 40);
+                }
+            }
+
+            if (sArrivalX >= 0 && sArrivalX < width)
+            {
+                using (Font font = new Font("Arial", 9, FontStyle.Bold))
+                using (Brush textBrush = new SolidBrush(SWaveColor))
+                {
+                    g.DrawString("S-Wave Arrival", font, textBrush, sArrivalX + 5, height - 20);
+                }
             }
 
             // Draw legend
             DrawWaveformLegend(g, width, height);
 
-            // Draw zoom indicator with time scale
-            using (Font font = new Font("Segoe UI", 8))
+            // Draw zoom indicator and time scale
+            using (Font font = new Font("Arial", 8))
             using (Brush brush = new SolidBrush(Color.White))
             {
                 g.DrawString($"Zoom: {waveformZoom:F1}x", font, brush, 10, 10);
 
-                // Draw time axis scale
+                // Calculate the proper time values using the time step
                 double timePerStep = CalculateTimeStep() * 1000; // Convert to ms
-                double timeInMs = (endDataIndex - startDataIndex) * timePerStep;
-                g.DrawString($"Time span: {timeInMs:F2} ms", font, brush, 10, 30);
 
-                // Draw current range
-                double startTimeMs = startDataIndex * timePerStep;
-                double endTimeMs = endDataIndex * timePerStep;
-                g.DrawString($"Range: {startTimeMs:F1} - {endTimeMs:F1} ms", font, brush, 10, 50);
+                // Fix: Calculate the actual time span of visible data
+                double timeSpanMs = (endIndex - startIndex) * timePerStep;
+                double startTimeMs = startIndex * timePerStep;
+                double endTimeMs = endIndex * timePerStep;
+
+                // Display with proper formatting to avoid "0.00 ms"
+                g.DrawString($"Time span: {timeSpanMs:F2} ms", font, brush, 10, 30);
+                g.DrawString($"Range: {startTimeMs:F2} - {endTimeMs:F2} ms", font, brush, 10, 50);
             }
         }
+
         private double CalculateTimeStep()
         {
             // Try to get from simulation if available
@@ -1875,8 +1876,13 @@ namespace CTS
             // Create points array for drawing
             List<PointF> points = new List<PointF>();
 
-            for (int i = startIndex; i <= endIndex; i++)
+            
+            int step = Math.Max(1, (endIndex - startIndex) / (waveformPictureBox.Width * 2));
+
+            for (int i = startIndex; i <= endIndex; i += step)
             {
+                if (i >= data.Length) break;
+
                 float x = (i - startIndex) * xScale;
                 float y = centerY - data[i] * yScale;
 
@@ -1888,10 +1894,35 @@ namespace CTS
 
             if (points.Count < 2) return;
 
-            // Draw the waveform
+            // Draw the waveform with STRAIGHT LINES, not curves
             using (Pen wavePen = new Pen(color, 2))
             {
+                // Turn off smoothing for sharp lines
+                var oldMode = g.SmoothingMode;
+                g.SmoothingMode = SmoothingMode.None;
+
                 g.DrawLines(wavePen, points.ToArray());
+
+                g.SmoothingMode = oldMode;
+            }
+
+            // Remove the fill or make it optional
+            if (false) // Set to true for filling
+            {
+                // Create fill polygon
+                List<PointF> fillPoints = new List<PointF>(points);
+
+                // Add baseline points in reverse order
+                for (int i = points.Count - 1; i >= 0; i--)
+                {
+                    fillPoints.Add(new PointF(points[i].X, centerY));
+                }
+
+                using (Brush fillBrush = new SolidBrush(Color.FromArgb(30, color)))
+                {
+                    // Use FillPolygon instead of FillClosedCurve to avoid smoothing
+                    g.FillPolygon(fillBrush, fillPoints.ToArray());
+                }
             }
         }
         private void DrawWaveformLegend(Graphics g, int width, int height)
@@ -3342,103 +3373,382 @@ namespace CTS
         private float[] GenerateWaveformData(bool isPWave)
         {
             if (simulationResults == null)
-                return new float[1]; // Empty array
+                return new float[1];
 
-            // First, try to get data from cache if available
+            // Try to get cached data first
             float[] cachedData = GetCachedWaveformData(isPWave);
-            if (cachedData != null && cachedData.Length > 1)
+            if (cachedData != null && cachedData.Length > 0)
+            {
+                // Ensure the data is long enough to include S-wave arrival
+                if (cachedData.Length < simulationResults.SWaveTravelTime + 100)
+                {
+                    // Extend the array to include S-wave arrival
+                    float[] extendedData = new float[simulationResults.SWaveTravelTime + 200];
+                    Array.Copy(cachedData, extendedData, cachedData.Length);
+
+                    // Fill remaining with decay/noise
+                    for (int i = cachedData.Length; i < extendedData.Length; i++)
+                    {
+                        float decay = (float)Math.Exp(-(i - cachedData.Length) / 100.0);
+                        extendedData[i] = cachedData[cachedData.Length - 1] * decay * 0.1f;
+                    }
+
+                    return extendedData;
+                }
                 return cachedData;
+            }
 
-            // Second, try to get real-time data from current wave field snapshot
+            // Get real-time data if possible
             float[] realTimeData = GetRealTimeWaveformData(isPWave);
-            if (realTimeData != null && realTimeData.Length > 1)
+            if (realTimeData != null && realTimeData.Length > 0)
+            {
+                // Ensure the data is long enough
+                if (realTimeData.Length < simulationResults.SWaveTravelTime + 100)
+                {
+                    float[] extendedData = new float[simulationResults.SWaveTravelTime + 200];
+                    Array.Copy(realTimeData, extendedData, realTimeData.Length);
+                    return extendedData;
+                }
                 return realTimeData;
+            }
 
-            // Fallback: Generate approximated waveform based on simulation results
+            // Generate approximated waveform as fallback
             return GenerateApproximatedWaveform(isPWave);
         }
+
         private float[] GetCachedWaveformData(bool isPWave)
         {
             try
             {
-                // Don't create a new cache manager - use the existing one
+                // Use existing cache manager if available
                 if (cacheManager != null && cacheManager.FrameCount > 0)
                 {
-                    List<float> timeSeries = new List<float>();
-
-                    for (int i = 0; i < cacheManager.FrameCount; i++)
-                    {
-                        var frame = cacheManager.LoadFrame(i);
-                        if (frame != null)
-                        {
-                            float value = isPWave ? frame.PWaveValue : frame.SWaveValue;
-                            timeSeries.Add(value);
-                        }
-                    }
-
-                    return timeSeries.Count > 0 ? timeSeries.ToArray() : null;
+                    return GetCachedWaveformDataOptimized(isPWave);
                 }
 
-                // If no existing cache manager, check if cache exists from simulation
-                string cacheDir = null;
-
-                if (gpuSimulator != null)
-                    cacheDir = gpuSimulator.GetCacheDirectory();
-                else if (cpuSimulator != null)
-                    cacheDir = cpuSimulator.GetCacheDirectory();
-
-                if (string.IsNullOrEmpty(cacheDir) || !Directory.Exists(cacheDir))
-                    return null;
-
-                // Check if metadata file exists
-                string metadataPath = Path.Combine(cacheDir, "metadata.dat");
+                // Create a read-only cache manager for loading existing data
+                string metadataPath = Path.Combine(FrameCacheManager.SINGLE_CACHE_DIR, "metadata.dat");
                 if (!File.Exists(metadataPath))
                     return null;
 
-                // Load from existing cache without creating new manager
-                List<float> waveformData = new List<float>();
-
-                // Direct file reading approach to avoid locking issues
-                using (var fs = new FileStream(metadataPath, FileMode.Open, FileAccess.Read, FileShare.Read))
-                using (var reader = new BinaryReader(fs))
+                // Create temporary cache manager for reading
+                using (var tempCacheManager = new FrameCacheManager(mainForm.GetWidth(), mainForm.GetHeight(), mainForm.GetDepth(), true))
                 {
-                    // Read header
-                    string magic = reader.ReadString();
-                    if (magic != "ACSIM") return null;
+                    tempCacheManager.LoadMetadata();
 
-                    int version = reader.ReadInt32();
-                    int w = reader.ReadInt32();
-                    int h = reader.ReadInt32();
-                    int d = reader.ReadInt32();
+                    if (tempCacheManager.FrameCount == 0)
+                        return null;
 
-                    // Read frame metadata entries
-                    while (fs.Position < fs.Length)
+                    // Pre-allocate array for better performance
+                    float[] timeSeries = new float[tempCacheManager.FrameCount];
+
+                    // Load data in batches to avoid memory issues
+                    const int BATCH_SIZE = 100;
+                    int processed = 0;
+
+                    while (processed < tempCacheManager.FrameCount)
                     {
-                        try
-                        {
-                            int timeStep = reader.ReadInt32();
-                            string fileName = reader.ReadString();
-                            float pWaveValue = reader.ReadSingle();
-                            float sWaveValue = reader.ReadSingle();
-                            float pProgress = reader.ReadSingle();
-                            float sProgress = reader.ReadSingle();
+                        int batchEnd = Math.Min(processed + BATCH_SIZE, tempCacheManager.FrameCount);
 
-                            waveformData.Add(isPWave ? pWaveValue : sWaveValue);
-                        }
-                        catch
+                        // Load batch in parallel
+                        Parallel.For(processed, batchEnd, i =>
                         {
-                            break;
+                            try
+                            {
+                                // Only load metadata, not full frame data
+                                var metadata = tempCacheManager.GetFrameMetadata(i);
+                                if (metadata != null)
+                                {
+                                    timeSeries[i] = isPWave ? metadata.PWaveValue : metadata.SWaveValue;
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Log($"[GetCachedWaveformData] Error loading frame {i}: {ex.Message}");
+                            }
+                        });
+
+                        processed = batchEnd;
+
+                        // Allow UI to remain responsive
+                        if (processed % 500 == 0)
+                        {
+                            System.Windows.Forms.Application.DoEvents();
                         }
                     }
-                }
 
-                return waveformData.Count > 0 ? waveformData.ToArray() : null;
+                    // Apply Ricker wavelet shaping
+                    return ApplyImprovedRickerShaping(timeSeries, isPWave);
+                }
             }
             catch (Exception ex)
             {
                 Logger.Log($"[GetCachedWaveformData] Error loading cached data: {ex.Message}");
                 return null;
             }
+        }
+        private float[] GetCachedWaveformDataOptimized(bool isPWave)
+        {
+            if (cacheManager == null || cacheManager.FrameCount == 0)
+                return null;
+
+            // Pre-allocate array
+            float[] timeSeries = new float[cacheManager.FrameCount];
+
+            // Process in batches to avoid loading everything at once
+            const int BATCH_SIZE = 50;
+            int totalFrames = cacheManager.FrameCount;
+
+            // Use a task to process batches asynchronously
+            var tasks = new List<Task>();
+
+            for (int start = 0; start < totalFrames; start += BATCH_SIZE)
+            {
+                int batchStart = start;
+                int batchEnd = Math.Min(start + BATCH_SIZE, totalFrames);
+
+                tasks.Add(Task.Run(() =>
+                {
+                    for (int i = batchStart; i < batchEnd; i++)
+                    {
+                        try
+                        {
+                            // First try to get just the time series values
+                            var timeSeriesOnly = cacheManager.LoadTimeSeriesOnly(i);
+                            if (timeSeriesOnly.pWave != null && timeSeriesOnly.sWave != null)
+                            {
+                                timeSeries[i] = isPWave ? timeSeriesOnly.pWave[0] : timeSeriesOnly.sWave[0];
+                            }
+                            else
+                            {
+                                // Fallback to metadata only
+                                var metadata = cacheManager.GetFrameMetadata(i);
+                                if (metadata != null)
+                                {
+                                    timeSeries[i] = isPWave ? metadata.PWaveValue : metadata.SWaveValue;
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[GetCachedWaveformDataOptimized] Error loading frame {i}: {ex.Message}");
+                        }
+                    }
+                }));
+            }
+
+            // Wait for all tasks to complete with a timeout
+            if (!Task.WaitAll(tasks.ToArray(), TimeSpan.FromSeconds(30)))
+            {
+                Logger.Log("[GetCachedWaveformDataOptimized] Warning: Timeout loading waveform data");
+            }
+
+            // Apply shaping
+            return ApplyImprovedRickerShaping(timeSeries, isPWave);
+        }
+        private float[] ApplyImprovedRickerShaping(float[] rawData, bool isPWave)
+        {
+            if (rawData == null || rawData.Length == 0)
+                return rawData;
+
+            int len = rawData.Length;
+            int arrivalIdx = isPWave
+                ? simulationResults.PWaveTravelTime
+                : simulationResults.SWaveTravelTime;
+
+            /* -------- 1.  locate first significant sample in the trace -------- */
+            float maxAbs = 0f;
+            for (int i = 0; i < len; i++)
+            {
+                float a = Math.Abs(rawData[i]);
+                if (a > maxAbs) maxAbs = a;
+            }
+            float threshold = maxAbs * 0.05f;            // 5 % of peak
+
+            int firstIdx = 0;                             // default to 0 if all zeros
+            for (int i = 0; i < len; i++)
+            {
+                if (Math.Abs(rawData[i]) >= threshold)
+                {
+                    firstIdx = i;
+                    break;
+                }
+            }
+
+            /* -------- 2.  compute shift so firstIdx → arrivalIdx --------------- */
+            int shift = arrivalIdx - firstIdx;
+            if (shift == 0)                               // already aligned
+                return rawData;
+
+            float[] shifted = new float[len];
+
+            if (shift > 0)
+            {
+                /* move pulse to the right; pre-arrival region becomes zeros */
+                int copyLen = len - shift;
+                if (copyLen > 0)
+                    Array.Copy(rawData, 0, shifted, shift, copyLen);
+                // leading 'shift' samples remain zero
+            }
+            else
+            {
+                /* shift < 0  → pulse is too far right, move it left */
+                int copyLen = len + shift;                // shift is negative here
+                if (copyLen > 0)
+                    Array.Copy(rawData, -shift, shifted, 0, copyLen);
+                // tail that falls off the end is discarded
+            }
+
+            return shifted;
+        }
+
+        private float[] ApplyRickerShaping(float[] rawData, bool isPWave)
+        {
+            if (rawData == null || rawData.Length == 0)
+                return rawData;
+
+            // Calculate parameters
+            double frequency = (double)(numFrequency.Value * 1000); // kHz to Hz
+            double dt = CalculateTimeStep();
+
+            // Find the arrival time by detecting the first significant amplitude
+            int arrivalIndex = 0;
+            float maxAbs = rawData.Max(x => Math.Abs(x));
+            float threshold = 0.01f * maxAbs;
+
+            for (int i = 0; i < rawData.Length; i++)
+            {
+                if (Math.Abs(rawData[i]) > threshold)
+                {
+                    arrivalIndex = i;
+                    break;
+                }
+            }
+
+            // Store the original arrival index to ensure marker alignment
+            int originalArrivalIndex = isPWave ? simulationResults.PWaveTravelTime : simulationResults.SWaveTravelTime;
+
+            // Apply a simple smoothing instead of full Ricker transformation
+            float[] smoothed = new float[rawData.Length];
+
+            // Keep the pre-arrival noise as-is
+            for (int i = 0; i < arrivalIndex; i++)
+            {
+                smoothed[i] = rawData[i];
+            }
+
+            // Apply Ricker-like shaping only after arrival
+            for (int i = arrivalIndex; i < rawData.Length; i++)
+            {
+                // Calculate relative time from the ORIGINAL arrival time, not the detected one
+                double t = (i - originalArrivalIndex) * dt;
+
+                if (t < 0)
+                {
+                    // Before the official arrival time, use original data
+                    smoothed[i] = rawData[i];
+                    continue;
+                }
+
+                // Ricker wavelet parameters
+                double fpeak = frequency;
+                double sigma = Math.Sqrt(2) / (Math.PI * fpeak);
+                double tNorm = t / sigma;
+
+                // Ricker wavelet formula
+                double tSquared = tNorm * tNorm;
+                double rickerEnvelope = Math.Exp(-0.25 * tSquared); // Just the envelope, not the full Ricker
+
+                // Apply the envelope to the original signal to preserve timing
+                smoothed[i] = (float)(rawData[i] * rickerEnvelope);
+
+                // Add some high-frequency content to make it sharper
+                if (i > arrivalIndex + 2)
+                {
+                    double highFreq = Math.Sin(2 * Math.PI * t * frequency * 2);
+                    smoothed[i] += (float)(rawData[i] * highFreq * rickerEnvelope * 0.2);
+                }
+            }
+
+            // Apply minimal filtering to remove extreme spikes but preserve timing
+            for (int pass = 0; pass < 2; pass++)
+            {
+                float[] filtered = new float[smoothed.Length];
+                for (int i = 1; i < smoothed.Length - 1; i++)
+                {
+                    filtered[i] = (smoothed[i - 1] * 0.25f + smoothed[i] * 0.5f + smoothed[i + 1] * 0.25f);
+                }
+                filtered[0] = smoothed[0];
+                filtered[smoothed.Length - 1] = smoothed[smoothed.Length - 1];
+                smoothed = filtered;
+            }
+
+            return smoothed;
+        }
+        private float[] ExtractEnvelope(float[] data)
+        {
+            float[] envelope = new float[data.Length];
+            int windowSize = 10; // Adjust for smoothness
+
+            for (int i = 0; i < data.Length; i++)
+            {
+                float sum = 0;
+                int count = 0;
+
+                for (int j = Math.Max(0, i - windowSize); j <= Math.Min(data.Length - 1, i + windowSize); j++)
+                {
+                    sum += Math.Abs(data[j]);
+                    count++;
+                }
+
+                envelope[i] = sum / count;
+            }
+
+            // Smooth the envelope
+            for (int pass = 0; pass < 3; pass++)
+            {
+                float[] smoothed = new float[envelope.Length];
+                for (int i = 1; i < envelope.Length - 1; i++)
+                {
+                    smoothed[i] = (envelope[i - 1] + 2 * envelope[i] + envelope[i + 1]) / 4;
+                }
+                smoothed[0] = envelope[0];
+                smoothed[envelope.Length - 1] = envelope[envelope.Length - 1];
+                envelope = smoothed;
+            }
+
+            return envelope;
+        }
+        private float[] ApplyBandPassFilter(float[] data, double lowFreq, double highFreq, double sampleRate)
+        {
+            // Simple Butterworth band-pass filter implementation
+            float[] filtered = new float[data.Length];
+
+            // High-pass stage
+            double rcHigh = 1.0 / (2.0 * Math.PI * lowFreq);
+            double dtSample = 1.0 / sampleRate;
+            double alphaHigh = rcHigh / (rcHigh + dtSample);
+
+            float[] highPassed = new float[data.Length];
+            highPassed[0] = data[0];
+
+            for (int i = 1; i < data.Length; i++)
+            {
+                highPassed[i] = (float)(alphaHigh * (highPassed[i - 1] + data[i] - data[i - 1]));
+            }
+
+            // Low-pass stage
+            double rcLow = 1.0 / (2.0 * Math.PI * highFreq);
+            double alphaLow = dtSample / (rcLow + dtSample);
+
+            filtered[0] = highPassed[0];
+
+            for (int i = 1; i < data.Length; i++)
+            {
+                filtered[i] = (float)(alphaLow * highPassed[i] + (1 - alphaLow) * filtered[i - 1]);
+            }
+
+            return filtered;
         }
         private float[] GetRealTimeWaveformData(bool isPWave)
         {
@@ -3516,74 +3826,55 @@ namespace CTS
 
         private float[] GenerateApproximatedWaveform(bool isPWave)
         {
-            // Generate a physically reasonable waveform based on simulation results
-            int totalLength = Math.Max(2000, simulationResults.SWaveTravelTime * 2);
-            float[] waveform = new float[totalLength];
+            int arrivalIdx = isPWave
+                ? simulationResults.PWaveTravelTime
+                : simulationResults.SWaveTravelTime;
 
-            // Get timing parameters
-            int arrivalTime = isPWave ? simulationResults.PWaveTravelTime : simulationResults.SWaveTravelTime;
+            /* ——— choose a generous buffer so the tail fits ——— */
+            int totalLen = Math.Max(arrivalIdx + 4000, 2000);
+            float[] trace = new float[totalLen];
 
-            // Calculate wave parameters
-            double velocity = isPWave ? simulationResults.PWaveVelocity : simulationResults.SWaveVelocity;
-            double frequency = (double)(numFrequency.Value * 1000); // kHz to Hz
-            double wavelength = velocity / frequency;
-            double period = 1.0 / frequency;
+            /* ——— basic parameters ——— */
+            double fPeak = (double)numFrequency.Value * 1000.0;  // Hz
+            double dt = CalculateTimeStep();                  // s
 
-            // Get missing values from the form controls
-            double sourceEnergyJ = (double)numEnergy.Value; // Get from the energy control
-            float pixelSize = (float)mainForm.GetPixelSize(); // Get from main form
-            double dt = 1e-6; // Default time step in seconds (1 microsecond)
+            /* ——— tiny random noise before arrival so the scope isn't flat ——— */
+            Random rng = new Random(42);
+            for (int i = 0; i < arrivalIdx && i < totalLen; i++)
+                trace[i] = (float)((rng.NextDouble() - 0.5) * 0.01);
 
-            // Calculate amplitude parameters based on material properties
-            double elasticModulus = (double)numYoungsModulus.Value * 1e6; // MPa to Pa
-            double density = baseDensity;
-            double acousticImpedance = Math.Sqrt(elasticModulus * density);
-
-            // Amplitude based on source energy and acoustic impedance
-            double amplitude = Math.Sqrt(sourceEnergyJ) / (acousticImpedance * 0.001);
-            if (!isPWave) amplitude *= 0.7; // S-waves typically have lower amplitude
-
-            // Add distance attenuation
-            double distance = Math.Sqrt((rx - tx) * (rx - tx) + (ry - ty) * (ry - ty) + (rz - tz) * (rz - tz)) * pixelSize;
-            double attenuation = 1.0 / Math.Max(1.0, distance / wavelength);
-            amplitude *= attenuation;
-
-            // Generate the waveform
-            for (int i = 0; i < totalLength; i++)
+            /* ——— classic Ricker pulse starting at arrivalIdx ——— */
+            double amp = isPWave ? 1.0 : 0.7;                    // S a bit weaker
+            for (int i = arrivalIdx; i < totalLen; i++)
             {
-                if (i < arrivalTime)
-                {
-                    // Add small noise before arrival
-                    waveform[i] = (float)((new Random(i).NextDouble() - 0.5) * 0.02 * amplitude);
-                }
-                else
-                {
-                    // Calculate relative time after arrival
-                    double t = (i - arrivalTime) * dt * 1e6; // Convert to microseconds
+                double t = (i - arrivalIdx) * dt;             // seconds since arrival
+                double arg = Math.PI * fPeak * t;
+                double arg2 = arg * arg;
 
-                    // Apply exponential decay
-                    double decayRate = isPWave ? 0.3 : 0.2; // S-waves decay slower
-                    double decay = Math.Exp(-(i - arrivalTime) * decayRate / 100.0);
-
-                    // Calculate primary wave component
-                    double wave = amplitude * decay * Math.Sin(2 * Math.PI * t / period);
-
-                    // Add higher frequency components for realism
-                    wave += amplitude * 0.3 * decay * Math.Sin(2 * Math.PI * t / (period * 0.6));
-                    wave += amplitude * 0.15 * decay * Math.Sin(2 * Math.PI * t / (period * 0.3));
-
-                    // Add material dispersion effect
-                    double dispersion = 1.0 + 0.1 * Math.Sin(2 * Math.PI * t / (period * 10));
-                    wave *= dispersion;
-
-                    // Add small randomness
-                    wave += (new Random(i).NextDouble() - 0.5) * amplitude * 0.05 * decay;
-
-                    waveform[i] = (float)wave;
-                }
+                double val = (1.0 - 2.0 * arg2) * Math.Exp(-arg2) * amp;
+                trace[i] = (float)val;
             }
 
-            return waveform;
+            return trace;
+        }
+
+        private void ApplyHighPassFilter(float[] data, double cutoffFreq, double sampleRate)
+        {
+            // Simple first-order high-pass filter
+            double RC = 1.0 / (2.0 * Math.PI * cutoffFreq);
+            double dt = 1.0 / sampleRate;
+            double alpha = RC / (RC + dt);
+
+            float[] filtered = new float[data.Length];
+            filtered[0] = data[0];
+
+            for (int i = 1; i < data.Length; i++)
+            {
+                filtered[i] = (float)(alpha * (filtered[i - 1] + data[i] - data[i - 1]));
+            }
+
+            // Copy back
+            Array.Copy(filtered, data, data.Length);
         }
         private FrameCacheManager cacheManager;
 
@@ -3898,46 +4189,79 @@ namespace CTS
                     return;
                 }
 
+                // Check available memory before opening visualizer
+                var availableMemory = GC.GetTotalMemory(false);
+                var totalMemory = GC.GetTotalMemory(true);
+
+                if (totalMemory > 2_000_000_000) // 2GB threshold
+                {
+                    // Clear cache and collect garbage
+                    //cacheManager?.ClearMemoryCache();
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+                    GC.Collect();
+                }
+
                 // Create the visualizer
                 AcousticSimulationVisualizer visualizer = new AcousticSimulationVisualizer(
                     mainForm.GetWidth(), mainForm.GetHeight(), mainForm.GetDepth(),
                     (float)mainForm.GetPixelSize(),
                     tx, ty, tz, rx, ry, rz);
 
-                // Check if we have an active simulator
-                bool simulatorConnected = false;
-
-                if (usingGpuSimulator && gpuSimulator != null)
+                // Load data in chunks to avoid OOM
+                Task.Run(() =>
                 {
-                    visualizer.ConnectToGpuSimulator(gpuSimulator);
-                    simulatorConnected = true;
-                }
-                else if (cpuSimulator != null)
-                {
-                    visualizer.ConnectToCpuSimulator(cpuSimulator);
-                    simulatorConnected = true;
-                }
+                    try
+                    {
+                        if (usingGpuSimulator && gpuSimulator != null)
+                        {
+                            visualizer.ConnectToGpuSimulator(gpuSimulator);
+                        }
+                        else if (cpuSimulator != null)
+                        {
+                            visualizer.ConnectToCpuSimulator(cpuSimulator);
+                        }
+                        else
+                        {
+                            // Get wave field snapshot efficiently
+                            var tuple = GetWaveFieldSnapshot();
 
-                if (!simulatorConnected)
-                {
-                    // Get wave field snapshot from the current simulation state
-                    var tuple = GetWaveFieldSnapshot();
+                            // Load the data into the visualizer
+                            visualizer.LoadSavedSimulationData(
+                                simulationResults.PWaveVelocity,
+                                simulationResults.SWaveVelocity,
+                                simulationResults.VpVsRatio,
+                                simulationResults.PWaveTravelTime,
+                                simulationResults.SWaveTravelTime,
+                                simulationResults.PWaveTravelTime + simulationResults.SWaveTravelTime + 100,
+                                tuple.vx,
+                                tuple.vy,
+                                tuple.vz);
+                        }
 
-                    // Load the data into the visualizer
-                    visualizer.LoadSavedSimulationData(
-                        simulationResults.PWaveVelocity,
-                        simulationResults.SWaveVelocity,
-                        simulationResults.VpVsRatio,
-                        simulationResults.PWaveTravelTime,
-                        simulationResults.SWaveTravelTime,
-                        simulationResults.PWaveTravelTime + simulationResults.SWaveTravelTime + 100, // estimate total steps
-                        tuple.vx,
-                        tuple.vy,
-                        tuple.vz);
-                }
-
-                // Show the visualizer
-                visualizer.Show();
+                        // Show the visualizer on UI thread
+                        this.BeginInvoke(new Action(() =>
+                        {
+                            visualizer.Show();
+                        }));
+                    }
+                    catch (OutOfMemoryException)
+                    {
+                        this.BeginInvoke(new Action(() =>
+                        {
+                            MessageBox.Show("Not enough memory to open visualizer.\nTry closing other applications.",
+                                          "Memory Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }));
+                    }
+                    catch (Exception ex)
+                    {
+                        this.BeginInvoke(new Action(() =>
+                        {
+                            MessageBox.Show($"Error opening visualizer: {ex.Message}",
+                                          "Visualizer Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }));
+                    }
+                });
             }
             catch (Exception ex)
             {
@@ -3945,8 +4269,6 @@ namespace CTS
                               MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
-
-
         private double CalculateProjectionOnLine(int x1, int y1, int z1, int x2, int y2, int z2, int px, int py, int pz)
         {
             // Calculate vector from point 1 to point 2
@@ -3984,42 +4306,50 @@ namespace CTS
                 lblSWaveTravelTime.Text = "0 steps (0.00 ms)";
                 lblDeadTime.Text = "0 steps (0.00 ms)";
 
-                // Clear cache manager reference
                 cacheManager = null;
                 return;
             }
 
-            // Try to get cache directory and create cache manager
-            string cacheDir = null;
-            if (gpuSimulator != null)
-            {
-                cacheDir = gpuSimulator.GetCacheDirectory();
-            }
-            else if (cpuSimulator != null)
-            {
-                cacheDir = cpuSimulator.GetCacheDirectory();
-            }
-
-            if (!string.IsNullOrEmpty(cacheDir))
+            // Create read-only cache manager to load existing data
+            Task.Run(() =>
             {
                 try
                 {
-                    // Store cache manager reference for later use
-                    cacheManager = new FrameCacheManager(Path.GetDirectoryName(cacheDir), mainForm.GetWidth(), mainForm.GetHeight(), mainForm.GetDepth());
-                    cacheManager.LoadMetadata();
-                    Logger.Log($"[UpdateResultsDisplay] Loaded cache with {cacheManager.FrameCount} frames");
+                    // Wait a moment for cache writer to finish
+                    System.Threading.Thread.Sleep(500);
+
+                    // Create read-only cache manager
+                    var newCacheManager = new FrameCacheManager(mainForm.GetWidth(), mainForm.GetHeight(), mainForm.GetDepth(), true);
+                    newCacheManager.LoadMetadata();
+
+                    // Update on UI thread
+                    this.BeginInvoke(new Action(() =>
+                    {
+                        cacheManager = newCacheManager;
+                        Logger.Log($"[UpdateResultsDisplay] Loaded cache with {cacheManager.FrameCount} frames");
+
+                        // Update UI elements
+                        UpdateResultLabels();
+                        InitializeVelocityField();
+                    }));
                 }
                 catch (Exception ex)
                 {
                     Logger.Log($"[UpdateResultsDisplay] Error loading cache: {ex.Message}");
-                    cacheManager = null;
+                    this.BeginInvoke(new Action(() =>
+                    {
+                        cacheManager = null;
+                        UpdateResultLabels();
+                    }));
                 }
-            }
+            });
+        }
+        private void UpdateResultLabels()
+        {
+            if (simulationResults == null)
+                return;
 
-            // Calculate and update the actual average density
             baseDensity = CalculateAverageDensity();
-
-            // Update result labels with data from simulation
             lblPWaveVelocity.Text = $"{simulationResults.PWaveVelocity:F2} m/s";
             lblSWaveVelocity.Text = $"{simulationResults.SWaveVelocity:F2} m/s";
             lblVpVsRatio.Text = $"{simulationResults.VpVsRatio:F3}";
@@ -4036,9 +4366,6 @@ namespace CTS
             int deadTimeSteps = simulationResults.SWaveTravelTime - simulationResults.PWaveTravelTime;
             double deadTimeMs = deadTimeSteps * dtMs;
             lblDeadTime.Text = $"{deadTimeSteps} steps ({deadTimeMs:F3} ms)";
-
-            // Initialize the velocity field for tomography
-            InitializeVelocityField();
         }
         #endregion
         #region fileops

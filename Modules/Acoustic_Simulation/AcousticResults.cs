@@ -1702,21 +1702,29 @@ namespace CTS
                 g.DrawLine(centerPen, 0, height / 2, width, height / 2);
             }
 
-            // Get time series data - we'll simulate it based on the results
-            // In a real implementation, this would come from captured simulation data
+            // Get time series data
             float[] pWaveSeries = GenerateWaveformData(true);
             float[] sWaveSeries = GenerateWaveformData(false);
 
             int centerY = height / 2;
-            int dataLength = pWaveSeries.Length;
 
-            // Calculate the visible range of data based on zoom level
-            int visiblePoints = (int)(dataLength / waveformZoom);
-            int startDataIndex = Math.Max(0, (dataLength - visiblePoints) / 2);
-            int endDataIndex = Math.Min(dataLength - 1, startDataIndex + visiblePoints);
+            // Ensure we include both P and S wave arrivals in the display
+            int maxDataLength = Math.Max(pWaveSeries.Length, sWaveSeries.Length);
+
+            // Calculate the visible range based on zoom and ensure it includes both arrivals
+            int endDataIndex = maxDataLength - 1;
+            int visiblePoints = (int)(endDataIndex / waveformZoom);
+            int startDataIndex = Math.Max(0, endDataIndex - visiblePoints);
+
+            // If S-wave arrival is beyond current view, adjust to include it
+            if (simulationResults.SWaveTravelTime > endDataIndex)
+            {
+                endDataIndex = simulationResults.SWaveTravelTime + 100; // Add some margin
+                startDataIndex = Math.Max(0, (int)(endDataIndex - width / waveformZoom));
+            }
 
             // Calculate x-scaling based on visible range
-            float xScale = (float)width / (endDataIndex - startDataIndex);
+            float xScale = (float)width / Math.Max(1, endDataIndex - startDataIndex);
 
             // Find max amplitude for scaling
             float maxAmplitude = 0.1f;
@@ -1730,14 +1738,14 @@ namespace CTS
             }
 
             // Calculate y-scaling to use 80% of the panel height
-            float yScale = (height * 0.4f) / maxAmplitude;
+            float yScale = (height * 0.4f) / Math.Max(0.1f, maxAmplitude);
 
             // Calculate P and S arrival positions
             int pArrivalPos = simulationResults.PWaveTravelTime;
             int sArrivalPos = simulationResults.SWaveTravelTime;
 
-            float pArrivalX = ((pArrivalPos - startDataIndex) * xScale);
-            float sArrivalX = ((sArrivalPos - startDataIndex) * xScale);
+            float pArrivalX = (pArrivalPos - startDataIndex) * xScale;
+            float sArrivalX = (sArrivalPos - startDataIndex) * xScale;
 
             // Draw dead time region if enabled
             if (chkShowDeadTime.Checked && pArrivalX < width && sArrivalX > 0)
@@ -1817,68 +1825,75 @@ namespace CTS
             // Draw legend
             DrawWaveformLegend(g, width, height);
 
-            // Draw zoom indicator
+            // Draw zoom indicator with time scale
             using (Font font = new Font("Segoe UI", 8))
             using (Brush brush = new SolidBrush(Color.White))
             {
                 g.DrawString($"Zoom: {waveformZoom:F1}x", font, brush, 10, 10);
 
                 // Draw time axis scale
-                double timePerStep = 0.000001; // 1 microsecond per step (typical)
-                double timeInMs = (endDataIndex - startDataIndex) * timePerStep * 1000; // convert to ms
+                double timePerStep = CalculateTimeStep() * 1000; // Convert to ms
+                double timeInMs = (endDataIndex - startDataIndex) * timePerStep;
                 g.DrawString($"Time span: {timeInMs:F2} ms", font, brush, 10, 30);
+
+                // Draw current range
+                double startTimeMs = startDataIndex * timePerStep;
+                double endTimeMs = endDataIndex * timePerStep;
+                g.DrawString($"Range: {startTimeMs:F1} - {endTimeMs:F1} ms", font, brush, 10, 50);
             }
         }
-
-        private void DrawWaveform(Graphics g, float[] data, int startIndex, int endIndex,
-                                 float xScale, float yScale, int centerY, Color color)
+        private double CalculateTimeStep()
         {
+            // Try to get from simulation if available
+            if (simulationResults != null)
+            {
+                // Calculate based on wave velocity and pixel size
+                double velocity = Math.Max(simulationResults.PWaveVelocity, simulationResults.SWaveVelocity);
+                float pixelSize = (float)mainForm.GetPixelSize();
+
+                // CFL condition with safety factor
+                double dt = 0.2 * pixelSize / velocity;
+
+                // Clamp between reasonable values
+                return Math.Max(1e-8, Math.Min(1e-5, dt));
+            }
+
+            // Default value - 1 microsecond
+            return 1e-6;
+        }
+        private void DrawWaveform(Graphics g, float[] data, int startIndex, int endIndex,
+                         float xScale, float yScale, int centerY, Color color)
+        {
+            if (data == null || data.Length == 0) return;
+
+            // Ensure we don't exceed the data bounds
+            startIndex = Math.Max(0, startIndex);
+            endIndex = Math.Min(data.Length - 1, endIndex);
+
+            if (endIndex <= startIndex) return;
+
             // Create points array for drawing
-            PointF[] points = new PointF[endIndex - startIndex + 1];
+            List<PointF> points = new List<PointF>();
 
             for (int i = startIndex; i <= endIndex; i++)
             {
-                if (i >= data.Length) break;
-
                 float x = (i - startIndex) * xScale;
                 float y = centerY - data[i] * yScale;
 
-                points[i - startIndex] = new PointF(x, y);
+                // Clamp Y to prevent drawing outside the control
+                y = Math.Max(0, Math.Min(waveformPictureBox.Height, y));
+
+                points.Add(new PointF(x, y));
             }
+
+            if (points.Count < 2) return;
 
             // Draw the waveform
             using (Pen wavePen = new Pen(color, 2))
             {
-                g.DrawLines(wavePen, points);
-            }
-
-            // Draw fill to center line
-            PointF[] fillPoints = new PointF[points.Length * 2];
-
-            // First set of points (the waveform)
-            Array.Copy(points, 0, fillPoints, 0, points.Length);
-
-            // Second set of points (mirror along centerY)
-            for (int i = 0; i < points.Length; i++)
-            {
-                fillPoints[points.Length + i] = new PointF(
-                    points[points.Length - 1 - i].X,
-                    centerY
-                );
-            }
-
-            using (PathGradientBrush fillBrush = new PathGradientBrush(fillPoints))
-            {
-                Color fillColor = Color.FromArgb(50, color);
-                Color transparentColor = Color.FromArgb(0, color);
-
-                fillBrush.CenterColor = fillColor;
-                fillBrush.SurroundColors = new Color[] { transparentColor };
-
-                g.FillClosedCurve(fillBrush, fillPoints, FillMode.Alternate, 0.1f);
+                g.DrawLines(wavePen, points.ToArray());
             }
         }
-
         private void DrawWaveformLegend(Graphics g, int width, int height)
         {
             // Create legend area in the top right
@@ -3346,50 +3361,78 @@ namespace CTS
         {
             try
             {
-                string cacheDir = null;
-
-                // Check if we have a GPU or CPU simulator reference
-                if (gpuSimulator != null)
-                    cacheDir = gpuSimulator.GetCacheDirectory();
-                else if (cpuSimulator != null)
-                    cacheDir = cpuSimulator.GetCacheDirectory();
-
-                if (string.IsNullOrEmpty(cacheDir))
-                    return null;
-
-                // Try to read from cache
-                using (var readCacheManager = new FrameCacheManager(Path.GetDirectoryName(cacheDir), 1, 1, 1))
+                // Don't create a new cache manager - use the existing one
+                if (cacheManager != null && cacheManager.FrameCount > 0)
                 {
-                    readCacheManager.LoadMetadata();
-
-                    int frameCount = readCacheManager.FrameCount;
-                    if (frameCount == 0)
-                        return null;
-
                     List<float> timeSeries = new List<float>();
 
-                    for (int i = 0; i < frameCount; i++)
+                    for (int i = 0; i < cacheManager.FrameCount; i++)
                     {
-                        var frame = readCacheManager.LoadFrame(i);
+                        var frame = cacheManager.LoadFrame(i);
                         if (frame != null)
                         {
-                            if (isPWave && frame.PWaveTimeSeries != null && frame.PWaveTimeSeries.Length > 0)
-                            {
-                                timeSeries.Add(frame.PWaveTimeSeries[frame.PWaveTimeSeries.Length - 1]);
-                            }
-                            else if (!isPWave && frame.SWaveTimeSeries != null && frame.SWaveTimeSeries.Length > 0)
-                            {
-                                timeSeries.Add(frame.SWaveTimeSeries[frame.SWaveTimeSeries.Length - 1]);
-                            }
-                            else
-                            {
-                                timeSeries.Add(isPWave ? frame.PWaveValue : frame.SWaveValue);
-                            }
+                            float value = isPWave ? frame.PWaveValue : frame.SWaveValue;
+                            timeSeries.Add(value);
                         }
                     }
 
                     return timeSeries.Count > 0 ? timeSeries.ToArray() : null;
                 }
+
+                // If no existing cache manager, check if cache exists from simulation
+                string cacheDir = null;
+
+                if (gpuSimulator != null)
+                    cacheDir = gpuSimulator.GetCacheDirectory();
+                else if (cpuSimulator != null)
+                    cacheDir = cpuSimulator.GetCacheDirectory();
+
+                if (string.IsNullOrEmpty(cacheDir) || !Directory.Exists(cacheDir))
+                    return null;
+
+                // Check if metadata file exists
+                string metadataPath = Path.Combine(cacheDir, "metadata.dat");
+                if (!File.Exists(metadataPath))
+                    return null;
+
+                // Load from existing cache without creating new manager
+                List<float> waveformData = new List<float>();
+
+                // Direct file reading approach to avoid locking issues
+                using (var fs = new FileStream(metadataPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                using (var reader = new BinaryReader(fs))
+                {
+                    // Read header
+                    string magic = reader.ReadString();
+                    if (magic != "ACSIM") return null;
+
+                    int version = reader.ReadInt32();
+                    int w = reader.ReadInt32();
+                    int h = reader.ReadInt32();
+                    int d = reader.ReadInt32();
+
+                    // Read frame metadata entries
+                    while (fs.Position < fs.Length)
+                    {
+                        try
+                        {
+                            int timeStep = reader.ReadInt32();
+                            string fileName = reader.ReadString();
+                            float pWaveValue = reader.ReadSingle();
+                            float sWaveValue = reader.ReadSingle();
+                            float pProgress = reader.ReadSingle();
+                            float sProgress = reader.ReadSingle();
+
+                            waveformData.Add(isPWave ? pWaveValue : sWaveValue);
+                        }
+                        catch
+                        {
+                            break;
+                        }
+                    }
+                }
+
+                return waveformData.Count > 0 ? waveformData.ToArray() : null;
             }
             catch (Exception ex)
             {
@@ -3397,7 +3440,6 @@ namespace CTS
                 return null;
             }
         }
-
         private float[] GetRealTimeWaveformData(bool isPWave)
         {
             try

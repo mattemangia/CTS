@@ -990,10 +990,7 @@ namespace CTS
         }
         public override float CalculateStrain(float pressure)
         {
-            // CRITICAL FIX: Calculate a direct, realistic strain value that doesn't depend on the base class
-            // We're using a simplified approach to ensure we get non-zero values
-
-            // Basic strain calculation from Hooke's law, but with realistic values
+            
             float baseStrain = pressure / Math.Max(YoungModulus, 1000.0f);
 
             // Ensure we have at least some visible strain

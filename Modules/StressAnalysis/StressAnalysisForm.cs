@@ -1133,7 +1133,7 @@ namespace CTS
             };
             exportCompositeRibbonButton.Click += (s, e) =>
             {
-                // Assuming 'currentTriaxial' holds your latest simulation
+                
                 if (currentTriaxial != null)
                     ExportFullCompositeImage(currentTriaxial);
                 else
@@ -4488,7 +4488,6 @@ namespace CTS
             }
         }
 
-        // Also make sure to have this helper method in your class:
         private void AddSummaryRow(TableLayoutPanel table, int rowIndex, string label, string value)
         {
             // Create label
@@ -4581,7 +4580,7 @@ namespace CTS
                     Logger.Log($"[StressAnalysisForm] Using inhomogeneous density with {densityMap.Count} points for acoustic sim");
                 }
 
-                SimulationResult triaxialResult = null;   // remains null unless you set it elsewhere
+                SimulationResult triaxialResult = null;   
 
                 //--- create sim via factory ----------------------------------------
                 AcousticVelocitySimulation simulation =
@@ -5544,7 +5543,7 @@ namespace CTS
             }
             else if (isFracturePanning)
             {
-                // You could implement panning here if needed
+              
             }
 
             lastFractureMousePosition = e.Location;

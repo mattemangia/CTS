@@ -134,7 +134,7 @@ namespace CTS
             this.Font = new Font("Segoe UI", 9F);
 
             // =====================
-            // TOP RIBBON PANEL - SIMPLIFIED LAYOUT WITH FEWER, WIDER CONTROLS
+            // TOP RIBBON PANEL 
             // =====================
             Panel ribbonPanel = new Panel
             {

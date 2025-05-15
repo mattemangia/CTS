@@ -630,7 +630,7 @@ namespace CTS
                     {
                         stepsSincePeak++;
 
-                        // CRITICAL FIX: Detect post-peak stress drop as failure
+                        
                         if (stepsSincePeak >= 3 && result.AverageStress < peakStress * 0.9f)
                         {
                             // Update result to indicate failure
@@ -661,8 +661,7 @@ namespace CTS
                         await Task.Delay(1);
                     }
                 }
-
-                // CRITICAL FIX: Ensure final result properly indicates failure if peak was detected and significant drop occurred
+// CRITICAL FIX: Ensure final result properly indicates failure if peak was detected and significant drop occurred
                 if (peakDetected && stressStrainCurve.Count > 0)
                 {
                     // Get final stress
@@ -1356,7 +1355,6 @@ namespace CTS
                 float leftSide = sigma1 - sigma3;
                 float rightSide = 2.0f * elementCohesion * cosPhi + (sigma1 + sigma3) * sinPhi;
 
-                // Failure percentage - CRITICAL FIX: Properly handle divide by zero
                 float failurePercent = 0;
                 if (rightSide > float.Epsilon)
                 {
@@ -1578,11 +1576,10 @@ namespace CTS
         /// </summary>
         private bool HasCompatibleGPU()
         {
-            // In a real implementation, this would check for CUDA/OpenCL/DirectCompute
-            // For now just check if we have a reasonably powerful CPU
+            
             try
             {
-                return Environment.ProcessorCount >= 4; // Simplified check for now
+                return Environment.ProcessorCount >= 4; 
             }
             catch
             {

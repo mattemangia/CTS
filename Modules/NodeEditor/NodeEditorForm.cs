@@ -140,7 +140,7 @@ namespace CTS.NodeEditor
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
             HandleKeyDown(new KeyEventArgs(keyData));
-            return true;  // Indicate that we handled the key
+            return true; 
         }
         private void NodeEditorForm_KeyDown(object sender, KeyEventArgs e)
         {

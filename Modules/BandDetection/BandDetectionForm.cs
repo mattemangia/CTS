@@ -908,7 +908,6 @@ namespace CTS
 
             xyPictureBox.Invalidate();
 
-            // Update chart to match zoom level - CRITICAL for alignment
             UpdateXYChart();
         }
 
@@ -1062,7 +1061,7 @@ namespace CTS
 
             xzPictureBox.Invalidate();
 
-            // Update chart to match zoom level - CRITICAL for alignment
+           
             UpdateXZChart();
         }
 
@@ -1216,7 +1215,7 @@ namespace CTS
 
             yzPictureBox.Invalidate();
 
-            // Update chart to match zoom level - CRITICAL for alignment
+          
             UpdateYZChart();
         }
 
@@ -2581,7 +2580,6 @@ namespace CTS
                     series.Points.Clear();
                 }
 
-                // CRITICAL: Set chart Y axis to exactly match image height
                 xyChart.ChartAreas[0].AxisY.Minimum = 0;
                 xyChart.ChartAreas[0].AxisY.Maximum = xyProcessedImage.Height;
 
@@ -2678,7 +2676,7 @@ namespace CTS
                     series.Points.Clear();
                 }
 
-                // CRITICAL: Set chart Y axis to exactly match image height
+           
                 // This ensures the Y coordinates in the chart match the image rows
                 xzChart.ChartAreas[0].AxisY.Minimum = 0;
                 xzChart.ChartAreas[0].AxisY.Maximum = xzProcessedImage.Height;
@@ -2777,7 +2775,7 @@ namespace CTS
                     series.Points.Clear();
                 }
 
-                // CRITICAL: Set chart Y axis to exactly match image height
+         
                 // This ensures the Y coordinates in the chart match the image rows
                 yzChart.ChartAreas[0].AxisY.Minimum = 0;
                 yzChart.ChartAreas[0].AxisY.Maximum = yzProcessedImage.Height;

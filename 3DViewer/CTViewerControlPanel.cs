@@ -1685,7 +1685,7 @@ namespace CTS.SharpDXIntegration
                         "Ready.";
                 }
 
-                // This is important: we need to refresh the measurements list to show current state
+                
                 RefreshMeasurementsList();
 
                 // Log the state change

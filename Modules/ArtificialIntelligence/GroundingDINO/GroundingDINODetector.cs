@@ -1579,8 +1579,7 @@ namespace CTS.Modules.ArtificialIntelligence.GroundingDINO
 
                 Rectangle box = new Rectangle(pixelX1, pixelY1, boxWidth, boxHeight);
 
-                // In a real implementation, we would map from class index to name
-                // Here we'll use the prompt + class index
+              
                 string label = $"{promptTextBox.Text} ({maxProb:F2})";
 
                 // Add to results

@@ -12,6 +12,10 @@ namespace CTS
     /// </summary>
     public sealed class AcousticSimulatorGPUWrapper : IDisposable
     {
+        public string GetCacheDirectory()
+        {
+            return gpuSimulator?.GetCacheDirectory();
+        }
         #region Events
         public event EventHandler<AcousticSimulationProgressEventArgs> ProgressUpdated;
         public event EventHandler<AcousticSimulationCompleteEventArgs> SimulationCompleted;

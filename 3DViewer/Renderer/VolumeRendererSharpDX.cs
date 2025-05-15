@@ -2675,7 +2675,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     currentLodLevel = 0;
                 }
 
-                // CRITICAL: First render the volume - use appropriate renderer based on mode
+           
                 if (useStreamingRenderer)
                 {
                     // Use the streaming renderer
@@ -2717,7 +2717,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 // Reset the needs render flag for infrequent renders when nothing changes
                 if (!isMoving)
                 {
-                    // Only clear the flag if we're not in an interactive state
+                    
                     NeedsRender = false;
                 }
             }
@@ -3951,7 +3951,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 {
                     try
                     {
-                        // Make sure we remove it from the panel first
+                      
                         if (renderPanel != null && renderPanel.Controls.Contains(measurementOverlay))
                         {
                             renderPanel.Controls.Remove(measurementOverlay);
@@ -3989,7 +3989,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 {
                     try
                     {
-                        // Make sure we remove it from the panel first
+                      
                         if (renderPanel != null && renderPanel.Controls.Contains(scaleBarPictureBox))
                         {
                             renderPanel.Controls.Remove(scaleBarPictureBox);
@@ -4437,8 +4437,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     context.Draw(vertexCount, 0);
                 }
 
-                // CRITICAL: Restore the shaders and states before rendering text
-                // This is essential to prevent the black screen issue
+           
                 context.VertexShader.Set(volumeVertexShader);
                 context.PixelShader.Set(volumePixelShader);
 
@@ -4966,7 +4965,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 if (labelVisibilitySRV != null) resources[0] = labelVisibilitySRV;
                 if (labelOpacitySRV != null) resources[1] = labelOpacitySRV;
 
-                // CRITICAL FIX: Ensure we always have a valid volume texture
+                
                 bool hasValidTexture = false;
 
                 // Try streaming LOD textures first, with bounds checking
@@ -4991,8 +4990,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 {
                     Logger.Log("[RenderVolumeWithStreaming] WARNING: No valid volume texture available!");
 
-                    // Critical fix: Try to create a simple, minimal texture if we have no valid texture
-                    // This will at least display something instead of just the bounding box
+                
                     if (resources[2] == null)
                     {
                         try
@@ -5271,9 +5269,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
         private bool IsChunkVisible(Vector3 minBounds, Vector3 maxBounds, ViewFrustum frustum)
         {
-            // Simple frustum culling check for a chunk
-            // Note: This is a simplified test - a more accurate test would check
-            // all 8 corners of the chunk against all 6 frustum planes
+            
 
             // Check if the volume center is roughly in the view direction
             Vector3 chunkCenter = (minBounds + maxBounds) * 0.5f;

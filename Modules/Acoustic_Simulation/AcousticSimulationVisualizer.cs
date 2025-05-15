@@ -2261,7 +2261,7 @@ namespace CTS
                         float.IsNaN(series[i]) || float.IsInfinity(series[i]))
                         continue;
 
-                    // CRITICAL: Direct mapping of data values to screen coordinates
+                  
                     float x1 = (i - 1) * xStep;
                     float x2 = i * xStep;
 
@@ -3257,7 +3257,7 @@ namespace CTS
             {
                 DrawWaveSeries(g, pSeries, pArea, minP, maxP, Color.DeepSkyBlue);
 
-                // Highlight midpoint on the P-wave graph - THIS IS CRITICAL
+             
                 int midIndex = pSeries.Length / 2;
                 if (midIndex < pSeries.Length)
                 {
@@ -3305,7 +3305,7 @@ namespace CTS
             {
                 DrawWaveSeries(g, sSeries, sArea, minS, maxS, Color.Crimson);
 
-                // Highlight midpoint on the S-wave graph - THIS IS CRITICAL
+               
                 int midIndex = sSeries.Length / 2;
                 if (midIndex < sSeries.Length)
                 {

@@ -25,6 +25,7 @@ using Task = System.Threading.Tasks.Task;
 using CTS.Misc;
 using MathHelper = OpenTK.MathHelper;
 using System.Text;
+using CTS.Modules.Triaxial_Simulation;
 
 
 namespace CTS
@@ -168,6 +169,111 @@ namespace CTS
         private bool enableTransparency = false;
         private KryptonCheckBox chkEnableTransparency;
         private float transparencyLevel = 0.7f; // 0.0 = fully transparent, 1.0 = fully opaque
+
+        public List<Point> GetStressStrainChartData()
+        {
+            // Return the stress-strain curve data
+            return new List<Point>(stressStrainCurve);
+        }
+
+        public bool HasDimensionalData()
+        {
+            // Check if we have dimensional data available
+            return deformedVertices != null && deformedVertices.Count > 0 &&
+                   vertices != null && vertices.Count > 0;
+        }
+
+        public (float Width, float Height, float Volume) GetCurrentDimensions()
+        {
+            // Calculate current dimensions from deformed vertices
+            if (deformedVertices == null || deformedVertices.Count == 0)
+                return (0, 0, 0);
+
+            Vector3 min = new Vector3(float.MaxValue);
+            Vector3 max = new Vector3(float.MinValue);
+
+            foreach (var v in deformedVertices)
+            {
+                min.X = Math.Min(min.X, v.X);
+                min.Y = Math.Min(min.Y, v.Y);
+                min.Z = Math.Min(min.Z, v.Z);
+
+                max.X = Math.Max(max.X, v.X);
+                max.Y = Math.Max(max.Y, v.Y);
+                max.Z = Math.Max(max.Z, v.Z);
+            }
+
+            float width = max.X - min.X;
+            float height = max.Y - min.Y;
+            float depth = max.Z - min.Z;
+            float volume = width * height * depth;
+
+            return (width, height, volume);
+        }
+
+        public (float Width, float Height, float Volume) GetInitialDimensions()
+        {
+            // Calculate initial dimensions from original vertices
+            if (vertices == null || vertices.Count == 0)
+                return (0, 0, 0);
+
+            Vector3 min = new Vector3(float.MaxValue);
+            Vector3 max = new Vector3(float.MinValue);
+
+            foreach (var v in vertices)
+            {
+                min.X = Math.Min(min.X, v.X);
+                min.Y = Math.Min(min.Y, v.Y);
+                min.Z = Math.Min(min.Z, v.Z);
+
+                max.X = Math.Max(max.X, v.X);
+                max.Y = Math.Max(max.Y, v.Y);
+                max.Z = Math.Max(max.Z, v.Z);
+            }
+
+            float width = max.X - min.X;
+            float height = max.Y - min.Y;
+            float depth = max.Z - min.Z;
+            float volume = width * height * depth;
+
+            return (width, height, volume);
+        }
+
+        public List<ParticleState> GetParticleStateHistory()
+        {
+            // Return empty list as we don't track particle states in the current implementation
+            // This would need to be implemented if you want detailed particle tracking
+            return new List<ParticleState>();
+        }
+
+        public float GetConfiningPressure()
+        {
+            // Return the confining pressure (minimum pressure in MPa)
+            return minPressure / 1000.0f; // Convert kPa to MPa
+        }
+
+        public List<FailurePoint> GetMultipleFailurePoints()
+        {
+            // Return null as we don't have multiple test data in current implementation
+            // This would need to be implemented if you have multiple triaxial tests
+            return null;
+        }
+
+        public List<float> GetTensileTestResults()
+        {
+            // Return null as we don't have tensile test data in current implementation
+            return null;
+        }
+
+        public float GetCohesion()
+        {
+            return cohesion;
+        }
+
+        public float GetFrictionAngle()
+        {
+            return frictionAngle;
+        }
 
         // Implement IMaterialDensityProvider interface
         public Material SelectedMaterial => selectedMaterial;
@@ -4518,7 +4624,7 @@ namespace CTS
             float avgPorosity = porosity;
             float compressibility = 1.0f / (bulkModulus * 10.0f); // Convert to MPa⁻¹
 
-            // Estimate volumetric strain - simplified approach
+            // Estimate volumetric strain 
             float volumetricStrain = strain * (1.0f - 2.0f * poissonRatio);
 
             // Skempton's B parameter - relates mean stress to pore pressure
@@ -6171,13 +6277,16 @@ namespace CTS
             GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
 
             // Text will be rendered with the font texture system
-            // Display "Ultra-simplified view during rotation - release mouse for details"
+           
 
             GL.MatrixMode(MatrixMode.Projection);
             GL.PopMatrix();
             GL.MatrixMode(MatrixMode.Modelview);
             GL.PopMatrix();
         }
+
+
+
         private void BtnContinueSimulation_Click(object sender, EventArgs e)
         {
             if (!meshGenerationComplete || tetrahedralElements.Count == 0)
@@ -6783,7 +6892,7 @@ namespace CTS
                 // Update progress
                 progressBar.Value = 100;
 
-                // CRITICAL FIX: Properly report failure
+               
                 if (e.HasFailed)
                 {
                     progressLabel.Text = "Simulation completed - Material failed";

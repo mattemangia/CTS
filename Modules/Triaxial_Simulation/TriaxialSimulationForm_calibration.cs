@@ -98,7 +98,7 @@ namespace CTS
             }
         }
 
-        private void UpdateSimulationFromCalibration(CalibrationParameters parameters)
+        private void UpdateSimulationFromCalibration(CTS.Modules.Triaxial_Simulation.CalibrationParameters parameters)
         {
             // Apply calibration parameters to the simulation
             if (parameters != null)

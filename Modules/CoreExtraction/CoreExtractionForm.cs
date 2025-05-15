@@ -38,7 +38,7 @@ namespace CTS
         private NumericUpDown _numDiameter, _numLength;
         private ComboBox _cmbOrientation, _cmbDiameterView;
 
-        // slice caches (use LRUCache from your implementation)
+        // slice caches 
         private readonly LRUCache<int, Bitmap> _xyCache, _xzCache, _yzCache;
         private CancellationTokenSource _renderCts = new CancellationTokenSource();
 

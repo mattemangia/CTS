@@ -422,11 +422,11 @@ namespace CTS
             bool useInhomogeneousDensity = false; // This should come from your UI, e.g. a checkbox
             ConcurrentDictionary<System.Numerics.Vector3, float> densityMap = null;
 
-            // This is where you would initialize densityMap if needed
+            
             if (useInhomogeneousDensity && densityMap == null)
             {
                 densityMap = new ConcurrentDictionary<System.Numerics.Vector3, float>();
-                // Populate the density map based on your application's needs
+          
             }
 
             if (useInhomogeneousDensity && densityMap != null && densityMap.Count > 0)

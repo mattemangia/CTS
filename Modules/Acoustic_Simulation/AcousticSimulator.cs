@@ -15,6 +15,11 @@ namespace CTS
     /// 
     public class AcousticSimulator : IDisposable
     {
+        public string GetCacheDirectory()
+        {
+            return cacheManager?.CacheDirectory;
+        }
+
         #region configuration -----------------------------------------------------------
         private const double WAVE_VISUALIZATION_AMPLIFICATION = 1.0e10;
         private readonly int width, height, depth;
@@ -1335,10 +1340,7 @@ namespace CTS
                 Logger.Log($"[AcousticSimulator] Error caching frame: {ex.Message}");
             }
         }
-        public string GetCacheDirectory()
-        {
-            return cacheManager?.CacheDirectory;
-        }
+        
         private float[] BuildTimeSeries(float currentValue, bool isPWave)
         {
             const int maxSamples = 1000;

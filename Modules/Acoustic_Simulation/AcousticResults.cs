@@ -3326,13 +3326,155 @@ namespace CTS
         }
         private float[] GenerateWaveformData(bool isPWave)
         {
-            // Create synthetic waveform data based on simulation results
-            // In a real implementation, this would come from actual simulation data
-
             if (simulationResults == null)
                 return new float[1]; // Empty array
 
-            // Create an array long enough to show the wave propagation
+            // First, try to get data from cache if available
+            float[] cachedData = GetCachedWaveformData(isPWave);
+            if (cachedData != null && cachedData.Length > 1)
+                return cachedData;
+
+            // Second, try to get real-time data from current wave field snapshot
+            float[] realTimeData = GetRealTimeWaveformData(isPWave);
+            if (realTimeData != null && realTimeData.Length > 1)
+                return realTimeData;
+
+            // Fallback: Generate approximated waveform based on simulation results
+            return GenerateApproximatedWaveform(isPWave);
+        }
+        private float[] GetCachedWaveformData(bool isPWave)
+        {
+            try
+            {
+                string cacheDir = null;
+
+                // Check if we have a GPU or CPU simulator reference
+                if (gpuSimulator != null)
+                    cacheDir = gpuSimulator.GetCacheDirectory();
+                else if (cpuSimulator != null)
+                    cacheDir = cpuSimulator.GetCacheDirectory();
+
+                if (string.IsNullOrEmpty(cacheDir))
+                    return null;
+
+                // Try to read from cache
+                using (var readCacheManager = new FrameCacheManager(Path.GetDirectoryName(cacheDir), 1, 1, 1))
+                {
+                    readCacheManager.LoadMetadata();
+
+                    int frameCount = readCacheManager.FrameCount;
+                    if (frameCount == 0)
+                        return null;
+
+                    List<float> timeSeries = new List<float>();
+
+                    for (int i = 0; i < frameCount; i++)
+                    {
+                        var frame = readCacheManager.LoadFrame(i);
+                        if (frame != null)
+                        {
+                            if (isPWave && frame.PWaveTimeSeries != null && frame.PWaveTimeSeries.Length > 0)
+                            {
+                                timeSeries.Add(frame.PWaveTimeSeries[frame.PWaveTimeSeries.Length - 1]);
+                            }
+                            else if (!isPWave && frame.SWaveTimeSeries != null && frame.SWaveTimeSeries.Length > 0)
+                            {
+                                timeSeries.Add(frame.SWaveTimeSeries[frame.SWaveTimeSeries.Length - 1]);
+                            }
+                            else
+                            {
+                                timeSeries.Add(isPWave ? frame.PWaveValue : frame.SWaveValue);
+                            }
+                        }
+                    }
+
+                    return timeSeries.Count > 0 ? timeSeries.ToArray() : null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[GetCachedWaveformData] Error loading cached data: {ex.Message}");
+                return null;
+            }
+        }
+
+        private float[] GetRealTimeWaveformData(bool isPWave)
+        {
+            try
+            {
+                // Try to get current wave field snapshot
+                var waveFieldTuple = GetWaveFieldSnapshot();
+
+                if (waveFieldTuple.vx == null || waveFieldTuple.vy == null || waveFieldTuple.vz == null)
+                    return null;
+
+                // Extract waveform along the ray path from TX to RX
+                List<float> waveformData = new List<float>();
+
+                // Sample points along the direct path
+                int numSamples = Math.Max(100, Math.Abs(rx - tx) + Math.Abs(ry - ty) + Math.Abs(rz - tz));
+
+                for (int i = 0; i < numSamples; i++)
+                {
+                    float t = i / (float)(numSamples - 1);
+
+                    // Linear interpolation along the path
+                    int x = (int)(tx + t * (rx - tx));
+                    int y = (int)(ty + t * (ry - ty));
+                    int z = (int)(tz + t * (rz - tz));
+
+                    // Ensure coordinates are within bounds
+                    x = Math.Max(0, Math.Min(mainForm.GetWidth() - 1, x));
+                    y = Math.Max(0, Math.Min(mainForm.GetHeight() - 1, y));
+                    z = Math.Max(0, Math.Min(mainForm.GetDepth() - 1, z));
+
+                    float value;
+                    if (isPWave)
+                    {
+                        // P-wave: use the component along the propagation direction
+                        double dx = rx - tx;
+                        double dy = ry - ty;
+                        double dz = rz - tz;
+                        double length = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+
+                        if (length > 0)
+                        {
+                            dx /= length;
+                            dy /= length;
+                            dz /= length;
+
+                            value = (float)(waveFieldTuple.vx[x, y, z] * dx +
+                                           waveFieldTuple.vy[x, y, z] * dy +
+                                           waveFieldTuple.vz[x, y, z] * dz);
+                        }
+                        else
+                        {
+                            value = (float)waveFieldTuple.vx[x, y, z];
+                        }
+                    }
+                    else
+                    {
+                        // S-wave: use the transverse components
+                        value = (float)Math.Sqrt(
+                            waveFieldTuple.vy[x, y, z] * waveFieldTuple.vy[x, y, z] +
+                            waveFieldTuple.vz[x, y, z] * waveFieldTuple.vz[x, y, z]);
+                    }
+
+                    waveformData.Add(value * 1e10f); // Apply amplification
+                }
+
+                return waveformData.Count > 0 ? waveformData.ToArray() : null;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[GetRealTimeWaveformData] Error getting real-time data: {ex.Message}");
+                return null;
+            }
+        }
+
+        private float[] GenerateApproximatedWaveform(bool isPWave)
+        {
+            // Generate a physically reasonable waveform based on simulation results
             int totalLength = Math.Max(2000, simulationResults.SWaveTravelTime * 2);
             float[] waveform = new float[totalLength];
 
@@ -3345,9 +3487,24 @@ namespace CTS
             double wavelength = velocity / frequency;
             double period = 1.0 / frequency;
 
-            // Calculate amplitude parameters
-            double amplitude = isPWave ? (double)numAmplitude.Value : (double)numAmplitude.Value * 0.7;
-            double decayFactor = 0.5; // Decay rate for the wave
+            // Get missing values from the form controls
+            double sourceEnergyJ = (double)numEnergy.Value; // Get from the energy control
+            float pixelSize = (float)mainForm.GetPixelSize(); // Get from main form
+            double dt = 1e-6; // Default time step in seconds (1 microsecond)
+
+            // Calculate amplitude parameters based on material properties
+            double elasticModulus = (double)numYoungsModulus.Value * 1e6; // MPa to Pa
+            double density = baseDensity;
+            double acousticImpedance = Math.Sqrt(elasticModulus * density);
+
+            // Amplitude based on source energy and acoustic impedance
+            double amplitude = Math.Sqrt(sourceEnergyJ) / (acousticImpedance * 0.001);
+            if (!isPWave) amplitude *= 0.7; // S-waves typically have lower amplitude
+
+            // Add distance attenuation
+            double distance = Math.Sqrt((rx - tx) * (rx - tx) + (ry - ty) * (ry - ty) + (rz - tz) * (rz - tz)) * pixelSize;
+            double attenuation = 1.0 / Math.Max(1.0, distance / wavelength);
+            amplitude *= attenuation;
 
             // Generate the waveform
             for (int i = 0; i < totalLength; i++)
@@ -3355,15 +3512,16 @@ namespace CTS
                 if (i < arrivalTime)
                 {
                     // Add small noise before arrival
-                    waveform[i] = (float)((new Random(i).NextDouble() - 0.5) * 0.02);
+                    waveform[i] = (float)((new Random(i).NextDouble() - 0.5) * 0.02 * amplitude);
                 }
                 else
                 {
                     // Calculate relative time after arrival
-                    double t = (i - arrivalTime) * period / 10;
+                    double t = (i - arrivalTime) * dt * 1e6; // Convert to microseconds
 
                     // Apply exponential decay
-                    double decay = Math.Exp(-(i - arrivalTime) * decayFactor / 50.0);
+                    double decayRate = isPWave ? 0.3 : 0.2; // S-waves decay slower
+                    double decay = Math.Exp(-(i - arrivalTime) * decayRate / 100.0);
 
                     // Calculate primary wave component
                     double wave = amplitude * decay * Math.Sin(2 * Math.PI * t / period);
@@ -3372,8 +3530,12 @@ namespace CTS
                     wave += amplitude * 0.3 * decay * Math.Sin(2 * Math.PI * t / (period * 0.6));
                     wave += amplitude * 0.15 * decay * Math.Sin(2 * Math.PI * t / (period * 0.3));
 
-                    // Add randomness
-                    wave += (new Random(i).NextDouble() - 0.5) * amplitude * 0.1 * decay;
+                    // Add material dispersion effect
+                    double dispersion = 1.0 + 0.1 * Math.Sin(2 * Math.PI * t / (period * 10));
+                    wave *= dispersion;
+
+                    // Add small randomness
+                    wave += (new Random(i).NextDouble() - 0.5) * amplitude * 0.05 * decay;
 
                     waveform[i] = (float)wave;
                 }
@@ -3381,6 +3543,8 @@ namespace CTS
 
             return waveform;
         }
+        private FrameCacheManager cacheManager;
+
 
         #endregion
 
@@ -3777,7 +3941,37 @@ namespace CTS
                 lblPWaveTravelTime.Text = "0 steps (0.00 ms)";
                 lblSWaveTravelTime.Text = "0 steps (0.00 ms)";
                 lblDeadTime.Text = "0 steps (0.00 ms)";
+
+                // Clear cache manager reference
+                cacheManager = null;
                 return;
+            }
+
+            // Try to get cache directory and create cache manager
+            string cacheDir = null;
+            if (gpuSimulator != null)
+            {
+                cacheDir = gpuSimulator.GetCacheDirectory();
+            }
+            else if (cpuSimulator != null)
+            {
+                cacheDir = cpuSimulator.GetCacheDirectory();
+            }
+
+            if (!string.IsNullOrEmpty(cacheDir))
+            {
+                try
+                {
+                    // Store cache manager reference for later use
+                    cacheManager = new FrameCacheManager(Path.GetDirectoryName(cacheDir), mainForm.GetWidth(), mainForm.GetHeight(), mainForm.GetDepth());
+                    cacheManager.LoadMetadata();
+                    Logger.Log($"[UpdateResultsDisplay] Loaded cache with {cacheManager.FrameCount} frames");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[UpdateResultsDisplay] Error loading cache: {ex.Message}");
+                    cacheManager = null;
+                }
             }
 
             // Calculate and update the actual average density

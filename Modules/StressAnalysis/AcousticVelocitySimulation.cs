@@ -5774,13 +5774,11 @@ namespace CTS
         {
             try
             {
-                // Export as PNG first, then convert to PDF
+                // Export as PNG first, then convert to PDF (#TODO: implement direct PDF export)
                 string tempPngPath = Path.Combine(Path.GetTempPath(), $"acoustic_sim_{SimulationId}.png");
                 if (ExportToPng(tempPngPath))
                 {
-                    // Create a simple PDF with the image (requires a PDF library)
-                    // This is a placeholder - in a real implementation, use a PDF library
-                    // like iTextSharp, PdfSharp, or similar
+                    
 
                     // For now, just export a PNG and notify the user
                     File.Copy(tempPngPath, filePath, true);

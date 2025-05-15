@@ -142,7 +142,10 @@ namespace CTS
             }
         }
         #endregion
-
+        public string GetCacheDirectory()
+        {
+            return cacheManager?.CacheDirectory;
+        }
         /// <summary>Returns √((λ + 2μ) / μ) for the current elastic constants.</summary>
         private double GetTheoreticalVpVsRatio()
         {

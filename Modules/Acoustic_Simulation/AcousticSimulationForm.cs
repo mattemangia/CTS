@@ -2488,7 +2488,7 @@ namespace CTS
         private void InjectTestWave()
         {
             // This method injects a test signal to verify visualization works
-            // Only call this if you need to debug the visualization without relying on simulators
+            // Only call this if needed to debug the visualization without relying on simulators
             Logger.Log("[AcousticSimulationForm] Injecting test wave pattern for debugging");
 
             int width = mainForm.GetWidth();
@@ -3237,9 +3237,7 @@ namespace CTS
 
         private Point WorldToScreen(Point3D worldPos)
         {
-            // A simplified projection method
-            // In a real implementation, this would use the same transformation as the volume renderer
-
+           
             // Get the size of the picture box
             int width = pictureBoxSimulation.Width;
             int height = pictureBoxSimulation.Height;
@@ -3818,7 +3816,7 @@ namespace CTS
                 // Update base density from the material
                 baseDensity = material.Density > 0 ? material.Density : 1000.0;
 
-                // Display current density in UI (if you have a label for it)
+                // Display current density in UI 
                 lblDensityInfo.Text = $"Current Density: {baseDensity} kg/m³";
 
                 // Log the change

@@ -20,7 +20,7 @@ namespace CTS.Modules.BugSubmission
     /// </summary>
     public class BugSubmissionForm : KryptonForm
     {
-        // Email settings - replace with your preferred contact information
+        
         private const string BugReportEmail = "your-email@example.com";
 
         // UI Controls

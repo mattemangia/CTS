@@ -1350,7 +1350,7 @@ namespace CTS
                     float normalStress = nx * nx * sigmaXX + ny * ny * sigmaYY + nz * nz * sigmaZZ +
                                         2 * nx * ny * sigmaXY + 2 * nx * nz * sigmaXZ + 2 * ny * nz * sigmaYZ;
 
-                    // Calculate shear stresses (simplified)
+                 
                     float shearMagnitude = (float)Math.Sqrt(
                         Math.Pow(nx * sigmaXY + ny * sigmaYY + nz * sigmaYZ, 2) +
                         Math.Pow(nx * sigmaXZ + ny * sigmaYZ + nz * sigmaZZ, 2) +
@@ -2731,8 +2731,8 @@ namespace CTS
         {
             try
             {
-                // Create a simple JSON structure manually
-                // In a real implementation, use a proper JSON library
+              
+               
                 using (System.IO.StreamWriter writer = new System.IO.StreamWriter(filePath))
                 {
                     writer.WriteLine("{");

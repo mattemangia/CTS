@@ -809,7 +809,7 @@ namespace CTS
             const double distinctFactor = 1.0;
             const int pTailSteps = 10;
             const double vpvsMin = 1.3;
-            const double vpvsMax = 2.2;
+            const double vpvsMax = 2.8;
             const double tiny = 1e-10;
 
             int mainAxis = (Math.Abs(rx - tx) >= Math.Abs(ry - ty) &&

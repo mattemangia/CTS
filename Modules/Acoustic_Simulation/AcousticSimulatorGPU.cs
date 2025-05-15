@@ -1483,7 +1483,7 @@ namespace CTS
             const double amplitudeFraction = 0.15;
             const double distinctFromPFactor = 1.0;
             const double vpvsLowerBound = 1.3;
-            const double vpvsUpperBound = 2.2;
+            const double vpvsUpperBound = 2.8;
             const double tiny = 1e-10;
 
             if (stepCount - pWaveTouchStep < minStepsAfterPWave)

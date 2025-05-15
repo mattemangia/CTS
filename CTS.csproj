@@ -1,4 +1,4 @@
-<Project ToolsVersion="12.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+﻿<Project ToolsVersion="12.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup>
     <RestoreProjectStyle>PackagesConfig</RestoreProjectStyle>
     <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
@@ -330,15 +330,10 @@
     <None Include="Resources\favicon.ico" />
     <None Include="Resources\logo.png" />
     <None Include="bin\x64\Debug\favicon.ico" />
-    <Content Include="OldCode_Deprecated\CT3DViewer.txt">
-      <SubType>Form</SubType>
-    </Content>
     <Compile Include="Modules\ArtificialIntelligence\SAM2\CTFusion.cs" />
     <Compile Include="3DViewer\CTViewer3DForm.cs">
       <SubType>Form</SubType>
     </Compile>
-    <Content Include="OldCode_Deprecated\CTViewerNative.txt" />
-    <Content Include="OldCode_Deprecated\CTVolumeViewer.txt" />
     <Compile Include="Modules\Filtering\GUI\FilterManager.cs" />
     <Compile Include="Modules\Resampling\IntegrateResampleForm.cs">
       <SubType>Form</SubType>
@@ -363,12 +358,9 @@
     </Compile>
     <Compile Include="Modules\ArtificialIntelligence\SAM2\Prompt.cs" />
     <Compile Include="Misc\SafeInvokeAsync.cs" />
-    <Content Include="OldCode_Deprecated\CTMemorySegmenter.txt" />
-    <Content Include="OldCode_Deprecated\SegmentationPropagator.txt" />
     <Compile Include="Modules\ArtificialIntelligence\SAM2\SegmentAnythingCT.cs" />
     <Compile Include="Modules\ArtificialIntelligence\TextureClassifier\TextureClassifier.cs" />
     <Compile Include="VolumeOperations\VolumeExtensions.cs" />
-    <Content Include="OldCode_Deprecated\VolumeShader.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="favicon.ico" />

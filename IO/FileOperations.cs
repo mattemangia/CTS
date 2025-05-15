@@ -22,15 +22,13 @@ namespace CTS
         /// Loads a dataset from a folder or file path
         /// </summary>
         public static async Task<(IGrayscaleVolumeData volumeData, ILabelVolumeData volumeLabels, int width, int height, int depth, double pixelSize)>
-            LoadDatasetAsync(string path, bool useMemoryMapping, double pixelSize, int binningFactor, IProgress<int> progress)
+    LoadDatasetAsync(string path, bool useMemoryMapping, double pixelSize, int binningFactor, IProgress<int> progress)
         {
-            // Log the input path and convert to absolute path immediately to avoid path resolution issues
             Logger.Log($"[FileOperations] Loading dataset from path: {path}");
             string absolutePath = Path.GetFullPath(path);
             Logger.Log($"[FileOperations] Absolute path resolved to: {absolutePath}");
             Logger.Log($"[FileOperations] Current working directory: {Directory.GetCurrentDirectory()}");
 
-            // Use the absolute path from now on
             path = absolutePath;
 
             IGrayscaleVolumeData volumeData = null;
@@ -39,7 +37,6 @@ namespace CTS
 
             bool folderMode = Directory.Exists(path);
 
-            // --- FOLDER MODE ---
             if (folderMode)
             {
                 Logger.Log("[FileOperations] Detected folder mode.");
@@ -48,232 +45,331 @@ namespace CTS
                 string labelsBinPath = Path.Combine(path, "labels.bin");
                 string volumeChkPath = Path.Combine(path, "volume.chk");
 
-                // Log the exact paths for debugging
-                Logger.Log($"[FileOperations] Volume bin path: {volumeBinPath}");
-                Logger.Log($"[FileOperations] Labels bin path: {labelsBinPath}");
-                Logger.Log($"[FileOperations] Volume chk path: {volumeChkPath}");
-
-                bool volumeExists = File.Exists(volumeBinPath);
-                bool labelsExist = File.Exists(labelsBinPath);
-                bool chkExists = File.Exists(volumeChkPath);
-
-                // Track if we need to generate anything
-                bool needToGenerateVolume = !volumeExists || !chkExists;
-                bool needToGenerateLabels = !labelsExist;
-
-                // Load or create volume data
-                if (needToGenerateVolume)
-                {
-                    Logger.Log("[FileOperations] Binary files missing. Generating volume.bin from folder images.");
-
-                    // Force garbage collection before opening new files
-                    GC.Collect();
-                    GC.WaitForPendingFinalizers();
-
-                    try
-                    {
-                        // Generate the volume directly with memory mapping (if requested)
-                        volumeData = ChunkedVolume.FromFolder(path, CHUNK_DIM, (ProgressForm)progress, useMemoryMapping);
-                        width = volumeData.Width;
-                        height = volumeData.Height;
-                        depth = volumeData.Depth;
-
-                        Logger.Log($"[FileOperations] Created original volume: {width}x{height}x{depth}");
-
-                        // Create the header file if it doesn't exist
-                        if (!chkExists)
-                        {
-                            CreateVolumeChk(path, width, height, depth, CHUNK_DIM, pixelSize);
-                        }
-
-                        // If we're using memory mapping, we need to close and reopen the file
-                        if (useMemoryMapping)
-                        {
-                            // Dispose the volume to release file handles
-                            volumeData.Dispose();
-                            volumeData = null;
-
-                            // Force garbage collection to release file locks
-                            GC.Collect();
-                            GC.WaitForPendingFinalizers();
-
-                            // Wait a moment to ensure OS file operations complete
-                            await Task.Delay(500);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Log($"[FileOperations] Error generating volume: {ex.Message}");
-                        // Clean up resources
-                        if (volumeData != null)
-                        {
-                            volumeData.Dispose();
-                            volumeData = null;
-                        }
-                        throw;
-                    }
-                }
-                else if (chkExists && !volumeExists)
-                {
-                    // We have a header but no volume
-                    Logger.Log("[FileOperations] Found volume.chk but volume.bin is missing. Reading dimensions from header.");
-                    var header = ReadVolumeChk(path);
-                    width = header.volWidth;
-                    height = header.volHeight;
-                    depth = header.volDepth;
-                    pixelSize = header.pixelSize;
-                }
-
-                // Create labels file if needed
-                if (needToGenerateLabels && width > 0 && height > 0 && depth > 0)
-                {
-                    Logger.Log("[FileOperations] Labels file not found. Creating blank labels file.");
-                    CreateBlankLabelsFile(labelsBinPath, width, height, depth, CHUNK_DIM);
-                }
-
-                // --- BINNING Branch ---
+                // Check if we need to apply binning FIRST
                 if (binningFactor > 1)
                 {
-                    // Close any open files before binning
-                    if (volumeData != null)
+                    Logger.Log($"[FileOperations] Binning requested with factor {binningFactor}");
+
+                    // Check if we already have binned data
+                    string binnedMarker = Path.Combine(path, $"binned_{binningFactor}.txt");
+
+                    if (!File.Exists(binnedMarker))
                     {
-                        volumeData.Dispose();
-                        volumeData = null;
+                        Logger.Log("[FileOperations] No binned data found, processing images first");
+
+                        // Find source images in the folder
+                        var imageFiles = Directory.GetFiles(path)
+                            .Where(f => IsImageFile(f))
+                            .OrderBy(f => GetImageNumber(f))
+                            .ToList();
+
+                        if (imageFiles.Count() > 0)
+                        {
+                            Logger.Log($"[FileOperations] Found {imageFiles.Count()} images to bin");
+
+                            // Declare dimensions outside the using block
+                            int origWidth, origHeight, origDepth;
+
+                            // Get dimensions from first image
+                            using (var firstImage = new Bitmap(imageFiles[0]))
+                            {
+                                origWidth = firstImage.Width;
+                                origHeight = firstImage.Height;
+                            }
+                            origDepth = imageFiles.Count();
+
+                            // Calculate binned dimensions - INCLUDING DEPTH!
+                            width = Math.Max(1, origWidth / binningFactor);
+                            height = Math.Max(1, origHeight / binningFactor);
+                            depth = Math.Max(1, origDepth / binningFactor);  // THIS IS THE KEY CHANGE!
+
+                            Logger.Log($"[FileOperations] 3D Binning {origWidth}x{origHeight}x{origDepth} -> {width}x{height}x{depth}");
+
+                            // Create binned folder
+                            string binnedFolder = Path.Combine(path, "binned_temp");
+                            if (Directory.Exists(binnedFolder))
+                                Directory.Delete(binnedFolder, true);
+                            Directory.CreateDirectory(binnedFolder);
+
+                            // Process images with 3D binning
+                            await ProcessImagesWithBinning(imageFiles, binnedFolder, binningFactor, width, height, progress);
+
+                            // Create volume from binned images
+                            ChunkedVolume tempVolume = null;
+                            try
+                            {
+                                Logger.Log("[FileOperations] Creating volume from binned images");
+                                tempVolume = (ChunkedVolume)ChunkedVolume.FromFolder(binnedFolder, CHUNK_DIM, (ProgressForm)progress, false);
+
+                                width = tempVolume.Width;
+                                height = tempVolume.Height;
+                                depth = tempVolume.Depth;
+
+                                Logger.Log($"[FileOperations] Volume created: {width}x{height}x{depth}");
+
+                                // Save the volume to the main folder
+                                Logger.Log("[FileOperations] Saving volume to main folder");
+                                tempVolume.SaveAsBin(volumeBinPath);
+
+                                // Update pixel size
+                                if (pixelSize <= 0 && File.Exists(volumeChkPath))
+                                {
+                                    var header = ReadVolumeChk(path);
+                                    pixelSize = header.pixelSize * binningFactor;
+                                }
+                                else if (pixelSize <= 0)
+                                {
+                                    pixelSize = 1e-6 * binningFactor;
+                                }
+                                else
+                                {
+                                    pixelSize = pixelSize * binningFactor;
+                                }
+
+                                // Create volume.chk
+                                CreateVolumeChk(path, width, height, depth, CHUNK_DIM, pixelSize);
+
+                                // Dispose the temp volume to release file locks
+                                tempVolume.Dispose();
+                                tempVolume = null;
+
+                                Logger.Log("[FileOperations] Volume saved, cleaning up temp folder");
+                            }
+                            finally
+                            {
+                                if (tempVolume != null)
+                                {
+                                    tempVolume.Dispose();
+                                    tempVolume = null;
+                                }
+                            }
+
+                            // Force garbage collection
+                            GC.Collect();
+                            GC.WaitForPendingFinalizers();
+                            GC.Collect();
+
+                            // Wait for file locks to be released
+                            await Task.Delay(500);
+
+                            // Now delete the temp folder
+                            try
+                            {
+                                Directory.Delete(binnedFolder, true);
+                                Logger.Log("[FileOperations] Temp folder deleted");
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Log($"[FileOperations] Warning: Could not delete temp folder: {ex.Message}");
+                            }
+
+                            // Create binned marker
+                            File.WriteAllText(binnedMarker, $"3D Binned with factor {binningFactor} at {DateTime.Now}\n{origWidth}x{origHeight}x{origDepth} -> {width}x{height}x{depth}");
+
+                            // Load the saved volume
+                            Logger.Log("[FileOperations] Loading saved volume");
+                            volumeData = LoadVolumeBin(volumeBinPath, useMemoryMapping);
+
+                            // Create empty labels
+                            CreateBlankLabelsFile(labelsBinPath, width, height, depth, CHUNK_DIM);
+                            volumeLabels = LoadLabelsBin(labelsBinPath, useMemoryMapping);
+
+                            Logger.Log("[FileOperations] 3D binning completed, volume loaded");
+                        }
+                        else
+                        {
+                            throw new Exception("No images found in folder for binning");
+                        }
                     }
-
-                    if (volumeLabels != null)
+                    else
                     {
-                        volumeLabels.Dispose();
-                        volumeLabels = null;
-                    }
-
-                    // Force garbage collection before binning
-                    GC.Collect();
-                    GC.WaitForPendingFinalizers();
-
-                    string backupVolPath = Path.Combine(path, "temp_volume.bin");
-                    Logger.Log($"[FileOperations] Creating backup copy of volume.bin: {backupVolPath}");
-                    File.Copy(volumeBinPath, backupVolPath, true);
-
-                    Logger.Log($"[FileOperations] Running binning process with factor {binningFactor}...");
-                    await ProcessBinningAsync(path, binningFactor, (float)pixelSize, useMemoryMapping);
-                    Logger.Log("[FileOperations] Binning complete.");
-
-                    // Force another GC after binning
-                    GC.Collect();
-                    GC.WaitForPendingFinalizers();
-
-                    // Wait a moment to ensure OS file operations complete
-                    await Task.Delay(500);
-                }
-
-                // Now load the volume and labels files
-                if (File.Exists(volumeBinPath))
-                {
-                    try
-                    {
-                        Logger.Log("[FileOperations] Loading volume.bin...");
+                        Logger.Log($"[FileOperations] Already binned with factor {binningFactor}");
+                        // Load the already binned volume
                         volumeData = LoadVolumeBin(volumeBinPath, useMemoryMapping);
                         width = volumeData.Width;
                         height = volumeData.Height;
                         depth = volumeData.Depth;
-                        Logger.Log($"[FileOperations] Loaded volume: {width}x{height}x{depth}");
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Log($"[FileOperations] Error loading volume.bin: {ex.Message}");
 
-                        // Try waiting and retrying once
-                        await Task.Delay(1000);
-                        Logger.Log("[FileOperations] Retrying after short delay...");
+                        if (File.Exists(labelsBinPath))
+                        {
+                            volumeLabels = LoadLabelsBin(labelsBinPath, useMemoryMapping);
+                        }
+                        else
+                        {
+                            // Create and load labels
+                            CreateBlankLabelsFile(labelsBinPath, width, height, depth, CHUNK_DIM);
+                            volumeLabels = LoadLabelsBin(labelsBinPath, useMemoryMapping);
+                        }
+                    }
+                }
+                else
+                {
+                    // No binning requested, proceed with original code
+                    bool volumeExists = File.Exists(volumeBinPath);
+                    bool labelsExist = File.Exists(labelsBinPath);
+                    bool chkExists = File.Exists(volumeChkPath);
+
+                    bool needToGenerateVolume = !volumeExists || !chkExists;
+                    bool needToGenerateLabels = !labelsExist;
+
+                    if (needToGenerateVolume)
+                    {
+                        Logger.Log("[FileOperations] Binary files missing. Generating volume.bin from folder images.");
+
+                        GC.Collect();
+                        GC.WaitForPendingFinalizers();
 
                         try
                         {
+                            volumeData = ChunkedVolume.FromFolder(path, CHUNK_DIM, (ProgressForm)progress, useMemoryMapping);
+                            width = volumeData.Width;
+                            height = volumeData.Height;
+                            depth = volumeData.Depth;
+
+                            Logger.Log($"[FileOperations] Created original volume: {width}x{height}x{depth}");
+
+                            if (!chkExists)
+                            {
+                                CreateVolumeChk(path, width, height, depth, CHUNK_DIM, pixelSize);
+                            }
+
+                            if (useMemoryMapping)
+                            {
+                                volumeData.Dispose();
+                                volumeData = null;
+                                GC.Collect();
+                                GC.WaitForPendingFinalizers();
+                                await Task.Delay(500);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[FileOperations] Error generating volume: {ex.Message}");
+                            if (volumeData != null)
+                            {
+                                volumeData.Dispose();
+                                volumeData = null;
+                            }
+                            throw;
+                        }
+                    }
+                    else if (chkExists && !volumeExists)
+                    {
+                        Logger.Log("[FileOperations] Found volume.chk but volume.bin is missing. Reading dimensions from header.");
+                        var header = ReadVolumeChk(path);
+                        width = header.volWidth;
+                        height = header.volHeight;
+                        depth = header.volDepth;
+                        pixelSize = header.pixelSize;
+                    }
+
+                    if (needToGenerateLabels && width > 0 && height > 0 && depth > 0)
+                    {
+                        Logger.Log("[FileOperations] Labels file not found. Creating blank labels file.");
+                        CreateBlankLabelsFile(labelsBinPath, width, height, depth, CHUNK_DIM);
+                    }
+
+                    // Now load the volume and labels files
+                    if (File.Exists(volumeBinPath))
+                    {
+                        try
+                        {
+                            Logger.Log("[FileOperations] Loading volume.bin...");
                             volumeData = LoadVolumeBin(volumeBinPath, useMemoryMapping);
                             width = volumeData.Width;
                             height = volumeData.Height;
                             depth = volumeData.Depth;
-                            Logger.Log($"[FileOperations] Retry succeeded, loaded volume: {width}x{height}x{depth}");
+                            Logger.Log($"[FileOperations] Loaded volume: {width}x{height}x{depth}");
                         }
-                        catch (Exception retryEx)
+                        catch (Exception ex)
                         {
-                            Logger.Log($"[FileOperations] Retry failed: {retryEx.Message}");
-                            throw;
+                            Logger.Log($"[FileOperations] Error loading volume.bin: {ex.Message}");
+                            await Task.Delay(1000);
+                            Logger.Log("[FileOperations] Retrying after short delay...");
+
+                            try
+                            {
+                                volumeData = LoadVolumeBin(volumeBinPath, useMemoryMapping);
+                                width = volumeData.Width;
+                                height = volumeData.Height;
+                                depth = volumeData.Depth;
+                                Logger.Log($"[FileOperations] Retry succeeded, loaded volume: {width}x{height}x{depth}");
+                            }
+                            catch (Exception retryEx)
+                            {
+                                Logger.Log($"[FileOperations] Retry failed: {retryEx.Message}");
+                                throw;
+                            }
                         }
                     }
-                }
 
-                // Load labels.bin
-                if (File.Exists(labelsBinPath))
-                {
-                    Logger.Log($"[FileOperations] Found labels file at: {labelsBinPath}");
-                    try
+                    if (File.Exists(labelsBinPath))
                     {
-                        volumeLabels = LoadLabelsBin(labelsBinPath, useMemoryMapping);
-                        if (volumeLabels != null)
-                        {
-                            Logger.Log($"[FileOperations] Loaded labels: {volumeLabels.Width}x{volumeLabels.Height}x{volumeLabels.Depth}");
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Log("[FileOperations] Error loading labels.bin: " + ex.Message + ". Recreating blank labels file.");
-
-                        // Close file handles and force GC
-                        if (volumeLabels != null)
-                        {
-                            volumeLabels.Dispose();
-                            volumeLabels = null;
-                        }
-
-                        GC.Collect();
-                        GC.WaitForPendingFinalizers();
-                        await Task.Delay(500);
-
-                        // Try to create a new blank labels file
+                        Logger.Log($"[FileOperations] Found labels file at: {labelsBinPath}");
                         try
                         {
-                            File.Delete(labelsBinPath);
-                            CreateBlankLabelsFile(labelsBinPath, width, height, depth, CHUNK_DIM);
                             volumeLabels = LoadLabelsBin(labelsBinPath, useMemoryMapping);
-                            Logger.Log("[FileOperations] Reloaded new labels.bin.");
+                            if (volumeLabels != null)
+                            {
+                                Logger.Log($"[FileOperations] Loaded labels: {volumeLabels.Width}x{volumeLabels.Height}x{volumeLabels.Depth}");
+                            }
                         }
-                        catch (Exception retryEx)
+                        catch (Exception ex)
                         {
-                            Logger.Log($"[FileOperations] Failed to create new labels file: {retryEx.Message}");
+                            Logger.Log("[FileOperations] Error loading labels.bin: " + ex.Message + ". Recreating blank labels file.");
+
+                            if (volumeLabels != null)
+                            {
+                                volumeLabels.Dispose();
+                                volumeLabels = null;
+                            }
+
+                            GC.Collect();
+                            GC.WaitForPendingFinalizers();
+                            await Task.Delay(500);
+
+                            try
+                            {
+                                File.Delete(labelsBinPath);
+                                CreateBlankLabelsFile(labelsBinPath, width, height, depth, CHUNK_DIM);
+                                volumeLabels = LoadLabelsBin(labelsBinPath, useMemoryMapping);
+                                Logger.Log("[FileOperations] Reloaded new labels.bin.");
+                            }
+                            catch (Exception retryEx)
+                            {
+                                Logger.Log($"[FileOperations] Failed to create new labels file: {retryEx.Message}");
+                                throw;
+                            }
+                        }
+                    }
+                    else if (width > 0 && height > 0 && depth > 0)
+                    {
+                        Logger.Log("[FileOperations] labels.bin not found. Creating and loading blank labels file.");
+                        CreateBlankLabelsFile(labelsBinPath, width, height, depth, CHUNK_DIM);
+
+                        await Task.Delay(500);
+
+                        try
+                        {
+                            volumeLabels = LoadLabelsBin(labelsBinPath, useMemoryMapping);
+                            Logger.Log("[FileOperations] Successfully loaded new labels file.");
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[FileOperations] Error loading newly created labels file: {ex.Message}");
                             throw;
                         }
-                    }
-                }
-                else if (width > 0 && height > 0 && depth > 0)
-                {
-                    Logger.Log("[FileOperations] labels.bin not found. Creating and loading blank labels file.");
-                    CreateBlankLabelsFile(labelsBinPath, width, height, depth, CHUNK_DIM);
-
-                    // Wait a moment for file operations to complete
-                    await Task.Delay(500);
-
-                    try
-                    {
-                        volumeLabels = LoadLabelsBin(labelsBinPath, useMemoryMapping);
-                        Logger.Log("[FileOperations] Successfully loaded new labels file.");
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Log($"[FileOperations] Error loading newly created labels file: {ex.Message}");
-                        throw;
                     }
                 }
             }
-            // --- FILE MODE ---
             else if (File.Exists(path))
             {
+                // File mode handling - unchanged from original
                 string fileName = Path.GetFileName(path).ToLower();
                 string baseFolder = Path.GetDirectoryName(path);
 
                 Logger.Log($"[FileOperations] File mode detected. Loading file: {fileName} from folder: {baseFolder}");
 
-                // Case: Volume file (volume.bin) only
                 if (fileName.Contains("volume") && !fileName.Contains("labels"))
                 {
                     string volChk = Path.Combine(baseFolder, "volume.chk");
@@ -289,7 +385,6 @@ namespace CTS
 
                         Logger.Log($"[FileOperations] Loaded header from volume.chk: {volWidth}x{volHeight}x{volDepth}, chunkDim={chkChunkDim}, pixelSize={pixelSize}");
 
-                        // Use raw-loading since the volume.bin in file mode does not include a header
                         volumeData = LoadVolumeBinRaw(path, useMemoryMapping, volWidth, volHeight, volDepth, chkChunkDim);
                         width = volumeData.Width;
                         height = volumeData.Height;
@@ -303,7 +398,6 @@ namespace CTS
                         else
                         {
                             CreateBlankLabelsFile(labelsPath, width, height, depth, CHUNK_DIM);
-                            // Wait briefly for file operations to complete
                             await Task.Delay(500);
                             volumeLabels = LoadLabelsBin(labelsPath, useMemoryMapping);
                         }
@@ -314,7 +408,6 @@ namespace CTS
                         (volumeData, volumeLabels, width, height, depth, pixelSize) = LoadCombinedBinary(path);
                     }
                 }
-                // Case: Labels file only
                 else if (fileName.Contains("labels"))
                 {
                     string labChk = Path.Combine(baseFolder, "labels.chk");
@@ -327,7 +420,6 @@ namespace CTS
                     height = volumeLabels.Height;
                     depth = volumeLabels.Depth;
                 }
-                // Otherwise, assume Combined File mode
                 else
                 {
                     Logger.Log("[FileOperations] File mode: assuming combined file mode.");
@@ -341,6 +433,226 @@ namespace CTS
             }
 
             return (volumeData, volumeLabels, width, height, depth, pixelSize);
+        }
+        private static async Task ProcessImagesWithBinning(List<string> imageFiles, string outputFolder,
+    int binFactor, int newWidth, int newHeight, IProgress<int> progress)
+        {
+            int processedCount = 0;
+            int origDepth = imageFiles.Count;
+            int newDepth = Math.Max(1, origDepth / binFactor);  // PROPER 3D BINNING!
+
+            Logger.Log($"[ProcessImagesWithBinning] 3D Binning: {imageFiles.Count} images -> {newDepth} slices");
+            Logger.Log($"[ProcessImagesWithBinning] Depth reduction: {origDepth} -> {newDepth}");
+
+            await Task.Run(() =>
+            {
+                // Process slices in groups for Z-dimension binning
+                Parallel.For(0, newDepth, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
+                newZ =>
+                {
+                    try
+                    {
+                        // Create binned slice by combining multiple source slices
+                        Bitmap binnedSlice = new Bitmap(newWidth, newHeight);
+
+                        // Accumulator for averaging multiple slices
+                        float[,] accumulator = new float[newWidth, newHeight];
+                        int[,] counts = new int[newWidth, newHeight];
+
+                        // Process each source slice that contributes to this binned slice
+                        int srcZStart = newZ * binFactor;
+                        int srcZEnd = Math.Min(srcZStart + binFactor, origDepth);
+
+                        for (int srcZ = srcZStart; srcZ < srcZEnd; srcZ++)
+                        {
+                            if (srcZ >= imageFiles.Count) break;
+
+                            using (Bitmap sourceImage = new Bitmap(imageFiles[srcZ]))
+                            {
+                                // Scale this slice to the new width/height
+                                using (Bitmap scaledSlice = new Bitmap(newWidth, newHeight))
+                                {
+                                    using (Graphics g = Graphics.FromImage(scaledSlice))
+                                    {
+                                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                                        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+                                        g.DrawImage(sourceImage, 0, 0, newWidth, newHeight);
+                                    }
+
+                                    // Accumulate pixel values from this slice
+                                    for (int y = 0; y < newHeight; y++)
+                                    {
+                                        for (int x = 0; x < newWidth; x++)
+                                        {
+                                            Color pixel = scaledSlice.GetPixel(x, y);
+                                            float gray = 0.299f * pixel.R + 0.587f * pixel.G + 0.114f * pixel.B;
+                                            accumulator[x, y] += gray;
+                                            counts[x, y]++;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Create final binned slice by averaging
+                        for (int y = 0; y < newHeight; y++)
+                        {
+                            for (int x = 0; x < newWidth; x++)
+                            {
+                                int value = counts[x, y] > 0 ? (int)(accumulator[x, y] / counts[x, y]) : 0;
+                                value = Math.Max(0, Math.Min(255, value));
+                                binnedSlice.SetPixel(x, y, Color.FromArgb(value, value, value));
+                            }
+                        }
+
+                        // Convert to grayscale and save
+                        Bitmap grayscaleSlice = ConvertToGrayscale(binnedSlice);
+                        string outputPath = Path.Combine(outputFolder, $"{newZ:D5}.bmp");
+                        grayscaleSlice.Save(outputPath, ImageFormat.Bmp);
+
+                        // Clean up
+                        grayscaleSlice.Dispose();
+                        binnedSlice.Dispose();
+
+                        int count = System.Threading.Interlocked.Add(ref processedCount, srcZEnd - srcZStart);
+                        progress?.Report((count * 100) / origDepth);
+
+                        Logger.Log($"[ProcessImagesWithBinning] Created binned slice {newZ}/{newDepth}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[ProcessImagesWithBinning] Error creating slice {newZ}: {ex.Message}");
+                        throw;
+                    }
+                });
+            });
+
+            Logger.Log($"[ProcessImagesWithBinning] 3D binning completed: {newDepth} slices created");
+        }
+        private static void ProcessSingleImage(string imagePath, string outputFolder, int binFactor, int newWidth, int newHeight)
+        {
+            Bitmap source = null;
+            Bitmap binned = null;
+            Bitmap grayscale = null;
+
+            try
+            {
+                // Load source image
+                source = new Bitmap(imagePath);
+
+                // Create binned image
+                binned = new Bitmap(newWidth, newHeight);
+
+                using (Graphics g = Graphics.FromImage(binned))
+                {
+                    g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+                    g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                    g.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
+                    g.DrawImage(source, 0, 0, newWidth, newHeight);
+                }
+
+                // Convert to grayscale
+                grayscale = ConvertToGrayscale(binned);
+
+                // Save with the same filename
+                string filename = Path.GetFileName(imagePath);
+                string outputPath = Path.Combine(outputFolder, filename);
+                grayscale.Save(outputPath, ImageFormat.Bmp);
+            }
+            finally
+            {
+                // Ensure all bitmaps are disposed
+                source?.Dispose();
+                binned?.Dispose();
+                grayscale?.Dispose();
+            }
+        }
+        private static bool IsImageFile(string path)
+        {
+            string ext = Path.GetExtension(path).ToLower();
+            return ext == ".bmp" || ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tif" || ext == ".tiff";
+        }
+
+        private static int GetImageNumber(string path)
+        {
+            string filename = Path.GetFileNameWithoutExtension(path);
+            string digits = new string(filename.Where(char.IsDigit).ToArray());
+
+            if (int.TryParse(digits, out int number))
+                return number;
+
+            return 0;
+        }
+        private static Bitmap ConvertToGrayscale(Bitmap source)
+        {
+            Bitmap grayscale = null;
+            BitmapData sourceData = null;
+            BitmapData grayscaleData = null;
+
+            try
+            {
+                grayscale = new Bitmap(source.Width, source.Height, PixelFormat.Format8bppIndexed);
+
+                // Set grayscale palette
+                ColorPalette palette = grayscale.Palette;
+                for (int i = 0; i < 256; i++)
+                {
+                    palette.Entries[i] = Color.FromArgb(i, i, i);
+                }
+                grayscale.Palette = palette;
+
+                // Lock bits for both bitmaps
+                sourceData = source.LockBits(
+                    new Rectangle(0, 0, source.Width, source.Height),
+                    ImageLockMode.ReadOnly,
+                    source.PixelFormat);
+
+                grayscaleData = grayscale.LockBits(
+                    new Rectangle(0, 0, grayscale.Width, grayscale.Height),
+                    ImageLockMode.WriteOnly,
+                    PixelFormat.Format8bppIndexed);
+
+                unsafe
+                {
+                    int bytesPerPixel = Image.GetPixelFormatSize(source.PixelFormat) / 8;
+
+                    for (int y = 0; y < source.Height; y++)
+                    {
+                        byte* sourceRow = (byte*)sourceData.Scan0 + (y * sourceData.Stride);
+                        byte* grayscaleRow = (byte*)grayscaleData.Scan0 + (y * grayscaleData.Stride);
+
+                        for (int x = 0; x < source.Width; x++)
+                        {
+                            int offset = x * bytesPerPixel;
+
+                            byte b = sourceRow[offset];
+                            byte g = bytesPerPixel > 1 ? sourceRow[offset + 1] : b;
+                            byte r = bytesPerPixel > 2 ? sourceRow[offset + 2] : b;
+
+                            // Convert to grayscale
+                            byte gray = (byte)(0.299 * r + 0.587 * g + 0.114 * b);
+                            grayscaleRow[x] = gray;
+                        }
+                    }
+                }
+
+                return grayscale;
+            }
+            catch
+            {
+                grayscale?.Dispose();
+                throw;
+            }
+            finally
+            {
+                // Always unlock bits
+                if (sourceData != null)
+                    source.UnlockBits(sourceData);
+
+                if (grayscaleData != null && grayscale != null)
+                    grayscale.UnlockBits(grayscaleData);
+            }
         }
 
         /// <summary>
@@ -588,7 +900,8 @@ namespace CTS
         /// <summary>
         /// Loads a volume from a raw binary file without header
         /// </summary>
-        public static IGrayscaleVolumeData LoadVolumeBinRaw(string path, bool useMM, int volWidth, int volHeight, int volDepth, int chunkDim)
+       
+public static IGrayscaleVolumeData LoadVolumeBinRaw(string path, bool useMM, int volWidth, int volHeight, int volDepth, int chunkDim)
         {
             try
             {
@@ -599,7 +912,12 @@ namespace CTS
                 int totalChunks = cntX * cntY * cntZ;
                 long chunkSize = (long)chunkDim * chunkDim * chunkDim;
                 long dataSize = totalChunks * chunkSize;
-                int headerSize = 36; // 9 ints (36 bytes)
+
+                // Possible header sizes:
+                // Old format: 9 ints = 36 bytes
+                // New format: 4 ints + 1 int + 1 double + 3 ints = 5 ints + 1 double + 3 ints = 40 bytes
+                int headerSize36 = 36; // 9 ints
+                int headerSize40 = 40; // 5 ints + 1 double + 3 ints
 
                 // Get file information
                 FileInfo fileInfo = new FileInfo(path);
@@ -608,6 +926,7 @@ namespace CTS
                 // Determine if file has a header and set the data offset
                 bool hasHeader = false;
                 long dataOffset = 0;
+                int actualHeaderSize = 0;
 
                 if (fileSize == dataSize)
                 {
@@ -615,20 +934,74 @@ namespace CTS
                     hasHeader = false;
                     dataOffset = 0;
                 }
-                else if (fileSize == dataSize + headerSize)
+                else if (fileSize == dataSize + headerSize36)
                 {
-                    Logger.Log("[LoadVolumeBinRaw] File appears to include a 36-byte header");
+                    Logger.Log("[LoadVolumeBinRaw] File appears to include a 36-byte header (old format)");
                     hasHeader = true;
-                    dataOffset = headerSize;
+                    dataOffset = headerSize36;
+                    actualHeaderSize = headerSize36;
+                }
+                else if (fileSize == dataSize + headerSize40)
+                {
+                    Logger.Log("[LoadVolumeBinRaw] File appears to include a 40-byte header (new format with pixelSize)");
+                    hasHeader = true;
+                    dataOffset = headerSize40;
+                    actualHeaderSize = headerSize40;
                 }
                 else
                 {
-                    throw new Exception($"Volume file size mismatch: expected {dataSize:N0} or {dataSize + headerSize:N0} bytes but got {fileSize:N0} bytes");
+                    // Try to detect header size by reading first few bytes
+                    using (FileStream detectFs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    using (BinaryReader detectBr = new BinaryReader(detectFs))
+                    {
+                        try
+                        {
+                            int testWidth = detectBr.ReadInt32();
+                            int testHeight = detectBr.ReadInt32();
+                            int testDepth = detectBr.ReadInt32();
+                            int testChunkDim = detectBr.ReadInt32();
+
+                            // Check if these values match expected dimensions
+                            if (testWidth == volWidth && testHeight == volHeight &&
+                                testDepth == volDepth && testChunkDim == chunkDim)
+                            {
+                                // Header detected, determine size
+                                long remainingData = fileSize - 16; // Already read 4 ints
+
+                                if (remainingData == dataSize + 20) // 5 more ints (old format)
+                                {
+                                    Logger.Log("[LoadVolumeBinRaw] Detected 36-byte header format");
+                                    hasHeader = true;
+                                    dataOffset = headerSize36;
+                                    actualHeaderSize = headerSize36;
+                                }
+                                else if (remainingData == dataSize + 24) // 1 int + 1 double + 3 ints (new format)
+                                {
+                                    Logger.Log("[LoadVolumeBinRaw] Detected 40-byte header format");
+                                    hasHeader = true;
+                                    dataOffset = headerSize40;
+                                    actualHeaderSize = headerSize40;
+                                }
+                                else
+                                {
+                                    throw new Exception($"Volume file size mismatch: expected {dataSize:N0}, {dataSize + headerSize36:N0}, or {dataSize + headerSize40:N0} bytes but got {fileSize:N0} bytes");
+                                }
+                            }
+                            else
+                            {
+                                throw new Exception($"Invalid header values or file size mismatch");
+                            }
+                        }
+                        catch
+                        {
+                            throw new Exception($"Volume file size mismatch: expected {dataSize:N0}, {dataSize + headerSize36:N0}, or {dataSize + headerSize40:N0} bytes but got {fileSize:N0} bytes");
+                        }
+                    }
                 }
 
                 // Log what we're doing
                 Logger.Log($"[LoadVolumeBinRaw] Loading volume: {volWidth}x{volHeight}x{volDepth}, chunkDim={chunkDim}");
-                Logger.Log($"[LoadVolumeBinRaw] File: {path}, size: {fileSize:N0} bytes, {(hasHeader ? "with header" : "no header")}");
+                Logger.Log($"[LoadVolumeBinRaw] File: {path}, size: {fileSize:N0} bytes, {(hasHeader ? $"with {actualHeaderSize}-byte header" : "no header")}");
 
                 // Implement retry mechanism with exponential back-off
                 MemoryMappedFile mmf = null;

@@ -1116,31 +1116,48 @@ namespace CTS
                 }));
             }
         }
-
         private double? AskUserPixelSize()
         {
+            // Ensure we're on the UI thread
+            if (this.InvokeRequired)
+            {
+                return (double?)this.Invoke(new Func<double?>(() => AskUserPixelSize()));
+            }
+
             using (Form form = new Form()
             {
                 Text = "Enter Pixel Size and Binning",
                 Width = 350,
                 Height = 220,
-                StartPosition = FormStartPosition.CenterScreen,
+                StartPosition = FormStartPosition.CenterScreen, // Changed back to CenterScreen
                 FormBorderStyle = FormBorderStyle.FixedDialog,
                 MaximizeBox = false,
                 MinimizeBox = false,
-                TopMost = true,
+                ShowInTaskbar = false,  // Add this
                 Icon = this.Icon
             })
             {
                 Label lbl = new Label() { Text = "Pixel size:", Left = 10, Top = 20, AutoSize = true };
                 TextBox txtVal = new TextBox() { Left = 80, Top = 18, Width = 80, Text = "1" };
-                ComboBox cbUnits = new ComboBox() { Left = 170, Top = 18, Width = 80 };
+                ComboBox cbUnits = new ComboBox()
+                {
+                    Left = 170,
+                    Top = 18,
+                    Width = 80,
+                    DropDownStyle = ComboBoxStyle.DropDownList  // Add this to prevent editing
+                };
                 cbUnits.Items.Add("µm");
                 cbUnits.Items.Add("mm");
                 cbUnits.SelectedIndex = 0;
 
                 Label lblBinning = new Label() { Text = "Binning:", Left = 10, Top = 60, AutoSize = true };
-                ComboBox cbBinning = new ComboBox() { Left = 80, Top = 58, Width = 170 };
+                ComboBox cbBinning = new ComboBox()
+                {
+                    Left = 80,
+                    Top = 58,
+                    Width = 170,
+                    DropDownStyle = ComboBoxStyle.DropDownList  // Add this to prevent editing
+                };
                 cbBinning.Items.Add("1 (disabled)");
                 cbBinning.Items.Add("2x2");
                 cbBinning.Items.Add("4x4");
@@ -1148,8 +1165,23 @@ namespace CTS
                 cbBinning.Items.Add("16x16");
                 cbBinning.SelectedIndex = 0;
 
-                Button ok = new Button() { Text = "OK", Left = 130, Top = 100, Width = 80, DialogResult = DialogResult.OK };
-                ok.Click += (s, e) => form.Close();
+                Button ok = new Button()
+                {
+                    Text = "OK",
+                    Left = 130,
+                    Top = 100,
+                    Width = 80,
+                    DialogResult = DialogResult.OK
+                };
+
+                Button cancel = new Button()  // Add a cancel button
+                {
+                    Text = "Cancel",
+                    Left = 220,
+                    Top = 100,
+                    Width = 80,
+                    DialogResult = DialogResult.Cancel
+                };
 
                 form.Controls.Add(lbl);
                 form.Controls.Add(txtVal);
@@ -1157,8 +1189,15 @@ namespace CTS
                 form.Controls.Add(lblBinning);
                 form.Controls.Add(cbBinning);
                 form.Controls.Add(ok);
-                form.AcceptButton = ok;
+                form.Controls.Add(cancel);  // Add cancel button
 
+                form.AcceptButton = ok;
+                form.CancelButton = cancel;  // Add cancel button as escape key handler
+
+                // Focus on the text box
+                form.Shown += (s, e) => txtVal.Focus();
+
+                // Show dialog without owner to avoid potential deadlock
                 if (form.ShowDialog() == DialogResult.OK)
                 {
                     if (double.TryParse(txtVal.Text, out double val))

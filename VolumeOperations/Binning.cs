@@ -1,6 +1,8 @@
 ﻿using System;
-using System.Globalization;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace CTS
@@ -8,302 +10,332 @@ namespace CTS
     public static class Binning
     {
         /// <summary>
-        /// Entry point for binning. 
-        /// 1) Load old chunked volume from volume.bin/.chk in folderPath.
-        /// 2) Bin it by binFactor (2,4,8,16,...).
-        /// 3) Overwrite the old volume.bin/.chk with the new binned data.
-        /// 4) Create a new blank labels.bin/.chk (all zero => "exterior").
+        /// Process true 3D binning that reduces all three dimensions
         /// </summary>
-        public static async Task ProcessBinningAsync(string folderPath, int binFactor, float pixelSize, bool useMM)
+        public static async Task ProcessBinningAsync(string folderPath, int binFactor, float pixelSize, bool useMemoryMapping)
         {
-            Log($"[ProcessBinningAsync] Binning factor={binFactor}, folder={folderPath}, pixelSize={pixelSize}", "Binning");
+            Logger.Log($"[Binning] Starting true 3D binning with factor {binFactor}");
 
-            // 1) Read old chunkDim + old pixelSize from volume.chk. If pixelSize <= 0, we keep the old one from .chk
-            string volumeChkPath = Path.Combine(folderPath, "volume.chk");
-            if (!File.Exists(volumeChkPath))
-                throw new FileNotFoundException($"No volume.chk found in {folderPath}");
-
-            int oldChunkDim = 256;
-            float oldPixelSize = 1f;
-            ParseVolumeChk(volumeChkPath, ref oldChunkDim, ref oldPixelSize);
-            if (pixelSize > 0f)  // If user explicitly provided a pixel size, override
-                oldPixelSize = pixelSize;
-
-            // 2) Load the old volume using ChunkedVolume.FromFolder, so it’s not locked to "volume.bin"
-            //    However, if "FromFolder" itself creates "volume.bin", we can still do that. 
-            //    Or can just open memory-mapped from "volume.bin" if it already exists. 
-
-            //    Here, we assume it's the same approach code is using. 
-
-
-            ChunkedVolume oldVol = null;
-            ChunkedVolume newVol = null;
             try
             {
-                oldVol = ChunkedVolume.FromFolder(folderPath, oldChunkDim, null, useMM);
-                int oldW = oldVol.Width;
-                int oldH = oldVol.Height;
-                int oldD = oldVol.Depth;
-                Log($"[ProcessBinningAsync] Loaded old volume: {oldW}x{oldH}x{oldD}, chunkDim={oldChunkDim}", "Binning");
+                // Read the current volume dimensions
+                var (oldWidth, oldHeight, oldDepth, chunkDim, oldPixelSize) = FileOperations.ReadVolumeChk(folderPath);
 
-                // 3) Compute new dims
-                int newW = (oldW + binFactor - 1) / binFactor;
-                int newH = (oldH + binFactor - 1) / binFactor;
-                int newD = (oldD + binFactor - 1) / binFactor;
-                if (newW < 1) newW = 1;
-                if (newH < 1) newH = 1;
-                if (newD < 1) newD = 1;
+                // Calculate new dimensions - ALL THREE DIMENSIONS REDUCED
+                int newWidth = Math.Max(1, oldWidth / binFactor);
+                int newHeight = Math.Max(1, oldHeight / binFactor);
+                int newDepth = Math.Max(1, oldDepth / binFactor);  // THIS IS THE KEY CHANGE
 
-                int newChunkDim = Math.Min(oldChunkDim, newW);
-                if (newChunkDim < 1) newChunkDim = 1;
-                float newPixelSize = oldPixelSize * binFactor;
+                double newPixelSize = oldPixelSize * binFactor;
+                if (pixelSize > 0)
+                    newPixelSize = pixelSize;
 
-                Log($"[ProcessBinningAsync] Binned volume => {newW}x{newH}x{newD}, chunkDim={newChunkDim}, px={newPixelSize}", "Binning");
+                Logger.Log($"[Binning] Dimensions: {oldWidth}x{oldHeight}x{oldDepth} -> {newWidth}x{newHeight}x{newDepth}");
+                Logger.Log($"[Binning] Depth reduction: {oldDepth} -> {newDepth}");
 
-                // 4) Create the new chunked volume in memory
-                newVol = new ChunkedVolume(newW, newH, newD, newChunkDim);
+                // Load the existing volume
+                string volumeBinPath = Path.Combine(folderPath, "volume.bin");
+                var sourceVolume = FileOperations.LoadVolumeBin(volumeBinPath, false);
 
-                // 5) Bin the old volume => new volume
-                BinVolume(oldVol, newVol, binFactor);
+                // Create new binned volume with reduced depth
+                ChunkedVolume binnedVolume = new ChunkedVolume(newWidth, newHeight, newDepth, chunkDim);
 
-                // 6) Dispose old volume to release any lock on volume.bin
-                oldVol.Dispose();
-                oldVol = null;
+                // Perform the actual 3D binning
+                await Task.Run(() =>
+                {
+                    // For each voxel in the binned volume
+                    Parallel.For(0, newDepth, binnedZ =>
+                    {
+                        for (int binnedY = 0; binnedY < newHeight; binnedY++)
+                        {
+                            for (int binnedX = 0; binnedX < newWidth; binnedX++)
+                            {
+                                // Calculate the corresponding region in the source volume
+                                int srcXStart = binnedX * binFactor;
+                                int srcYStart = binnedY * binFactor;
+                                int srcZStart = binnedZ * binFactor;
 
-                // 7) Overwrite volume.bin + volume.chk
-                OverwriteVolume(newVol, folderPath, newPixelSize, useMM);
+                                int srcXEnd = Math.Min(srcXStart + binFactor, oldWidth);
+                                int srcYEnd = Math.Min(srcYStart + binFactor, oldHeight);
+                                int srcZEnd = Math.Min(srcZStart + binFactor, oldDepth);
 
-                // 8) Always create a blank label file 
-                //    with the same new dimension + chunkDim => label=0 => "exterior"
-                CreateBlankLabels(folderPath, newW, newH, newD, newChunkDim, newPixelSize, useMM);
+                                // Average all voxels in the bin (3D box)
+                                long sum = 0;
+                                int count = 0;
+
+                                for (int srcZ = srcZStart; srcZ < srcZEnd; srcZ++)
+                                {
+                                    for (int srcY = srcYStart; srcY < srcYEnd; srcY++)
+                                    {
+                                        for (int srcX = srcXStart; srcX < srcXEnd; srcX++)
+                                        {
+                                            sum += sourceVolume[srcX, srcY, srcZ];
+                                            count++;
+                                        }
+                                    }
+                                }
+
+                                // Store the average
+                                binnedVolume[binnedX, binnedY, binnedZ] = (byte)(sum / Math.Max(1, count));
+                            }
+                        }
+
+                        if ((binnedZ + 1) % 10 == 0)
+                        {
+                            Logger.Log($"[Binning] Processed {binnedZ + 1}/{newDepth} binned slices");
+                        }
+                    });
+                });
+
+                Logger.Log("[Binning] 3D binning complete, saving results");
+
+                // Save the binned volume
+                string tempVolumePath = Path.Combine(folderPath, "volume_binned.tmp");
+                binnedVolume.SaveAsBin(tempVolumePath);
+
+                // Create a new empty labels file
+                string tempLabelsPath = Path.Combine(folderPath, "labels_binned.tmp");
+                FileOperations.CreateBlankLabelsFile(tempLabelsPath, newWidth, newHeight, newDepth, chunkDim);
+
+                // Clean up
+                sourceVolume.Dispose();
+                binnedVolume.Dispose();
+
+                // Move temporary files to final locations
+                string labelsBinPath = Path.Combine(folderPath, "labels.bin");
+
+                // Delete old files
+                File.Delete(volumeBinPath);
+                if (File.Exists(labelsBinPath))
+                    File.Delete(labelsBinPath);
+
+                // Rename temp files
+                File.Move(tempVolumePath, volumeBinPath);
+                File.Move(tempLabelsPath, labelsBinPath);
+
+                // Update the header file with new dimensions
+                FileOperations.CreateVolumeChk(folderPath, newWidth, newHeight, newDepth, chunkDim, newPixelSize);
+
+                // Preserve materials if they exist
+                string labelsChkPath = Path.Combine(folderPath, "labels.chk");
+                if (File.Exists(labelsChkPath))
+                {
+                    var materials = FileOperations.ReadLabelsChk(folderPath);
+                    FileOperations.CreateLabelsChk(folderPath, materials);
+                }
+
+                Logger.Log($"[Binning] Success! New volume: {newWidth}x{newHeight}x{newDepth}");
+
+                // Create a marker file to indicate binning was done
+                string markerPath = Path.Combine(folderPath, $"binned_{binFactor}x3d.txt");
+                File.WriteAllText(markerPath, $"3D binned with factor {binFactor} at {DateTime.Now}\nOriginal: {oldWidth}x{oldHeight}x{oldDepth}\nNew: {newWidth}x{newHeight}x{newDepth}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[Binning] Error: {ex.Message}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Alternative method to create a properly 3D-binned volume from images
+        /// </summary>
+        public static async Task Create3DBinnedVolumeFromImages(string folderPath, int binFactor)
+        {
+            Logger.Log($"[Binning] Creating 3D binned volume from images with factor {binFactor}");
+
+            try
+            {
+                // Find image files
+                var imageFiles = Directory.GetFiles(folderPath)
+                    .Where(f => IsImageFile(f))
+                    .OrderBy(f => GetImageNumber(f))
+                    .ToList();
+
+                if (imageFiles.Count == 0)
+                    throw new Exception("No image files found");
+
+                // Get dimensions from first image
+                int origWidth, origHeight;
+                using (var firstImage = new Bitmap(imageFiles[0]))
+                {
+                    origWidth = firstImage.Width;
+                    origHeight = firstImage.Height;
+                }
+                int origDepth = imageFiles.Count;
+
+                // Calculate new dimensions including depth
+                int newWidth = Math.Max(1, origWidth / binFactor);
+                int newHeight = Math.Max(1, origHeight / binFactor);
+                int newDepth = Math.Max(1, origDepth / binFactor);
+
+                Logger.Log($"[Binning] Original: {origWidth}x{origHeight}x{origDepth}");
+                Logger.Log($"[Binning] New: {newWidth}x{newHeight}x{newDepth}");
+
+                // Create output folder
+                string outputFolder = Path.Combine(folderPath, $"binned_{binFactor}x3d");
+                if (Directory.Exists(outputFolder))
+                    Directory.Delete(outputFolder, true);
+                Directory.CreateDirectory(outputFolder);
+
+                // Process slices in groups
+                await Task.Run(() =>
+                {
+                    Parallel.For(0, newDepth, newZ =>
+                    {
+                        // Create binned slice by combining multiple source slices
+                        using (Bitmap binnedSlice = new Bitmap(newWidth, newHeight))
+                        {
+                            // Accumulator for averaging
+                            float[,] accumulator = new float[newWidth, newHeight];
+                            int[,] counts = new int[newWidth, newHeight];
+
+                            // Process each source slice in this depth bin
+                            int srcZStart = newZ * binFactor;
+                            int srcZEnd = Math.Min(srcZStart + binFactor, origDepth);
+
+                            for (int srcZ = srcZStart; srcZ < srcZEnd; srcZ++)
+                            {
+                                if (srcZ >= imageFiles.Count) break;
+
+                                using (Bitmap sourceImage = new Bitmap(imageFiles[srcZ]))
+                                {
+                                    // Process each pixel in the slice
+                                    for (int newY = 0; newY < newHeight; newY++)
+                                    {
+                                        for (int newX = 0; newX < newWidth; newX++)
+                                        {
+                                            // Average pixels in this bin
+                                            int srcXStart = newX * binFactor;
+                                            int srcYStart = newY * binFactor;
+                                            int srcXEnd = Math.Min(srcXStart + binFactor, origWidth);
+                                            int srcYEnd = Math.Min(srcYStart + binFactor, origHeight);
+
+                                            float sum = 0;
+                                            int pixelCount = 0;
+
+                                            for (int srcY = srcYStart; srcY < srcYEnd; srcY++)
+                                            {
+                                                for (int srcX = srcXStart; srcX < srcXEnd; srcX++)
+                                                {
+                                                    Color pixel = sourceImage.GetPixel(srcX, srcY);
+                                                    float gray = 0.299f * pixel.R + 0.587f * pixel.G + 0.114f * pixel.B;
+                                                    sum += gray;
+                                                    pixelCount++;
+                                                }
+                                            }
+
+                                            if (pixelCount > 0)
+                                            {
+                                                accumulator[newX, newY] += sum / pixelCount;
+                                                counts[newX, newY]++;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Create final binned slice
+                            for (int y = 0; y < newHeight; y++)
+                            {
+                                for (int x = 0; x < newWidth; x++)
+                                {
+                                    int value = counts[x, y] > 0 ? (int)(accumulator[x, y] / counts[x, y]) : 0;
+                                    value = Math.Max(0, Math.Min(255, value));
+                                    binnedSlice.SetPixel(x, y, Color.FromArgb(value, value, value));
+                                }
+                            }
+
+                            // Save as grayscale
+                            Bitmap grayscale = ConvertToGrayscale(binnedSlice);
+                            string outputPath = Path.Combine(outputFolder, $"{newZ:D5}.bmp");
+                            grayscale.Save(outputPath, ImageFormat.Bmp);
+                            grayscale.Dispose();
+                        }
+
+                        if ((newZ + 1) % 10 == 0)
+                        {
+                            Logger.Log($"[Binning] Created {newZ + 1}/{newDepth} binned slices");
+                        }
+                    });
+                });
+
+                Logger.Log($"[Binning] Created {newDepth} binned slices in {outputFolder}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[Binning] Error: {ex.Message}");
+                throw;
+            }
+        }
+
+        private static Bitmap ConvertToGrayscale(Bitmap source)
+        {
+            Bitmap grayscale = new Bitmap(source.Width, source.Height, PixelFormat.Format8bppIndexed);
+
+            // Set palette
+            ColorPalette palette = grayscale.Palette;
+            for (int i = 0; i < 256; i++)
+            {
+                palette.Entries[i] = Color.FromArgb(i, i, i);
+            }
+            grayscale.Palette = palette;
+
+            // Convert pixels
+            BitmapData sourceData = source.LockBits(
+                new Rectangle(0, 0, source.Width, source.Height),
+                ImageLockMode.ReadOnly,
+                source.PixelFormat);
+
+            BitmapData grayscaleData = grayscale.LockBits(
+                new Rectangle(0, 0, grayscale.Width, grayscale.Height),
+                ImageLockMode.WriteOnly,
+                PixelFormat.Format8bppIndexed);
+
+            try
+            {
+                unsafe
+                {
+                    int srcBytesPerPixel = Image.GetPixelFormatSize(source.PixelFormat) / 8;
+
+                    for (int y = 0; y < source.Height; y++)
+                    {
+                        byte* sourceRow = (byte*)sourceData.Scan0 + (y * sourceData.Stride);
+                        byte* grayscaleRow = (byte*)grayscaleData.Scan0 + (y * grayscaleData.Stride);
+
+                        for (int x = 0; x < source.Width; x++)
+                        {
+                            int offset = x * srcBytesPerPixel;
+                            byte b = sourceRow[offset];
+                            byte g = srcBytesPerPixel > 1 ? sourceRow[offset + 1] : b;
+                            byte r = srcBytesPerPixel > 2 ? sourceRow[offset + 2] : b;
+
+                            byte gray = (byte)(0.299 * r + 0.587 * g + 0.114 * b);
+                            grayscaleRow[x] = gray;
+                        }
+                    }
+                }
             }
             finally
             {
-                // Cleanup if something fails
-                if (oldVol != null)
-                    oldVol.Dispose();
-                if (newVol != null)
-                    newVol.Dispose();
+                source.UnlockBits(sourceData);
+                grayscale.UnlockBits(grayscaleData);
             }
 
-            Log("[ProcessBinningAsync] Binning complete. Overwrote volume.bin/.chk + labels.bin/.chk with binned data.", "Binning");
-            await Task.CompletedTask;
+            return grayscale;
         }
 
-        /// <summary>
-        /// Bins the volume chunk-by-chunk:
-        /// For each voxel in newVol, we average binFactor^3 region from oldVol. 
-        /// </summary>
-        private static void BinVolume(ChunkedVolume oldVol, ChunkedVolume newVol, int binFactor)
+        private static bool IsImageFile(string path)
         {
-            Log("[BinVolume] Start binning...", "Binning");
-            int oldW = oldVol.Width, oldH = oldVol.Height, oldD = oldVol.Depth;
-            int newW = newVol.Width, newH = newVol.Height, newD = newVol.Depth;
-
-            for (int z = 0; z < newD; z++)
-            {
-                for (int y = 0; y < newH; y++)
-                {
-                    for (int x = 0; x < newW; x++)
-                    {
-                        long sum = 0;
-                        int count = 0;
-                        for (int dz = 0; dz < binFactor; dz++)
-                        {
-                            int srcZ = z * binFactor + dz;
-                            if (srcZ >= oldD) break;
-                            for (int dy = 0; dy < binFactor; dy++)
-                            {
-                                int srcY = y * binFactor + dy;
-                                if (srcY >= oldH) break;
-                                for (int dx = 0; dx < binFactor; dx++)
-                                {
-                                    int srcX = x * binFactor + dx;
-                                    if (srcX >= oldW) break;
-                                    byte val = oldVol[srcX, srcY, srcZ];
-                                    sum += val;
-                                    count++;
-                                }
-                            }
-                        }
-                        byte avg = (count > 0) ? (byte)(sum / count) : (byte)0;
-                        newVol[x, y, z] = avg;
-                    }
-                }
-            }
-            Log("[BinVolume] Done binning oldVol => newVol", "Binning");
+            string ext = Path.GetExtension(path).ToLower();
+            return ext == ".bmp" || ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tif" || ext == ".tiff";
         }
 
-        /// <summary>
-        /// Overwrites volume.bin + volume.chk with the new volume data + updated pixel size.
-        /// Disposal of the old volume must happen first, or the file lock remains.
-        /// </summary>
-        private static void OverwriteVolume(ChunkedVolume vol, string folderPath, float newPixelSize, bool useMM)
+        private static int GetImageNumber(string path)
         {
-            // 1) Delete old volume.bin/.chk
-            string binPath = Path.Combine(folderPath, "volume.bin");
-            string chkPath = Path.Combine(folderPath, "volume.chk");
-            DeleteIfExists(binPath);
-            DeleteIfExists(chkPath);
-
-            // 2) SaveAsBin => writes the 28-byte header + chunk data
-            vol.SaveAsBin(binPath);
-
-            // 3) Recompute chunk counts
-            int cntX = (vol.Width + GetPrivateField<int>(vol, "_chunkDim") - 1) / GetPrivateField<int>(vol, "_chunkDim");
-            int cntY = (vol.Height + GetPrivateField<int>(vol, "_chunkDim") - 1) / GetPrivateField<int>(vol, "_chunkDim");
-            int cntZ = (vol.Depth + GetPrivateField<int>(vol, "_chunkDim") - 1) / GetPrivateField<int>(vol, "_chunkDim");
-
-            // 4) Write volume.chk
-            using (var sw = new StreamWriter(chkPath))
-            {
-                sw.WriteLine($"Width={vol.Width}");
-                sw.WriteLine($"Height={vol.Height}");
-                sw.WriteLine($"Depth={vol.Depth}");
-                sw.WriteLine($"ChunkDim={GetPrivateField<int>(vol, "_chunkDim")}");
-                sw.WriteLine($"CntX={cntX}");
-                sw.WriteLine($"CntY={cntY}");
-                sw.WriteLine($"CntZ={cntZ}");
-                sw.WriteLine($"PixelSize={newPixelSize.ToString(CultureInfo.InvariantCulture)}");
-                sw.WriteLine("RawFile=volume.bin");
-            }
-            Log("[OverwriteVolume] Wrote new volume.bin/.chk", " Binning");
-        }
-
-        /// <summary>
-        /// Creates a new blank label volume with the same new dimension/chunkDim => label=0 => "Exterior",
-        /// and overwrites labels.bin/.chk. 
-        /// </summary>
-        private static void CreateBlankLabels(
-    string folderPath,
-    int w, int h, int d,
-    int chunkDim, float px,
-    bool useMM)
-        {
-            Logger.Log("[CreateBlankLabels] Creating empty label volume => all zero => exterior" + " Binning");
-
-            // 1) Delete old labels.bin/.chk
-            string labelsBin = Path.Combine(folderPath, "labels.bin");
-            string labelsChk = Path.Combine(folderPath, "labels.chk");
-            DeleteIfExists(labelsBin);
-            DeleteIfExists(labelsChk);
-
-            // 2) Create new ChunkedLabelVolume 
-            //    The constructor will create labels.bin at the needed size
-            var labelVol = new ChunkedLabelVolume(w, h, d, chunkDim, useMM, labelsBin);
-
-
-            // 3) If we want to be sure everything is zero, 
-
-
-
-            //    do a triple nested loop writing labelVol[x,y,z] = 0.
-            //    Usually new file is zeroed, but let's do it explicitly:
-            for (int z = 0; z < d; z++)
-            {
-                for (int y = 0; y < h; y++)
-                {
-                    for (int x = 0; x < w; x++)
-                    {
-                        labelVol[x, y, z] = 0; // writes to memory-mapped chunk
-                    }
-                }
-            }
-
-            // 4) Dispose => flush data to disk + close the memory map
-            labelVol.Dispose();
-
-            // 5) Write labels.chk (text file). 
-            int cntX = (w + chunkDim - 1) / chunkDim;
-            int cntY = (h + chunkDim - 1) / chunkDim;
-            int cntZ = (d + chunkDim - 1) / chunkDim;
-            using (var sw = new StreamWriter(labelsChk))
-            {
-                sw.WriteLine($"Width={w}");
-                sw.WriteLine($"Height={h}");
-                sw.WriteLine($"Depth={d}");
-                sw.WriteLine($"ChunkDim={chunkDim}");
-                sw.WriteLine($"CntX={cntX}");
-                sw.WriteLine($"CntY={cntY}");
-                sw.WriteLine($"CntZ={cntZ}");
-                sw.WriteLine($"PixelSize={px.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
-                sw.WriteLine("MaterialCount=2");
-                sw.WriteLine("Material0=Exterior");
-                sw.WriteLine("Material1=Material1");
-                sw.WriteLine($"RawFile={Path.GetFileName(labelsBin)}");
-            }
-            Logger.Log("[CreateBlankLabels] Created new labels.bin/.chk with all-zero data => exterior only." + "Binning");
-        }
-
-
-        // --------------------------------------------------------------------
-        //  HELPER METHODS
-        // --------------------------------------------------------------------
-        private static void DeleteIfExists(string path)
-        {
-            if (File.Exists(path))
-            {
-                try
-                {
-                    File.Delete(path);
-                }
-                catch (Exception ex)
-                {
-                    Log($"[DeleteIfExists] Can't delete {path}: {ex.Message}", "Binning");
-                }
-            }
-        }
-
-        /// <summary>
-
-        ///   .chk: 
-
-        /// In .chk: 
-
-        ///   Width=...
-        ///   Height=...
-        ///   Depth=...
-        ///   ChunkDim=256
-        ///   PixelSize=...
-
-        ///   only parse ChunkDim & PixelSize here to replicate the main usage.
-
-
-
-        /// </summary>
-        private static void ParseVolumeChk(string chkPath, ref int chunkDim, ref float px)
-        {
-            var lines = File.ReadAllLines(chkPath);
-            foreach (var line in lines)
-            {
-                string trimmed = line.Trim();
-                if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith("#") || trimmed.StartsWith(";"))
-                    continue;
-                string[] parts = trimmed.Split('=');
-                if (parts.Length != 2) continue;
-                string key = parts[0].Trim().ToLowerInvariant();
-                string val = parts[1].Trim();
-
-                if (key == "chunkdim") chunkDim = int.Parse(val);
-                else if (key == "pixelsize") px = float.Parse(val, CultureInfo.InvariantCulture);
-            }
-        }
-
-        /// <summary>
-        /// Accesses private fields in ChunkedVolume/ChunkedLabelVolume (e.g. _chunkDim).
-        /// We do this so we can compute correct .chk fields without modifying the miracle classes.
-        /// </summary>
-        private static T GetPrivateField<T>(object obj, string fieldName)
-        {
-            var fi = obj.GetType().GetField(fieldName,
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-            if (fi == null) return default;
-            return (T)fi.GetValue(obj);
-        }
-
-        private static void Log(string msg, string cat)
-        {
-            Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} - [{cat}] {msg}");
+            string filename = Path.GetFileNameWithoutExtension(path);
+            string digits = new string(filename.Where(char.IsDigit).ToArray());
+            return int.TryParse(digits, out int number) ? number : 0;
         }
     }
 }

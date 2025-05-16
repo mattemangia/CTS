@@ -6,6 +6,7 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -2794,7 +2795,7 @@ namespace CTS
                     progressBar.Value = 0;
                     statusLabel.Text = "Simulating permeability...";
 
-                    // Run simulation
+                    // Run simulation with the new parameters
                     using (var simulator = new PermeabilitySimulator())
                     {
                         Progress<int> progress = new Progress<int>(percent =>
@@ -2808,6 +2809,10 @@ namespace CTS
                             dialog.Viscosity,
                             dialog.InputPressure,
                             dialog.OutputPressure,
+                            dialog.Tortuosity,
+                            dialog.UseDarcyMethod,
+                            dialog.UseStefanBoltzmannMethod,
+                            dialog.UseNavierStokesMethod,
                             useGpuCheckBox.Checked,
                             progress);
                     }
@@ -2821,8 +2826,22 @@ namespace CTS
                         mainTabControl.SelectedTab = permeabilityTab;
                     }
 
-                    // Update status
-                    statusLabel.Text = $"Permeability: {permeabilityResult.PermeabilityDarcy:F3} Darcy ({permeabilityResult.PermeabilityMilliDarcy:F1} mD)";
+                    // Update status with comprehensive message
+                    StringBuilder statusBuilder = new StringBuilder("Permeability: ");
+                    if (permeabilityResult.UsedDarcyMethod)
+                    {
+                        statusBuilder.Append($"Darcy={permeabilityResult.PermeabilityDarcy:F3}D ");
+                    }
+                    if (permeabilityResult.UsedStefanBoltzmannMethod)
+                    {
+                        statusBuilder.Append($"KC={permeabilityResult.StefanBoltzmannPermeabilityDarcy:F3}D ");
+                    }
+                    if (permeabilityResult.UsedNavierStokesMethod)
+                    {
+                        statusBuilder.Append($"NS={permeabilityResult.NavierStokesPermeabilityDarcy:F3}D ");
+                    }
+                    statusBuilder.Append($"| τ={permeabilityResult.Tortuosity:F2}");
+                    statusLabel.Text = statusBuilder.ToString();
 
                     // Enable save and export buttons
                     if (savePermeabilityButton != null) savePermeabilityButton.Enabled = true;
@@ -2889,13 +2908,13 @@ namespace CTS
                 rotationY = 30.0f;
                 rotationZ = 0.0f;
                 viewScale = 1.0f;
-                panOffsetX = 0.0f; // Reset panning offset X
-                panOffsetY = 0.0f; // Reset panning offset Y
+                panOffsetX = 0.0f;
+                panOffsetY = 0.0f;
                 permeabilityPictureBox.Image = RenderPressureField();
             };
             controlPanel.Controls.Add(resetViewButton);
 
-            // Add screenshot button in the control panel (not in the top ribbon)
+            // Add screenshot button in the control panel
             Button screenshotButton = new Button
             {
                 Text = "Save Screenshot",
@@ -2915,17 +2934,17 @@ namespace CTS
             Panel resultsPanel = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 90, // Increased height to accommodate tortuosity info
+                Height = 150, // Increased height for multiple calculation methods
                 BackColor = Color.FromArgb(30, 30, 30),
                 Padding = new Padding(5)
             };
 
-            // Create a table layout for the results with 3 columns, 3 rows (added a row for tortuosity)
+            // Create a table layout for the results with all calculation methods
             TableLayoutPanel tableLayout = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 3,
-                RowCount = 3, // Increased to 3 rows
+                RowCount = 6, // Increased rows to fit all methods
                 BackColor = Color.Transparent
             };
 
@@ -2935,12 +2954,12 @@ namespace CTS
             tableLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
 
             // Row styles
-            tableLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 33.33F));
-            tableLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 33.33F));
-            tableLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 33.33F)); // Added third row
+            for (int i = 0; i < 6; i++)
+            {
+                tableLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 16.67F));
+            }
 
-            // Add labels with permeability information
-            // Row 1
+            // Row 0: Common properties
             tableLayout.Controls.Add(new Label
             {
                 Text = $"Flow Axis: {permeabilityResult.FlowAxis}",
@@ -2968,7 +2987,7 @@ namespace CTS
                 Anchor = AnchorStyles.Left
             }, 2, 0);
 
-            // Row 2
+            // Row 1: More common properties
             tableLayout.Controls.Add(new Label
             {
                 Text = $"Fluid Viscosity: {permeabilityResult.Viscosity:G4} Pa·s",
@@ -2980,7 +2999,7 @@ namespace CTS
 
             tableLayout.Controls.Add(new Label
             {
-                Text = $"Permeability: {permeabilityResult.PermeabilityDarcy:F3} Darcy ({permeabilityResult.PermeabilityMilliDarcy:F1} mD)",
+                Text = $"Sample: L={permeabilityResult.ModelLength * 1000:F2} mm, A={permeabilityResult.ModelArea * 1e6:F2} mm²",
                 ForeColor = Color.White,
                 AutoSize = true,
                 Font = new Font("Segoe UI", 9, FontStyle.Bold),
@@ -2989,43 +3008,133 @@ namespace CTS
 
             tableLayout.Controls.Add(new Label
             {
-                Text = $"Sample: L={permeabilityResult.ModelLength * 1000:F2} mm, A={permeabilityResult.ModelArea * 1e6:F2} mm²",
-                ForeColor = Color.White,
+                Text = $"Tortuosity: {permeabilityResult.Tortuosity:F2}",
+                ForeColor = Color.Yellow, // Highlighted in yellow
                 AutoSize = true,
                 Font = new Font("Segoe UI", 9, FontStyle.Bold),
                 Anchor = AnchorStyles.Left
             }, 2, 1);
 
-            // Row 3 - New row for tortuosity information
+            // Row 2: Column headers for methods
             tableLayout.Controls.Add(new Label
             {
-                Text = $"Tortuosity: {permeabilityResult.Tortuosity:F2}",
-                ForeColor = Color.Yellow, // Highlighted in yellow to stand out
+                Text = "Calculation Method",
+                ForeColor = Color.LightGray,
                 AutoSize = true,
-                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                Font = new Font("Segoe UI", 9, FontStyle.Underline),
                 Anchor = AnchorStyles.Left
             }, 0, 2);
 
             tableLayout.Controls.Add(new Label
             {
-                Text = $"Corrected Permeability: {permeabilityResult.CorrectedPermeabilityDarcy:F3} Darcy " +
-                       $"({permeabilityResult.CorrectedPermeabilityDarcy * 1000:F1} mD)",
-                ForeColor = Color.Yellow, // Highlighted in yellow to stand out
+                Text = "Raw Permeability",
+                ForeColor = Color.LightGray,
                 AutoSize = true,
-                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                Font = new Font("Segoe UI", 9, FontStyle.Underline),
                 Anchor = AnchorStyles.Left
             }, 1, 2);
 
-            // Add explanation tooltip for tortuosity correction
-            var correctionMethodLabel = new Label
+            tableLayout.Controls.Add(new Label
             {
-                Text = "Corrected via Kozeny-Carman: k' = k/τ²",
+                Text = "Corrected Permeability",
                 ForeColor = Color.LightGray,
                 AutoSize = true,
-                Font = new Font("Segoe UI", 8, FontStyle.Italic),
+                Font = new Font("Segoe UI", 9, FontStyle.Underline),
                 Anchor = AnchorStyles.Left
-            };
-            tableLayout.Controls.Add(correctionMethodLabel, 2, 2);
+            }, 2, 2);
+
+            // Row 3: Darcy's Law results
+            if (permeabilityResult.UsedDarcyMethod)
+            {
+                tableLayout.Controls.Add(new Label
+                {
+                    Text = "Darcy's Law",
+                    ForeColor = Color.White,
+                    AutoSize = true,
+                    Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                    Anchor = AnchorStyles.Left
+                }, 0, 3);
+
+                tableLayout.Controls.Add(new Label
+                {
+                    Text = $"{permeabilityResult.PermeabilityDarcy:F3} D ({permeabilityResult.PermeabilityMilliDarcy:F1} mD)",
+                    ForeColor = Color.White,
+                    AutoSize = true,
+                    Font = new Font("Segoe UI", 9),
+                    Anchor = AnchorStyles.Left
+                }, 1, 3);
+
+                tableLayout.Controls.Add(new Label
+                {
+                    Text = $"{permeabilityResult.CorrectedPermeabilityDarcy:F3} D ({permeabilityResult.CorrectedPermeabilityDarcy * 1000:F1} mD)",
+                    ForeColor = Color.LightGreen,
+                    AutoSize = true,
+                    Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                    Anchor = AnchorStyles.Left
+                }, 2, 3);
+            }
+
+            // Row 4: Kozeny-Carman (Stefan-Boltzmann) results
+            if (permeabilityResult.UsedStefanBoltzmannMethod)
+            {
+                tableLayout.Controls.Add(new Label
+                {
+                    Text = "Kozeny-Carman Method",
+                    ForeColor = Color.White,
+                    AutoSize = true,
+                    Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                    Anchor = AnchorStyles.Left
+                }, 0, 4);
+
+                tableLayout.Controls.Add(new Label
+                {
+                    Text = $"{permeabilityResult.StefanBoltzmannPermeabilityDarcy:F3} D ({permeabilityResult.StefanBoltzmannPermeabilityMilliDarcy:F1} mD)",
+                    ForeColor = Color.White,
+                    AutoSize = true,
+                    Font = new Font("Segoe UI", 9),
+                    Anchor = AnchorStyles.Left
+                }, 1, 4);
+
+                tableLayout.Controls.Add(new Label
+                {
+                    Text = $"{permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy:F3} D ({permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy * 1000:F1} mD)",
+                    ForeColor = Color.LightGreen,
+                    AutoSize = true,
+                    Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                    Anchor = AnchorStyles.Left
+                }, 2, 4);
+            }
+
+            // Row 5: Navier-Stokes results
+            if (permeabilityResult.UsedNavierStokesMethod)
+            {
+                tableLayout.Controls.Add(new Label
+                {
+                    Text = "Navier-Stokes Method",
+                    ForeColor = Color.White,
+                    AutoSize = true,
+                    Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                    Anchor = AnchorStyles.Left
+                }, 0, 5);
+
+                tableLayout.Controls.Add(new Label
+                {
+                    Text = $"{permeabilityResult.NavierStokesPermeabilityDarcy:F3} D ({permeabilityResult.NavierStokesPermeabilityMilliDarcy:F1} mD)",
+                    ForeColor = Color.White,
+                    AutoSize = true,
+                    Font = new Font("Segoe UI", 9),
+                    Anchor = AnchorStyles.Left
+                }, 1, 5);
+
+                tableLayout.Controls.Add(new Label
+                {
+                    Text = $"{permeabilityResult.CorrectedNavierStokesPermeabilityDarcy:F3} D ({permeabilityResult.CorrectedNavierStokesPermeabilityDarcy * 1000:F1} mD)",
+                    ForeColor = Color.LightGreen,
+                    AutoSize = true,
+                    Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                    Anchor = AnchorStyles.Left
+                }, 2, 5);
+            }
 
             resultsPanel.Controls.Add(tableLayout);
             visualizationPanel.Controls.Add(resultsPanel);
@@ -3042,7 +3151,7 @@ namespace CTS
             // Render the pressure field
             permeabilityPictureBox.Image = RenderPressureField();
 
-            // Add mouse handling for rotation and zooming (same as the 3D network viewer)
+            // Add mouse handling for rotation and zooming
             permeabilityPictureBox.MouseDown += (s, e) =>
             {
                 if (e.Button == MouseButtons.Left)
@@ -3061,7 +3170,7 @@ namespace CTS
             {
                 if (isDragging)
                 {
-                    // Calculate the delta movement for rotation
+                    // Calculate delta movement for rotation
                     float deltaX = (e.X - lastMousePosition.X) * 0.5f;
                     float deltaY = (e.Y - lastMousePosition.Y) * 0.5f;
 
@@ -3076,7 +3185,7 @@ namespace CTS
                 }
                 else if (isPanning)
                 {
-                    // Calculate the delta movement for panning
+                    // Calculate delta movement for panning
                     float deltaX = (e.X - lastMousePosition.X) * 0.01f;
                     float deltaY = (e.Y - lastMousePosition.Y) * 0.01f;
 
@@ -3188,7 +3297,7 @@ namespace CTS
 
             visualizationPanel.Controls.Add(legendPanel);
 
-            // Add instructions label at the bottom (matches 3D Network View)
+            // Add instructions label at the bottom
             Label instructionsLabel = new Label
             {
                 Text = "Left-click and drag to rotate | Middle-click and drag to pan | Mouse wheel to zoom",
@@ -3206,11 +3315,22 @@ namespace CTS
             // Enable the export button
             if (exportPermeabilityButton != null) exportPermeabilityButton.Enabled = true;
 
-            // Update status label with tortuosity information
-            statusLabel.Text = $"Permeability: {permeabilityResult.PermeabilityDarcy:F3} Darcy " +
-                                $"({permeabilityResult.PermeabilityMilliDarcy:F1} mD) | " +
-                                $"Tortuosity: {permeabilityResult.Tortuosity:F2} | " +
-                                $"Corrected: {permeabilityResult.CorrectedPermeabilityDarcy:F3} Darcy";
+            // Prepare a comprehensive status message with all calculation methods
+            System.Text.StringBuilder statusBuilder = new System.Text.StringBuilder("Permeability: ");
+            if (permeabilityResult.UsedDarcyMethod)
+            {
+                statusBuilder.Append($"Darcy={permeabilityResult.PermeabilityDarcy:F3}D ");
+            }
+            if (permeabilityResult.UsedStefanBoltzmannMethod)
+            {
+                statusBuilder.Append($"KC={permeabilityResult.StefanBoltzmannPermeabilityDarcy:F3}D ");
+            }
+            if (permeabilityResult.UsedNavierStokesMethod)
+            {
+                statusBuilder.Append($"NS={permeabilityResult.NavierStokesPermeabilityDarcy:F3}D ");
+            }
+            statusBuilder.Append($"| τ={permeabilityResult.Tortuosity:F2}");
+            statusLabel.Text = statusBuilder.ToString();
         }
         private Bitmap RenderPressureField()
         {
@@ -3663,22 +3783,45 @@ namespace CTS
                         {
                             // Write file header
                             writer.Write("PERMEABILITY"); // Magic string
-                            writer.Write(1); // Version number
+                            writer.Write(2); // Version number (increased for new format)
 
                             // Write basic simulation parameters
                             writer.Write((int)permeabilityResult.FlowAxis);
                             writer.Write(permeabilityResult.Viscosity);
                             writer.Write(permeabilityResult.InputPressure);
                             writer.Write(permeabilityResult.OutputPressure);
+
+                            // Write calculation method flags
+                            writer.Write(permeabilityResult.UsedDarcyMethod);
+                            writer.Write(permeabilityResult.UsedStefanBoltzmannMethod);
+                            writer.Write(permeabilityResult.UsedNavierStokesMethod);
+
+                            // Write Darcy method results
                             writer.Write(permeabilityResult.PermeabilityDarcy);
                             writer.Write(permeabilityResult.PermeabilityMilliDarcy);
-                            writer.Write(permeabilityResult.Tortuosity); // Save tortuosity
-                            writer.Write(permeabilityResult.CorrectedPermeabilityDarcy); // Save corrected permeability
+
+                            // Write Kozeny-Carman (Stefan-Boltzmann) results
+                            writer.Write(permeabilityResult.StefanBoltzmannPermeabilityDarcy);
+                            writer.Write(permeabilityResult.StefanBoltzmannPermeabilityMilliDarcy);
+
+                            // Write Navier-Stokes results
+                            writer.Write(permeabilityResult.NavierStokesPermeabilityDarcy);
+                            writer.Write(permeabilityResult.NavierStokesPermeabilityMilliDarcy);
+
+                            // Write tortuosity
+                            writer.Write(permeabilityResult.Tortuosity);
+
+                            // Write corrected values
+                            writer.Write(permeabilityResult.CorrectedPermeabilityDarcy);
+                            writer.Write(permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy);
+                            writer.Write(permeabilityResult.CorrectedNavierStokesPermeabilityDarcy);
+
+                            // Write total flow rate and model dimensions
                             writer.Write(permeabilityResult.TotalFlowRate);
                             writer.Write(permeabilityResult.ModelLength);
                             writer.Write(permeabilityResult.ModelArea);
 
-                            // Write inlet/outlet pores count
+                            // Write inlet/outlet pores
                             writer.Write(permeabilityResult.InletPores.Count);
                             foreach (var poreId in permeabilityResult.InletPores)
                             {
@@ -3747,7 +3890,7 @@ namespace CTS
                             }
 
                             int version = reader.ReadInt32();
-                            if (version != 1)
+                            if (version != 1 && version != 2)
                             {
                                 throw new Exception($"Unsupported version: {version}");
                             }
@@ -3759,36 +3902,76 @@ namespace CTS
                                 FlowAxis = (PermeabilitySimulator.FlowAxis)reader.ReadInt32(),
                                 Viscosity = reader.ReadDouble(),
                                 InputPressure = reader.ReadDouble(),
-                                OutputPressure = reader.ReadDouble(),
-                                PermeabilityDarcy = reader.ReadDouble(),
-                                PermeabilityMilliDarcy = reader.ReadDouble()
+                                OutputPressure = reader.ReadDouble()
                             };
 
-                            // Try to read tortuosity and corrected permeability
-                            try
+                            if (version == 2)
                             {
-                                if (fs.Position < fs.Length - 16) // Need at least 16 bytes (for 2 doubles)
-                                {
-                                    permeabilityResult.Tortuosity = reader.ReadDouble();
-                                    permeabilityResult.CorrectedPermeabilityDarcy = reader.ReadDouble();
-                                }
-                                else
-                                {
-                                    // If not present in file, calculate based on model tortuosity
-                                    permeabilityResult.Tortuosity = networkModel.Tortuosity;
-                                    permeabilityResult.CorrectedPermeabilityDarcy = permeabilityResult.PermeabilityDarcy /
-                                        (permeabilityResult.Tortuosity * permeabilityResult.Tortuosity);
-                                }
+                                // Read calculation method flags (version 2)
+                                permeabilityResult.UsedDarcyMethod = reader.ReadBoolean();
+                                permeabilityResult.UsedStefanBoltzmannMethod = reader.ReadBoolean();
+                                permeabilityResult.UsedNavierStokesMethod = reader.ReadBoolean();
+
+                                // Read all method results
+                                permeabilityResult.PermeabilityDarcy = reader.ReadDouble();
+                                permeabilityResult.PermeabilityMilliDarcy = reader.ReadDouble();
+
+                                permeabilityResult.StefanBoltzmannPermeabilityDarcy = reader.ReadDouble();
+                                permeabilityResult.StefanBoltzmannPermeabilityMilliDarcy = reader.ReadDouble();
+
+                                permeabilityResult.NavierStokesPermeabilityDarcy = reader.ReadDouble();
+                                permeabilityResult.NavierStokesPermeabilityMilliDarcy = reader.ReadDouble();
+
+                                // Read tortuosity and corrected values
+                                permeabilityResult.Tortuosity = reader.ReadDouble();
+                                permeabilityResult.CorrectedPermeabilityDarcy = reader.ReadDouble();
+                                permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy = reader.ReadDouble();
+                                permeabilityResult.CorrectedNavierStokesPermeabilityDarcy = reader.ReadDouble();
                             }
-                            catch
+                            else
                             {
-                                // If reading fails, use model tortuosity and calculate corrected value
-                                permeabilityResult.Tortuosity = networkModel.Tortuosity;
-                                permeabilityResult.CorrectedPermeabilityDarcy = permeabilityResult.PermeabilityDarcy /
-                                    (permeabilityResult.Tortuosity * permeabilityResult.Tortuosity);
+                                // Compatibility with version 1 files
+                                permeabilityResult.PermeabilityDarcy = reader.ReadDouble();
+                                permeabilityResult.PermeabilityMilliDarcy = reader.ReadDouble();
+
+                                // Default method flags
+                                permeabilityResult.UsedDarcyMethod = true;
+                                permeabilityResult.UsedStefanBoltzmannMethod = false;
+                                permeabilityResult.UsedNavierStokesMethod = false;
+
+                                // Try to read tortuosity if it exists in the file
+                                try
+                                {
+                                    if (fs.Position < fs.Length - 16) // Check for 16 more bytes
+                                    {
+                                        permeabilityResult.Tortuosity = reader.ReadDouble();
+                                        permeabilityResult.CorrectedPermeabilityDarcy = reader.ReadDouble();
+                                    }
+                                    else
+                                    {
+                                        permeabilityResult.Tortuosity = networkModel.Tortuosity;
+                                        permeabilityResult.CorrectedPermeabilityDarcy =
+                                            permeabilityResult.PermeabilityDarcy / (permeabilityResult.Tortuosity * permeabilityResult.Tortuosity);
+                                    }
+                                }
+                                catch
+                                {
+                                    // Fall back to model tortuosity
+                                    permeabilityResult.Tortuosity = networkModel.Tortuosity;
+                                    permeabilityResult.CorrectedPermeabilityDarcy =
+                                        permeabilityResult.PermeabilityDarcy / (permeabilityResult.Tortuosity * permeabilityResult.Tortuosity);
+                                }
+
+                                // Set defaults for other methods
+                                permeabilityResult.StefanBoltzmannPermeabilityDarcy = 0;
+                                permeabilityResult.StefanBoltzmannPermeabilityMilliDarcy = 0;
+                                permeabilityResult.NavierStokesPermeabilityDarcy = 0;
+                                permeabilityResult.NavierStokesPermeabilityMilliDarcy = 0;
+                                permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy = 0;
+                                permeabilityResult.CorrectedNavierStokesPermeabilityDarcy = 0;
                             }
 
-                            // Continue reading the remaining data
+                            // Read common results
                             permeabilityResult.TotalFlowRate = reader.ReadDouble();
                             permeabilityResult.ModelLength = reader.ReadDouble();
                             permeabilityResult.ModelArea = reader.ReadDouble();
@@ -3836,8 +4019,14 @@ namespace CTS
                                 catch { /* Ignore if timestamp isn't available */ }
                             }
 
-                            Logger.Log($"[PoreNetworkModelingForm] Loaded permeability results from {timestamp}, " +
-                                      $"tortuosity: {permeabilityResult.Tortuosity:F2}");
+                            Logger.Log($"[PoreNetworkModelingForm] Loaded permeability results from {timestamp}");
+
+                            // Log information about which methods were loaded
+                            string methods = "";
+                            if (permeabilityResult.UsedDarcyMethod) methods += "Darcy's Law ";
+                            if (permeabilityResult.UsedStefanBoltzmannMethod) methods += "Kozeny-Carman ";
+                            if (permeabilityResult.UsedNavierStokesMethod) methods += "Navier-Stokes ";
+                            Logger.Log($"[PoreNetworkModelingForm] Loaded methods: {methods}, tortuosity: {permeabilityResult.Tortuosity:F2}");
                         }
 
                         // Update UI with loaded results
@@ -3846,10 +4035,26 @@ namespace CTS
                         // Switch to permeability tab
                         mainTabControl.SelectedTab = permeabilityTab;
 
-                        // Update status
-                        statusLabel.Text = $"Loaded permeability: {permeabilityResult.PermeabilityDarcy:F3} Darcy | " +
-                                          $"Tortuosity: {permeabilityResult.Tortuosity:F2} | " +
-                                          $"Corrected: {permeabilityResult.CorrectedPermeabilityDarcy:F3} Darcy";
+                        // Update status with a multi-method message
+                        System.Text.StringBuilder statusBuilder = new System.Text.StringBuilder("Loaded permeability: ");
+                        if (permeabilityResult.UsedDarcyMethod)
+                        {
+                            statusBuilder.Append($"Darcy={permeabilityResult.PermeabilityDarcy:F3}D ");
+                        }
+                        if (permeabilityResult.UsedStefanBoltzmannMethod)
+                        {
+                            statusBuilder.Append($"KC={permeabilityResult.StefanBoltzmannPermeabilityDarcy:F3}D ");
+                        }
+                        if (permeabilityResult.UsedNavierStokesMethod)
+                        {
+                            statusBuilder.Append($"NS={permeabilityResult.NavierStokesPermeabilityDarcy:F3}D ");
+                        }
+                        statusBuilder.Append($"| τ={permeabilityResult.Tortuosity:F2}");
+                        statusLabel.Text = statusBuilder.ToString();
+
+                        // Enable export buttons
+                        if (exportPermeabilityButton != null) exportPermeabilityButton.Enabled = true;
+                        if (savePermeabilityButton != null) savePermeabilityButton.Enabled = true;
 
                         MessageBox.Show("Permeability results loaded successfully", "Load Complete",
                             MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -3930,8 +4135,8 @@ namespace CTS
                     // Create a new workbook
                     workbook = excel.Workbooks.Add();
 
-                    // Ensure we have at least 4 worksheets
-                    while (workbook.Worksheets.Count < 4)
+                    // Ensure we have at least 5 worksheets (Summary, Method Comparison, Pressure Field, Flow Rates, Charts)
+                    while (workbook.Worksheets.Count < 5)
                     {
                         workbook.Worksheets.Add();
                     }
@@ -3943,13 +4148,13 @@ namespace CTS
                     Application.DoEvents();
 
                     worksheet = workbook.Worksheets[1];
-                    worksheet.Name = "Permeability Summary";
+                    worksheet.Name = "Summary";
 
                     // Create a title
                     worksheet.Cells[1, 1] = "Permeability Simulation Results";
                     worksheet.Cells[1, 1].Font.Size = 14;
                     worksheet.Cells[1, 1].Font.Bold = true;
-                    worksheet.Range["A1:C1"].Merge();
+                    worksheet.Range["A1:D1"].Merge();
 
                     // Add simulation parameters
                     int row = 3;
@@ -3957,8 +4162,8 @@ namespace CTS
                     // Format header for simulation parameters
                     worksheet.Cells[row, 1] = "Simulation Parameters";
                     worksheet.Cells[row, 1].Font.Bold = true;
-                    worksheet.Range[$"A{row}:C{row}"].Merge();
-                    worksheet.Range[$"A{row}:C{row}"].Interior.Color =
+                    worksheet.Range[$"A{row}:D{row}"].Merge();
+                    worksheet.Range[$"A{row}:D{row}"].Interior.Color =
                         System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
                     row++;
 
@@ -3969,52 +4174,6 @@ namespace CTS
                     AddStatistic(worksheet, ref row, "Output Pressure (Pa)", permeabilityResult.OutputPressure);
                     AddStatistic(worksheet, ref row, "Pressure Differential (Pa)",
                         permeabilityResult.InputPressure - permeabilityResult.OutputPressure);
-
-                    // Add empty row for spacing
-                    row++;
-
-                    // Format header for results
-                    worksheet.Cells[row, 1] = "Results";
-                    worksheet.Cells[row, 1].Font.Bold = true;
-                    worksheet.Range[$"A{row}:C{row}"].Merge();
-                    worksheet.Range[$"A{row}:C{row}"].Interior.Color =
-                        System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
-                    row++;
-
-                    // Add permeability results and highlight tortuosity-related rows
-                    AddStatistic(worksheet, ref row, "Permeability (Darcy)", permeabilityResult.PermeabilityDarcy);
-                    AddStatistic(worksheet, ref row, "Permeability (mD)", permeabilityResult.PermeabilityMilliDarcy);
-
-                    // Add tortuosity with highlighting
-                    worksheet.Cells[row, 1] = "Tortuosity";
-                    worksheet.Cells[row, 2] = permeabilityResult.Tortuosity;
-                    worksheet.Range[$"A{row}:B{row}"].Interior.Color =
-                        System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightYellow);
-                    worksheet.Range[$"A{row}:B{row}"].Font.Bold = true;
-                    row++;
-
-                    // Add corrected permeability with highlighting
-                    worksheet.Cells[row, 1] = "Corrected Permeability (Darcy)";
-                    worksheet.Cells[row, 2] = permeabilityResult.CorrectedPermeabilityDarcy;
-                    worksheet.Range[$"A{row}:B{row}"].Interior.Color =
-                        System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightYellow);
-                    worksheet.Range[$"A{row}:B{row}"].Font.Bold = true;
-                    row++;
-
-                    worksheet.Cells[row, 1] = "Corrected Permeability (mD)";
-                    worksheet.Cells[row, 2] = permeabilityResult.CorrectedPermeabilityDarcy * 1000;
-                    worksheet.Range[$"A{row}:B{row}"].Interior.Color =
-                        System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightYellow);
-                    worksheet.Range[$"A{row}:B{row}"].Font.Bold = true;
-                    row++;
-
-                    // Add explanation of correction
-                    worksheet.Cells[row, 1] = "Correction Method";
-                    worksheet.Cells[row, 2] = "Kozeny-Carman: k' = k/τ²";
-                    worksheet.Range[$"A{row}:B{row}"].Font.Italic = true;
-                    row++;
-
-                    // Continue with other results
                     AddStatistic(worksheet, ref row, "Total Flow Rate (m³/s)", permeabilityResult.TotalFlowRate);
                     AddStatistic(worksheet, ref row, "Model Length (m)", permeabilityResult.ModelLength);
                     AddStatistic(worksheet, ref row, "Model Area (m²)", permeabilityResult.ModelArea);
@@ -4022,11 +4181,41 @@ namespace CTS
                     // Add empty row for spacing
                     row++;
 
+                    // Format header for tortuosity section
+                    worksheet.Cells[row, 1] = "Tortuosity Information";
+                    worksheet.Cells[row, 1].Font.Bold = true;
+                    worksheet.Range[$"A{row}:D{row}"].Merge();
+                    worksheet.Range[$"A{row}:D{row}"].Interior.Color =
+                        System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
+                    row++;
+
+                    // Add tortuosity with highlighting
+                    worksheet.Cells[row, 1] = "Tortuosity Factor (τ)";
+                    worksheet.Cells[row, 2] = permeabilityResult.Tortuosity;
+                    worksheet.Range[$"A{row}:B{row}"].Interior.Color =
+                        System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightYellow);
+                    worksheet.Range[$"A{row}:B{row}"].Font.Bold = true;
+                    row++;
+
+                    worksheet.Cells[row, 1] = "Correction Method";
+                    worksheet.Cells[row, 2] = "Kozeny-Carman: k' = k/τ²";
+                    worksheet.Cells[row, 1].Font.Italic = true;
+                    worksheet.Cells[row, 2].Font.Italic = true;
+                    row++;
+
+                    worksheet.Cells[row, 1] = "Correction Factor (1/τ²)";
+                    worksheet.Cells[row, 2] = 1.0 / (permeabilityResult.Tortuosity * permeabilityResult.Tortuosity);
+                    worksheet.Cells[row, 2].NumberFormat = "0.0000";
+                    row++;
+
+                    // Add empty row for spacing
+                    row++;
+
                     // Format header for model info
                     worksheet.Cells[row, 1] = "Model Information";
                     worksheet.Cells[row, 1].Font.Bold = true;
-                    worksheet.Range[$"A{row}:C{row}"].Merge();
-                    worksheet.Range[$"A{row}:C{row}"].Interior.Color =
+                    worksheet.Range[$"A{row}:D{row}"].Merge();
+                    worksheet.Range[$"A{row}:D{row}"].Interior.Color =
                         System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
                     row++;
 
@@ -4041,12 +4230,136 @@ namespace CTS
                     worksheet.Columns.AutoFit();
 
                     // ==========================================================
-                    // Worksheet 2: Pressure Field
+                    // Worksheet 2: Method Comparison
+                    // ==========================================================
+                    progressLabel.Text = "Creating method comparison sheet...";
+                    Application.DoEvents();
+
+                    worksheet = workbook.Worksheets[2];
+                    worksheet.Name = "Method Comparison";
+
+                    // Create a title
+                    worksheet.Cells[1, 1] = "Permeability Calculation Method Comparison";
+                    worksheet.Cells[1, 1].Font.Size = 14;
+                    worksheet.Cells[1, 1].Font.Bold = true;
+                    worksheet.Range["A1:G1"].Merge();
+
+                    // Create headers for the methods table
+                    row = 3;
+                    worksheet.Cells[row, 1] = "Calculation Method";
+                    worksheet.Cells[row, 2] = "Raw Permeability (Darcy)";
+                    worksheet.Cells[row, 3] = "Raw Permeability (mD)";
+                    worksheet.Cells[row, 4] = "Tortuosity Factor";
+                    worksheet.Cells[row, 5] = "Corrected Permeability (Darcy)";
+                    worksheet.Cells[row, 6] = "Corrected Permeability (mD)";
+                    worksheet.Cells[row, 7] = "Correction (%)";
+
+                    // Format header row
+                    var headerRange = worksheet.Range[$"A{row}:G{row}"];
+                    headerRange.Font.Bold = true;
+                    headerRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
+                    row++;
+
+                    // Add data for each method
+                    if (permeabilityResult.UsedDarcyMethod)
+                    {
+                        worksheet.Cells[row, 1] = "Darcy's Law";
+                        worksheet.Cells[row, 2] = permeabilityResult.PermeabilityDarcy;
+                        worksheet.Cells[row, 3] = permeabilityResult.PermeabilityMilliDarcy;
+                        worksheet.Cells[row, 4] = permeabilityResult.Tortuosity;
+                        worksheet.Cells[row, 5] = permeabilityResult.CorrectedPermeabilityDarcy;
+                        worksheet.Cells[row, 6] = permeabilityResult.CorrectedPermeabilityDarcy * 1000;
+
+                        // Calculate and format percentage difference
+                        double percentDiff = ((permeabilityResult.CorrectedPermeabilityDarcy / permeabilityResult.PermeabilityDarcy) - 1.0) * 100;
+                        worksheet.Cells[row, 7] = percentDiff;
+                        worksheet.Cells[row, 7].NumberFormat = "+0.00%;-0.00%;0.00%";
+
+                        // Format the row
+                        worksheet.Range[$"A{row}:G{row}"].Interior.Color =
+                            System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.FromArgb(235, 245, 251));
+                        row++;
+                    }
+
+                    if (permeabilityResult.UsedStefanBoltzmannMethod)
+                    {
+                        worksheet.Cells[row, 1] = "Kozeny-Carman Method";
+                        worksheet.Cells[row, 2] = permeabilityResult.StefanBoltzmannPermeabilityDarcy;
+                        worksheet.Cells[row, 3] = permeabilityResult.StefanBoltzmannPermeabilityMilliDarcy;
+                        worksheet.Cells[row, 4] = permeabilityResult.Tortuosity;
+                        worksheet.Cells[row, 5] = permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy;
+                        worksheet.Cells[row, 6] = permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy * 1000;
+
+                        // Calculate and format percentage difference
+                        double percentDiff = ((permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy /
+                            permeabilityResult.StefanBoltzmannPermeabilityDarcy) - 1.0) * 100;
+                        worksheet.Cells[row, 7] = percentDiff;
+                        worksheet.Cells[row, 7].NumberFormat = "+0.00%;-0.00%;0.00%";
+
+                        // Format the row
+                        worksheet.Range[$"A{row}:G{row}"].Interior.Color =
+                            System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.FromArgb(255, 240, 245));
+                        row++;
+                    }
+
+                    if (permeabilityResult.UsedNavierStokesMethod)
+                    {
+                        worksheet.Cells[row, 1] = "Navier-Stokes Method";
+                        worksheet.Cells[row, 2] = permeabilityResult.NavierStokesPermeabilityDarcy;
+                        worksheet.Cells[row, 3] = permeabilityResult.NavierStokesPermeabilityMilliDarcy;
+                        worksheet.Cells[row, 4] = permeabilityResult.Tortuosity;
+                        worksheet.Cells[row, 5] = permeabilityResult.CorrectedNavierStokesPermeabilityDarcy;
+                        worksheet.Cells[row, 6] = permeabilityResult.CorrectedNavierStokesPermeabilityDarcy * 1000;
+
+                        // Calculate and format percentage difference
+                        double percentDiff = ((permeabilityResult.CorrectedNavierStokesPermeabilityDarcy /
+                            permeabilityResult.NavierStokesPermeabilityDarcy) - 1.0) * 100;
+                        worksheet.Cells[row, 7] = percentDiff;
+                        worksheet.Cells[row, 7].NumberFormat = "+0.00%;-0.00%;0.00%";
+
+                        // Format the row
+                        worksheet.Range[$"A{row}:G{row}"].Interior.Color =
+                            System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.FromArgb(240, 255, 240));
+                        row++;
+                    }
+
+                    // Add an explanation of the methods
+                    row += 2; // Add some space
+
+                    worksheet.Cells[row, 1] = "Method Descriptions:";
+                    worksheet.Cells[row, 1].Font.Bold = true;
+                    worksheet.Range[$"A{row}:G{row}"].Merge();
+                    row++;
+
+                    worksheet.Cells[row, 1] = "Darcy's Law:";
+                    worksheet.Cells[row, 1].Font.Bold = true;
+                    worksheet.Cells[row, 2] = "Based on Hagen-Poiseuille flow through pore throats (k = (Q * μ * L) / (A * ΔP))";
+                    worksheet.Range[$"B{row}:G{row}"].Merge();
+                    row++;
+
+                    worksheet.Cells[row, 1] = "Kozeny-Carman:";
+                    worksheet.Cells[row, 1].Font.Bold = true;
+                    worksheet.Cells[row, 2] = "Based on porosity and specific surface area (k = (ε³/S²) / (K₀ * (1-ε)²))";
+                    worksheet.Range[$"B{row}:G{row}"].Merge();
+                    row++;
+
+                    worksheet.Cells[row, 1] = "Navier-Stokes:";
+                    worksheet.Cells[row, 1].Font.Bold = true;
+                    worksheet.Cells[row, 2] = "Includes non-Darcy (inertial) flow effects at higher Reynolds numbers";
+                    worksheet.Range[$"B{row}:G{row}"].Merge();
+                    row++;
+
+                    // Auto-fit columns and add filter
+                    worksheet.Columns.AutoFit();
+                    headerRange.AutoFilter();
+
+                    // ==========================================================
+                    // Worksheet 3: Pressure Field
                     // ==========================================================
                     progressLabel.Text = "Exporting pressure field data...";
                     Application.DoEvents();
 
-                    worksheet = workbook.Worksheets[2];
+                    worksheet = workbook.Worksheets[3];
                     worksheet.Name = "Pressure Field";
 
                     // Add headers
@@ -4054,9 +4367,13 @@ namespace CTS
                     worksheet.Cells[1, 2] = "Pressure (Pa)";
                     worksheet.Cells[1, 3] = "Is Inlet";
                     worksheet.Cells[1, 4] = "Is Outlet";
+                    worksheet.Cells[1, 5] = "X (μm)";
+                    worksheet.Cells[1, 6] = "Y (μm)";
+                    worksheet.Cells[1, 7] = "Z (μm)";
+                    worksheet.Cells[1, 8] = "Radius (μm)";
 
                     // Format headers
-                    dynamic headerRange = worksheet.Range("A1:D1");
+                    headerRange = worksheet.Range("A1:H1");
                     headerRange.Font.Bold = true;
                     headerRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
 
@@ -4072,11 +4389,15 @@ namespace CTS
                         worksheet.Cells[row, 2] = pressure;
                         worksheet.Cells[row, 3] = isInlet;
                         worksheet.Cells[row, 4] = isOutlet;
+                        worksheet.Cells[row, 5] = pore.Center.X;
+                        worksheet.Cells[row, 6] = pore.Center.Y;
+                        worksheet.Cells[row, 7] = pore.Center.Z;
+                        worksheet.Cells[row, 8] = pore.Radius;
 
                         // Highlight inlet and outlet pores
                         if (isInlet || isOutlet)
                         {
-                            dynamic rowRange = worksheet.Range($"A{row}:D{row}");
+                            dynamic rowRange = worksheet.Range[$"A{row}:H{row}"];
                             rowRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(
                                 isInlet ? System.Drawing.Color.LightPink : System.Drawing.Color.LightBlue);
                         }
@@ -4089,12 +4410,12 @@ namespace CTS
                     headerRange.AutoFilter();
 
                     // ==========================================================
-                    // Worksheet 3: Flow Rates
+                    // Worksheet 4: Flow Rates
                     // ==========================================================
                     progressLabel.Text = "Exporting flow rate data...";
                     Application.DoEvents();
 
-                    worksheet = workbook.Worksheets[3];
+                    worksheet = workbook.Worksheets[4];
                     worksheet.Name = "Flow Rates";
 
                     // Add headers
@@ -4102,11 +4423,12 @@ namespace CTS
                     worksheet.Cells[1, 2] = "Pore 1 ID";
                     worksheet.Cells[1, 3] = "Pore 2 ID";
                     worksheet.Cells[1, 4] = "Flow Rate (m³/s)";
-                    worksheet.Cells[1, 5] = "Radius (µm)";
-                    worksheet.Cells[1, 6] = "Length (µm)";
+                    worksheet.Cells[1, 5] = "Radius (μm)";
+                    worksheet.Cells[1, 6] = "Length (μm)";
+                    worksheet.Cells[1, 7] = "Connects Inlet/Outlet";
 
                     // Format headers
-                    headerRange = worksheet.Range("A1:F1");
+                    headerRange = worksheet.Range("A1:G1");
                     headerRange.Font.Bold = true;
                     headerRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
 
@@ -4116,12 +4438,25 @@ namespace CTS
                     {
                         double flowRate = permeabilityResult.ThroatFlowRates.TryGetValue(throat.Id, out double fr) ? fr : 0;
 
+                        // Check if this throat connects inlet to outlet (directly or indirectly)
+                        bool connectsInletOutlet =
+                            (permeabilityResult.InletPores.Contains(throat.PoreId1) && permeabilityResult.OutletPores.Contains(throat.PoreId2)) ||
+                            (permeabilityResult.InletPores.Contains(throat.PoreId2) && permeabilityResult.OutletPores.Contains(throat.PoreId1));
+
                         worksheet.Cells[row, 1] = throat.Id;
                         worksheet.Cells[row, 2] = throat.PoreId1;
                         worksheet.Cells[row, 3] = throat.PoreId2;
                         worksheet.Cells[row, 4] = flowRate;
                         worksheet.Cells[row, 5] = throat.Radius;
                         worksheet.Cells[row, 6] = throat.Length;
+                        worksheet.Cells[row, 7] = connectsInletOutlet;
+
+                        // Highlight high flow throats
+                        if (Math.Abs(flowRate) > permeabilityResult.TotalFlowRate * 0.01)
+                        {
+                            dynamic rowRange = worksheet.Range[$"A{row}:G{row}"];
+                            rowRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightYellow);
+                        }
 
                         row++;
                     }
@@ -4131,7 +4466,7 @@ namespace CTS
                     headerRange.AutoFilter();
 
                     // ==========================================================
-                    // Worksheet 4: Charts
+                    // Worksheet 5: Charts
                     // ==========================================================
                     progressLabel.Text = "Creating charts...";
                     Application.DoEvents();
@@ -4139,91 +4474,127 @@ namespace CTS
                     try
                     {
                         // Create chart sheet
-                        worksheet = workbook.Worksheets[4];
+                        worksheet = workbook.Worksheets[5];
                         worksheet.Name = "Charts";
 
                         // Add chart title
-                        worksheet.Cells[1, 1] = "Permeability Visualization";
+                        worksheet.Cells[1, 1] = "Permeability Method Comparison";
                         worksheet.Cells[1, 1].Font.Size = 14;
                         worksheet.Cells[1, 1].Font.Bold = true;
                         worksheet.Range["A1:G1"].Merge();
 
-                        // Add permeability and tortuosity relationship chart
+                        // Create data for permeability comparison chart
                         row = 3;
-                        worksheet.Cells[row, 1] = "Permeability Summary";
-                        worksheet.Cells[row, 1].Font.Bold = true;
-                        worksheet.Range[$"A{row}:G{row}"].Merge();
-                        worksheet.Range[$"A{row}:G{row}"].Interior.Color =
-                            System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
-                        row++;
 
-                        // Create data for a simple summary chart
                         // Headers
-                        worksheet.Cells[row, 1] = "Measurement";
-                        worksheet.Cells[row, 2] = "Value";
+                        worksheet.Cells[row, 1] = "Method";
+                        worksheet.Cells[row, 2] = "Raw Permeability (mD)";
+                        worksheet.Cells[row, 3] = "Corrected Permeability (mD)";
                         row++;
 
-                        // Data points
-                        worksheet.Cells[row, 1] = "Raw Permeability (mD)";
-                        worksheet.Cells[row, 2] = permeabilityResult.PermeabilityMilliDarcy;
-                        row++;
+                        // Add method data
+                        int methodCount = 0;
 
-                        worksheet.Cells[row, 1] = "Corrected Permeability (mD)";
-                        worksheet.Cells[row, 2] = permeabilityResult.CorrectedPermeabilityDarcy * 1000;
-                        row++;
+                        if (permeabilityResult.UsedDarcyMethod)
+                        {
+                            worksheet.Cells[row, 1] = "Darcy's Law";
+                            worksheet.Cells[row, 2] = permeabilityResult.PermeabilityMilliDarcy;
+                            worksheet.Cells[row, 3] = permeabilityResult.CorrectedPermeabilityDarcy * 1000;
+                            row++;
+                            methodCount++;
+                        }
 
-                        // Create simple column chart
-                        dynamic chartObj = worksheet.ChartObjects.Add(100, 150, 400, 250);
-                        dynamic chart = chartObj.Chart;
+                        if (permeabilityResult.UsedStefanBoltzmannMethod)
+                        {
+                            worksheet.Cells[row, 1] = "Kozeny-Carman";
+                            worksheet.Cells[row, 2] = permeabilityResult.StefanBoltzmannPermeabilityMilliDarcy;
+                            worksheet.Cells[row, 3] = permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy * 1000;
+                            row++;
+                            methodCount++;
+                        }
 
-                        // Set the source data range
-                        var dataRange = worksheet.Range[$"A{row - 2}:B{row - 1}"];
-                        chart.SetSourceData(dataRange);
+                        if (permeabilityResult.UsedNavierStokesMethod)
+                        {
+                            worksheet.Cells[row, 1] = "Navier-Stokes";
+                            worksheet.Cells[row, 2] = permeabilityResult.NavierStokesPermeabilityMilliDarcy;
+                            worksheet.Cells[row, 3] = permeabilityResult.CorrectedNavierStokesPermeabilityDarcy * 1000;
+                            row++;
+                            methodCount++;
+                        }
 
-                        // Set chart type to column
-                        chart.ChartType = 51; // xlColumnClustered
+                        // Only create chart if we have data from at least one method
+                        if (methodCount > 0)
+                        {
+                            // Create column chart for method comparison
+                            dynamic chartObj = worksheet.ChartObjects.Add(100, 100, 600, 300);
+                            dynamic chart = chartObj.Chart;
 
-                        // Add title and labels
-                        chart.HasTitle = true;
-                        chart.ChartTitle.Text = "Permeability Comparison";
+                            // Set the source data range (exclude headers)
+                            var dataRange = worksheet.Range[$"A4:C{3 + methodCount}"];
+                            chart.SetSourceData(dataRange);
+
+                            // Set chart type to column
+                            chart.ChartType = 51; // xlColumnClustered
+
+                            // Add title and labels
+                            chart.HasTitle = true;
+                            chart.ChartTitle.Text = "Permeability by Calculation Method";
+
+                            chart.Axes(1).HasTitle = true; // x-axis
+                            chart.Axes(1).AxisTitle.Text = "Calculation Method";
+
+                            chart.Axes(2).HasTitle = true; // y-axis
+                            chart.Axes(2).AxisTitle.Text = "Permeability (mD)";
+
+                            // Add data labels
+                            chart.SeriesCollection(1).HasDataLabels = true;
+                            chart.SeriesCollection(2).HasDataLabels = true;
+                            chart.SeriesCollection(1).DataLabels.ShowValue = true;
+                            chart.SeriesCollection(2).DataLabels.ShowValue = true;
+                            chart.SeriesCollection(1).DataLabels.NumberFormat = "0.00";
+                            chart.SeriesCollection(2).DataLabels.NumberFormat = "0.00";
+
+                            // Create a legend
+                            chart.HasLegend = true;
+                            chart.Legend.Position = 2; // xlBottom = 2
+                        }
 
                         // Create tortuosity explanation diagram
-                        row += 2;
-                        worksheet.Cells[row, 1] = "Tortuosity Explanation";
+                        row += 3; // Add some space
+
+                        worksheet.Cells[row, 1] = "Tortuosity Effect on Permeability";
                         worksheet.Cells[row, 1].Font.Bold = true;
                         worksheet.Range[$"A{row}:G{row}"].Merge();
                         worksheet.Range[$"A{row}:G{row}"].Interior.Color =
                             System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
                         row++;
 
-                        // Create simple table explaining tortuosity
+                        // Insert diagram explaining tortuosity and permeability
+                        row++; // Space for diagram
+
+                        // Add tortuosity explanation text
+                        worksheet.Cells[row, 1] = "Tortuosity (τ) Impact:";
+                        worksheet.Cells[row, 1].Font.Bold = true;
+                        worksheet.Range[$"A{row}:A{row + 5}"].Font.Bold = true;
+                        row++;
                         worksheet.Cells[row, 1] = "Definition:";
-                        worksheet.Cells[row, 2] = "Tortuosity (τ) measures how winding or twisted the flow paths are through the porous medium.";
+                        worksheet.Cells[row, 2] = "Tortuosity measures the ratio of actual flow path length to straight-line distance";
                         worksheet.Range[$"B{row}:G{row}"].Merge();
                         row++;
-
-                        worksheet.Cells[row, 1] = "Mathematical:";
-                        worksheet.Cells[row, 2] = "τ = (Le/L)², where Le is actual path length and L is straight-line distance";
+                        worksheet.Cells[row, 1] = "Formula:";
+                        worksheet.Cells[row, 2] = "τ = (Le/L)";
                         worksheet.Range[$"B{row}:G{row}"].Merge();
                         row++;
-
-                        worksheet.Cells[row, 1] = "This Model:";
-                        worksheet.Cells[row, 2] = $"τ = {permeabilityResult.Tortuosity:F2}";
-                        worksheet.Range[$"B{row}:G{row}"].Merge();
-                        row++;
-
-                        worksheet.Cells[row, 1] = "Effect:";
-                        worksheet.Cells[row, 2] = "Higher tortuosity reduces permeability according to the Kozeny-Carman relationship: k ∝ (ε³/S²)/τ²";
-                        worksheet.Range[$"B{row}:G{row}"].Merge();
-                        row++;
-
                         worksheet.Cells[row, 1] = "Correction:";
-                        worksheet.Cells[row, 2] = $"Raw k = {permeabilityResult.PermeabilityDarcy:F3} Darcy, Corrected k = {permeabilityResult.CorrectedPermeabilityDarcy:F3} Darcy";
+                        worksheet.Cells[row, 2] = "Permeability is reduced by factor of 1/τ² (Kozeny-Carman relation)";
                         worksheet.Range[$"B{row}:G{row}"].Merge();
                         row++;
-
-                        // Format the explanation table
-                        worksheet.Range[$"A{row - 5}:A{row - 1}"].Font.Bold = true;
+                        worksheet.Cells[row, 1] = "This sample:";
+                        worksheet.Cells[row, 2] = $"τ = {permeabilityResult.Tortuosity:F2}, Correction Factor = {1.0 / (permeabilityResult.Tortuosity * permeabilityResult.Tortuosity):F4}";
+                        worksheet.Range[$"B{row}:G{row}"].Merge();
+                        worksheet.Range[$"B{row}:G{row}"].Font.Bold = true;
+                        worksheet.Range[$"B{row}:G{row}"].Interior.Color =
+                            System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightYellow);
 
                         // Auto-fit columns
                         worksheet.Columns.AutoFit();
@@ -4235,8 +4606,8 @@ namespace CTS
                         // We don't want to stop the export if just the chart fails
                     }
 
-                    // Make Summary sheet active
-                    workbook.Worksheets[1].Activate();
+                    // Make Method Comparison sheet active
+                    workbook.Worksheets[2].Activate();
 
                     // Save workbook to specified file
                     progressLabel.Text = "Saving Excel file...";
@@ -4342,19 +4713,39 @@ namespace CTS
             {
                 // Write simulation parameters
                 writer.WriteLine("# Permeability Simulation Results");
-                writer.WriteLine($"Date,{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")}");
+                writer.WriteLine($"Date,{DateTime.Now:yyyy-MM-dd HH:mm:ss}");
                 writer.WriteLine($"Flow Axis,{permeabilityResult.FlowAxis}");
                 writer.WriteLine($"Fluid Viscosity (Pa·s),{permeabilityResult.Viscosity:G8}");
                 writer.WriteLine($"Input Pressure (Pa),{permeabilityResult.InputPressure:F2}");
                 writer.WriteLine($"Output Pressure (Pa),{permeabilityResult.OutputPressure:F2}");
-                writer.WriteLine($"Permeability (Darcy),{permeabilityResult.PermeabilityDarcy:G8}");
-                writer.WriteLine($"Permeability (mD),{permeabilityResult.PermeabilityMilliDarcy:G8}");
                 writer.WriteLine($"Tortuosity,{permeabilityResult.Tortuosity:G8}");
-                writer.WriteLine($"Corrected Permeability (Darcy),{permeabilityResult.CorrectedPermeabilityDarcy:G8}");
-                writer.WriteLine($"Corrected Permeability (mD),{permeabilityResult.CorrectedPermeabilityDarcy * 1000:G8}");
                 writer.WriteLine($"Total Flow Rate (m³/s),{permeabilityResult.TotalFlowRate:G8}");
                 writer.WriteLine($"Model Length (m),{permeabilityResult.ModelLength:G8}");
                 writer.WriteLine($"Model Area (m²),{permeabilityResult.ModelArea:G8}");
+                writer.WriteLine();
+
+                // Write calculation method results
+                writer.WriteLine("# Permeability Results by Method");
+                writer.WriteLine("Method,Raw Permeability (Darcy),Raw Permeability (mD),Corrected Permeability (Darcy),Corrected Permeability (mD)");
+
+                if (permeabilityResult.UsedDarcyMethod)
+                {
+                    writer.WriteLine($"Darcy's Law,{permeabilityResult.PermeabilityDarcy:G8},{permeabilityResult.PermeabilityMilliDarcy:G8}," +
+                                   $"{permeabilityResult.CorrectedPermeabilityDarcy:G8},{permeabilityResult.CorrectedPermeabilityDarcy * 1000:G8}");
+                }
+
+                if (permeabilityResult.UsedStefanBoltzmannMethod)
+                {
+                    writer.WriteLine($"Kozeny-Carman Method,{permeabilityResult.StefanBoltzmannPermeabilityDarcy:G8},{permeabilityResult.StefanBoltzmannPermeabilityMilliDarcy:G8}," +
+                                   $"{permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy:G8},{permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy * 1000:G8}");
+                }
+
+                if (permeabilityResult.UsedNavierStokesMethod)
+                {
+                    writer.WriteLine($"Navier-Stokes Method,{permeabilityResult.NavierStokesPermeabilityDarcy:G8},{permeabilityResult.NavierStokesPermeabilityMilliDarcy:G8}," +
+                                   $"{permeabilityResult.CorrectedNavierStokesPermeabilityDarcy:G8},{permeabilityResult.CorrectedNavierStokesPermeabilityDarcy * 1000:G8}");
+                }
+
                 writer.WriteLine();
 
                 // Write pressure field
@@ -4390,6 +4781,14 @@ namespace CTS
                 {
                     writer.WriteLine($"Outlet,{poreId}");
                 }
+
+                // Write tortuosity correction explanation
+                writer.WriteLine();
+                writer.WriteLine("# Tortuosity Correction Information");
+                writer.WriteLine("Description,Value");
+                writer.WriteLine($"Tortuosity (τ),{permeabilityResult.Tortuosity:F4}");
+                writer.WriteLine("Correction Method,Kozeny-Carman: k' = k/τ²");
+                writer.WriteLine($"Correction Factor (1/τ²),{1.0 / (permeabilityResult.Tortuosity * permeabilityResult.Tortuosity):F4}");
             }
         }
 
@@ -4412,15 +4811,16 @@ namespace CTS
                 {
                     try
                     {
-                        // Create a copy of the current visualization with added scalebar
+                        // Create a copy of the current visualization with added info
                         using (Bitmap originalImage = new Bitmap(permeabilityPictureBox.Image))
                         {
-                            // Create a new bitmap with space for the scale bar and info
-                            Bitmap screenshotWithScale = new Bitmap(
+                            // Create a new bitmap with space for the info panel
+                            // Increased height to provide more space for multiple calculation methods
+                            Bitmap screenshotWithInfo = new Bitmap(
                                 originalImage.Width,
-                                originalImage.Height + 70); // Increased height to accommodate multiple lines
+                                originalImage.Height + 120); // Increased height for multiple methods and better spacing
 
-                            using (Graphics g = Graphics.FromImage(screenshotWithScale))
+                            using (Graphics g = Graphics.FromImage(screenshotWithInfo))
                             {
                                 g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
                                 g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
@@ -4428,48 +4828,96 @@ namespace CTS
                                 // Draw the original image
                                 g.DrawImage(originalImage, 0, 0, originalImage.Width, originalImage.Height);
 
-                                // Draw a black background for the scale bar area
+                                // Draw a black background for the info panel
                                 g.FillRectangle(new SolidBrush(Color.Black),
-                                    0, originalImage.Height, originalImage.Width, 70);
+                                    0, originalImage.Height, originalImage.Width, 120);
 
                                 // Draw pressure scale bar
                                 DrawPressureScaleBar(g,
-                                    new Rectangle(50, originalImage.Height + 35, originalImage.Width - 100, 30),
+                                    new Rectangle(50, originalImage.Height + 80, originalImage.Width - 100, 20),
                                     permeabilityResult.InputPressure,
                                     permeabilityResult.OutputPressure);
 
-                                // Draw timestamp
-                                g.DrawString($"Date: {DateTime.Now:yyyy-MM-dd HH:mm:ss}",
-                                    new Font("Arial", 8),
-                                    Brushes.White,
-                                    new Point(originalImage.Width - 200, originalImage.Height + 5));
+                                // Draw title at the top of info panel
+                                Font titleFont = new Font("Arial", 11, FontStyle.Bold);
+                                string titleText = $"Flow Direction: {permeabilityResult.FlowAxis}-Axis | Tortuosity: {permeabilityResult.Tortuosity:F2}";
+                                SizeF titleSize = g.MeasureString(titleText, titleFont);
+                                g.DrawString(titleText, titleFont, Brushes.White,
+                                    (screenshotWithInfo.Width - titleSize.Width) / 2, originalImage.Height + 5);
 
-                                // Draw permeability values with tortuosity on multiple lines
-                                int yPos = originalImage.Height + 5;
+                                // Create method result labels with improved spacing
+                                Font methodFont = new Font("Arial", 9, FontStyle.Bold);
+                                int yPos = originalImage.Height + 32; // Start position for method rows
+                                int leftColumnX = 20;
+                                int middleColumnX = originalImage.Width / 3 + 20;
+                                int rightColumnX = 2 * originalImage.Width / 3 + 20;
 
-                                // Line 1: Original permeability
-                                g.DrawString($"Permeability: {permeabilityResult.PermeabilityDarcy:F3} Darcy " +
-                                            $"({permeabilityResult.PermeabilityMilliDarcy:F1} mD)",
-                                    new Font("Arial", 8, FontStyle.Bold),
-                                    Brushes.White,
-                                    new Point(50, yPos));
+                                // Draw column headers
+                                g.DrawString("Calculation Method", new Font("Arial", 8), Brushes.LightGray, leftColumnX, yPos);
+                                g.DrawString("Raw Permeability", new Font("Arial", 8), Brushes.LightGray, middleColumnX, yPos);
+                                g.DrawString("Corrected Permeability", new Font("Arial", 8), Brushes.LightGray, rightColumnX, yPos);
+                                yPos += 18; // Move down for the data rows
 
-                                // Line 2: Tortuosity and corrected permeability
-                                yPos += 15; // Move down for next line
+                                // Draw each method's results
+                                if (permeabilityResult.UsedDarcyMethod)
+                                {
+                                    g.DrawString("Darcy's Law:", methodFont, Brushes.White, leftColumnX, yPos);
+                                    g.DrawString($"{permeabilityResult.PermeabilityDarcy:F3} Darcy ({permeabilityResult.PermeabilityMilliDarcy:F1} mD)",
+                                        methodFont, Brushes.White, middleColumnX, yPos);
+                                    g.DrawString($"{permeabilityResult.CorrectedPermeabilityDarcy:F3} Darcy ({permeabilityResult.CorrectedPermeabilityDarcy * 1000:F1} mD)",
+                                        methodFont, Brushes.LightGreen, rightColumnX, yPos);
+                                    yPos += 18; // Space for next method
+                                }
 
-                                g.DrawString($"Tortuosity: {permeabilityResult.Tortuosity:F2}",
-                                    new Font("Arial", 8, FontStyle.Bold),
-                                    Brushes.Yellow, // Use yellow to highlight tortuosity
-                                    new Point(50, yPos));
+                                if (permeabilityResult.UsedStefanBoltzmannMethod)
+                                {
+                                    g.DrawString("Kozeny-Carman:", methodFont, Brushes.White, leftColumnX, yPos);
+                                    g.DrawString($"{permeabilityResult.StefanBoltzmannPermeabilityDarcy:F3} Darcy ({permeabilityResult.StefanBoltzmannPermeabilityMilliDarcy:F1} mD)",
+                                        methodFont, Brushes.White, middleColumnX, yPos);
+                                    g.DrawString($"{permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy:F3} Darcy ({permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy * 1000:F1} mD)",
+                                        methodFont, Brushes.LightGreen, rightColumnX, yPos);
+                                    yPos += 18; // Space for next method
+                                }
 
-                                g.DrawString($"Corrected k: {permeabilityResult.CorrectedPermeabilityDarcy:F3} Darcy " +
-                                            $"({permeabilityResult.CorrectedPermeabilityDarcy * 1000:F1} mD)",
-                                    new Font("Arial", 8, FontStyle.Bold),
-                                    Brushes.LightGreen, // Use light green for corrected permeability
-                                    new Point(200, yPos)); // Offset to the right
+                                if (permeabilityResult.UsedNavierStokesMethod)
+                                {
+                                    g.DrawString("Navier-Stokes:", methodFont, Brushes.White, leftColumnX, yPos);
+                                    g.DrawString($"{permeabilityResult.NavierStokesPermeabilityDarcy:F3} Darcy ({permeabilityResult.NavierStokesPermeabilityMilliDarcy:F1} mD)",
+                                        methodFont, Brushes.White, middleColumnX, yPos);
+                                    g.DrawString($"{permeabilityResult.CorrectedNavierStokesPermeabilityDarcy:F3} Darcy ({permeabilityResult.CorrectedNavierStokesPermeabilityDarcy * 1000:F1} mD)",
+                                        methodFont, Brushes.LightGreen, rightColumnX, yPos);
+                                }
+
+                                // Draw timestamp in bottom right corner
+                                Font timestampFont = new Font("Arial", 8);
+                                string timestamp = $"Date: {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
+                                SizeF timestampSize = g.MeasureString(timestamp, timestampFont);
+                                g.DrawString(timestamp, timestampFont, Brushes.LightGray,
+                                    screenshotWithInfo.Width - timestampSize.Width - 10,
+                                    originalImage.Height + 100 - timestampSize.Height);
+
+                                // Add legend for inlet/outlet pores
+                                int legendX = originalImage.Width - 150;
+                                int legendY = 20;
+                                int legendSpacing = 20;
+
+                                // Semi-transparent black background for the legend
+                                g.FillRectangle(new SolidBrush(Color.FromArgb(150, 0, 0, 0)),
+                                    legendX - 5, legendY - 5, 140, 60);
+
+                                // Draw legend items
+                                g.FillEllipse(new SolidBrush(Color.White), legendX, legendY, 12, 12);
+                                g.DrawEllipse(new Pen(Color.Red, 2), legendX, legendY, 12, 12);
+                                g.DrawString("Inlet Pores", new Font("Arial", 8), Brushes.White, legendX + 18, legendY);
+
+                                g.FillEllipse(new SolidBrush(Color.DarkGray), legendX, legendY + legendSpacing, 12, 12);
+                                g.DrawEllipse(new Pen(Color.Blue, 2), legendX, legendY + legendSpacing, 12, 12);
+                                g.DrawString("Outlet Pores", new Font("Arial", 8), Brushes.White, legendX + 18, legendY + legendSpacing);
+
+                                g.DrawString("Pressure", new Font("Arial", 8, FontStyle.Bold), Brushes.White, legendX, legendY + 2 * legendSpacing);
                             }
 
-                            // Save the image with the scale bar
+                            // Save the image with the info panel
                             string extension = Path.GetExtension(saveDialog.FileName).ToLower();
                             System.Drawing.Imaging.ImageFormat format = System.Drawing.Imaging.ImageFormat.Png; // Default
 
@@ -4478,7 +4926,7 @@ namespace CTS
                             else if (extension == ".bmp")
                                 format = System.Drawing.Imaging.ImageFormat.Bmp;
 
-                            screenshotWithScale.Save(saveDialog.FileName, format);
+                            screenshotWithInfo.Save(saveDialog.FileName, format);
                         }
 
                         statusLabel.Text = "Permeability visualization saved successfully.";
@@ -4494,7 +4942,6 @@ namespace CTS
                 }
             }
         }
-
         private void OpenPoreConnectivityDialog(object sender, EventArgs e)
         {
             using (var dialog = new PoreConnectivityDialog())
@@ -4521,7 +4968,7 @@ namespace CTS
         {
             // Draw gradient bar
             int width = rect.Width;
-            int height = 20;
+            int height = rect.Height;
 
             // Create gradient brush from red to blue
             using (System.Drawing.Drawing2D.LinearGradientBrush gradientBrush =
@@ -4548,6 +4995,20 @@ namespace CTS
             int numTicks = 5;
             using (Font font = new Font("Arial", 8))
             {
+                // Calculate label width to prevent overlap
+                string sampleLabel = $"{maxPressure:F0} Pa";
+                SizeF labelSize = g.MeasureString(sampleLabel, font);
+
+                // Ensure we never draw labels too close together
+                int minLabelSpacing = (int)(labelSize.Width * 1.2);
+                int tickSpacing = Math.Max(width / (numTicks - 1), minLabelSpacing);
+
+                // Recalculate numTicks if needed to avoid overlap
+                if (tickSpacing > width / (numTicks - 1))
+                {
+                    numTicks = Math.Max(2, (int)(width / tickSpacing) + 1);
+                }
+
                 for (int i = 0; i < numTicks; i++)
                 {
                     float x = rect.X + (width * i / (numTicks - 1));
@@ -4559,15 +5020,24 @@ namespace CTS
                     double pressure = maxPressure - (i * (maxPressure - minPressure) / (numTicks - 1));
                     string label = $"{pressure:F0} Pa";
 
-                    // Measure text and center it under the tick
-                    SizeF textSize = g.MeasureString(label, font);
-                    g.DrawString(label, font, Brushes.White, x - textSize.Width / 2, rect.Y + height + 6);
+                    // Measure this specific label
+                    SizeF thisLabelSize = g.MeasureString(label, font);
+
+                    // Center the label under the tick, ensuring it doesn't go off the edges
+                    float labelX = Math.Max(rect.X, Math.Min(rect.X + width - thisLabelSize.Width,
+                        x - thisLabelSize.Width / 2));
+
+                    // Draw the label
+                    g.DrawString(label, font, Brushes.White, labelX, rect.Y + height + 6);
                 }
             }
 
-            // Draw title
-            g.DrawString("Pressure", new Font("Arial", 9, FontStyle.Bold),
-                Brushes.White, rect.X + width / 2 - 30, rect.Y - 15);
+            // Draw title above the scale bar
+            Font titleFont = new Font("Arial", 8, FontStyle.Bold);
+            string titleText = "Pressure Gradient";
+            SizeF titleSize = g.MeasureString(titleText, titleFont);
+            g.DrawString(titleText, titleFont, Brushes.White,
+                rect.X + (width / 2) - (titleSize.Width / 2), rect.Y - titleSize.Height - 2);
         }
     }
 }

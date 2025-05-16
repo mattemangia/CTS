@@ -9,7 +9,7 @@ using System.Threading.Tasks;
 namespace CTS
 {
     /// <summary>
-    /// Simulates absolute permeability through a pore network model using Darcy's law
+    /// Simulates absolute permeability through a pore network model using multiple methods
     /// </summary>
     public class PermeabilitySimulator : IDisposable
     {
@@ -67,24 +67,32 @@ namespace CTS
         }
 
         /// <summary>
-        /// Simulates absolute permeability through the pore network model
+        /// Simulates absolute permeability through the pore network model using selected methods
         /// </summary>
         /// <param name="model">The pore network model</param>
         /// <param name="axis">The flow axis</param>
         /// <param name="viscosity">Fluid viscosity (Pa.s)</param>
         /// <param name="inputPressure">Input pressure (Pa)</param>
         /// <param name="outputPressure">Output pressure (Pa)</param>
+        /// <param name="tortuosity">Tortuosity factor for correction</param>
+        /// <param name="useDarcyMethod">Whether to use Darcy's law</param>
+        /// <param name="useStefanBoltzmannMethod">Whether to use Stefan-Boltzmann method</param>
+        /// <param name="useNavierStokesMethod">Whether to use Navier-Stokes method</param>
         /// <param name="useGpu">Whether to use GPU acceleration if available</param>
         /// <param name="progress">Progress reporting</param>
-        /// <returns>Simulation result containing permeability and pressure field</returns>
+        /// <returns>Simulation result containing permeability calculations from all methods</returns>
         public async Task<PermeabilitySimulationResult> SimulatePermeabilityAsync(
-            PoreNetworkModel model,
-            FlowAxis axis,
-            double viscosity,
-            double inputPressure,
-            double outputPressure,
-            bool useGpu = true,
-            IProgress<int> progress = null)
+    PoreNetworkModel model,
+    FlowAxis axis,
+    double viscosity,
+    double inputPressure,
+    double outputPressure,
+    double tortuosity,
+    bool useDarcyMethod = true,
+    bool useStefanBoltzmannMethod = false,
+    bool useNavierStokesMethod = false,
+    bool useGpu = true,
+    IProgress<int> progress = null)
         {
             if (model.Pores.Count == 0 || model.Throats.Count == 0)
             {
@@ -99,36 +107,105 @@ namespace CTS
                 Viscosity = viscosity,
                 InputPressure = inputPressure,
                 OutputPressure = outputPressure,
-                Tortuosity = model.Tortuosity // Copy tortuosity from model
+                Tortuosity = tortuosity,
+                UsedDarcyMethod = useDarcyMethod,
+                UsedStefanBoltzmannMethod = useStefanBoltzmannMethod,
+                UsedNavierStokesMethod = useNavierStokesMethod
             };
 
-            progress?.Report(10);
+            progress?.Report(5);
 
-            // Use GPU or CPU based on availability and user preference
-            if (useGpu && gpuInitialized)
+            // Calculate model dimensions and create necessary data structures (common to all methods)
+            await PrepareCommonCalculations(result, progress);
+
+            progress?.Report(15);
+
+            // Run each requested calculation method
+            if (useDarcyMethod)
             {
-                Logger.Log("[PermeabilitySimulator] Using GPU for simulation");
-                await SimulatePermeabilityGPU(result, progress);
-            }
-            else
-            {
-                Logger.Log("[PermeabilitySimulator] Using CPU for simulation");
-                await SimulatePermeabilityCPU(result, progress);
+                Logger.Log("[PermeabilitySimulator] Using Darcy's law for simulation");
+
+                // Use GPU or CPU based on availability and user preference
+                if (useGpu && gpuInitialized)
+                {
+                    Logger.Log("[PermeabilitySimulator] Using GPU for Darcy calculation");
+                    await SimulatePermeabilityDarcyGPU(result, progress);
+                }
+                else
+                {
+                    Logger.Log("[PermeabilitySimulator] Using CPU for Darcy calculation");
+                    await SimulatePermeabilityDarcyCPU(result, progress);
+                }
+
+                // Calculate tortuosity-corrected permeability
+                if (result.Tortuosity > 0)
+                {
+                    result.CorrectedPermeabilityDarcy = result.PermeabilityDarcy / (result.Tortuosity * result.Tortuosity);
+                    result.CorrectedPermeabilityMilliDarcy = result.CorrectedPermeabilityDarcy * 1000;
+
+                    Logger.Log($"[PermeabilitySimulator] Applied tortuosity correction for Darcy method: " +
+                               $"original k={result.PermeabilityDarcy:F4} Darcy, " +
+                               $"τ={result.Tortuosity:F2}, corrected k={result.CorrectedPermeabilityDarcy:F4} Darcy");
+                }
+                else
+                {
+                    // If tortuosity is not available, use the uncorrected value
+                    result.CorrectedPermeabilityDarcy = result.PermeabilityDarcy;
+                    result.CorrectedPermeabilityMilliDarcy = result.PermeabilityMilliDarcy;
+                    Logger.Log("[PermeabilitySimulator] No tortuosity available for Darcy correction, using uncorrected permeability");
+                }
             }
 
-            // Calculate tortuosity-corrected permeability using the Kozeny-Carman relationship
-            // k_corrected = k / τ² where τ is tortuosity
-            if (result.Tortuosity > 0)
+            progress?.Report(50);
+
+            if (useStefanBoltzmannMethod)
             {
-                result.CorrectedPermeabilityDarcy = result.PermeabilityDarcy / (result.Tortuosity * result.Tortuosity);
-                Logger.Log($"[PermeabilitySimulator] Applied tortuosity correction: original k={result.PermeabilityDarcy:F4} Darcy, " +
-                           $"τ={result.Tortuosity:F2}, corrected k={result.CorrectedPermeabilityDarcy:F4} Darcy");
+                Logger.Log("[PermeabilitySimulator] Using Kozeny-Carman method for simulation");
+                await SimulateStefanBoltzmannMethod(result, useGpu, progress);
+
+                // Apply tortuosity correction
+                if (result.Tortuosity > 0)
+                {
+                    result.CorrectedStefanBoltzmannPermeabilityDarcy =
+                        result.StefanBoltzmannPermeabilityDarcy / (result.Tortuosity * result.Tortuosity);
+                    result.CorrectedStefanBoltzmannPermeabilityMilliDarcy =
+                        result.CorrectedStefanBoltzmannPermeabilityDarcy * 1000;
+
+                    Logger.Log($"[PermeabilitySimulator] Applied tortuosity correction for Kozeny-Carman method: " +
+                               $"original k={result.StefanBoltzmannPermeabilityDarcy:F4} Darcy, " +
+                               $"τ={result.Tortuosity:F2}, corrected k={result.CorrectedStefanBoltzmannPermeabilityDarcy:F4} Darcy");
+                }
+                else
+                {
+                    result.CorrectedStefanBoltzmannPermeabilityDarcy = result.StefanBoltzmannPermeabilityDarcy;
+                    result.CorrectedStefanBoltzmannPermeabilityMilliDarcy = result.StefanBoltzmannPermeabilityMilliDarcy;
+                }
             }
-            else
+
+            progress?.Report(75);
+
+            if (useNavierStokesMethod)
             {
-                // If tortuosity is not available, use the uncorrected value
-                result.CorrectedPermeabilityDarcy = result.PermeabilityDarcy;
-                Logger.Log("[PermeabilitySimulator] No tortuosity available for correction, using uncorrected permeability");
+                Logger.Log("[PermeabilitySimulator] Using Navier-Stokes method for simulation");
+                await SimulateNavierStokesMethod(result, useGpu, progress);
+
+                // Apply tortuosity correction
+                if (result.Tortuosity > 0)
+                {
+                    result.CorrectedNavierStokesPermeabilityDarcy =
+                        result.NavierStokesPermeabilityDarcy / (result.Tortuosity * result.Tortuosity);
+                    result.CorrectedNavierStokesPermeabilityMilliDarcy =
+                        result.CorrectedNavierStokesPermeabilityDarcy * 1000;
+
+                    Logger.Log($"[PermeabilitySimulator] Applied tortuosity correction for Navier-Stokes method: " +
+                               $"original k={result.NavierStokesPermeabilityDarcy:F4} Darcy, " +
+                               $"τ={result.Tortuosity:F2}, corrected k={result.CorrectedNavierStokesPermeabilityDarcy:F4} Darcy");
+                }
+                else
+                {
+                    result.CorrectedNavierStokesPermeabilityDarcy = result.NavierStokesPermeabilityDarcy;
+                    result.CorrectedNavierStokesPermeabilityMilliDarcy = result.NavierStokesPermeabilityMilliDarcy;
+                }
             }
 
             progress?.Report(100);
@@ -136,9 +213,71 @@ namespace CTS
         }
 
         /// <summary>
-        /// CPU implementation of permeability simulation
+        /// Prepares common calculation data used by all methods
         /// </summary>
-        private async Task SimulatePermeabilityCPU(PermeabilitySimulationResult result, IProgress<int> progress = null)
+        private async Task PrepareCommonCalculations(PermeabilitySimulationResult result, IProgress<int> progress = null)
+        {
+            await Task.Run(() => {
+                var model = result.Model;
+                var axis = result.FlowAxis;
+
+                // Calculate the model dimensions
+                double minCoord = 0, maxCoord = 0;
+                switch (axis)
+                {
+                    case FlowAxis.X:
+                        minCoord = model.Pores.Min(p => p.Center.X);
+                        maxCoord = model.Pores.Max(p => p.Center.X);
+                        break;
+
+                    case FlowAxis.Y:
+                        minCoord = model.Pores.Min(p => p.Center.Y);
+                        maxCoord = model.Pores.Max(p => p.Center.Y);
+                        break;
+
+                    case FlowAxis.Z:
+                        minCoord = model.Pores.Min(p => p.Center.Z);
+                        maxCoord = model.Pores.Max(p => p.Center.Z);
+                        break;
+                }
+
+                // Sample dimensions (in meters)
+                double modelLength = (maxCoord - minCoord) * 1e-6; // µm to m
+
+                // Calculate cross-sectional area
+                double minX = model.Pores.Min(p => p.Center.X - p.Radius);
+                double maxX = model.Pores.Max(p => p.Center.X + p.Radius);
+                double minY = model.Pores.Min(p => p.Center.Y - p.Radius);
+                double maxY = model.Pores.Max(p => p.Center.Y + p.Radius);
+                double minZ = model.Pores.Min(p => p.Center.Z - p.Radius);
+                double maxZ = model.Pores.Max(p => p.Center.Z + p.Radius);
+
+                double area;
+                switch (axis)
+                {
+                    case FlowAxis.X:
+                        area = (maxY - minY) * (maxZ - minZ) * 1e-12; // µm² to m²
+                        break;
+
+                    case FlowAxis.Y:
+                        area = (maxX - minX) * (maxZ - minZ) * 1e-12; // µm² to m²
+                        break;
+
+                    case FlowAxis.Z:
+                    default:
+                        area = (maxX - minX) * (maxY - minY) * 1e-12; // µm² to m²
+                        break;
+                }
+
+                result.ModelLength = modelLength;
+                result.ModelArea = area;
+            });
+        }
+
+        /// <summary>
+        /// CPU implementation of permeability simulation using Darcy's law
+        /// </summary>
+        private async Task SimulatePermeabilityDarcyCPU(PermeabilitySimulationResult result, IProgress<int> progress = null)
         {
             await Task.Run(() =>
             {
@@ -317,61 +456,11 @@ namespace CTS
                     }
                 }
 
-                progress?.Report(80);
-
-                // Calculate the model dimensions
-                double minCoord = 0, maxCoord = 0;
-                switch (axis)
-                {
-                    case FlowAxis.X:
-                        minCoord = model.Pores.Min(p => p.Center.X);
-                        maxCoord = model.Pores.Max(p => p.Center.X);
-                        break;
-
-                    case FlowAxis.Y:
-                        minCoord = model.Pores.Min(p => p.Center.Y);
-                        maxCoord = model.Pores.Max(p => p.Center.Y);
-                        break;
-
-                    case FlowAxis.Z:
-                        minCoord = model.Pores.Min(p => p.Center.Z);
-                        maxCoord = model.Pores.Max(p => p.Center.Z);
-                        break;
-                }
-
-                // Sample dimensions (in meters)
-                double modelLength = (maxCoord - minCoord) * 1e-6; // µm to m
-
-                // Calculate cross-sectional area
-                double minX = model.Pores.Min(p => p.Center.X - p.Radius);
-                double maxX = model.Pores.Max(p => p.Center.X + p.Radius);
-                double minY = model.Pores.Min(p => p.Center.Y - p.Radius);
-                double maxY = model.Pores.Max(p => p.Center.Y + p.Radius);
-                double minZ = model.Pores.Min(p => p.Center.Z - p.Radius);
-                double maxZ = model.Pores.Max(p => p.Center.Z + p.Radius);
-
-                double area;
-                switch (axis)
-                {
-                    case FlowAxis.X:
-                        area = (maxY - minY) * (maxZ - minZ) * 1e-12; // µm² to m²
-                        break;
-
-                    case FlowAxis.Y:
-                        area = (maxX - minX) * (maxZ - minZ) * 1e-12; // µm² to m²
-                        break;
-
-                    case FlowAxis.Z:
-                    default:
-                        area = (maxX - minX) * (maxY - minY) * 1e-12; // µm² to m²
-                        break;
-                }
-
                 // Pressure drop
                 double deltaP = Math.Abs(inputPressure - outputPressure);
 
                 // Calculate permeability using Darcy's Law: k = (Q * μ * L) / (A * ΔP)
-                double permeability = (totalFlowRate * viscosity * modelLength) / (area * deltaP);
+                double permeability = (totalFlowRate * viscosity * result.ModelLength) / (result.ModelArea * deltaP);
 
                 // Convert from m² to Darcy (1 Darcy = 9.869233e-13 m²)
                 double permeabilityDarcy = permeability / 9.869233e-13;
@@ -381,28 +470,24 @@ namespace CTS
                 result.PermeabilityMilliDarcy = permeabilityDarcy * 1000;
                 result.PressureField = pressureField;
                 result.TotalFlowRate = totalFlowRate;
-                result.ModelLength = modelLength;
-                result.ModelArea = area;
                 result.ThroatFlowRates = throatFlowRates;
                 result.InletPores = inletPores.Select(p => p.Id).ToList();
                 result.OutletPores = outletPores.Select(p => p.Id).ToList();
 
-                progress?.Report(90);
-
-                Logger.Log($"[PermeabilitySimulator] CPU simulation completed. Permeability: {permeabilityDarcy:F4} Darcy");
+                Logger.Log($"[PermeabilitySimulator] Darcy CPU simulation completed. Permeability: {permeabilityDarcy:F4} Darcy");
             });
         }
 
         /// <summary>
-        /// GPU implementation of permeability simulation
+        /// GPU implementation of permeability simulation using Darcy's law
         /// </summary>
-        private async Task SimulatePermeabilityGPU(PermeabilitySimulationResult result, IProgress<int> progress = null)
+        private async Task SimulatePermeabilityDarcyGPU(PermeabilitySimulationResult result, IProgress<int> progress = null)
         {
             // Ensure GPU is initialized
             if (!gpuInitialized)
             {
-                Logger.Log("[PermeabilitySimulator] GPU not initialized, falling back to CPU");
-                await SimulatePermeabilityCPU(result, progress);
+                Logger.Log("[PermeabilitySimulator] GPU not initialized, falling back to CPU for Darcy calculation");
+                await SimulatePermeabilityDarcyCPU(result, progress);
                 return;
             }
 
@@ -417,7 +502,7 @@ namespace CTS
                     double inputPressure = result.InputPressure;
                     double outputPressure = result.OutputPressure;
 
-                    Logger.Log($"[PermeabilitySimulator] Using GPU accelerator: {accelerator.Name}");
+                    Logger.Log($"[PermeabilitySimulator] Using GPU accelerator for Darcy's law: {accelerator.Name}");
                     Logger.Log($"[PermeabilitySimulator] Processing {model.Pores.Count} pores and {model.Throats.Count} throats");
 
                     // Get the axis coordinate for sorting
@@ -662,61 +747,11 @@ namespace CTS
                         }
                     }
 
-                    progress?.Report(80);
-
-                    // Calculate the model dimensions
-                    double minCoord = 0, maxCoord = 0;
-                    switch (axis)
-                    {
-                        case FlowAxis.X:
-                            minCoord = model.Pores.Min(p => p.Center.X);
-                            maxCoord = model.Pores.Max(p => p.Center.X);
-                            break;
-
-                        case FlowAxis.Y:
-                            minCoord = model.Pores.Min(p => p.Center.Y);
-                            maxCoord = model.Pores.Max(p => p.Center.Y);
-                            break;
-
-                        case FlowAxis.Z:
-                            minCoord = model.Pores.Min(p => p.Center.Z);
-                            maxCoord = model.Pores.Max(p => p.Center.Z);
-                            break;
-                    }
-
-                    // Sample dimensions (in meters)
-                    double modelLength = (maxCoord - minCoord) * 1e-6; // µm to m
-
-                    // Calculate cross-sectional area
-                    double minX = model.Pores.Min(p => p.Center.X - p.Radius);
-                    double maxX = model.Pores.Max(p => p.Center.X + p.Radius);
-                    double minY = model.Pores.Min(p => p.Center.Y - p.Radius);
-                    double maxY = model.Pores.Max(p => p.Center.Y + p.Radius);
-                    double minZ = model.Pores.Min(p => p.Center.Z - p.Radius);
-                    double maxZ = model.Pores.Max(p => p.Center.Z + p.Radius);
-
-                    double area;
-                    switch (axis)
-                    {
-                        case FlowAxis.X:
-                            area = (maxY - minY) * (maxZ - minZ) * 1e-12; // µm² to m²
-                            break;
-
-                        case FlowAxis.Y:
-                            area = (maxX - minX) * (maxZ - minZ) * 1e-12; // µm² to m²
-                            break;
-
-                        case FlowAxis.Z:
-                        default:
-                            area = (maxX - minX) * (maxY - minY) * 1e-12; // µm² to m²
-                            break;
-                    }
-
                     // Pressure drop
                     double deltaP = Math.Abs(inputPressure - outputPressure);
 
                     // Calculate permeability using Darcy's Law: k = (Q * μ * L) / (A * ΔP)
-                    double permeability = (totalFlowRate * viscosity * modelLength) / (area * deltaP);
+                    double permeability = (totalFlowRate * viscosity * result.ModelLength) / (result.ModelArea * deltaP);
 
                     // Convert from m² to Darcy (1 Darcy = 9.869233e-13 m²)
                     double permeabilityDarcy = permeability / 9.869233e-13;
@@ -726,26 +761,209 @@ namespace CTS
                     result.PermeabilityMilliDarcy = permeabilityDarcy * 1000;
                     result.PressureField = pressureField;
                     result.TotalFlowRate = totalFlowRate;
-                    result.ModelLength = modelLength;
-                    result.ModelArea = area;
                     result.ThroatFlowRates = throatFlowRates;
                     result.InletPores = inletPores.Select(p => p.Id).ToList();
                     result.OutletPores = outletPores.Select(p => p.Id).ToList();
 
-                    progress?.Report(90);
-
-                    Logger.Log($"[PermeabilitySimulator] GPU simulation completed. Permeability: {permeabilityDarcy:F4} Darcy");
+                    Logger.Log($"[PermeabilitySimulator] Darcy GPU simulation completed. Permeability: {permeabilityDarcy:F4} Darcy");
                 });
             }
             catch (Exception ex)
             {
-                Logger.Log($"[PermeabilitySimulator] GPU simulation failed: {ex.Message}");
+                Logger.Log($"[PermeabilitySimulator] Darcy GPU simulation failed: {ex.Message}");
                 Logger.Log($"[PermeabilitySimulator] Stack trace: {ex.StackTrace}");
-                Logger.Log("[PermeabilitySimulator] Falling back to CPU implementation");
+                Logger.Log("[PermeabilitySimulator] Falling back to CPU implementation for Darcy's law");
 
                 // Fall back to CPU implementation
-                await SimulatePermeabilityCPU(result, progress);
+                await SimulatePermeabilityDarcyCPU(result, progress);
             }
+        }
+
+        /// <summary>
+        /// Simulates permeability using the Stefan-Boltzmann approach (adaptation for fluid flow)
+        /// </summary>
+        private async Task SimulateStefanBoltzmannMethod(PermeabilitySimulationResult result, bool useGpu, IProgress<int> progress = null)
+        {
+            await Task.Run(() => {
+                var model = result.Model;
+                double viscosity = result.Viscosity;
+
+                // Kozeny-Carman equation implementation
+                // Calculate porosity from the pore network model
+                double totalModelVolume = result.ModelLength * result.ModelArea; // in m³
+
+                // Calculate total pore volume
+                double totalPoreVolume = 0;
+                foreach (var pore in model.Pores)
+                {
+                    // Convert radius from μm to m and calculate volume
+                    double radius = pore.Radius * 1e-6; // μm to m
+                    double poreVolume = (4.0 / 3.0) * Math.PI * Math.Pow(radius, 3);
+                    totalPoreVolume += poreVolume;
+                }
+
+                // Add throat volumes
+                foreach (var throat in model.Throats)
+                {
+                    // Approximate throat as cylinder
+                    double radius = throat.Radius * 1e-6; // μm to m
+                    double length = throat.Length * 1e-6; // μm to m
+                    double throatVolume = Math.PI * Math.Pow(radius, 2) * length;
+                    totalPoreVolume += throatVolume;
+                }
+
+                // Calculate porosity
+                double porosity = totalPoreVolume / totalModelVolume;
+
+                // Safeguard against unrealistic porosity values
+                porosity = Math.Max(0.001, Math.Min(0.999, porosity));
+
+                // Calculate specific surface area
+                double totalSurfaceArea = 0;
+                foreach (var pore in model.Pores)
+                {
+                    // Surface area of sphere
+                    double radius = pore.Radius * 1e-6; // μm to m
+                    double surfaceArea = 4.0 * Math.PI * Math.Pow(radius, 2);
+                    totalSurfaceArea += surfaceArea;
+                }
+
+                foreach (var throat in model.Throats)
+                {
+                    // Surface area of cylinder (without ends)
+                    double radius = throat.Radius * 1e-6; // μm to m
+                    double length = throat.Length * 1e-6; // μm to m
+                    double surfaceArea = 2.0 * Math.PI * radius * length;
+                    totalSurfaceArea += surfaceArea;
+                }
+
+                // Specific surface area (surface area per unit volume)
+                double specificSurfaceArea = totalSurfaceArea / totalPoreVolume;
+
+                // Kozeny constant (typically 5 for spherical particles)
+                double kozenyConstant = 5.0;
+
+                // Calculate permeability using Kozeny-Carman equation:
+                // k = (ε³) / (K₀ * S² * (1-ε)²)
+                // where ε is porosity, K₀ is Kozeny constant, S is specific surface area
+
+                double permeability = Math.Pow(porosity, 3) / (kozenyConstant * Math.Pow(specificSurfaceArea, 2) * Math.Pow(1 - porosity, 2));
+
+                // Convert from m² to Darcy
+                double permeabilityDarcy = permeability / 9.869233e-13;
+
+                // Update result
+                result.StefanBoltzmannPermeabilityDarcy = permeabilityDarcy;
+                result.StefanBoltzmannPermeabilityMilliDarcy = permeabilityDarcy * 1000;
+
+                Logger.Log($"[PermeabilitySimulator] Kozeny-Carman simulation completed. Permeability: {permeabilityDarcy:F4} Darcy");
+                Logger.Log($"[PermeabilitySimulator] Kozeny-Carman parameters: Porosity={porosity:F4}, Specific Surface Area={specificSurfaceArea:E4} m²/m³");
+            });
+        }
+
+        /// <summary>
+        /// Simulates permeability using a simplified Navier-Stokes approach
+        /// </summary>
+        private async Task SimulateNavierStokesMethod(PermeabilitySimulationResult result, bool useGpu, IProgress<int> progress = null)
+        {
+            await Task.Run(() => {
+                var model = result.Model;
+                double viscosity = result.Viscosity;
+                double inputPressure = result.InputPressure;
+                double outputPressure = result.OutputPressure;
+
+                // First, analyze the throat network to determine the flow characteristics
+                double avgThroatRadius = 0;
+                double minThroatRadius = double.MaxValue;
+                double maxThroatRadius = 0;
+
+                foreach (var throat in model.Throats)
+                {
+                    double radius = throat.Radius * 1e-6; // μm to m
+                    avgThroatRadius += radius;
+                    minThroatRadius = Math.Min(minThroatRadius, radius);
+                    maxThroatRadius = Math.Max(maxThroatRadius, radius);
+                }
+
+                avgThroatRadius /= model.Throats.Count;
+
+                // Assume water density (can be adjusted if needed)
+                double fluidDensity = 1000; // kg/m³
+
+                // Determine pressure gradient
+                double pressureDrop = Math.Abs(inputPressure - outputPressure);
+                double pressureGradient = pressureDrop / result.ModelLength; // Pa/m
+
+                // Estimate initial velocity (without Forchheimer) using Darcy's law
+                double darcyPermeability = 0;
+
+                // Use Darcy result if available, or calculate an estimate using Hagen-Poiseuille
+                if (result.PermeabilityDarcy > 0)
+                {
+                    darcyPermeability = result.PermeabilityDarcy * 9.869233e-13; // Darcy to m²
+                }
+                else
+                {
+                    // Estimate permeability using average throat radius with Hagen-Poiseuille
+                    darcyPermeability = Math.Pow(avgThroatRadius, 2) / 8;
+                }
+
+                // Estimate superficial velocity (volumetric flow rate per unit area)
+                double superficialVelocity = (darcyPermeability / viscosity) * pressureGradient;
+
+                // Calculate Reynolds number based on average throat diameter
+                double reynoldsNumber = (2 * avgThroatRadius * superficialVelocity * fluidDensity) / viscosity;
+
+                // Apply Forchheimer correction for high-velocity (non-Darcy) flow
+                // Forchheimer Equation: -∇p = (μ/k)v + βρv²
+                // Where β is the Forchheimer coefficient
+
+                // Calculate Forchheimer coefficient (using Ergun correlation)
+                double porosity = 0.4; // Estimate porosity or calculate from model if available
+                double particleDiameter = 2 * avgThroatRadius; // Estimate particle diameter from throat size
+                double forchheimer = 1.75 / (porosity * particleDiameter);
+
+                // Iteratively solve for velocity considering both Darcy and Forchheimer effects
+                double tolerance = 1e-6;
+                double maxIterations = 100;
+                double velocity = superficialVelocity; // Initial guess
+
+                for (int i = 0; i < maxIterations; i++)
+                {
+                    // Updated velocity from Forchheimer equation
+                    double newVelocity = pressureGradient / ((viscosity / darcyPermeability) + (forchheimer * fluidDensity * velocity));
+
+                    // Check convergence
+                    if (Math.Abs(newVelocity - velocity) < tolerance)
+                    {
+                        velocity = newVelocity;
+                        break;
+                    }
+
+                    velocity = 0.7 * velocity + 0.3 * newVelocity; // Relaxation for better convergence
+                }
+
+                // Calculate apparent permeability from Navier-Stokes with Forchheimer correction
+                double apparentPermeability = (velocity * viscosity) / pressureGradient;
+
+                // Convert to Darcy
+                double permeabilityDarcy = apparentPermeability / 9.869233e-13;
+
+                // Update result with Navier-Stokes solution
+                result.NavierStokesPermeabilityDarcy = permeabilityDarcy;
+                result.NavierStokesPermeabilityMilliDarcy = permeabilityDarcy * 1000;
+
+                Logger.Log($"[PermeabilitySimulator] Navier-Stokes simulation completed. Permeability: {permeabilityDarcy:F4} Darcy");
+                Logger.Log($"[PermeabilitySimulator] Navier-Stokes parameters: Reynolds number={reynoldsNumber:F4}, " +
+                          $"Forchheimer coefficient={forchheimer:E4}, Non-Darcy effects={(reynoldsNumber > 1 ? "Significant" : "Minimal")}");
+
+                // Additional detailed logging
+                if (reynoldsNumber > 10)
+                {
+                    Logger.Log($"[PermeabilitySimulator] WARNING: Reynolds number of {reynoldsNumber:F1} indicates turbulent flow. " +
+                              "Navier-Stokes results may be less accurate without turbulence modeling.");
+                }
+            });
         }
 
         /// <summary>
@@ -969,30 +1187,6 @@ namespace CTS
         {
             Dispose(false);
         }
-    }
-
-    /// <summary>
-    /// Stores the results of a permeability simulation
-    /// </summary>
-    [Serializable]
-    public class PermeabilitySimulationResult
-    {
-        public PoreNetworkModel Model { get; set; }
-        public PermeabilitySimulator.FlowAxis FlowAxis { get; set; }
-        public double Viscosity { get; set; }
-        public double InputPressure { get; set; }
-        public double OutputPressure { get; set; }
-        public double PermeabilityDarcy { get; set; }
-        public double PermeabilityMilliDarcy { get; set; }
-        public double Tortuosity { get; set; } // Added tortuosity property
-        public double CorrectedPermeabilityDarcy { get; set; } // Added tortuosity-corrected permeability
-        public Dictionary<int, double> PressureField { get; set; }
-        public Dictionary<int, double> ThroatFlowRates { get; set; }
-        public double TotalFlowRate { get; set; }
-        public double ModelLength { get; set; }
-        public double ModelArea { get; set; }
-        public List<int> InletPores { get; set; }
-        public List<int> OutletPores { get; set; }
     }
 }
 

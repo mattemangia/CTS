@@ -56,7 +56,13 @@ namespace CTS
         private double maxThroatLengthFactor = 3.0;
         private double minOverlapFactor = 0.1;
         private bool enforceFlowPath = true;
-
+        private enum VisualizationMethod
+        {
+            Darcy,
+            LatticeBoltzmann,
+            NavierStokes,
+            Combined
+        }
         // 3d rotation
         private float rotationX = 30.0f;
 
@@ -2788,6 +2794,9 @@ namespace CTS
                 // Show dialog to get parameters
                 using (var dialog = new PermeabilitySimulationDialog())
                 {
+                    // Apply the tortuosity value from the network model to the dialog
+                    dialog.SetInitialTortuosity(networkModel.Tortuosity);
+
                     if (dialog.ShowDialog() != DialogResult.OK)
                         return;
 
@@ -2811,7 +2820,7 @@ namespace CTS
                             dialog.OutputPressure,
                             dialog.Tortuosity,
                             dialog.UseDarcyMethod,
-                            dialog.UseStefanBoltzmannMethod,
+                            dialog.UseLatticeBoltzmannMethod,
                             dialog.UseNavierStokesMethod,
                             useGpuCheckBox.Checked,
                             progress);
@@ -2832,9 +2841,9 @@ namespace CTS
                     {
                         statusBuilder.Append($"Darcy={permeabilityResult.PermeabilityDarcy:F3}D ");
                     }
-                    if (permeabilityResult.UsedStefanBoltzmannMethod)
+                    if (permeabilityResult.UsedLatticeBoltzmannMethod)
                     {
-                        statusBuilder.Append($"KC={permeabilityResult.StefanBoltzmannPermeabilityDarcy:F3}D ");
+                        statusBuilder.Append($"LBM={permeabilityResult.LatticeBoltzmannPermeabilityDarcy:F3}D ");
                     }
                     if (permeabilityResult.UsedNavierStokesMethod)
                     {
@@ -2856,7 +2865,6 @@ namespace CTS
                 Logger.Log($"[PoreNetworkModelingForm] Error: {ex.Message}\n{ex.StackTrace}");
             }
         }
-
         private void RenderPermeabilityResults()
         {
             if (permeabilityResult == null || permeabilityTab == null)
@@ -2865,76 +2873,22 @@ namespace CTS
             // First, clear the tab
             permeabilityTab.Controls.Clear();
 
-            // Create layout matching the 3D Network View tab
-            Panel visualizationPanel = new Panel
+            // Create the parent form for multiple visualization methods
+            TableLayoutPanel mainLayout = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                BorderStyle = BorderStyle.None,
-                BackColor = Color.Black
+                RowCount = 2,
+                ColumnCount = 1
             };
 
-            // Control panel at top (similar to 3D Network View)
-            Panel controlPanel = new Panel
-            {
-                Dock = DockStyle.Top,
-                Height = 40,
-                BackColor = Color.FromArgb(50, 50, 50)
-            };
-
-            // Add rotation label
-            Label rotationLabel = new Label
-            {
-                Text = "Rotation:",
-                Location = new Point(10, 12),
-                ForeColor = Color.White,
-                AutoSize = true
-            };
-            controlPanel.Controls.Add(rotationLabel);
-
-            // Add reset view button
-            Button resetViewButton = new Button
-            {
-                Text = "Reset View",
-                Location = new Point(150, 8),
-                Width = 100,
-                Height = 25,
-                FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(80, 80, 80),
-                ForeColor = Color.White
-            };
-            resetViewButton.Click += (s, e) =>
-            {
-                rotationX = 30.0f;
-                rotationY = 30.0f;
-                rotationZ = 0.0f;
-                viewScale = 1.0f;
-                panOffsetX = 0.0f;
-                panOffsetY = 0.0f;
-                permeabilityPictureBox.Image = RenderPressureField();
-            };
-            controlPanel.Controls.Add(resetViewButton);
-
-            // Add screenshot button in the control panel
-            Button screenshotButton = new Button
-            {
-                Text = "Save Screenshot",
-                Location = new Point(260, 8),
-                Width = 130,
-                Height = 25,
-                FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(80, 80, 80),
-                ForeColor = Color.White
-            };
-            screenshotButton.Click += SavePermeabilityScreenshot;
-            controlPanel.Controls.Add(screenshotButton);
-
-            visualizationPanel.Controls.Add(controlPanel);
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 150)); // Results panel
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // Visualization panel
 
             // Create the results panel at the top for key permeability info
             Panel resultsPanel = new Panel
             {
-                Dock = DockStyle.Top,
-                Height = 150, // Increased height for multiple calculation methods
+                Dock = DockStyle.Fill,
+                Height = 150,
                 BackColor = Color.FromArgb(30, 30, 30),
                 Padding = new Padding(5)
             };
@@ -2944,7 +2898,7 @@ namespace CTS
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 3,
-                RowCount = 6, // Increased rows to fit all methods
+                RowCount = 6,
                 BackColor = Color.Transparent
             };
 
@@ -3074,12 +3028,12 @@ namespace CTS
                 }, 2, 3);
             }
 
-            // Row 4: Kozeny-Carman (Stefan-Boltzmann) results
-            if (permeabilityResult.UsedStefanBoltzmannMethod)
+            // Row 4: Lattice Boltzmann results
+            if (permeabilityResult.UsedLatticeBoltzmannMethod)
             {
                 tableLayout.Controls.Add(new Label
                 {
-                    Text = "Kozeny-Carman Method",
+                    Text = "Lattice Boltzmann Method",
                     ForeColor = Color.White,
                     AutoSize = true,
                     Font = new Font("Segoe UI", 9, FontStyle.Bold),
@@ -3088,7 +3042,7 @@ namespace CTS
 
                 tableLayout.Controls.Add(new Label
                 {
-                    Text = $"{permeabilityResult.StefanBoltzmannPermeabilityDarcy:F3} D ({permeabilityResult.StefanBoltzmannPermeabilityMilliDarcy:F1} mD)",
+                    Text = $"{permeabilityResult.LatticeBoltzmannPermeabilityDarcy:F3} D ({permeabilityResult.LatticeBoltzmannPermeabilityMilliDarcy:F1} mD)",
                     ForeColor = Color.White,
                     AutoSize = true,
                     Font = new Font("Segoe UI", 9),
@@ -3097,7 +3051,7 @@ namespace CTS
 
                 tableLayout.Controls.Add(new Label
                 {
-                    Text = $"{permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy:F3} D ({permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy * 1000:F1} mD)",
+                    Text = $"{permeabilityResult.CorrectedLatticeBoltzmannPermeabilityDarcy:F3} D ({permeabilityResult.CorrectedLatticeBoltzmannPermeabilityDarcy * 1000:F1} mD)",
                     ForeColor = Color.LightGreen,
                     AutoSize = true,
                     Font = new Font("Segoe UI", 9, FontStyle.Bold),
@@ -3137,193 +3091,71 @@ namespace CTS
             }
 
             resultsPanel.Controls.Add(tableLayout);
-            visualizationPanel.Controls.Add(resultsPanel);
+            mainLayout.Controls.Add(resultsPanel, 0, 0);
 
-            // Create pressure visualization PictureBox
-            permeabilityPictureBox = new PictureBox
+            // Create a TabControl for multiple visualization methods
+            TabControl visualizationTabs = new TabControl
             {
                 Dock = DockStyle.Fill,
-                BackColor = Color.Black,
-                SizeMode = PictureBoxSizeMode.CenterImage
-            };
-            visualizationPanel.Controls.Add(permeabilityPictureBox);
-
-            // Render the pressure field
-            permeabilityPictureBox.Image = RenderPressureField();
-
-            // Add mouse handling for rotation and zooming
-            permeabilityPictureBox.MouseDown += (s, e) =>
-            {
-                if (e.Button == MouseButtons.Left)
-                {
-                    isDragging = true;
-                    lastMousePosition = e.Location;
-                }
-                else if (e.Button == MouseButtons.Middle)
-                {
-                    isPanning = true;
-                    lastMousePosition = e.Location;
-                }
-            };
-
-            permeabilityPictureBox.MouseMove += (s, e) =>
-            {
-                if (isDragging)
-                {
-                    // Calculate delta movement for rotation
-                    float deltaX = (e.X - lastMousePosition.X) * 0.5f;
-                    float deltaY = (e.Y - lastMousePosition.Y) * 0.5f;
-
-                    // Update rotation angles
-                    rotationY += deltaX;
-                    rotationX += deltaY;
-
-                    // Render with new rotation
-                    permeabilityPictureBox.Image = RenderPressureField();
-
-                    lastMousePosition = e.Location;
-                }
-                else if (isPanning)
-                {
-                    // Calculate delta movement for panning
-                    float deltaX = (e.X - lastMousePosition.X) * 0.01f;
-                    float deltaY = (e.Y - lastMousePosition.Y) * 0.01f;
-
-                    // Update pan offsets
-                    panOffsetX += deltaX;
-                    panOffsetY += deltaY;
-
-                    // Render with new pan
-                    permeabilityPictureBox.Image = RenderPressureField();
-
-                    lastMousePosition = e.Location;
-                }
-            };
-
-            permeabilityPictureBox.MouseUp += (s, e) =>
-            {
-                if (e.Button == MouseButtons.Left)
-                {
-                    isDragging = false;
-                }
-                else if (e.Button == MouseButtons.Middle)
-                {
-                    isPanning = false;
-                }
-            };
-
-            permeabilityPictureBox.MouseWheel += (s, e) =>
-            {
-                // Change zoom level with mouse wheel
-                float zoomFactor = 1.0f + (e.Delta > 0 ? 0.1f : -0.1f);
-                viewScale *= zoomFactor;
-
-                // Limit minimum and maximum zoom
-                viewScale = Math.Max(0.2f, Math.Min(3.0f, viewScale));
-
-                permeabilityPictureBox.Image = RenderPressureField();
-            };
-
-            // Add color legend for pressure
-            Panel legendPanel = new Panel
-            {
-                Dock = DockStyle.Right,
-                Width = 80,
-                BackColor = Color.FromArgb(30, 30, 30)
-            };
-
-            // Create pressure gradient legend
-            PictureBox legendPictureBox = new PictureBox
-            {
-                Width = 20,
-                Height = 200,
-                Location = new Point(30, 50),
-                BorderStyle = BorderStyle.FixedSingle
-            };
-
-            // Generate the gradient image
-            Bitmap gradientBitmap = new Bitmap(1, 200);
-            for (int y = 0; y < 200; y++)
-            {
-                // Create gradient from red (high pressure) to blue (low pressure)
-                double t = (double)y / 199;
-                Color color = GetPressureColor(1.0 - t);
-                gradientBitmap.SetPixel(0, y, color);
-            }
-
-            // Scale to proper width
-            Bitmap scaledGradient = new Bitmap(20, 200);
-            using (Graphics g = Graphics.FromImage(scaledGradient))
-            {
-                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
-                g.DrawImage(gradientBitmap, 0, 0, 20, 200);
-            }
-
-            legendPictureBox.Image = scaledGradient;
-            legendPanel.Controls.Add(legendPictureBox);
-
-            // Add labels for pressure legend
-            Label pressureLegendLabel = new Label
-            {
-                Text = "Pressure",
-                ForeColor = Color.White,
-                Location = new Point(10, 10),
-                Size = new Size(60, 20),
-                TextAlign = ContentAlignment.MiddleCenter,
+                Appearance = TabAppearance.FlatButtons,
+                ItemSize = new Size(0, 30),
                 Font = new Font("Segoe UI", 9, FontStyle.Bold)
             };
-            legendPanel.Controls.Add(pressureLegendLabel);
 
-            // Add labels for high and low pressure
-            Label highLabel = new Label
+            // Add tabs for each method
+            int tabIndex = 0;
+
+            // Darcy method tab
+            if (permeabilityResult.UsedDarcyMethod)
             {
-                Text = $"{permeabilityResult.InputPressure:F0} Pa",
-                ForeColor = Color.White,
-                Location = new Point(10, 30),
-                Size = new Size(60, 20),
-                TextAlign = ContentAlignment.MiddleCenter
-            };
-            legendPanel.Controls.Add(highLabel);
+                TabPage darcyTab = CreateVisualizationTab("Darcy's Law", VisualizationMethod.Darcy);
+                visualizationTabs.TabPages.Add(darcyTab);
+                tabIndex++;
+            }
 
-            Label lowLabel = new Label
+            // Lattice Boltzmann method tab
+            if (permeabilityResult.UsedLatticeBoltzmannMethod)
             {
-                Text = $"{permeabilityResult.OutputPressure:F0} Pa",
-                ForeColor = Color.White,
-                Location = new Point(10, 250),
-                Size = new Size(60, 20),
-                TextAlign = ContentAlignment.MiddleCenter
-            };
-            legendPanel.Controls.Add(lowLabel);
+                TabPage lbmTab = CreateVisualizationTab("Lattice Boltzmann", VisualizationMethod.LatticeBoltzmann);
+                visualizationTabs.TabPages.Add(lbmTab);
+                tabIndex++;
+            }
 
-            visualizationPanel.Controls.Add(legendPanel);
-
-            // Add instructions label at the bottom
-            Label instructionsLabel = new Label
+            // Navier-Stokes method tab
+            if (permeabilityResult.UsedNavierStokesMethod)
             {
-                Text = "Left-click and drag to rotate | Middle-click and drag to pan | Mouse wheel to zoom",
-                Dock = DockStyle.Bottom,
-                Height = 25,
-                TextAlign = ContentAlignment.MiddleCenter,
-                ForeColor = Color.LightGray,
-                BackColor = Color.FromArgb(20, 20, 20)
-            };
-            visualizationPanel.Controls.Add(instructionsLabel);
+                TabPage nsTab = CreateVisualizationTab("Navier-Stokes", VisualizationMethod.NavierStokes);
+                visualizationTabs.TabPages.Add(nsTab);
+            }
 
-            // Add the visualization panel to the tab
-            permeabilityTab.Controls.Add(visualizationPanel);
+            // Add combined view if multiple methods are used
+            if ((permeabilityResult.UsedDarcyMethod ? 1 : 0) +
+                (permeabilityResult.UsedLatticeBoltzmannMethod ? 1 : 0) +
+                (permeabilityResult.UsedNavierStokesMethod ? 1 : 0) > 1)
+            {
+                TabPage combinedTab = CreateVisualizationTab("Combined View", VisualizationMethod.Combined);
+                visualizationTabs.TabPages.Add(combinedTab);
+            }
+
+            mainLayout.Controls.Add(visualizationTabs, 0, 1);
+            permeabilityTab.Controls.Add(mainLayout);
 
             // Enable the export button
             if (exportPermeabilityButton != null) exportPermeabilityButton.Enabled = true;
 
+            // Set the first tab as the active tab
+            if (visualizationTabs.TabPages.Count > 0)
+                visualizationTabs.SelectedIndex = 0;
+
             // Prepare a comprehensive status message with all calculation methods
-            System.Text.StringBuilder statusBuilder = new System.Text.StringBuilder("Permeability: ");
+            StringBuilder statusBuilder = new StringBuilder("Permeability: ");
             if (permeabilityResult.UsedDarcyMethod)
             {
                 statusBuilder.Append($"Darcy={permeabilityResult.PermeabilityDarcy:F3}D ");
             }
-            if (permeabilityResult.UsedStefanBoltzmannMethod)
+            if (permeabilityResult.UsedLatticeBoltzmannMethod)
             {
-                statusBuilder.Append($"KC={permeabilityResult.StefanBoltzmannPermeabilityDarcy:F3}D ");
+                statusBuilder.Append($"LBM={permeabilityResult.LatticeBoltzmannPermeabilityDarcy:F3}D ");
             }
             if (permeabilityResult.UsedNavierStokesMethod)
             {
@@ -3332,7 +3164,7 @@ namespace CTS
             statusBuilder.Append($"| τ={permeabilityResult.Tortuosity:F2}");
             statusLabel.Text = statusBuilder.ToString();
         }
-        private Bitmap RenderPressureField()
+        private Bitmap RenderPressureField(VisualizationMethod method = VisualizationMethod.Darcy)
         {
             if (permeabilityResult == null)
                 return null;
@@ -3366,10 +3198,40 @@ namespace CTS
                 // Create rotation matrices
                 var rotationMatrix = Create3DRotationMatrix(rotationX, rotationY, rotationZ);
 
-                // Find pressure range
-                double minPressure = permeabilityResult.PressureField.Values.Min();
-                double maxPressure = permeabilityResult.PressureField.Values.Max();
-                double pressureRange = maxPressure - minPressure;
+                // Get the pressure field for the selected method
+                Dictionary<int, double> pressureField = GetPressureFieldForMethod(method);
+
+                // Find pressure range - FIXED to handle empty collections
+                double minPressure = 0;
+                double maxPressure = 0;
+                double pressureRange = 0;
+
+                // Check if the pressure field has any values
+                if (pressureField != null && pressureField.Count > 0)
+                {
+                    try
+                    {
+                        minPressure = pressureField.Values.Min();
+                        maxPressure = pressureField.Values.Max();
+                        pressureRange = maxPressure - minPressure;
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // Handle the case where Min/Max fails even with count check
+                        minPressure = permeabilityResult.OutputPressure;
+                        maxPressure = permeabilityResult.InputPressure;
+                        pressureRange = maxPressure - minPressure;
+                        Logger.Log($"[PoreNetworkModelingForm] Warning: Could not calculate pressure range, using simulation parameters instead");
+                    }
+                }
+                else
+                {
+                    // Default values if pressure field is empty or null
+                    minPressure = permeabilityResult.OutputPressure;
+                    maxPressure = permeabilityResult.InputPressure;
+                    pressureRange = maxPressure - minPressure;
+                    Logger.Log($"[PoreNetworkModelingForm] Warning: Pressure field is empty, using simulation parameters instead");
+                }
 
                 // Project and render throats first (draw from back to front)
                 var throatsWithDepth = new List<(double depth, Point p1, Point p2, float thickness, Color color)>();
@@ -3382,11 +3244,14 @@ namespace CTS
                     if (pore1 != null && pore2 != null)
                     {
                         // Get pressure for both pores
-                        if (!permeabilityResult.PressureField.TryGetValue(pore1.Id, out double pressure1))
-                            pressure1 = 0;
+                        double pressure1 = 0;
+                        double pressure2 = 0;
 
-                        if (!permeabilityResult.PressureField.TryGetValue(pore2.Id, out double pressure2))
-                            pressure2 = 0;
+                        if (pressureField != null)
+                        {
+                            pressureField.TryGetValue(pore1.Id, out pressure1);
+                            pressureField.TryGetValue(pore2.Id, out pressure2);
+                        }
 
                         // Average pressure for throat color
                         double avgPressure = (pressure1 + pressure2) / 2;
@@ -3422,7 +3287,7 @@ namespace CTS
                         double avgZ = (transformedP1.z + transformedP2.z) / 2;
 
                         // Create pressure-based color
-                        Color throatColor = GetPressureColor(normalizedPressure);
+                        Color throatColor = GetPressureColor(normalizedPressure, method);
 
                         throatsWithDepth.Add((avgZ, p1, p2, thickness, throatColor));
                     }
@@ -3446,8 +3311,11 @@ namespace CTS
                 foreach (var pore in permeabilityResult.Model.Pores)
                 {
                     // Get pressure for pore
-                    if (!permeabilityResult.PressureField.TryGetValue(pore.Id, out double pressure))
-                        pressure = 0;
+                    double pressure = 0;
+                    if (pressureField != null)
+                    {
+                        pressureField.TryGetValue(pore.Id, out pressure);
+                    }
 
                     double normalizedPressure = pressureRange > 0 ? (pressure - minPressure) / pressureRange : 0.5;
 
@@ -3466,7 +3334,7 @@ namespace CTS
                     int radius = Math.Max(3, (int)(pore.Radius * scaleFactor * 0.5));
 
                     // Assign color based on pressure
-                    Color poreColor = GetPressureColor(normalizedPressure);
+                    Color poreColor = GetPressureColor(normalizedPressure, method);
 
                     // Highlight inlet and outlet pores
                     bool isInlet = permeabilityResult.InletPores.Contains(pore.Id);
@@ -3510,12 +3378,14 @@ namespace CTS
                 // Draw coordinate axes for orientation
                 DrawCoordinateAxes(g, width, height, scaleFactor * 0.2, rotationMatrix);
 
-                // Add legend title
-                string axisText = permeabilityResult.FlowAxis.ToString();
-                g.DrawString($"Flow Direction: {axisText}-Axis",
+                // Add legend title based on method
+                string methodName = method.ToString();
+                double permeabilityValue = GetPermeabilityValueForMethod(method);
+
+                g.DrawString($"{methodName} Method",
                     new Font("Arial", 12, FontStyle.Bold), Brushes.White, 20, 20);
 
-                g.DrawString($"Permeability: {permeabilityResult.PermeabilityDarcy:F3} Darcy ({permeabilityResult.PermeabilityMilliDarcy:F1} mD)",
+                g.DrawString($"Permeability: {permeabilityValue:F3} Darcy",
                     new Font("Arial", 12, FontStyle.Bold), Brushes.White, 20, 50);
 
                 // Add inlet/outlet legend
@@ -3530,8 +3400,66 @@ namespace CTS
 
             return pressureImage;
         }
+        private Dictionary<int, double> GetPressureFieldForMethod(VisualizationMethod method)
+        {
+            switch (method)
+            {
+                case VisualizationMethod.Darcy:
+                    return permeabilityResult.PressureField ?? new Dictionary<int, double>();
 
-        private Color GetPressureColor(double normalizedPressure)
+                case VisualizationMethod.LatticeBoltzmann:
+                    return permeabilityResult.LatticeBoltzmannPressureField ?? new Dictionary<int, double>();
+
+                case VisualizationMethod.NavierStokes:
+                    return permeabilityResult.NavierStokesPressureField ?? new Dictionary<int, double>();
+
+                default:
+                    return permeabilityResult.PressureField ?? new Dictionary<int, double>();
+            }
+        }
+        private double GetPermeabilityValueForMethod(VisualizationMethod method)
+        {
+            switch (method)
+            {
+                case VisualizationMethod.Darcy:
+                    return permeabilityResult.CorrectedPermeabilityDarcy;
+
+                case VisualizationMethod.LatticeBoltzmann:
+                    return permeabilityResult.CorrectedLatticeBoltzmannPermeabilityDarcy;
+
+                case VisualizationMethod.NavierStokes:
+                    return permeabilityResult.CorrectedNavierStokesPermeabilityDarcy;
+
+                default:
+                    return permeabilityResult.CorrectedPermeabilityDarcy;
+            }
+        }
+        private Color GetPressureColor(double normalizedPressure, VisualizationMethod method)
+        {
+            // Use slightly different color schemes for each method to distinguish them visually
+            switch (method)
+            {
+                case VisualizationMethod.Darcy:
+                    // Standard red-green-blue gradient
+                    return GetStandardPressureGradient(normalizedPressure);
+
+                case VisualizationMethod.LatticeBoltzmann:
+                    // Cyan-to-magenta gradient for LBM
+                    return GetLatticeBoltzmannGradient(normalizedPressure);
+
+                case VisualizationMethod.NavierStokes:
+                    // Yellow-to-purple gradient for NS
+                    return GetNavierStokesGradient(normalizedPressure);
+
+                case VisualizationMethod.Combined:
+                    // Use standard gradient for combined view
+                    return GetStandardPressureGradient(normalizedPressure);
+
+                default:
+                    return GetStandardPressureGradient(normalizedPressure);
+            }
+        }
+        private Color GetStandardPressureGradient(double normalizedPressure)
         {
             // Red (high pressure) to Blue (low pressure) gradient
             normalizedPressure = Math.Max(0, Math.Min(1, normalizedPressure));
@@ -3541,21 +3469,382 @@ namespace CTS
                 // Blue to green (0 to 0.5)
                 double t = normalizedPressure * 2;
                 int r = 0;
-                int g = (int)(255 * t);
-                int b = (int)(255 * (1 - t));
+                int g = Math.Max(0, Math.Min(255, (int)(255 * t)));
+                int b = Math.Max(0, Math.Min(255, (int)(255 * (1 - t))));
                 return Color.FromArgb(r, g, b);
             }
             else
             {
                 // Green to red (0.5 to 1)
                 double t = (normalizedPressure - 0.5) * 2;
-                int r = (int)(255 * t);
-                int g = (int)(255 * (1 - t));
+                int r = Math.Max(0, Math.Min(255, (int)(255 * t)));
+                int g = Math.Max(0, Math.Min(255, (int)(255 * (1 - t))));
                 int b = 0;
                 return Color.FromArgb(r, g, b);
             }
         }
+        private Color GetLatticeBoltzmannGradient(double normalizedPressure)
+        {
+            // Special enhanced gradient for Lattice Boltzmann
+            normalizedPressure = Math.Max(0, Math.Min(1, normalizedPressure));
 
+            // Use a more visible cyan-magenta-yellow gradient
+            if (normalizedPressure < 0.33)
+            {
+                // Cyan to Blue (low pressure)
+                double t = normalizedPressure * 3;
+                int r = 0;
+                int g = Math.Max(0, Math.Min(255, (int)(150 + 105 * (1 - t)))); // Clamp to 0-255
+                int b = 255;
+                return Color.FromArgb(r, g, b);
+            }
+            else if (normalizedPressure < 0.67)
+            {
+                // Blue to Red (medium pressure)
+                double t = (normalizedPressure - 0.33) * 3;
+                int r = Math.Max(0, Math.Min(255, (int)(255 * t))); // Clamp to 0-255
+                int g = 0;
+                int b = Math.Max(0, Math.Min(255, (int)(255 * (1 - t)))); // Clamp to 0-255
+                return Color.FromArgb(r, g, b);
+            }
+            else
+            {
+                // Red to Yellow (high pressure) 
+                double t = (normalizedPressure - 0.67) * 3;
+                int r = 255;
+                int g = Math.Max(0, Math.Min(255, (int)(255 * t))); // Clamp to 0-255
+                int b = 0;
+                return Color.FromArgb(r, g, b);
+            }
+        }
+        private Color GetNavierStokesGradient(double normalizedPressure)
+        {
+            // Yellow (high pressure) to Purple (low pressure) gradient
+            normalizedPressure = Math.Max(0, Math.Min(1, normalizedPressure));
+
+            if (normalizedPressure < 0.5)
+            {
+                // Purple to white (0 to 0.5)
+                double t = normalizedPressure * 2;
+                int r = Math.Max(0, Math.Min(255, (int)(128 + 127 * t)));
+                int g = Math.Max(0, Math.Min(255, (int)(0 + 255 * t)));
+                int b = Math.Max(0, Math.Min(255, (int)(128 + 127 * t)));
+                return Color.FromArgb(r, g, b);
+            }
+            else
+            {
+                // White to yellow (0.5 to 1)
+                double t = (normalizedPressure - 0.5) * 2;
+                int r = 255;
+                int g = 255;
+                int b = Math.Max(0, Math.Min(255, (int)(255 * (1 - t))));
+                return Color.FromArgb(r, g, b);
+            }
+        }
+        private Bitmap RenderCombinedView()
+        {
+            if (permeabilityResult == null)
+                return null;
+
+            int width = 800;
+            int height = 600;
+
+            Bitmap combinedImage = new Bitmap(width, height);
+
+            using (Graphics g = Graphics.FromImage(combinedImage))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.Clear(Color.Black);
+
+                // Draw title
+                g.DrawString("Combined View - Multiple Calculation Methods",
+                    new Font("Arial", 14, FontStyle.Bold), Brushes.White, 20, 20);
+
+                // Count how many methods are used
+                int methodCount = 0;
+                if (permeabilityResult.UsedDarcyMethod) methodCount++;
+                if (permeabilityResult.UsedLatticeBoltzmannMethod) methodCount++;
+                if (permeabilityResult.UsedNavierStokesMethod) methodCount++;
+
+                if (methodCount <= 1)
+                {
+                    // If only one method, just return that method's visualization
+                    VisualizationMethod method = VisualizationMethod.Darcy;
+                    if (permeabilityResult.UsedLatticeBoltzmannMethod) method = VisualizationMethod.LatticeBoltzmann;
+                    if (permeabilityResult.UsedNavierStokesMethod) method = VisualizationMethod.NavierStokes;
+
+                    return RenderPressureField(method);
+                }
+
+                // Collect the methods to display
+                List<VisualizationMethod> methods = new List<VisualizationMethod>();
+                if (permeabilityResult.UsedDarcyMethod) methods.Add(VisualizationMethod.Darcy);
+                if (permeabilityResult.UsedLatticeBoltzmannMethod) methods.Add(VisualizationMethod.LatticeBoltzmann);
+                if (permeabilityResult.UsedNavierStokesMethod) methods.Add(VisualizationMethod.NavierStokes);
+
+                // Available height after title
+                int availableHeight = height - 50;
+
+                // Calculate thumbnail size based on method count
+                int thumbHeight = methodCount <= 2 ? availableHeight : availableHeight / 2;
+                int thumbWidth = methodCount <= 2 ? width / methodCount : width / 2;
+
+                // Create consistent-sized thumbnails for each method
+                int baseSize = 400; // Base size for rendering
+
+                // Draw thumbnails for each method
+                for (int i = 0; i < methodCount; i++)
+                {
+                    // Render the method at the base resolution for consistent quality
+                    Bitmap methodImage = RenderPressureField(methods[i]);
+
+                    // Calculate position for this thumbnail
+                    int x, y;
+                    if (methodCount <= 2)
+                    {
+                        // Two methods - place side by side
+                        x = i * thumbWidth;
+                        y = 40;
+                    }
+                    else
+                    {
+                        // Three methods - two on top, one on bottom
+                        x = (i % 2) * thumbWidth;
+                        y = (i < 2) ? 40 : 40 + thumbHeight;
+                    }
+
+                    // Calculate display rectangle - maintain aspect ratio
+                    Rectangle destRect = CalculateFitRectangle(
+                        methodImage.Width, methodImage.Height,
+                        thumbWidth, thumbHeight,
+                        x, y);
+
+                    // Draw the image with maintained aspect ratio
+                    g.DrawImage(methodImage, destRect);
+
+                    // Draw border around the image
+                    g.DrawRectangle(new Pen(Color.FromArgb(80, 80, 80), 2), destRect);
+
+                    // Add method label
+                    string methodLabel = GetMethodName(methods[i]);
+                    Font labelFont = new Font("Arial", 10, FontStyle.Bold);
+                    SizeF textSize = g.MeasureString(methodLabel, labelFont);
+
+                    // Label background
+                    g.FillRectangle(new SolidBrush(Color.FromArgb(30, 30, 30)),
+                        destRect.X, destRect.Y, textSize.Width + 10, textSize.Height + 6);
+
+                    // Label text
+                    g.DrawString(methodLabel, labelFont,
+                        new SolidBrush(GetMethodColor(methods[i])),
+                        destRect.X + 5, destRect.Y + 3);
+
+                    // Permeability value
+                    string valueLabel = $"{GetPermeabilityValueForMethod(methods[i]):F3} Darcy";
+                    Font valueFont = new Font("Arial", 9);
+                    g.DrawString(valueLabel, valueFont, Brushes.White,
+                        destRect.X + 5, destRect.Y + textSize.Height + 20);
+
+                    // Clean up
+                    methodImage.Dispose();
+                }
+            }
+
+            return combinedImage;
+        }
+
+        // Helper method to calculate rectangle that maintains aspect ratio
+        private Rectangle CalculateFitRectangle(int sourceWidth, int sourceHeight,
+                                               int maxWidth, int maxHeight,
+                                               int offsetX, int offsetY)
+        {
+            // Calculate aspect ratios
+            double sourceRatio = (double)sourceWidth / sourceHeight;
+            double targetRatio = (double)maxWidth / maxHeight;
+
+            int resultWidth, resultHeight;
+
+            if (sourceRatio > targetRatio)
+            {
+                // Source is wider than target, constrain by width
+                resultWidth = maxWidth;
+                resultHeight = (int)(resultWidth / sourceRatio);
+            }
+            else
+            {
+                // Source is taller than target, constrain by height
+                resultHeight = maxHeight;
+                resultWidth = (int)(resultHeight * sourceRatio);
+            }
+
+            // Center the image in the available space
+            int x = offsetX + (maxWidth - resultWidth) / 2;
+            int y = offsetY + (maxHeight - resultHeight) / 2;
+
+            return new Rectangle(x, y, resultWidth, resultHeight);
+        }
+        private string GetMethodName(VisualizationMethod method)
+        {
+            switch (method)
+            {
+                case VisualizationMethod.Darcy:
+                    return "Darcy's Law";
+                case VisualizationMethod.LatticeBoltzmann:
+                    return "Lattice Boltzmann";
+                case VisualizationMethod.NavierStokes:
+                    return "Navier-Stokes";
+                default:
+                    return "Unknown Method";
+            }
+        }
+        private void SaveMethodScreenshot(VisualizationMethod method)
+        {
+            Bitmap visualizationImage = RenderMethodVisualization(method);
+
+            if (visualizationImage == null)
+            {
+                MessageBox.Show("No visualization available to save.",
+                    "Screenshot Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            using (SaveFileDialog saveDialog = new SaveFileDialog())
+            {
+                saveDialog.Filter = "PNG Image|*.png|JPEG Image|*.jpg|Bitmap Image|*.bmp";
+                saveDialog.Title = $"Save {method} Visualization";
+                saveDialog.DefaultExt = "png";
+
+                if (saveDialog.ShowDialog() == DialogResult.OK)
+                {
+                    try
+                    {
+                        // Create a copy with added info
+                        using (Bitmap originalImage = visualizationImage)
+                        {
+                            // Create a new bitmap with space for the info panel
+                            Bitmap screenshotWithInfo = new Bitmap(
+                                originalImage.Width,
+                                originalImage.Height + 120); // Space for multiple methods and info
+
+                            using (Graphics g = Graphics.FromImage(screenshotWithInfo))
+                            {
+                                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+
+                                // Draw the original image
+                                g.DrawImage(originalImage, 0, 0, originalImage.Width, originalImage.Height);
+
+                                // Draw a black background for the info panel
+                                g.FillRectangle(new SolidBrush(Color.Black),
+                                    0, originalImage.Height, originalImage.Width, 120);
+
+                                // Draw pressure scale bar
+                                DrawPressureScaleBar(g,
+                                    new Rectangle(50, originalImage.Height + 80, originalImage.Width - 100, 20),
+                                    permeabilityResult.InputPressure,
+                                    permeabilityResult.OutputPressure);
+
+                                // Draw title at the top of info panel
+                                Font titleFont = new Font("Arial", 11, FontStyle.Bold);
+                                string titleText = $"Flow Direction: {permeabilityResult.FlowAxis}-Axis | Tortuosity: {permeabilityResult.Tortuosity:F2}";
+                                SizeF titleSize = g.MeasureString(titleText, titleFont);
+                                g.DrawString(titleText, titleFont, Brushes.White,
+                                    (screenshotWithInfo.Width - titleSize.Width) / 2, originalImage.Height + 5);
+
+                                // Draw method result based on which method was used
+                                Font methodFont = new Font("Arial", 9, FontStyle.Bold);
+                                int yPos = originalImage.Height + 30;
+
+                                // Draw method-specific permeability value
+                                string methodText = $"{method} Method: ";
+                                string valueText = "";
+
+                                switch (method)
+                                {
+                                    case VisualizationMethod.Darcy:
+                                        methodText += "Darcy's Law";
+                                        valueText = $"{permeabilityResult.PermeabilityDarcy:F3} Darcy ({permeabilityResult.PermeabilityMilliDarcy:F1} mD)";
+                                        break;
+
+                                    case VisualizationMethod.LatticeBoltzmann:
+                                        methodText += "Lattice Boltzmann Method";
+                                        valueText = $"{permeabilityResult.LatticeBoltzmannPermeabilityDarcy:F3} Darcy ({permeabilityResult.LatticeBoltzmannPermeabilityMilliDarcy:F1} mD)";
+                                        break;
+
+                                    case VisualizationMethod.NavierStokes:
+                                        methodText += "Navier-Stokes Method";
+                                        valueText = $"{permeabilityResult.NavierStokesPermeabilityDarcy:F3} Darcy ({permeabilityResult.NavierStokesPermeabilityMilliDarcy:F1} mD)";
+                                        break;
+
+                                    case VisualizationMethod.Combined:
+                                        methodText = "Multiple calculation methods shown";
+                                        break;
+                                }
+
+                                // Draw method name and value
+                                g.DrawString(methodText, methodFont, Brushes.White, 20, yPos);
+                                g.DrawString(valueText, methodFont, Brushes.LightGreen, 250, yPos);
+
+                                // Add corrected value with tortuosity
+                                if (method != VisualizationMethod.Combined && permeabilityResult.Tortuosity > 1.0)
+                                {
+                                    yPos += 22;
+                                    g.DrawString($"Corrected for Tortuosity (τ = {permeabilityResult.Tortuosity:F2}):",
+                                        methodFont, Brushes.White, 20, yPos);
+
+                                    string correctedValue = "";
+                                    switch (method)
+                                    {
+                                        case VisualizationMethod.Darcy:
+                                            correctedValue = $"{permeabilityResult.CorrectedPermeabilityDarcy:F3} Darcy ({permeabilityResult.CorrectedPermeabilityDarcy * 1000:F1} mD)";
+                                            break;
+
+                                        case VisualizationMethod.LatticeBoltzmann:
+                                            correctedValue = $"{permeabilityResult.CorrectedLatticeBoltzmannPermeabilityDarcy:F3} Darcy ({permeabilityResult.CorrectedLatticeBoltzmannPermeabilityDarcy * 1000:F1} mD)";
+                                            break;
+
+                                        case VisualizationMethod.NavierStokes:
+                                            correctedValue = $"{permeabilityResult.CorrectedNavierStokesPermeabilityDarcy:F3} Darcy ({permeabilityResult.CorrectedNavierStokesPermeabilityDarcy * 1000:F1} mD)";
+                                            break;
+                                    }
+
+                                    g.DrawString(correctedValue, methodFont, Brushes.LightGreen, 250, yPos);
+                                }
+
+                                // Draw timestamp in corner
+                                Font timestampFont = new Font("Arial", 8);
+                                string timestamp = $"Date: {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
+                                SizeF timestampSize = g.MeasureString(timestamp, timestampFont);
+                                g.DrawString(timestamp, timestampFont, Brushes.LightGray,
+                                    screenshotWithInfo.Width - timestampSize.Width - 10,
+                                    originalImage.Height + 100 - timestampSize.Height);
+                            }
+
+                            // Save the image with the info panel
+                            string extension = Path.GetExtension(saveDialog.FileName).ToLower();
+                            System.Drawing.Imaging.ImageFormat format = System.Drawing.Imaging.ImageFormat.Png; // Default
+
+                            if (extension == ".jpg" || extension == ".jpeg")
+                                format = System.Drawing.Imaging.ImageFormat.Jpeg;
+                            else if (extension == ".bmp")
+                                format = System.Drawing.Imaging.ImageFormat.Bmp;
+
+                            screenshotWithInfo.Save(saveDialog.FileName, format);
+                        }
+
+                        statusLabel.Text = $"{method} visualization saved successfully.";
+                        MessageBox.Show($"{method} visualization screenshot saved successfully.",
+                            "Save Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"Error saving screenshot: {ex.Message}",
+                            "Screenshot Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        Logger.Log($"[PoreNetworkModelingForm] Error saving screenshot: {ex.Message}\n{ex.StackTrace}");
+                    }
+                }
+            }
+        }
         // New method to handle loading raw data without header validation
         private void LoadNetworkAsRawData(FileStream fs)
         {
@@ -3783,7 +4072,7 @@ namespace CTS
                         {
                             // Write file header
                             writer.Write("PERMEABILITY"); // Magic string
-                            writer.Write(2); // Version number (increased for new format)
+                            writer.Write(3); // Version number (increased for Lattice Boltzmann additions)
 
                             // Write basic simulation parameters
                             writer.Write((int)permeabilityResult.FlowAxis);
@@ -3793,28 +4082,33 @@ namespace CTS
 
                             // Write calculation method flags
                             writer.Write(permeabilityResult.UsedDarcyMethod);
-                            writer.Write(permeabilityResult.UsedStefanBoltzmannMethod);
+                            writer.Write(permeabilityResult.UsedLatticeBoltzmannMethod);
                             writer.Write(permeabilityResult.UsedNavierStokesMethod);
 
                             // Write Darcy method results
                             writer.Write(permeabilityResult.PermeabilityDarcy);
                             writer.Write(permeabilityResult.PermeabilityMilliDarcy);
 
-                            // Write Kozeny-Carman (Stefan-Boltzmann) results
-                            writer.Write(permeabilityResult.StefanBoltzmannPermeabilityDarcy);
-                            writer.Write(permeabilityResult.StefanBoltzmannPermeabilityMilliDarcy);
+                            // Write Lattice Boltzmann results
+                            writer.Write(permeabilityResult.LatticeBoltzmannPermeabilityDarcy);
+                            writer.Write(permeabilityResult.LatticeBoltzmannPermeabilityMilliDarcy);
 
                             // Write Navier-Stokes results
                             writer.Write(permeabilityResult.NavierStokesPermeabilityDarcy);
                             writer.Write(permeabilityResult.NavierStokesPermeabilityMilliDarcy);
+
+                            // Write Kozeny-Carman results
+                            writer.Write(permeabilityResult.KozenyCarmanPermeabilityDarcy);
+                            writer.Write(permeabilityResult.KozenyCarmanPermeabilityMilliDarcy);
 
                             // Write tortuosity
                             writer.Write(permeabilityResult.Tortuosity);
 
                             // Write corrected values
                             writer.Write(permeabilityResult.CorrectedPermeabilityDarcy);
-                            writer.Write(permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy);
+                            writer.Write(permeabilityResult.CorrectedLatticeBoltzmannPermeabilityDarcy);
                             writer.Write(permeabilityResult.CorrectedNavierStokesPermeabilityDarcy);
+                            writer.Write(permeabilityResult.CorrectedKozenyCarmanPermeabilityDarcy);
 
                             // Write total flow rate and model dimensions
                             writer.Write(permeabilityResult.TotalFlowRate);
@@ -3834,12 +4128,36 @@ namespace CTS
                                 writer.Write(poreId);
                             }
 
-                            // Write pressure field
+                            // Write pressure field for Darcy method
                             writer.Write(permeabilityResult.PressureField.Count);
                             foreach (var pair in permeabilityResult.PressureField)
                             {
                                 writer.Write(pair.Key);
                                 writer.Write(pair.Value);
+                            }
+
+                            // Write pressure field for Lattice Boltzmann method
+                            int lbmFieldCount = permeabilityResult.LatticeBoltzmannPressureField?.Count ?? 0;
+                            writer.Write(lbmFieldCount);
+                            if (lbmFieldCount > 0)
+                            {
+                                foreach (var pair in permeabilityResult.LatticeBoltzmannPressureField)
+                                {
+                                    writer.Write(pair.Key);
+                                    writer.Write(pair.Value);
+                                }
+                            }
+
+                            // Write pressure field for Navier-Stokes method
+                            int nsFieldCount = permeabilityResult.NavierStokesPressureField?.Count ?? 0;
+                            writer.Write(nsFieldCount);
+                            if (nsFieldCount > 0)
+                            {
+                                foreach (var pair in permeabilityResult.NavierStokesPressureField)
+                                {
+                                    writer.Write(pair.Key);
+                                    writer.Write(pair.Value);
+                                }
                             }
 
                             // Write throat flow rates
@@ -3867,7 +4185,6 @@ namespace CTS
                 }
             }
         }
-
         private void LoadPermeabilityResults(object sender, EventArgs e)
         {
             using (OpenFileDialog openDialog = new OpenFileDialog())
@@ -3890,7 +4207,7 @@ namespace CTS
                             }
 
                             int version = reader.ReadInt32();
-                            if (version != 1 && version != 2)
+                            if (version != 1 && version != 2 && version != 3)
                             {
                                 throw new Exception($"Unsupported version: {version}");
                             }
@@ -3905,28 +4222,67 @@ namespace CTS
                                 OutputPressure = reader.ReadDouble()
                             };
 
-                            if (version == 2)
+                            if (version >= 2)
                             {
-                                // Read calculation method flags (version 2)
+                                // Read calculation method flags (version 2+)
                                 permeabilityResult.UsedDarcyMethod = reader.ReadBoolean();
-                                permeabilityResult.UsedStefanBoltzmannMethod = reader.ReadBoolean();
+
+                                if (version >= 3)
+                                {
+                                    // Version 3 uses LatticeBoltzmann
+                                    permeabilityResult.UsedLatticeBoltzmannMethod = reader.ReadBoolean();
+                                }
+                                else
+                                {
+                                    // Version 2 used StefanBoltzmann - convert to LatticeBoltzmann
+                                    permeabilityResult.UsedLatticeBoltzmannMethod = reader.ReadBoolean();
+                                }
+
                                 permeabilityResult.UsedNavierStokesMethod = reader.ReadBoolean();
 
                                 // Read all method results
                                 permeabilityResult.PermeabilityDarcy = reader.ReadDouble();
                                 permeabilityResult.PermeabilityMilliDarcy = reader.ReadDouble();
 
-                                permeabilityResult.StefanBoltzmannPermeabilityDarcy = reader.ReadDouble();
-                                permeabilityResult.StefanBoltzmannPermeabilityMilliDarcy = reader.ReadDouble();
+                                if (version >= 3)
+                                {
+                                    // Version 3 uses LatticeBoltzmann
+                                    permeabilityResult.LatticeBoltzmannPermeabilityDarcy = reader.ReadDouble();
+                                    permeabilityResult.LatticeBoltzmannPermeabilityMilliDarcy = reader.ReadDouble();
+                                }
+                                else
+                                {
+                                    // Version 2 used StefanBoltzmann - convert to LatticeBoltzmann
+                                    permeabilityResult.LatticeBoltzmannPermeabilityDarcy = reader.ReadDouble();
+                                    permeabilityResult.LatticeBoltzmannPermeabilityMilliDarcy = reader.ReadDouble();
+                                }
 
                                 permeabilityResult.NavierStokesPermeabilityDarcy = reader.ReadDouble();
                                 permeabilityResult.NavierStokesPermeabilityMilliDarcy = reader.ReadDouble();
 
+                                // Read Kozeny-Carman results if available (version 3+)
+                                if (version >= 3)
+                                {
+                                    permeabilityResult.KozenyCarmanPermeabilityDarcy = reader.ReadDouble();
+                                    permeabilityResult.KozenyCarmanPermeabilityMilliDarcy = reader.ReadDouble();
+                                }
+
                                 // Read tortuosity and corrected values
                                 permeabilityResult.Tortuosity = reader.ReadDouble();
                                 permeabilityResult.CorrectedPermeabilityDarcy = reader.ReadDouble();
-                                permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy = reader.ReadDouble();
-                                permeabilityResult.CorrectedNavierStokesPermeabilityDarcy = reader.ReadDouble();
+
+                                if (version >= 3)
+                                {
+                                    permeabilityResult.CorrectedLatticeBoltzmannPermeabilityDarcy = reader.ReadDouble();
+                                    permeabilityResult.CorrectedNavierStokesPermeabilityDarcy = reader.ReadDouble();
+                                    permeabilityResult.CorrectedKozenyCarmanPermeabilityDarcy = reader.ReadDouble();
+                                }
+                                else if (version == 2)
+                                {
+                                    // In version 2, we had Stefan-Boltzmann - convert to LB
+                                    permeabilityResult.CorrectedLatticeBoltzmannPermeabilityDarcy = reader.ReadDouble();
+                                    permeabilityResult.CorrectedNavierStokesPermeabilityDarcy = reader.ReadDouble();
+                                }
                             }
                             else
                             {
@@ -3936,7 +4292,7 @@ namespace CTS
 
                                 // Default method flags
                                 permeabilityResult.UsedDarcyMethod = true;
-                                permeabilityResult.UsedStefanBoltzmannMethod = false;
+                                permeabilityResult.UsedLatticeBoltzmannMethod = false;
                                 permeabilityResult.UsedNavierStokesMethod = false;
 
                                 // Try to read tortuosity if it exists in the file
@@ -3963,12 +4319,15 @@ namespace CTS
                                 }
 
                                 // Set defaults for other methods
-                                permeabilityResult.StefanBoltzmannPermeabilityDarcy = 0;
-                                permeabilityResult.StefanBoltzmannPermeabilityMilliDarcy = 0;
+                                permeabilityResult.LatticeBoltzmannPermeabilityDarcy = 0;
+                                permeabilityResult.LatticeBoltzmannPermeabilityMilliDarcy = 0;
                                 permeabilityResult.NavierStokesPermeabilityDarcy = 0;
                                 permeabilityResult.NavierStokesPermeabilityMilliDarcy = 0;
-                                permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy = 0;
+                                permeabilityResult.CorrectedLatticeBoltzmannPermeabilityDarcy = 0;
                                 permeabilityResult.CorrectedNavierStokesPermeabilityDarcy = 0;
+                                permeabilityResult.KozenyCarmanPermeabilityDarcy = 0;
+                                permeabilityResult.KozenyCarmanPermeabilityMilliDarcy = 0;
+                                permeabilityResult.CorrectedKozenyCarmanPermeabilityDarcy = 0;
                             }
 
                             // Read common results
@@ -3991,7 +4350,7 @@ namespace CTS
                                 permeabilityResult.OutletPores.Add(reader.ReadInt32());
                             }
 
-                            // Read pressure field
+                            // Read Darcy pressure field
                             int pressureCount = reader.ReadInt32();
                             permeabilityResult.PressureField = new Dictionary<int, double>(pressureCount);
                             for (int i = 0; i < pressureCount; i++)
@@ -3999,6 +4358,60 @@ namespace CTS
                                 int key = reader.ReadInt32();
                                 double value = reader.ReadDouble();
                                 permeabilityResult.PressureField[key] = value;
+                            }
+
+                            // Read Lattice Boltzmann pressure field if available
+                            if (version >= 3)
+                            {
+                                int lbmPressureCount = reader.ReadInt32();
+                                if (lbmPressureCount > 0)
+                                {
+                                    permeabilityResult.LatticeBoltzmannPressureField = new Dictionary<int, double>(lbmPressureCount);
+                                    for (int i = 0; i < lbmPressureCount; i++)
+                                    {
+                                        int key = reader.ReadInt32();
+                                        double value = reader.ReadDouble();
+                                        permeabilityResult.LatticeBoltzmannPressureField[key] = value;
+                                    }
+                                }
+
+                                // Read Navier-Stokes pressure field if available
+                                int nsPressureCount = reader.ReadInt32();
+                                if (nsPressureCount > 0)
+                                {
+                                    permeabilityResult.NavierStokesPressureField = new Dictionary<int, double>(nsPressureCount);
+                                    for (int i = 0; i < nsPressureCount; i++)
+                                    {
+                                        int key = reader.ReadInt32();
+                                        double value = reader.ReadDouble();
+                                        permeabilityResult.NavierStokesPressureField[key] = value;
+                                    }
+                                }
+                            }
+                            else if (version == 2)
+                            {
+                                // In version 2, there's no separate LBM or NS pressure fields
+                                // Initialize empty dictionaries
+                                permeabilityResult.LatticeBoltzmannPressureField = new Dictionary<int, double>();
+                                permeabilityResult.NavierStokesPressureField = new Dictionary<int, double>();
+
+                                // Copy Darcy pressure field to LBM if LBM method was selected
+                                if (permeabilityResult.UsedLatticeBoltzmannMethod)
+                                {
+                                    foreach (var pair in permeabilityResult.PressureField)
+                                    {
+                                        permeabilityResult.LatticeBoltzmannPressureField[pair.Key] = pair.Value;
+                                    }
+                                }
+
+                                // Copy Darcy pressure field to NS if NS method was selected
+                                if (permeabilityResult.UsedNavierStokesMethod)
+                                {
+                                    foreach (var pair in permeabilityResult.PressureField)
+                                    {
+                                        permeabilityResult.NavierStokesPressureField[pair.Key] = pair.Value;
+                                    }
+                                }
                             }
 
                             // Read throat flow rates
@@ -4024,9 +4437,17 @@ namespace CTS
                             // Log information about which methods were loaded
                             string methods = "";
                             if (permeabilityResult.UsedDarcyMethod) methods += "Darcy's Law ";
-                            if (permeabilityResult.UsedStefanBoltzmannMethod) methods += "Kozeny-Carman ";
+                            if (permeabilityResult.UsedLatticeBoltzmannMethod) methods += "Lattice Boltzmann ";
                             if (permeabilityResult.UsedNavierStokesMethod) methods += "Navier-Stokes ";
                             Logger.Log($"[PoreNetworkModelingForm] Loaded methods: {methods}, tortuosity: {permeabilityResult.Tortuosity:F2}");
+
+                            // Version conversion warning
+                            if (version < 3 && permeabilityResult.UsedLatticeBoltzmannMethod)
+                            {
+                                Logger.Log("[PoreNetworkModelingForm] Converting old Stefan-Boltzmann data to Lattice Boltzmann");
+                                MessageBox.Show("This file was saved with an older version that used a method called 'Stefan-Boltzmann' instead of 'Lattice Boltzmann'. The data has been converted automatically.",
+                                    "Version Conversion", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            }
                         }
 
                         // Update UI with loaded results
@@ -4036,14 +4457,14 @@ namespace CTS
                         mainTabControl.SelectedTab = permeabilityTab;
 
                         // Update status with a multi-method message
-                        System.Text.StringBuilder statusBuilder = new System.Text.StringBuilder("Loaded permeability: ");
+                        StringBuilder statusBuilder = new StringBuilder("Loaded permeability: ");
                         if (permeabilityResult.UsedDarcyMethod)
                         {
                             statusBuilder.Append($"Darcy={permeabilityResult.PermeabilityDarcy:F3}D ");
                         }
-                        if (permeabilityResult.UsedStefanBoltzmannMethod)
+                        if (permeabilityResult.UsedLatticeBoltzmannMethod)
                         {
-                            statusBuilder.Append($"KC={permeabilityResult.StefanBoltzmannPermeabilityDarcy:F3}D ");
+                            statusBuilder.Append($"LBM={permeabilityResult.LatticeBoltzmannPermeabilityDarcy:F3}D ");
                         }
                         if (permeabilityResult.UsedNavierStokesMethod)
                         {
@@ -4066,6 +4487,340 @@ namespace CTS
                         Logger.Log($"[PoreNetworkModelingForm] Error loading permeability: {ex.Message}\n{ex.StackTrace}");
                     }
                 }
+            }
+        }
+        private TabPage CreateVisualizationTab(string title, VisualizationMethod method)
+        {
+            TabPage tab = new TabPage(title)
+            {
+                BackColor = Color.Black,
+                Padding = new Padding(0)
+            };
+
+            Panel visualizationPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BorderStyle = BorderStyle.None,
+                BackColor = Color.Black
+            };
+
+            // Control panel at top
+            Panel controlPanel = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 40,
+                BackColor = Color.FromArgb(50, 50, 50)
+            };
+
+            Label rotationLabel = new Label
+            {
+                Text = "Rotation:",
+                Location = new Point(10, 12),
+                ForeColor = Color.White,
+                AutoSize = true
+            };
+            controlPanel.Controls.Add(rotationLabel);
+
+            Button resetViewButton = new Button
+            {
+                Text = "Reset View",
+                Location = new Point(150, 8),
+                Width = 100,
+                Height = 25,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(80, 80, 80),
+                ForeColor = Color.White
+            };
+
+            // Store the visualization method with the button
+            resetViewButton.Tag = method;
+            resetViewButton.Click += (s, e) =>
+            {
+                rotationX = 30.0f;
+                rotationY = 30.0f;
+                rotationZ = 0.0f;
+                viewScale = 1.0f;
+                panOffsetX = 0.0f;
+                panOffsetY = 0.0f;
+                UpdateVisualization((VisualizationMethod)((Button)s).Tag, ((Button)s).Parent.Parent);
+            };
+            controlPanel.Controls.Add(resetViewButton);
+
+            Button screenshotButton = new Button
+            {
+                Text = "Save Screenshot",
+                Location = new Point(260, 8),
+                Width = 130,
+                Height = 25,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(80, 80, 80),
+                ForeColor = Color.White,
+                Tag = method
+            };
+            screenshotButton.Click += (s, e) => SaveMethodScreenshot((VisualizationMethod)((Button)s).Tag);
+            controlPanel.Controls.Add(screenshotButton);
+
+            visualizationPanel.Controls.Add(controlPanel);
+
+            // Create pressure visualization PictureBox
+            PictureBox visualizationPictureBox = new PictureBox
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.Black,
+                SizeMode = PictureBoxSizeMode.CenterImage,
+                Tag = method // Store the visualization method with the PictureBox
+            };
+
+            // Render the initial visualization
+            visualizationPictureBox.Image = RenderMethodVisualization(method);
+
+            // Add mouse handling for each visualization
+            SetupVisualizationMouseHandling(visualizationPictureBox);
+
+            visualizationPanel.Controls.Add(visualizationPictureBox);
+
+            // Add color legend for pressure
+            Panel legendPanel = CreatePressureLegendPanel(method);
+            visualizationPanel.Controls.Add(legendPanel);
+
+            // Add instructions label
+            Label instructionsLabel = new Label
+            {
+                Text = "Left-click and drag to rotate | Middle-click and drag to pan | Mouse wheel to zoom",
+                Dock = DockStyle.Bottom,
+                Height = 25,
+                TextAlign = ContentAlignment.MiddleCenter,
+                ForeColor = Color.LightGray,
+                BackColor = Color.FromArgb(20, 20, 20)
+            };
+            visualizationPanel.Controls.Add(instructionsLabel);
+
+            tab.Controls.Add(visualizationPanel);
+            return tab;
+        }
+        private void SetupVisualizationMouseHandling(PictureBox pictureBox)
+        {
+            pictureBox.MouseDown += (s, e) =>
+            {
+                if (e.Button == MouseButtons.Left)
+                {
+                    isDragging = true;
+                    lastMousePosition = e.Location;
+                }
+                else if (e.Button == MouseButtons.Middle)
+                {
+                    isPanning = true;
+                    lastMousePosition = e.Location;
+                }
+            };
+
+            pictureBox.MouseMove += (s, e) =>
+            {
+                if (isDragging)
+                {
+                    // Calculate delta movement for rotation
+                    float deltaX = (e.X - lastMousePosition.X) * 0.5f;
+                    float deltaY = (e.Y - lastMousePosition.Y) * 0.5f;
+
+                    // Update rotation angles
+                    rotationY += deltaX;
+                    rotationX += deltaY;
+
+                    // Update visualization
+                    UpdateVisualization((VisualizationMethod)((PictureBox)s).Tag, ((PictureBox)s).Parent);
+
+                    lastMousePosition = e.Location;
+                }
+                else if (isPanning)
+                {
+                    // Calculate delta movement for panning
+                    float deltaX = (e.X - lastMousePosition.X) * 0.01f;
+                    float deltaY = (e.Y - lastMousePosition.Y) * 0.01f;
+
+                    // Update pan offsets
+                    panOffsetX += deltaX;
+                    panOffsetY += deltaY;
+
+                    // Update visualization
+                    UpdateVisualization((VisualizationMethod)((PictureBox)s).Tag, ((PictureBox)s).Parent);
+
+                    lastMousePosition = e.Location;
+                }
+            };
+
+            pictureBox.MouseUp += (s, e) =>
+            {
+                if (e.Button == MouseButtons.Left)
+                {
+                    isDragging = false;
+                }
+                else if (e.Button == MouseButtons.Middle)
+                {
+                    isPanning = false;
+                }
+            };
+
+            pictureBox.MouseWheel += (s, e) =>
+            {
+                // Change zoom level with mouse wheel
+                float zoomFactor = 1.0f + (e.Delta > 0 ? 0.1f : -0.1f);
+                viewScale *= zoomFactor;
+
+                // Limit minimum and maximum zoom
+                viewScale = Math.Max(0.2f, Math.Min(3.0f, viewScale));
+
+                // Update visualization
+                UpdateVisualization((VisualizationMethod)((PictureBox)s).Tag, ((PictureBox)s).Parent);
+            };
+        }
+        private void UpdateVisualization(VisualizationMethod method, Control parent)
+        {
+            // Find the PictureBox in the parent
+            foreach (Control control in parent.Controls)
+            {
+                if (control is PictureBox pictureBox && pictureBox.Tag is VisualizationMethod)
+                {
+                    pictureBox.Image = RenderMethodVisualization(method);
+                    break;
+                }
+            }
+        }
+        private Bitmap RenderMethodVisualization(VisualizationMethod method)
+        {
+            switch (method)
+            {
+                case VisualizationMethod.Darcy:
+                    return RenderPressureField(method);
+
+                case VisualizationMethod.LatticeBoltzmann:
+                    return RenderPressureField(method);
+
+                case VisualizationMethod.NavierStokes:
+                    return RenderPressureField(method);
+
+                case VisualizationMethod.Combined:
+                    return RenderCombinedView();
+
+                default:
+                    return RenderPressureField(method);
+            }
+        }
+        private Panel CreatePressureLegendPanel(VisualizationMethod method)
+        {
+            Panel legendPanel = new Panel
+            {
+                Dock = DockStyle.Right,
+                Width = 80,
+                BackColor = Color.FromArgb(30, 30, 30)
+            };
+
+            // Create pressure gradient legend
+            PictureBox legendPictureBox = new PictureBox
+            {
+                Width = 20,
+                Height = 200,
+                Location = new Point(30, 50),
+                BorderStyle = BorderStyle.FixedSingle
+            };
+
+            // Generate the gradient image
+            Bitmap gradientBitmap = new Bitmap(1, 200);
+            for (int y = 0; y < 200; y++)
+            {
+                // Create gradient from red (high pressure) to blue (low pressure)
+                double t = (double)y / 199;
+                Color color = GetPressureColor(1.0 - t, method);
+                gradientBitmap.SetPixel(0, y, color);
+            }
+
+            // Scale to proper width
+            Bitmap scaledGradient = new Bitmap(20, 200);
+            using (Graphics g = Graphics.FromImage(scaledGradient))
+            {
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                g.DrawImage(gradientBitmap, 0, 0, 20, 200);
+            }
+
+            legendPictureBox.Image = scaledGradient;
+            legendPanel.Controls.Add(legendPictureBox);
+
+            // Add labels for pressure legend
+            Label pressureLegendLabel = new Label
+            {
+                Text = "Pressure",
+                ForeColor = Color.White,
+                Location = new Point(10, 10),
+                Size = new Size(60, 20),
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold)
+            };
+            legendPanel.Controls.Add(pressureLegendLabel);
+
+            // Add labels for high and low pressure
+            Label highLabel = new Label
+            {
+                Text = $"{permeabilityResult.InputPressure:F0} Pa",
+                ForeColor = Color.White,
+                Location = new Point(10, 30),
+                Size = new Size(60, 20),
+                TextAlign = ContentAlignment.MiddleCenter
+            };
+            legendPanel.Controls.Add(highLabel);
+
+            Label lowLabel = new Label
+            {
+                Text = $"{permeabilityResult.OutputPressure:F0} Pa",
+                ForeColor = Color.White,
+                Location = new Point(10, 250),
+                Size = new Size(60, 20),
+                TextAlign = ContentAlignment.MiddleCenter
+            };
+            legendPanel.Controls.Add(lowLabel);
+
+            // Add method indicator
+            Label methodLabel = new Label
+            {
+                Text = GetMethodShortName(method),
+                ForeColor = GetMethodColor(method),
+                Location = new Point(10, 280),
+                Size = new Size(60, 20),
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold)
+            };
+            legendPanel.Controls.Add(methodLabel);
+
+            return legendPanel;
+        }
+        private Color GetMethodColor(VisualizationMethod method)
+        {
+            switch (method)
+            {
+                case VisualizationMethod.Darcy:
+                    return Color.LightGreen;
+                case VisualizationMethod.LatticeBoltzmann:
+                    return Color.LightBlue;
+                case VisualizationMethod.NavierStokes:
+                    return Color.LightPink;
+                case VisualizationMethod.Combined:
+                    return Color.White;
+                default:
+                    return Color.White;
+            }
+        }
+        private string GetMethodShortName(VisualizationMethod method)
+        {
+            switch (method)
+            {
+                case VisualizationMethod.Darcy:
+                    return "Darcy";
+                case VisualizationMethod.LatticeBoltzmann:
+                    return "LBM";
+                case VisualizationMethod.NavierStokes:
+                    return "NS";
+                case VisualizationMethod.Combined:
+                    return "All";
+                default:
+                    return "Unknown";
             }
         }
         private void ExportPermeabilityToExcel(string filename)
@@ -4281,24 +5036,24 @@ namespace CTS
                         row++;
                     }
 
-                    if (permeabilityResult.UsedStefanBoltzmannMethod)
+                    if (permeabilityResult.UsedLatticeBoltzmannMethod)
                     {
-                        worksheet.Cells[row, 1] = "Kozeny-Carman Method";
-                        worksheet.Cells[row, 2] = permeabilityResult.StefanBoltzmannPermeabilityDarcy;
-                        worksheet.Cells[row, 3] = permeabilityResult.StefanBoltzmannPermeabilityMilliDarcy;
+                        worksheet.Cells[row, 1] = "Lattice Boltzmann Method";
+                        worksheet.Cells[row, 2] = permeabilityResult.LatticeBoltzmannPermeabilityDarcy;
+                        worksheet.Cells[row, 3] = permeabilityResult.LatticeBoltzmannPermeabilityMilliDarcy;
                         worksheet.Cells[row, 4] = permeabilityResult.Tortuosity;
-                        worksheet.Cells[row, 5] = permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy;
-                        worksheet.Cells[row, 6] = permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy * 1000;
+                        worksheet.Cells[row, 5] = permeabilityResult.CorrectedLatticeBoltzmannPermeabilityDarcy;
+                        worksheet.Cells[row, 6] = permeabilityResult.CorrectedLatticeBoltzmannPermeabilityDarcy * 1000;
 
                         // Calculate and format percentage difference
-                        double percentDiff = ((permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy /
-                            permeabilityResult.StefanBoltzmannPermeabilityDarcy) - 1.0) * 100;
+                        double percentDiff = ((permeabilityResult.CorrectedLatticeBoltzmannPermeabilityDarcy /
+                            permeabilityResult.LatticeBoltzmannPermeabilityDarcy) - 1.0) * 100;
                         worksheet.Cells[row, 7] = percentDiff;
                         worksheet.Cells[row, 7].NumberFormat = "+0.00%;-0.00%;0.00%";
 
                         // Format the row
                         worksheet.Range[$"A{row}:G{row}"].Interior.Color =
-                            System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.FromArgb(255, 240, 245));
+                            System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.FromArgb(240, 250, 255));
                         row++;
                     }
 
@@ -4323,6 +5078,28 @@ namespace CTS
                         row++;
                     }
 
+                    // Add Kozeny-Carman results for validation
+                    if (permeabilityResult.KozenyCarmanPermeabilityDarcy > 0)
+                    {
+                        worksheet.Cells[row, 1] = "Kozeny-Carman Method (Reference)";
+                        worksheet.Cells[row, 2] = permeabilityResult.KozenyCarmanPermeabilityDarcy;
+                        worksheet.Cells[row, 3] = permeabilityResult.KozenyCarmanPermeabilityMilliDarcy;
+                        worksheet.Cells[row, 4] = permeabilityResult.Tortuosity;
+                        worksheet.Cells[row, 5] = permeabilityResult.CorrectedKozenyCarmanPermeabilityDarcy;
+                        worksheet.Cells[row, 6] = permeabilityResult.CorrectedKozenyCarmanPermeabilityDarcy * 1000;
+
+                        // Calculate and format percentage difference
+                        double percentDiff = ((permeabilityResult.CorrectedKozenyCarmanPermeabilityDarcy /
+                            permeabilityResult.KozenyCarmanPermeabilityDarcy) - 1.0) * 100;
+                        worksheet.Cells[row, 7] = percentDiff;
+                        worksheet.Cells[row, 7].NumberFormat = "+0.00%;-0.00%;0.00%";
+
+                        // Format the row (subtle gray background)
+                        worksheet.Range[$"A{row}:G{row}"].Interior.Color =
+                            System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.FromArgb(245, 245, 245));
+                        row++;
+                    }
+
                     // Add an explanation of the methods
                     row += 2; // Add some space
 
@@ -4337,15 +5114,21 @@ namespace CTS
                     worksheet.Range[$"B{row}:G{row}"].Merge();
                     row++;
 
-                    worksheet.Cells[row, 1] = "Kozeny-Carman:";
+                    worksheet.Cells[row, 1] = "Lattice Boltzmann:";
                     worksheet.Cells[row, 1].Font.Bold = true;
-                    worksheet.Cells[row, 2] = "Based on porosity and specific surface area (k = (ε³/S²) / (K₀ * (1-ε)²))";
+                    worksheet.Cells[row, 2] = "Computational fluid dynamics approach using mesoscopic particle distributions";
                     worksheet.Range[$"B{row}:G{row}"].Merge();
                     row++;
 
                     worksheet.Cells[row, 1] = "Navier-Stokes:";
                     worksheet.Cells[row, 1].Font.Bold = true;
                     worksheet.Cells[row, 2] = "Includes non-Darcy (inertial) flow effects at higher Reynolds numbers";
+                    worksheet.Range[$"B{row}:G{row}"].Merge();
+                    row++;
+
+                    worksheet.Cells[row, 1] = "Kozeny-Carman:";
+                    worksheet.Cells[row, 1].Font.Bold = true;
+                    worksheet.Cells[row, 2] = "Empirical model relating permeability to porosity and specific surface area";
                     worksheet.Range[$"B{row}:G{row}"].Merge();
                     row++;
 
@@ -4362,52 +5145,195 @@ namespace CTS
                     worksheet = workbook.Worksheets[3];
                     worksheet.Name = "Pressure Field";
 
-                    // Add headers
-                    worksheet.Cells[1, 1] = "Pore ID";
-                    worksheet.Cells[1, 2] = "Pressure (Pa)";
-                    worksheet.Cells[1, 3] = "Is Inlet";
-                    worksheet.Cells[1, 4] = "Is Outlet";
-                    worksheet.Cells[1, 5] = "X (μm)";
-                    worksheet.Cells[1, 6] = "Y (μm)";
-                    worksheet.Cells[1, 7] = "Z (μm)";
-                    worksheet.Cells[1, 8] = "Radius (μm)";
+                    // Create a title
+                    worksheet.Cells[1, 1] = "Pressure Field Data by Calculation Method";
+                    worksheet.Cells[1, 1].Font.Size = 14;
+                    worksheet.Cells[1, 1].Font.Bold = true;
+                    worksheet.Range["A1:H1"].Merge();
+                    row = 3;
 
-                    // Format headers
-                    headerRange = worksheet.Range("A1:H1");
-                    headerRange.Font.Bold = true;
-                    headerRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
-
-                    // Add pressure field data
-                    row = 2;
-                    foreach (var pore in permeabilityResult.Model.Pores)
+                    // Create a section for each method's pressure field
+                    if (permeabilityResult.UsedDarcyMethod && permeabilityResult.PressureField != null)
                     {
-                        bool isInlet = permeabilityResult.InletPores.Contains(pore.Id);
-                        bool isOutlet = permeabilityResult.OutletPores.Contains(pore.Id);
-                        double pressure = permeabilityResult.PressureField.TryGetValue(pore.Id, out double p) ? p : 0;
+                        // Darcy method header
+                        worksheet.Cells[row, 1] = "Darcy's Law Pressure Field";
+                        worksheet.Cells[row, 1].Font.Bold = true;
+                        worksheet.Range[$"A{row}:H{row}"].Merge();
+                        worksheet.Range[$"A{row}:H{row}"].Interior.Color =
+                            System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
+                        row++;
 
-                        worksheet.Cells[row, 1] = pore.Id;
-                        worksheet.Cells[row, 2] = pressure;
-                        worksheet.Cells[row, 3] = isInlet;
-                        worksheet.Cells[row, 4] = isOutlet;
-                        worksheet.Cells[row, 5] = pore.Center.X;
-                        worksheet.Cells[row, 6] = pore.Center.Y;
-                        worksheet.Cells[row, 7] = pore.Center.Z;
-                        worksheet.Cells[row, 8] = pore.Radius;
+                        // Add headers
+                        worksheet.Cells[row, 1] = "Pore ID";
+                        worksheet.Cells[row, 2] = "Pressure (Pa)";
+                        worksheet.Cells[row, 3] = "Is Inlet";
+                        worksheet.Cells[row, 4] = "Is Outlet";
+                        worksheet.Cells[row, 5] = "X (μm)";
+                        worksheet.Cells[row, 6] = "Y (μm)";
+                        worksheet.Cells[row, 7] = "Z (μm)";
+                        worksheet.Cells[row, 8] = "Radius (μm)";
 
-                        // Highlight inlet and outlet pores
-                        if (isInlet || isOutlet)
+                        // Format headers
+                        headerRange = worksheet.Range[$"A{row}:H{row}"];
+                        headerRange.Font.Bold = true;
+                        headerRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightBlue);
+                        row++;
+
+                        // Add data for Darcy pressure field
+                        foreach (var pore in permeabilityResult.Model.Pores)
                         {
-                            dynamic rowRange = worksheet.Range[$"A{row}:H{row}"];
-                            rowRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(
-                                isInlet ? System.Drawing.Color.LightPink : System.Drawing.Color.LightBlue);
+                            bool isInlet = permeabilityResult.InletPores.Contains(pore.Id);
+                            bool isOutlet = permeabilityResult.OutletPores.Contains(pore.Id);
+
+                            if (permeabilityResult.PressureField.TryGetValue(pore.Id, out double pressure))
+                            {
+                                worksheet.Cells[row, 1] = pore.Id;
+                                worksheet.Cells[row, 2] = pressure;
+                                worksheet.Cells[row, 3] = isInlet;
+                                worksheet.Cells[row, 4] = isOutlet;
+                                worksheet.Cells[row, 5] = pore.Center.X;
+                                worksheet.Cells[row, 6] = pore.Center.Y;
+                                worksheet.Cells[row, 7] = pore.Center.Z;
+                                worksheet.Cells[row, 8] = pore.Radius;
+
+                                // Highlight inlet and outlet pores
+                                if (isInlet || isOutlet)
+                                {
+                                    dynamic rowRange = worksheet.Range[$"A{row}:H{row}"];
+                                    rowRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(
+                                        isInlet ? System.Drawing.Color.LightPink : System.Drawing.Color.LightBlue);
+                                }
+
+                                row++;
+                            }
                         }
 
-                        row++;
+                        // Add a separator row
+                        row += 2;
                     }
 
-                    // Auto-fit columns and add filter
+                    // Add Lattice Boltzmann pressure field if available
+                    if (permeabilityResult.UsedLatticeBoltzmannMethod && permeabilityResult.LatticeBoltzmannPressureField != null)
+                    {
+                        // LBM method header
+                        worksheet.Cells[row, 1] = "Lattice Boltzmann Pressure Field";
+                        worksheet.Cells[row, 1].Font.Bold = true;
+                        worksheet.Range[$"A{row}:H{row}"].Merge();
+                        worksheet.Range[$"A{row}:H{row}"].Interior.Color =
+                            System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
+                        row++;
+
+                        // Add headers
+                        worksheet.Cells[row, 1] = "Pore ID";
+                        worksheet.Cells[row, 2] = "Pressure (Pa)";
+                        worksheet.Cells[row, 3] = "Is Inlet";
+                        worksheet.Cells[row, 4] = "Is Outlet";
+                        worksheet.Cells[row, 5] = "X (μm)";
+                        worksheet.Cells[row, 6] = "Y (μm)";
+                        worksheet.Cells[row, 7] = "Z (μm)";
+                        worksheet.Cells[row, 8] = "Radius (μm)";
+
+                        // Format headers
+                        headerRange = worksheet.Range[$"A{row}:H{row}"];
+                        headerRange.Font.Bold = true;
+                        headerRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightCyan);
+                        row++;
+
+                        // Add data for LBM pressure field
+                        foreach (var pore in permeabilityResult.Model.Pores)
+                        {
+                            bool isInlet = permeabilityResult.InletPores.Contains(pore.Id);
+                            bool isOutlet = permeabilityResult.OutletPores.Contains(pore.Id);
+
+                            if (permeabilityResult.LatticeBoltzmannPressureField.TryGetValue(pore.Id, out double pressure))
+                            {
+                                worksheet.Cells[row, 1] = pore.Id;
+                                worksheet.Cells[row, 2] = pressure;
+                                worksheet.Cells[row, 3] = isInlet;
+                                worksheet.Cells[row, 4] = isOutlet;
+                                worksheet.Cells[row, 5] = pore.Center.X;
+                                worksheet.Cells[row, 6] = pore.Center.Y;
+                                worksheet.Cells[row, 7] = pore.Center.Z;
+                                worksheet.Cells[row, 8] = pore.Radius;
+
+                                // Highlight inlet and outlet pores
+                                if (isInlet || isOutlet)
+                                {
+                                    dynamic rowRange = worksheet.Range[$"A{row}:H{row}"];
+                                    rowRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(
+                                        isInlet ? System.Drawing.Color.LightPink : System.Drawing.Color.LightBlue);
+                                }
+
+                                row++;
+                            }
+                        }
+
+                        // Add a separator row
+                        row += 2;
+                    }
+
+                    // Add Navier-Stokes pressure field if available
+                    if (permeabilityResult.UsedNavierStokesMethod && permeabilityResult.NavierStokesPressureField != null)
+                    {
+                        // NS method header
+                        worksheet.Cells[row, 1] = "Navier-Stokes Pressure Field";
+                        worksheet.Cells[row, 1].Font.Bold = true;
+                        worksheet.Range[$"A{row}:H{row}"].Merge();
+                        worksheet.Range[$"A{row}:H{row}"].Interior.Color =
+                            System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
+                        row++;
+
+                        // Add headers
+                        worksheet.Cells[row, 1] = "Pore ID";
+                        worksheet.Cells[row, 2] = "Pressure (Pa)";
+                        worksheet.Cells[row, 3] = "Is Inlet";
+                        worksheet.Cells[row, 4] = "Is Outlet";
+                        worksheet.Cells[row, 5] = "X (μm)";
+                        worksheet.Cells[row, 6] = "Y (μm)";
+                        worksheet.Cells[row, 7] = "Z (μm)";
+                        worksheet.Cells[row, 8] = "Radius (μm)";
+
+                        // Format headers
+                        headerRange = worksheet.Range[$"A{row}:H{row}"];
+                        headerRange.Font.Bold = true;
+                        headerRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightPink);
+                        row++;
+
+                        // Add data for NS pressure field
+                        foreach (var pore in permeabilityResult.Model.Pores)
+                        {
+                            bool isInlet = permeabilityResult.InletPores.Contains(pore.Id);
+                            bool isOutlet = permeabilityResult.OutletPores.Contains(pore.Id);
+
+                            if (permeabilityResult.NavierStokesPressureField.TryGetValue(pore.Id, out double pressure))
+                            {
+                                worksheet.Cells[row, 1] = pore.Id;
+                                worksheet.Cells[row, 2] = pressure;
+                                worksheet.Cells[row, 3] = isInlet;
+                                worksheet.Cells[row, 4] = isOutlet;
+                                worksheet.Cells[row, 5] = pore.Center.X;
+                                worksheet.Cells[row, 6] = pore.Center.Y;
+                                worksheet.Cells[row, 7] = pore.Center.Z;
+                                worksheet.Cells[row, 8] = pore.Radius;
+
+                                // Highlight inlet and outlet pores
+                                if (isInlet || isOutlet)
+                                {
+                                    dynamic rowRange = worksheet.Range[$"A{row}:H{row}"];
+                                    rowRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(
+                                        isInlet ? System.Drawing.Color.LightPink : System.Drawing.Color.LightBlue);
+                                }
+
+                                row++;
+                            }
+                        }
+
+                        // Add a separator row
+                        row += 2;
+                    }
+
+                    // Auto-fit columns on the pressure field sheet
                     worksheet.Columns.AutoFit();
-                    headerRange.AutoFilter();
 
                     // ==========================================================
                     // Worksheet 4: Flow Rates
@@ -4428,7 +5354,7 @@ namespace CTS
                     worksheet.Cells[1, 7] = "Connects Inlet/Outlet";
 
                     // Format headers
-                    headerRange = worksheet.Range("A1:G1");
+                    headerRange = worksheet.Range["A1:G1"];
                     headerRange.Font.Bold = true;
                     headerRange.Interior.Color = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
 
@@ -4504,11 +5430,11 @@ namespace CTS
                             methodCount++;
                         }
 
-                        if (permeabilityResult.UsedStefanBoltzmannMethod)
+                        if (permeabilityResult.UsedLatticeBoltzmannMethod)
                         {
-                            worksheet.Cells[row, 1] = "Kozeny-Carman";
-                            worksheet.Cells[row, 2] = permeabilityResult.StefanBoltzmannPermeabilityMilliDarcy;
-                            worksheet.Cells[row, 3] = permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy * 1000;
+                            worksheet.Cells[row, 1] = "Lattice Boltzmann";
+                            worksheet.Cells[row, 2] = permeabilityResult.LatticeBoltzmannPermeabilityMilliDarcy;
+                            worksheet.Cells[row, 3] = permeabilityResult.CorrectedLatticeBoltzmannPermeabilityDarcy * 1000;
                             row++;
                             methodCount++;
                         }
@@ -4518,6 +5444,16 @@ namespace CTS
                             worksheet.Cells[row, 1] = "Navier-Stokes";
                             worksheet.Cells[row, 2] = permeabilityResult.NavierStokesPermeabilityMilliDarcy;
                             worksheet.Cells[row, 3] = permeabilityResult.CorrectedNavierStokesPermeabilityDarcy * 1000;
+                            row++;
+                            methodCount++;
+                        }
+
+                        // Add Kozeny-Carman as reference if available
+                        if (permeabilityResult.KozenyCarmanPermeabilityDarcy > 0)
+                        {
+                            worksheet.Cells[row, 1] = "Kozeny-Carman";
+                            worksheet.Cells[row, 2] = permeabilityResult.KozenyCarmanPermeabilityMilliDarcy;
+                            worksheet.Cells[row, 3] = permeabilityResult.CorrectedKozenyCarmanPermeabilityDarcy * 1000;
                             row++;
                             methodCount++;
                         }
@@ -4734,10 +5670,10 @@ namespace CTS
                                    $"{permeabilityResult.CorrectedPermeabilityDarcy:G8},{permeabilityResult.CorrectedPermeabilityDarcy * 1000:G8}");
                 }
 
-                if (permeabilityResult.UsedStefanBoltzmannMethod)
+                if (permeabilityResult.UsedLatticeBoltzmannMethod)
                 {
-                    writer.WriteLine($"Kozeny-Carman Method,{permeabilityResult.StefanBoltzmannPermeabilityDarcy:G8},{permeabilityResult.StefanBoltzmannPermeabilityMilliDarcy:G8}," +
-                                   $"{permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy:G8},{permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy * 1000:G8}");
+                    writer.WriteLine($"Lattice Boltzmann Method,{permeabilityResult.LatticeBoltzmannPermeabilityDarcy:G8},{permeabilityResult.LatticeBoltzmannPermeabilityMilliDarcy:G8}," +
+                                   $"{permeabilityResult.CorrectedLatticeBoltzmannPermeabilityDarcy:G8},{permeabilityResult.CorrectedLatticeBoltzmannPermeabilityDarcy * 1000:G8}");
                 }
 
                 if (permeabilityResult.UsedNavierStokesMethod)
@@ -4746,23 +5682,74 @@ namespace CTS
                                    $"{permeabilityResult.CorrectedNavierStokesPermeabilityDarcy:G8},{permeabilityResult.CorrectedNavierStokesPermeabilityDarcy * 1000:G8}");
                 }
 
+                if (permeabilityResult.KozenyCarmanPermeabilityDarcy > 0)
+                {
+                    writer.WriteLine($"Kozeny-Carman Method (Reference),{permeabilityResult.KozenyCarmanPermeabilityDarcy:G8},{permeabilityResult.KozenyCarmanPermeabilityMilliDarcy:G8}," +
+                                   $"{permeabilityResult.CorrectedKozenyCarmanPermeabilityDarcy:G8},{permeabilityResult.CorrectedKozenyCarmanPermeabilityDarcy * 1000:G8}");
+                }
+
                 writer.WriteLine();
 
-                // Write pressure field
-                writer.WriteLine("# Pressure Field");
-                writer.WriteLine("Pore ID,Pressure (Pa),Is Inlet,Is Outlet");
-                foreach (var pore in permeabilityResult.Model.Pores)
+                // Write pressure fields for each method
+                if (permeabilityResult.UsedDarcyMethod && permeabilityResult.PressureField != null && permeabilityResult.PressureField.Count > 0)
                 {
-                    bool isInlet = permeabilityResult.InletPores.Contains(pore.Id);
-                    bool isOutlet = permeabilityResult.OutletPores.Contains(pore.Id);
-                    double pressure = permeabilityResult.PressureField.TryGetValue(pore.Id, out double p) ? p : 0;
-                    writer.WriteLine($"{pore.Id},{pressure:F4},{isInlet},{isOutlet}");
+                    writer.WriteLine("# Darcy's Law Pressure Field");
+                    writer.WriteLine("Pore ID,Pressure (Pa),Is Inlet,Is Outlet,X (µm),Y (µm),Z (µm),Radius (µm)");
+
+                    foreach (var pore in permeabilityResult.Model.Pores)
+                    {
+                        bool isInlet = permeabilityResult.InletPores.Contains(pore.Id);
+                        bool isOutlet = permeabilityResult.OutletPores.Contains(pore.Id);
+
+                        if (permeabilityResult.PressureField.TryGetValue(pore.Id, out double pressure))
+                        {
+                            writer.WriteLine($"{pore.Id},{pressure:G8},{isInlet},{isOutlet},{pore.Center.X:F2},{pore.Center.Y:F2},{pore.Center.Z:F2},{pore.Radius:F2}");
+                        }
+                    }
+                    writer.WriteLine();
                 }
-                writer.WriteLine();
+
+                // Write Lattice Boltzmann pressure field
+                if (permeabilityResult.UsedLatticeBoltzmannMethod && permeabilityResult.LatticeBoltzmannPressureField != null && permeabilityResult.LatticeBoltzmannPressureField.Count > 0)
+                {
+                    writer.WriteLine("# Lattice Boltzmann Pressure Field");
+                    writer.WriteLine("Pore ID,Pressure (Pa),Is Inlet,Is Outlet,X (µm),Y (µm),Z (µm),Radius (µm)");
+
+                    foreach (var pore in permeabilityResult.Model.Pores)
+                    {
+                        bool isInlet = permeabilityResult.InletPores.Contains(pore.Id);
+                        bool isOutlet = permeabilityResult.OutletPores.Contains(pore.Id);
+
+                        if (permeabilityResult.LatticeBoltzmannPressureField.TryGetValue(pore.Id, out double pressure))
+                        {
+                            writer.WriteLine($"{pore.Id},{pressure:G8},{isInlet},{isOutlet},{pore.Center.X:F2},{pore.Center.Y:F2},{pore.Center.Z:F2},{pore.Radius:F2}");
+                        }
+                    }
+                    writer.WriteLine();
+                }
+
+                // Write Navier-Stokes pressure field
+                if (permeabilityResult.UsedNavierStokesMethod && permeabilityResult.NavierStokesPressureField != null && permeabilityResult.NavierStokesPressureField.Count > 0)
+                {
+                    writer.WriteLine("# Navier-Stokes Pressure Field");
+                    writer.WriteLine("Pore ID,Pressure (Pa),Is Inlet,Is Outlet,X (µm),Y (µm),Z (µm),Radius (µm)");
+
+                    foreach (var pore in permeabilityResult.Model.Pores)
+                    {
+                        bool isInlet = permeabilityResult.InletPores.Contains(pore.Id);
+                        bool isOutlet = permeabilityResult.OutletPores.Contains(pore.Id);
+
+                        if (permeabilityResult.NavierStokesPressureField.TryGetValue(pore.Id, out double pressure))
+                        {
+                            writer.WriteLine($"{pore.Id},{pressure:G8},{isInlet},{isOutlet},{pore.Center.X:F2},{pore.Center.Y:F2},{pore.Center.Z:F2},{pore.Radius:F2}");
+                        }
+                    }
+                    writer.WriteLine();
+                }
 
                 // Write throat flow rates
                 writer.WriteLine("# Throat Flow Rates");
-                writer.WriteLine("Throat ID,Pore 1,Pore 2,Flow Rate (m³/s),Radius (μm),Length (μm)");
+                writer.WriteLine("Throat ID,Pore 1 ID,Pore 2 ID,Flow Rate (m³/s),Radius (µm),Length (µm)");
                 foreach (var throat in permeabilityResult.Model.Throats)
                 {
                     double flowRate = permeabilityResult.ThroatFlowRates.TryGetValue(throat.Id, out double fr) ? fr : 0;
@@ -4782,7 +5769,7 @@ namespace CTS
                     writer.WriteLine($"Outlet,{poreId}");
                 }
 
-                // Write tortuosity correction explanation
+                // Write tortuosity correction information
                 writer.WriteLine();
                 writer.WriteLine("# Tortuosity Correction Information");
                 writer.WriteLine("Description,Value");
@@ -4792,156 +5779,7 @@ namespace CTS
             }
         }
 
-        private void SavePermeabilityScreenshot(object sender, EventArgs e)
-        {
-            if (permeabilityPictureBox?.Image == null)
-            {
-                MessageBox.Show("No permeability visualization to save.",
-                    "Screenshot Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            using (SaveFileDialog saveDialog = new SaveFileDialog())
-            {
-                saveDialog.Filter = "PNG Image|*.png|JPEG Image|*.jpg|Bitmap Image|*.bmp";
-                saveDialog.Title = "Save Permeability Visualization";
-                saveDialog.DefaultExt = "png";
-
-                if (saveDialog.ShowDialog() == DialogResult.OK)
-                {
-                    try
-                    {
-                        // Create a copy of the current visualization with added info
-                        using (Bitmap originalImage = new Bitmap(permeabilityPictureBox.Image))
-                        {
-                            // Create a new bitmap with space for the info panel
-                            // Increased height to provide more space for multiple calculation methods
-                            Bitmap screenshotWithInfo = new Bitmap(
-                                originalImage.Width,
-                                originalImage.Height + 120); // Increased height for multiple methods and better spacing
-
-                            using (Graphics g = Graphics.FromImage(screenshotWithInfo))
-                            {
-                                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
-
-                                // Draw the original image
-                                g.DrawImage(originalImage, 0, 0, originalImage.Width, originalImage.Height);
-
-                                // Draw a black background for the info panel
-                                g.FillRectangle(new SolidBrush(Color.Black),
-                                    0, originalImage.Height, originalImage.Width, 120);
-
-                                // Draw pressure scale bar
-                                DrawPressureScaleBar(g,
-                                    new Rectangle(50, originalImage.Height + 80, originalImage.Width - 100, 20),
-                                    permeabilityResult.InputPressure,
-                                    permeabilityResult.OutputPressure);
-
-                                // Draw title at the top of info panel
-                                Font titleFont = new Font("Arial", 11, FontStyle.Bold);
-                                string titleText = $"Flow Direction: {permeabilityResult.FlowAxis}-Axis | Tortuosity: {permeabilityResult.Tortuosity:F2}";
-                                SizeF titleSize = g.MeasureString(titleText, titleFont);
-                                g.DrawString(titleText, titleFont, Brushes.White,
-                                    (screenshotWithInfo.Width - titleSize.Width) / 2, originalImage.Height + 5);
-
-                                // Create method result labels with improved spacing
-                                Font methodFont = new Font("Arial", 9, FontStyle.Bold);
-                                int yPos = originalImage.Height + 32; // Start position for method rows
-                                int leftColumnX = 20;
-                                int middleColumnX = originalImage.Width / 3 + 20;
-                                int rightColumnX = 2 * originalImage.Width / 3 + 20;
-
-                                // Draw column headers
-                                g.DrawString("Calculation Method", new Font("Arial", 8), Brushes.LightGray, leftColumnX, yPos);
-                                g.DrawString("Raw Permeability", new Font("Arial", 8), Brushes.LightGray, middleColumnX, yPos);
-                                g.DrawString("Corrected Permeability", new Font("Arial", 8), Brushes.LightGray, rightColumnX, yPos);
-                                yPos += 18; // Move down for the data rows
-
-                                // Draw each method's results
-                                if (permeabilityResult.UsedDarcyMethod)
-                                {
-                                    g.DrawString("Darcy's Law:", methodFont, Brushes.White, leftColumnX, yPos);
-                                    g.DrawString($"{permeabilityResult.PermeabilityDarcy:F3} Darcy ({permeabilityResult.PermeabilityMilliDarcy:F1} mD)",
-                                        methodFont, Brushes.White, middleColumnX, yPos);
-                                    g.DrawString($"{permeabilityResult.CorrectedPermeabilityDarcy:F3} Darcy ({permeabilityResult.CorrectedPermeabilityDarcy * 1000:F1} mD)",
-                                        methodFont, Brushes.LightGreen, rightColumnX, yPos);
-                                    yPos += 18; // Space for next method
-                                }
-
-                                if (permeabilityResult.UsedStefanBoltzmannMethod)
-                                {
-                                    g.DrawString("Kozeny-Carman:", methodFont, Brushes.White, leftColumnX, yPos);
-                                    g.DrawString($"{permeabilityResult.StefanBoltzmannPermeabilityDarcy:F3} Darcy ({permeabilityResult.StefanBoltzmannPermeabilityMilliDarcy:F1} mD)",
-                                        methodFont, Brushes.White, middleColumnX, yPos);
-                                    g.DrawString($"{permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy:F3} Darcy ({permeabilityResult.CorrectedStefanBoltzmannPermeabilityDarcy * 1000:F1} mD)",
-                                        methodFont, Brushes.LightGreen, rightColumnX, yPos);
-                                    yPos += 18; // Space for next method
-                                }
-
-                                if (permeabilityResult.UsedNavierStokesMethod)
-                                {
-                                    g.DrawString("Navier-Stokes:", methodFont, Brushes.White, leftColumnX, yPos);
-                                    g.DrawString($"{permeabilityResult.NavierStokesPermeabilityDarcy:F3} Darcy ({permeabilityResult.NavierStokesPermeabilityMilliDarcy:F1} mD)",
-                                        methodFont, Brushes.White, middleColumnX, yPos);
-                                    g.DrawString($"{permeabilityResult.CorrectedNavierStokesPermeabilityDarcy:F3} Darcy ({permeabilityResult.CorrectedNavierStokesPermeabilityDarcy * 1000:F1} mD)",
-                                        methodFont, Brushes.LightGreen, rightColumnX, yPos);
-                                }
-
-                                // Draw timestamp in bottom right corner
-                                Font timestampFont = new Font("Arial", 8);
-                                string timestamp = $"Date: {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
-                                SizeF timestampSize = g.MeasureString(timestamp, timestampFont);
-                                g.DrawString(timestamp, timestampFont, Brushes.LightGray,
-                                    screenshotWithInfo.Width - timestampSize.Width - 10,
-                                    originalImage.Height + 100 - timestampSize.Height);
-
-                                // Add legend for inlet/outlet pores
-                                int legendX = originalImage.Width - 150;
-                                int legendY = 20;
-                                int legendSpacing = 20;
-
-                                // Semi-transparent black background for the legend
-                                g.FillRectangle(new SolidBrush(Color.FromArgb(150, 0, 0, 0)),
-                                    legendX - 5, legendY - 5, 140, 60);
-
-                                // Draw legend items
-                                g.FillEllipse(new SolidBrush(Color.White), legendX, legendY, 12, 12);
-                                g.DrawEllipse(new Pen(Color.Red, 2), legendX, legendY, 12, 12);
-                                g.DrawString("Inlet Pores", new Font("Arial", 8), Brushes.White, legendX + 18, legendY);
-
-                                g.FillEllipse(new SolidBrush(Color.DarkGray), legendX, legendY + legendSpacing, 12, 12);
-                                g.DrawEllipse(new Pen(Color.Blue, 2), legendX, legendY + legendSpacing, 12, 12);
-                                g.DrawString("Outlet Pores", new Font("Arial", 8), Brushes.White, legendX + 18, legendY + legendSpacing);
-
-                                g.DrawString("Pressure", new Font("Arial", 8, FontStyle.Bold), Brushes.White, legendX, legendY + 2 * legendSpacing);
-                            }
-
-                            // Save the image with the info panel
-                            string extension = Path.GetExtension(saveDialog.FileName).ToLower();
-                            System.Drawing.Imaging.ImageFormat format = System.Drawing.Imaging.ImageFormat.Png; // Default
-
-                            if (extension == ".jpg" || extension == ".jpeg")
-                                format = System.Drawing.Imaging.ImageFormat.Jpeg;
-                            else if (extension == ".bmp")
-                                format = System.Drawing.Imaging.ImageFormat.Bmp;
-
-                            screenshotWithInfo.Save(saveDialog.FileName, format);
-                        }
-
-                        statusLabel.Text = "Permeability visualization saved successfully.";
-                        MessageBox.Show("Visualization screenshot saved successfully.",
-                            "Save Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    }
-                    catch (Exception ex)
-                    {
-                        MessageBox.Show($"Error saving screenshot: {ex.Message}",
-                            "Screenshot Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        Logger.Log($"[PoreNetworkModelingForm] Error saving screenshot: {ex.Message}\n{ex.StackTrace}");
-                    }
-                }
-            }
-        }
+        
         private void OpenPoreConnectivityDialog(object sender, EventArgs e)
         {
             using (var dialog = new PoreConnectivityDialog())

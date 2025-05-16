@@ -15,10 +15,10 @@ namespace CTS
         private Button okButton;
         private Button cancelButton;
 
-        // New calculation method controls
+        // Calculation method controls
         private GroupBox calcMethodGroupBox;
         private CheckBox darcyCheckBox;
-        private CheckBox stefanBoltzmannCheckBox;
+        private CheckBox latticeBoltzmannCheckBox;
         private CheckBox navierStokesCheckBox;
 
         // Tortuosity controls
@@ -34,7 +34,7 @@ namespace CTS
 
         // Calculation method flags
         public bool UseDarcyMethod { get; private set; }
-        public bool UseStefanBoltzmannMethod { get; private set; }
+        public bool UseLatticeBoltzmannMethod { get; private set; }
         public bool UseNavierStokesMethod { get; private set; }
 
         public PermeabilitySimulationDialog()
@@ -168,10 +168,10 @@ namespace CTS
                 Font = new Font("Segoe UI", 9F)
             };
 
-            // Stefan-Boltzmann checkbox
-            stefanBoltzmannCheckBox = new CheckBox
+            // Lattice Boltzmann checkbox
+            latticeBoltzmannCheckBox = new CheckBox
             {
-                Text = "Stefan-Boltzmann Method (alternative permeability calculation)",
+                Text = "Lattice Boltzmann Method (computational fluid dynamics approach)",
                 Location = new Point(20, 55),
                 Size = new Size(490, 24),
                 Checked = false,
@@ -181,7 +181,7 @@ namespace CTS
             // Navier-Stokes checkbox
             navierStokesCheckBox = new CheckBox
             {
-                Text = "Navier-Stokes Method (advanced fluid dynamics approach)",
+                Text = "Navier-Stokes Method (advanced fluid dynamics with inertial effects)",
                 Location = new Point(20, 80),
                 Size = new Size(490, 24),
                 Checked = false,
@@ -190,7 +190,7 @@ namespace CTS
 
             // Add checkboxes to the groupbox
             calcMethodGroupBox.Controls.Add(darcyCheckBox);
-            calcMethodGroupBox.Controls.Add(stefanBoltzmannCheckBox);
+            calcMethodGroupBox.Controls.Add(latticeBoltzmannCheckBox);
             calcMethodGroupBox.Controls.Add(navierStokesCheckBox);
 
             // Button positioning
@@ -231,14 +231,14 @@ namespace CTS
 
             // Event handler for checkbox validation
             darcyCheckBox.CheckedChanged += CalculationMethod_CheckedChanged;
-            stefanBoltzmannCheckBox.CheckedChanged += CalculationMethod_CheckedChanged;
+            latticeBoltzmannCheckBox.CheckedChanged += CalculationMethod_CheckedChanged;
             navierStokesCheckBox.CheckedChanged += CalculationMethod_CheckedChanged;
         }
 
         private void CalculationMethod_CheckedChanged(object sender, EventArgs e)
         {
             // Ensure at least one calculation method is selected
-            if (!darcyCheckBox.Checked && !stefanBoltzmannCheckBox.Checked && !navierStokesCheckBox.Checked)
+            if (!darcyCheckBox.Checked && !latticeBoltzmannCheckBox.Checked && !navierStokesCheckBox.Checked)
             {
                 // If the last checked box is being unchecked, prevent it
                 ((CheckBox)sender).Checked = true;
@@ -246,7 +246,23 @@ namespace CTS
                     "Invalid Selection", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
+        public void SetInitialTortuosity(double tortuosityValue)
+        {
+            // Ensure the value is within the allowed range for the NumericUpDown control
+            decimal value = (decimal)Math.Max(
+                Math.Min(tortuosityValue, (double)tortuosityNumeric.Maximum),
+                (double)tortuosityNumeric.Minimum);
 
+            // Apply the value to the control
+            tortuosityNumeric.Value = value;
+
+            // Ensure a reasonable default if the value is too small
+            if (value < 1.0m)
+            {
+                tortuosityNumeric.Value = 1.0m;
+                Logger.Log($"[PermeabilitySimulationDialog] Applied minimum tortuosity value (1.0) instead of {tortuosityValue:F2}");
+            }
+        }
         private void OkButton_Click(object sender, EventArgs e)
         {
             // Validate input (ensure input pressure > output pressure)
@@ -261,7 +277,7 @@ namespace CTS
             }
 
             // Ensure at least one calculation method is selected
-            if (!darcyCheckBox.Checked && !stefanBoltzmannCheckBox.Checked && !navierStokesCheckBox.Checked)
+            if (!darcyCheckBox.Checked && !latticeBoltzmannCheckBox.Checked && !navierStokesCheckBox.Checked)
             {
                 MessageBox.Show("Please select at least one calculation method.",
                     "Invalid Parameters", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -280,7 +296,7 @@ namespace CTS
 
             // Store calculation method choices
             UseDarcyMethod = darcyCheckBox.Checked;
-            UseStefanBoltzmannMethod = stefanBoltzmannCheckBox.Checked;
+            UseLatticeBoltzmannMethod = latticeBoltzmannCheckBox.Checked;
             UseNavierStokesMethod = navierStokesCheckBox.Checked;
         }
     }

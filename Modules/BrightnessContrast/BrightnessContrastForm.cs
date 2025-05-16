@@ -66,7 +66,17 @@ namespace CTS
             InitializeComponent();
             LoadCurrentSlice();
         }
+        public BrightnessContrastForm(int brightness, int contrast, byte blackPoint, byte whitePoint)
+        {
+            // Just set the adjustment parameters without initializing GUI
+            this.brightness = brightness;
+            this.contrast = contrast;
+            this.blackPoint = blackPoint;
+            this.whitePoint = whitePoint;
+        }
 
+    
+        
         private void InitializeComponent()
         {
             // Form setup

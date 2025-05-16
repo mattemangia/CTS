@@ -97,7 +97,19 @@ namespace CTS
             InitializeGPU();
             InitializeForm();
         }
+        /// <summary>
+        /// Constructor that optionally doesn't show the form, for headless usage in nodes
+        /// </summary>
+        public FilterManager(MainForm mainForm, bool showForm = true)
+        {
+            this.mainForm = mainForm;
+            InitializeGPU();
 
+            if (showForm)
+            {
+                InitializeForm();
+            }
+        }
         #region GPU Init / Dispose
 
         private void InitializeGPU()
@@ -1300,12 +1312,79 @@ namespace CTS
         #endregion Apply To All Slices
 
         #region Filter Implementation
+        
+        /// <summary>
+        /// Public version to be used by node integrations
+        /// </summary>
+        public byte[] ApplyFilter3D(byte[] volumeData, int width, int height, int depth, string filterName, int kernelSize, float sigma, float h, int templateSize, int searchSize, bool useGPUFlag, ProgressForm progress)
+        {
+            // Handle 3D filter selection and processing here
+            byte[] result;
+            bool overwrite = false; // We're not overwriting anything, just returning the result
+            string outputFolder = ""; // Not used when not exporting
 
+            if (filterName == "Gaussian")
+            {
+                if (useGPUFlag && gpuInitialized)
+                    result = GaussianFilter3D_GPU(volumeData, width, height, depth, kernelSize, sigma);
+                else
+                    result = GaussianFilter3D_CPU_Full(volumeData, width, height, depth, kernelSize, sigma, progress);
+            }
+            else if (filterName == "Median")
+            {
+                if (useGPUFlag && gpuInitialized)
+                    result = MedianFilter3D_GPU(volumeData, width, height, depth, kernelSize);
+                else
+                    result = MedianFilter3D_CPU_Full(volumeData, width, height, depth, kernelSize, progress);
+            }
+            else if (filterName == "Non-Local Means")
+            {
+                using (var nlmFilter = new NLM3DFilter(useGPUFlag))
+                {
+                    result = nlmFilter.RunNLM3D(volumeData, width, height, depth, templateSize, searchSize, h, useGPUFlag, progress);
+                }
+            }
+            else if (filterName == "Bilateral")
+            {
+                float sigmaSpatial = (numSigmaSpatial != null) ? (float)numSigmaSpatial.Value : 3.0f;
+                float sigmaRange = (numSigmaRange != null) ? (float)numSigmaRange.Value : 25.0f;
+
+                if (useGPUFlag && gpuInitialized)
+                    result = BilateralFilter3D_GPU(volumeData, width, height, depth, kernelSize, sigmaSpatial, sigmaRange);
+                else
+                    result = BilateralFilter3D_CPU(volumeData, width, height, depth, kernelSize, sigmaSpatial, sigmaRange, progress);
+            }
+            else if (filterName == "Unsharp Mask")
+            {
+                float unsharpAmount = (numUnsharpAmount != null) ? (float)numUnsharpAmount.Value : 1.5f;
+
+                if (useGPUFlag && gpuInitialized)
+                    result = UnsharpMask3D_GPU(volumeData, width, height, depth, unsharpAmount, kernelSize / 2, sigma);
+                else
+                    result = UnsharpMask3D_CPU(volumeData, width, height, depth, unsharpAmount, kernelSize / 2, sigma, progress);
+            }
+            else if (filterName == "Edge Detection")
+            {
+                bool normalizeEdges = (chkEdgeNormalize != null) ? chkEdgeNormalize.Checked : true;
+
+                if (useGPUFlag && gpuInitialized)
+                    result = EdgeDetection3D_GPU(volumeData, width, height, depth, normalizeEdges);
+                else
+                    result = EdgeDetection3D_CPU(volumeData, width, height, depth, normalizeEdges, progress);
+            }
+            else
+            {
+                // Fallback - just return the source
+                result = volumeData;
+            }
+
+            return result;
+        }
         /// <summary>
         /// Applies a 2D filter (Gaussian, median, NLM, etc.) to a single slice.
         /// If using GPU is true, tries GPU acceleration. Otherwise uses CPU fallback.
         /// </summary>
-        private byte[] ApplyFilter2D(
+        public byte[] ApplyFilter2D(
     byte[] sliceData,
     int width,
     int height,
@@ -1434,7 +1513,7 @@ namespace CTS
         /// Applies a genuine 3D filter (Gaussian or Median) to the entire volume in a single GPU pass,
         /// or CPU fallback if GPU is unavailable. Overwrites or exports BMP as needed.
         /// </summary>
-        private void ApplyFilter3D(
+        public void ApplyFilter3D(
             string filterName,
             int kernelSize,
             float sigma,

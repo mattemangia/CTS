@@ -8,6 +8,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Krypton.Toolkit;
 using Krypton.Navigator;
+using CTS.Modules.NodeEditor.Nodes;
 
 namespace CTS.NodeEditor
 {
@@ -206,81 +207,104 @@ namespace CTS.NodeEditor
         private void SetupNodeTypes()
         {
             var nodeTypes = new List<NodeTypeInfo>
-            {
-                // Input nodes (Green theme)
-                new NodeTypeInfo("Input", "Volume Data", typeof(VolumeDataNode), Color.FromArgb(120, 200, 120)),
-                new NodeTypeInfo("Input", "Label Data", typeof(LabelDataNode), Color.FromArgb(120, 200, 120)),
-                new NodeTypeInfo("Input", "Load Dataset", typeof(LoadDatasetNode), Color.FromArgb(100, 180, 100)),
-                
-                // Processing nodes (Blue theme)
-                new NodeTypeInfo("Tools", "Threshold", typeof(ThresholdNode), Color.FromArgb(100, 150, 255)),
-                new NodeTypeInfo("Tools", "Brush", typeof(BrushNode), Color.FromArgb(100, 150, 255)),
-                new NodeTypeInfo("Tools", "Eraser", typeof(EraserNode), Color.FromArgb(100, 150, 255)),
-                new NodeTypeInfo("Tools", "Segment Anything", typeof(SegmentAnythingNode), Color.FromArgb(100, 150, 255)),
-                new NodeTypeInfo("Tools", "MicroSAM", typeof(MicroSAMNode), Color.FromArgb(100, 150, 255)),
-                new NodeTypeInfo("Tools", "Grounding DINO", typeof(GroundingDINONode), Color.FromArgb(100, 150, 255)),
-                new NodeTypeInfo("Tools", "Interpolate", typeof(InterpolateNode), Color.FromArgb(100, 150, 255)),
-                
-                // Simulation nodes (Purple theme)
-                new NodeTypeInfo("Simulation", "Pore Network", typeof(PoreNetworkNode), Color.FromArgb(180, 100, 255)),
-                new NodeTypeInfo("Simulation", "Stress Analysis", typeof(StressAnalysisNode), Color.FromArgb(180, 100, 255)),
-                new NodeTypeInfo("Simulation", "Acoustic", typeof(AcousticSimulationNode), Color.FromArgb(180, 100, 255)),
-                new NodeTypeInfo("Simulation", "Triaxial", typeof(TriaxialSimulationNode), Color.FromArgb(180, 100, 255)),
-                
-                // Filtering nodes (Teal theme)
-                new NodeTypeInfo("Filters", "Band Detection", typeof(BandDetectionNode), Color.FromArgb(100, 200, 200)),
-                new NodeTypeInfo("Filters", "Transform", typeof(TransformDatasetNode), Color.FromArgb(100, 200, 200)),
-                new NodeTypeInfo("Filters", "Core Extraction", typeof(CoreExtractionNode), Color.FromArgb(100, 200, 200)),
-                new NodeTypeInfo("Filters", "Filter Manager", typeof(FilterManagerNode), Color.FromArgb(100, 200, 200)),
-                
-                // Material nodes (Orange theme)
-                new NodeTypeInfo("Materials", "Add Material", typeof(AddMaterialNode), Color.FromArgb(255, 180, 100)),
-                new NodeTypeInfo("Materials", "Remove Material", typeof(RemoveMaterialNode), Color.FromArgb(255, 180, 100)),
-                new NodeTypeInfo("Materials", "Merge Materials", typeof(MergeMaterialsNode), Color.FromArgb(255, 180, 100)),
-                new NodeTypeInfo("Materials", "Extract Material", typeof(ExtractMaterialNode), Color.FromArgb(255, 180, 100)),
-                
-                // Output nodes (Red theme)
-                new NodeTypeInfo("Output", "Export Images", typeof(ExportImagesNode), Color.FromArgb(255, 120, 120)),
-                new NodeTypeInfo("Output", "Save Dataset", typeof(SaveDatasetNode), Color.FromArgb(255, 120, 120)),
-                new NodeTypeInfo("Output", "Statistics", typeof(StatisticsNode), Color.FromArgb(255, 120, 120))
-            };
+    {
+        // Input nodes (Green theme)
+        new NodeTypeInfo("Input", "Current Dataset", typeof(CurrentDatasetNode), Color.FromArgb(120, 200, 120)),
+        new NodeTypeInfo("Input", "Volume Data", typeof(VolumeDataNode), Color.FromArgb(120, 200, 120)),
+        new NodeTypeInfo("Input", "Label Data", typeof(LabelDataNode), Color.FromArgb(120, 200, 120)),
+        new NodeTypeInfo("Input", "Label", typeof(LabelNode), Color.FromArgb(255, 180, 100)),
+        new NodeTypeInfo("Input", "Current Label", typeof(CurrentLabelNode), Color.FromArgb(120, 200, 120)),
+        new NodeTypeInfo("Input", "Load Dataset", typeof(LoadDatasetNode), Color.FromArgb(100, 180, 100)),
+        new NodeTypeInfo("Input", "Load Multiple Datasets", typeof(LoadMultipleDatasetNode), Color.FromArgb(100, 180, 100)),
+        new NodeTypeInfo("Input", "Dataset Decompression", typeof(DatasetDecompressionNode), Color.FromArgb(120, 200, 120)),
+        
+        // Processing nodes (Blue theme)
+        new NodeTypeInfo("Tools", "Brightness & Contrast", typeof(BrightnessContrastNode), Color.FromArgb(100, 150, 255)),
+        new NodeTypeInfo("Tools", "Resample Volume", typeof(ResampleVolumeNode), Color.FromArgb(100, 180, 255)),
+        new NodeTypeInfo("Tools", "Threshold", typeof(ThresholdNode), Color.FromArgb(100, 150, 255)),
+        new NodeTypeInfo("Tools", "Segment Anything", typeof(SegmentAnythingNode), Color.FromArgb(100, 150, 255)),
+        new NodeTypeInfo("Tools", "MicroSAM", typeof(MicroSAMNode), Color.FromArgb(100, 150, 255)),
+        new NodeTypeInfo("Tools", "Grounding DINO", typeof(GroundingDINONode), Color.FromArgb(100, 150, 255)),
+        new NodeTypeInfo("Tools", "Interpolate", typeof(InterpolateNode), Color.FromArgb(100, 150, 255)),
+        new NodeTypeInfo("Tools", "Manual Thresholding", typeof(ManualThresholdingNode), Color.FromArgb(120, 180, 255)),
+        new NodeTypeInfo("Tools", "Binarize", typeof(BinarizeNode), Color.FromArgb(100, 150, 255)),
+        new NodeTypeInfo("Tools", "Remove Small Islands", typeof(RemoveSmallIslandsNode), Color.FromArgb(120, 180, 255)),
 
-            // Create toolbox list
-            var toolboxList = new ListView
+        
+        // Simulation nodes (Purple theme)
+        new NodeTypeInfo("Simulation", "Pore Network", typeof(PoreNetworkNode), Color.FromArgb(180, 100, 255)),
+        new NodeTypeInfo("Simulation", "Acoustic", typeof(AcousticSimulationNode), Color.FromArgb(180, 100, 255)),
+        new NodeTypeInfo("Simulation", "Triaxial", typeof(TriaxialSimulationNode), Color.FromArgb(180, 100, 255)),
+        
+        // Filtering nodes (Teal theme)
+        new NodeTypeInfo("Filters", "Band Detection", typeof(BandDetectionNode), Color.FromArgb(100, 200, 200)),
+        new NodeTypeInfo("Filters", "Transform", typeof(TransformDatasetNode), Color.FromArgb(100, 200, 200)),
+        new NodeTypeInfo("Filters", "Core Extraction", typeof(CoreExtractionNode), Color.FromArgb(100, 200, 200)),
+        new NodeTypeInfo("Filters", "Image Filter", typeof(FilterNode), Color.FromArgb(100, 200, 200)),
+        
+        // Material nodes (Orange theme)
+        new NodeTypeInfo("Materials", "Add Material", typeof(AddMaterialNode), Color.FromArgb(255, 180, 100)),
+        new NodeTypeInfo("Materials", "Remove Material", typeof(RemoveMaterialNode), Color.FromArgb(255, 180, 100)),
+        new NodeTypeInfo("Materials", "Merge Materials", typeof(MergeMaterialsNode), Color.FromArgb(255, 180, 100)),
+        new NodeTypeInfo("Materials", "Extract Material", typeof(ExtractMaterialsNode), Color.FromArgb(180, 100, 255)),
+        new NodeTypeInfo("Materials", "Material Density", typeof(DensityNode), Color.FromArgb(255, 180, 100)),
+        
+        // Output nodes (Red theme)
+        new NodeTypeInfo("Output", "Export Image Stack", typeof(ExportImageStackNode), Color.FromArgb(255, 120, 120)),
+        new NodeTypeInfo("Output", "Save Dataset", typeof(SaveDatasetNode), Color.FromArgb(255, 120, 120)),
+        new NodeTypeInfo("Output", "Save Labels", typeof(SaveLabelsNode), Color.FromArgb(255, 120, 120)),
+        new NodeTypeInfo("Output", "Replace Current", typeof(ReplaceCurrentNode), Color.FromArgb(255, 140, 120)),
+        new NodeTypeInfo("Output", "Statistics", typeof(StatisticsNode), Color.FromArgb(255, 120, 120)),
+        new NodeTypeInfo("Output", "Dataset Compression", typeof(DatasetCompressionNode), Color.FromArgb(255, 120, 120)),
+
+        //Analysis Nodes (Violet theme)
+        new NodeTypeInfo("Analysis", "Material Statistics", typeof(MaterialStatisticsNode), Color.FromArgb(160, 120, 200)),
+    };
+
+            // Create a TreeView for nodes with collapsible categories
+            var toolboxTree = new TreeView
             {
                 Dock = DockStyle.Fill,
-                View = View.List,
                 BackColor = Color.FromArgb(45, 45, 48),
                 ForeColor = Color.White,
                 BorderStyle = BorderStyle.None,
-                GridLines = false,
+                ShowLines = false,
                 FullRowSelect = true,
-                ShowGroups = true
+                ShowPlusMinus = true, // This enables collapsing/expanding
+                HideSelection = false,
+                ItemHeight = 22
             };
 
             // Group nodes by category
             var groups = nodeTypes.GroupBy(t => t.Category).ToList();
             foreach (var group in groups)
             {
-                var listGroup = new ListViewGroup(group.Key)
-                {
-                    HeaderAlignment = HorizontalAlignment.Left
-                };
-                toolboxList.Groups.Add(listGroup);
+                var categoryNode = new TreeNode(group.Key);
+                toolboxTree.Nodes.Add(categoryNode);
 
                 foreach (var nodeType in group)
                 {
-                    var item = new ListViewItem(nodeType.Name)
+                    var nodeTreeNode = new TreeNode(nodeType.Name)
                     {
-                        Group = listGroup,
                         Tag = nodeType
                     };
-                    toolboxList.Items.Add(item);
+                    categoryNode.Nodes.Add(nodeTreeNode);
                 }
             }
 
-            toolboxList.ItemActivate += ToolboxList_ItemActivate;
-            toolboxPanel.Controls.Add(toolboxList);
+            // Expand all categories initially
+            toolboxTree.ExpandAll();
+
+            // Handle node selection
+            toolboxTree.NodeMouseDoubleClick += (sender, e) =>
+            {
+                if (e.Node?.Tag is NodeTypeInfo nodeTypeInfo)
+                {
+                    CreateNode(nodeTypeInfo);
+                }
+            };
+
+            toolboxPanel.Controls.Add(toolboxTree);
         }
 
         private void ToolboxList_ItemActivate(object sender, EventArgs e)

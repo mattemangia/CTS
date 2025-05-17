@@ -1,0 +1,27 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifiers>win-x64;linux-x64</RuntimeIdentifiers>
+    <Version>1.0.0</Version>
+    <Authors>Matteo Mangiagalli</Authors>
+    <Company>University of Fribourg, Geosciences Department</Company>
+    <Product>CTS - Parallel Computing Node Server</Product>
+    <Copyright>© 2025 University of Fribourg</Copyright>
+    <Description>Parallel Computing Node Server for distributed computing tasks</Description>
+  </PropertyGroup>
+
+
+  <ItemGroup>
+    <PackageReference Include="ILGPU" Version="1.5.2" />
+    <PackageReference Include="ILGPU.Algorithms" Version="1.5.2" />
+    <PackageReference Include="ILGPU.SharpDX" Version="0.5.0" />
+    <PackageReference Include="Terminal.Gui" Version="1.18.1" />
+  </ItemGroup>
+
+</Project>

@@ -819,6 +819,7 @@ namespace CTS
 
             // Add Label Operations submenu
             AddLabelOperationsMenu();
+            AddComputeClusterMenu();
         }
         private void CreateHelpMenu()
         {
@@ -2635,7 +2636,32 @@ namespace CTS
                 return null; // Indicate dialog was cancelled
             }
         }
+        private void AddComputeClusterMenu()
+        {
+            // Create menu item for the Compute Cluster Manager
+            ToolStripMenuItem computeClusterMenuItem = new ToolStripMenuItem("Compute Cluster Manager");
+            computeClusterMenuItem.Click += (s, e) =>
+            {
+                try
+                {
+                    Logger.Log("[ControlForm] Opening Compute Cluster Manager");
 
+                    // Create and show the Compute Cluster Manager form
+                    ComputeClusterForm clusterForm = new ComputeClusterForm(mainForm);
+                    clusterForm.Show();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[ControlForm] Error opening Compute Cluster Manager: {ex.Message}");
+                    MessageBox.Show($"Error opening Compute Cluster Manager: {ex.Message}",
+                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            };
+
+            // Add the menu item to the Tools menu
+            toolsMenu.DropDownItems.Add(new ToolStripSeparator()); // Add separator before new item
+            toolsMenu.DropDownItems.Add(computeClusterMenuItem);
+        }
         public void UpdateToolUI(SegmentationTool tool)
         {
             // Update current tool

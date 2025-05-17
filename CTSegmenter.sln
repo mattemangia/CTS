@@ -5,6 +5,8 @@ VisualStudioVersion = 17.12.35707.178
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CTS", "CTS.csproj", "{A890BC78-2B81-4116-A284-9A76A35D1996}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HPCServer", "HPCServer\HPCServer.csproj", "{BC2597CD-9AE4-C2D9-5260-9620F94572C3}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -21,6 +23,14 @@ Global
 		{A890BC78-2B81-4116-A284-9A76A35D1996}.Release|x64.Build.0 = Release|x64
 		{A890BC78-2B81-4116-A284-9A76A35D1996}.Release|x86.ActiveCfg = Release|x86
 		{A890BC78-2B81-4116-A284-9A76A35D1996}.Release|x86.Build.0 = Release|x86
+		{BC2597CD-9AE4-C2D9-5260-9620F94572C3}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{BC2597CD-9AE4-C2D9-5260-9620F94572C3}.Debug|x64.Build.0 = Debug|Any CPU
+		{BC2597CD-9AE4-C2D9-5260-9620F94572C3}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{BC2597CD-9AE4-C2D9-5260-9620F94572C3}.Debug|x86.Build.0 = Debug|Any CPU
+		{BC2597CD-9AE4-C2D9-5260-9620F94572C3}.Release|x64.ActiveCfg = Release|Any CPU
+		{BC2597CD-9AE4-C2D9-5260-9620F94572C3}.Release|x64.Build.0 = Release|Any CPU
+		{BC2597CD-9AE4-C2D9-5260-9620F94572C3}.Release|x86.ActiveCfg = Release|Any CPU
+		{BC2597CD-9AE4-C2D9-5260-9620F94572C3}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

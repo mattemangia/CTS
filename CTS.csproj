@@ -125,6 +125,7 @@
     <Compile Include="MaterialOperations\MaterialOperations.cs" />
     <Compile Include="Misc\Annotations.cs" />
     <Compile Include="Misc\AcousticVolume.cs" />
+    <Compile Include="Misc\BeaconMessage.cs" />
     <Compile Include="Misc\Compression.cs" />
     <Compile Include="Misc\ExportAnimationDialog.cs">
       <SubType>Form</SubType>
@@ -284,6 +285,7 @@
     <Compile Include="UI\CompressionForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="UI\ComputeClusterManager.cs" />
     <Compile Include="UI\DensityCalibrationPreviewForm.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -408,6 +410,7 @@
   </ItemGroup>
   <ItemGroup>
     <Folder Include=".vs\CTSegmenter\v17\" />
+    <Folder Include="HPCServer\" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Cyotek.Drawing.BitmapFont">

@@ -46,7 +46,7 @@ namespace CTS
         private bool isXyMeasurementDrawing = false;
         private Point xyMeasurementStart;
         private Point xyMeasurementCurrent;
-
+        public List<ComputeEndpoint> ComputeEndpoints { get; set; }
         private bool isXzMeasurementDrawing = false;
         private Point xzMeasurementStart;
         private Point xzMeasurementCurrent;

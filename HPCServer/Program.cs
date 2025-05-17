@@ -31,7 +31,7 @@ namespace ParallelComputingClientserver
 
         static async Task Main(string[] args)
         {
-            Console.WriteLine("Initializing Parallel Computing Client Server...");
+            Console.WriteLine("Initializing Parallel Computing Server...");
 
             // Initialize ILGPU
             InitializeILGPU();
@@ -380,7 +380,7 @@ namespace ParallelComputingClientserver
             var top = Application.Top;
 
             // Create a window that takes up the full screen
-            var win = new Window("Parallel Computing Client Server")
+            var win = new Window("CTS - Parallel Computing Client Server (CTS/PCCS)")
             {
                 X = 0,
                 Y = 0,
@@ -446,7 +446,7 @@ namespace ParallelComputingClientserver
             keepAliveColorScheme.Normal = Terminal.Gui.Attribute.Make(Color.Green, Color.Black);
 
             // Label for indicator descriptions
-            var indicatorLabel = new Label("B:Beacon K:KeepAlive")
+            var indicatorLabel = new Label("B:Beacon  K:KeepAlive  ")
             {
                 X = Pos.AnchorEnd(22),
                 Y = Pos.AnchorEnd(1),
@@ -457,7 +457,7 @@ namespace ParallelComputingClientserver
             // Create indicators
             beaconIndicator = new Label("●")
             {
-                X = Pos.AnchorEnd(9),
+                X = Pos.AnchorEnd(1),
                 Y = Pos.AnchorEnd(1),
                 ColorScheme = beaconColorScheme,
                 Width = 1
@@ -466,7 +466,7 @@ namespace ParallelComputingClientserver
 
             keepAliveIndicator = new Label("●")
             {
-                X = Pos.AnchorEnd(3),
+                X = Pos.AnchorEnd(13),
                 Y = Pos.AnchorEnd(1),
                 ColorScheme = keepAliveColorScheme,
                 Width = 1
@@ -515,49 +515,7 @@ namespace ParallelComputingClientserver
             beaconIndicator.SetNeedsDisplay();
             keepAliveIndicator.SetNeedsDisplay();
         }
-        private static void UpdateIndicators()
-        {
-            // Update beacon indicator
-            if (DateTime.Now - lastBeaconTime < TimeSpan.FromSeconds(1))
-            {
-                beaconActive = !beaconActive;
-                beaconIndicator.ColorScheme = new ColorScheme()
-                {
-                    Normal = beaconActive ?
-                        Terminal.Gui.Attribute.Make(Color.Red, Color.Black) :
-                        Terminal.Gui.Attribute.Make(Color.Black, Color.Black)
-                };
-            }
-            else
-            {
-                beaconIndicator.ColorScheme = new ColorScheme()
-                {
-                    Normal = Terminal.Gui.Attribute.Make(Color.Black, Color.Black)
-                };
-            }
-
-            // Update keep-alive indicator
-            if (DateTime.Now - lastKeepAliveTime < TimeSpan.FromSeconds(1))
-            {
-                keepAliveActive = !keepAliveActive;
-                keepAliveIndicator.ColorScheme = new ColorScheme()
-                {
-                    Normal = keepAliveActive ?
-                        Terminal.Gui.Attribute.Make(Color.Green, Color.Black) :
-                        Terminal.Gui.Attribute.Make(Color.Black, Color.Black)
-                };
-            }
-            else
-            {
-                keepAliveIndicator.ColorScheme = new ColorScheme()
-                {
-                    Normal = Terminal.Gui.Attribute.Make(Color.Black, Color.Black)
-                };
-            }
-
-            beaconIndicator.SetNeedsDisplay();
-            keepAliveIndicator.SetNeedsDisplay();
-        }
+        
         private static void ShowAbout()
         {
             var dialog = new Dialog("About", 60, 14);
@@ -572,7 +530,7 @@ namespace ParallelComputingClientserver
                 Y = 1,
                 Width = Dim.Fill() - 2,
                 Height = Dim.Fill() - 4,
-                Text = "CTS - Parallel Computing Client Server\n" +
+                Text = "CTS - Parallel Computing Client Server (CTS/PCCS)\n" +
                       $"Version {versionStr}\n\n" +
                       "University of Fribourg\n" +
                       "Geosciences Department\n\n" +
@@ -600,14 +558,15 @@ namespace ParallelComputingClientserver
                 Y = 1,
                 Width = Dim.Fill() - 2,
                 Height = Dim.Fill() - 4,
-                Text = "Parallel Computing Client Server\n\n" +
+                Text = "Parallel Computing Client Server (CTS/PCCS)\n\n" +
                       "F1: Show this help screen\n" +
                       "F2: Configure server settings\n" +
                       "F3: View connected Clients\n" +
+                      "F4: Show about information\n" +
                       "F10: Exit the application\n\n" +
-                      "This server manages a network of compute Clients that can\n" +
+                      "This server manages a network of compute nodes that can\n" +
                       "perform parallel computations using ILGPU.\n\n" +
-                      "The server broadcasts a beacon to help Clients discover it\n" +
+                      "The server broadcasts a beacon to help nodes discover it\n" +
                       "and coordinates computation tasks across all Clients."
             };
 

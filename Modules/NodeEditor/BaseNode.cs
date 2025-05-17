@@ -9,6 +9,7 @@ namespace CTS.NodeEditor
     // Base node class
     public abstract class BaseNode
     {
+        private Dictionary<string, object> outputData = new Dictionary<string, object>();
         public Point Position { get; set; }
         public Size Size { get; set; }
         public Color Color { get; set; }
@@ -44,7 +45,34 @@ namespace CTS.NodeEditor
         {
             // To be implemented in derived classes
         }
+        public void SetOutputData(string pinName, object data)
+        {
+            outputData[pinName] = data;
+        }
 
+        public object GetOutputData(string pinName)
+        {
+            if (outputData.ContainsKey(pinName))
+                return outputData[pinName];
+            return null;
+        }
+        public object GetInputData(string pinName)
+        {
+            // Find the input pin with the given name
+            var pin = inputs.FirstOrDefault(p => p.Name == pinName);
+            if (pin == null)
+                return null;
+
+            // Find connections to this input pin
+            var incomingConnections = GetIncomingConnections(pin);
+            if (!incomingConnections.Any())
+                return null;
+
+            // Get data from the first connected output pin
+            // Note: Multiple connections to one input are possible, but we'll use the first one by default
+            var connection = incomingConnections.First();
+            return connection.From.Node.GetOutputData(connection.From.Name);
+        }
         protected NodePin AddInputPin(string name, Color color)
         {
             var pin = new NodePin(this, false, name, color);
@@ -52,7 +80,13 @@ namespace CTS.NodeEditor
             inputs.Add(pin);
             return pin;
         }
-
+        private IEnumerable<NodeConnection> GetIncomingConnections(NodePin pin)
+        {
+            // Use NodeEditorForm.Instance instead of NodeEditor.Instance
+            if (NodeEditorForm.Instance != null)
+                return NodeEditorForm.Instance.Connections.Where(c => c.To == pin);
+            return Enumerable.Empty<NodeConnection>();
+        }
         protected NodePin AddOutputPin(string name, Color color)
         {
             var pin = new NodePin(this, true, name, color);

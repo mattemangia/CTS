@@ -21,6 +21,8 @@ namespace CTS.SharpDXIntegration
         private int pendingQualityIndex;
         private bool thresholdUpdatePending = false;
         private bool isThresholdUpdating = false;
+        private TrackBar trkGlobalOpacity;
+        private Label lblGlobalOpacity;
 
         private TabPage tabClippingPlane;
         private CheckBox chkEnableClippingPlane;
@@ -912,7 +914,62 @@ namespace CTS.SharpDXIntegration
                 opacityUpdateTimer.Start();
             };
             panel.Controls.Add(trkOpacity);
+            lblGlobalOpacity = new Label();
+            lblGlobalOpacity.Text = "Global Opacity (All Visible Materials):";
+            lblGlobalOpacity.AutoSize = true;
+            lblGlobalOpacity.Margin = new Padding(0, 20, 0, 5);
+            panel.Controls.Add(lblGlobalOpacity);
 
+            trkGlobalOpacity = new TrackBar();
+            trkGlobalOpacity.Minimum = 0;
+            trkGlobalOpacity.Maximum = 100;
+            trkGlobalOpacity.Value = 100;
+            trkGlobalOpacity.TickFrequency = 10;
+            trkGlobalOpacity.Width = 330;
+            trkGlobalOpacity.Scroll += (s, e) =>
+            {
+                float globalAlpha = trkGlobalOpacity.Value / 100f;
+
+                // Update all checked (visible) materials
+                for (int i = 0; i < lstMaterials.Items.Count; i++)
+                {
+                    if (lstMaterials.GetItemChecked(i))
+                    {
+                        Material mat = (Material)lstMaterials.Items[i];
+                        viewerForm.SetMaterialOpacity(mat.ID, globalAlpha);
+                    }
+                }
+
+                // Update status
+                lblStatus.Text = $"Global opacity set to {globalAlpha:P0}";
+            };
+            panel.Controls.Add(trkGlobalOpacity);
+            Label lblGlobalOpacityDesc = new Label();
+            lblGlobalOpacityDesc.Text = "Adjusts opacity for all visible materials at once.";
+            lblGlobalOpacityDesc.AutoSize = true;
+            lblGlobalOpacityDesc.Font = new Font(lblGlobalOpacityDesc.Font, FontStyle.Italic);
+            lblGlobalOpacityDesc.ForeColor = Color.DarkGray;
+            lblGlobalOpacityDesc.Margin = new Padding(0, 0, 0, 10);
+            panel.Controls.Add(lblGlobalOpacityDesc);
+            Button btnResetOpacities = new Button();
+            btnResetOpacities.Text = "Reset All Opacities to 100%";
+            btnResetOpacities.Width = 200;
+            btnResetOpacities.Click += (s, e) =>
+            {
+                // Reset the global slider
+                trkGlobalOpacity.Value = 100;
+
+                // Reset opacity for all materials
+                for (int i = 0; i < lstMaterials.Items.Count; i++)
+                {
+                    Material mat = (Material)lstMaterials.Items[i];
+                    viewerForm.SetMaterialOpacity(mat.ID, 1.0f);
+                }
+
+                // Update status
+                lblStatus.Text = "All opacities reset to 100%";
+            };
+            panel.Controls.Add(btnResetOpacities);
             tabMaterials.Controls.Add(panel);
         }
 

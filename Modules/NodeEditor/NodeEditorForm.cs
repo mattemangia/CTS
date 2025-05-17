@@ -29,10 +29,13 @@ namespace CTS.NodeEditor
         private bool isMultiSelecting;
         private Point selectionStart;
         private Rectangle selectionRectangle;
-
+        private List<NodeConnection> selectedConnections = new List<NodeConnection>();
         // For copy/paste
         private List<BaseNode> copiedNodes;
         private List<NodeConnection> copiedConnections;
+        public static NodeEditorForm Instance { get; private set; }
+
+        public IEnumerable<NodeConnection> Connections => connections.AsReadOnly();
 
         public NodeEditorForm(MainForm mainForm)
         {
@@ -42,6 +45,10 @@ namespace CTS.NodeEditor
             selectedNodes = new List<BaseNode>();
             copiedNodes = new List<BaseNode>();
             copiedConnections = new List<NodeConnection>();
+            selectedConnections = new List<NodeConnection>(); 
+
+            // Set the static instance
+            NodeEditorForm.Instance = this;
 
             InitializeComponent();
             InitializeMenuBar();
@@ -159,7 +166,14 @@ namespace CTS.NodeEditor
             {
                 case Keys.Delete:
                 case Keys.Back:
-                    DeleteSelectedNodes();
+                    if (selectedConnections.Count > 0)
+                    {
+                        DeleteSelectedConnections();
+                    }
+                    else
+                    {
+                        DeleteSelectedNodes();
+                    }
                     e.Handled = true;
                     break;
 
@@ -196,7 +210,6 @@ namespace CTS.NodeEditor
                     break;
             }
         }
-
         private void InitializeMenuBar()
         {
             var menuStrip = CreateMenuBar();
@@ -334,7 +347,6 @@ namespace CTS.NodeEditor
         }
 
         #region Canvas Event Handlers
-
         private void Canvas_MouseDown(object sender, MouseEventArgs e)
         {
             // Check if clicking on a node or pin
@@ -387,12 +399,52 @@ namespace CTS.NodeEditor
                         nodes.Add(selected);
                     }
 
+                    // Clear connection selection when selecting nodes
+                    selectedConnections.Clear();
+
                     // Update properties panel
                     UpdatePropertiesPanel(node);
                     canvasPanel.Invalidate();
                     return;
                 }
             }
+
+            // Check if clicking on a connection
+            foreach (var connection in connections)
+            {
+                if (IsMouseOverConnection(e.Location, connection))
+                {
+                    if (Control.ModifierKeys == Keys.Control)
+                    {
+                        // Toggle selection with Ctrl
+                        if (selectedConnections.Contains(connection))
+                            selectedConnections.Remove(connection);
+                        else
+                            selectedConnections.Add(connection);
+                    }
+                    else
+                    {
+                        // Single selection
+                        selectedConnections.Clear();
+                        selectedConnections.Add(connection);
+                    }
+
+                    // Clear node selection when selecting connections
+                    if (Control.ModifierKeys != Keys.Control)
+                    {
+                        selectedNodes.Clear();
+                        selectedNode = null;
+                        UpdatePropertiesPanel(null);
+                    }
+
+                    canvasPanel.Invalidate();
+                    return;
+                }
+            }
+
+            // If we got here, we didn't click on a node or connection
+            // Clear connection selection
+            selectedConnections.Clear();
 
             // Start rectangle selection if no node clicked
             if (Control.ModifierKeys != Keys.Control)
@@ -409,7 +461,6 @@ namespace CTS.NodeEditor
             UpdatePropertiesPanel(null);
             canvasPanel.Invalidate();
         }
-
         private void Canvas_MouseMove(object sender, MouseEventArgs e)
         {
             if (isDragging && selectedNodes.Count > 0)
@@ -499,7 +550,9 @@ namespace CTS.NodeEditor
             // Can't connect output to output or input to input
             if (from.IsOutput == to.IsOutput) return false;
 
-            // Check if connection already exists
+            // Check if this exact connection already exists
+            // Note: One output pin CAN connect to multiple input pins on different nodes
+            // And one input pin CAN receive from multiple output pins (if needed)
             if (connections.Any(c => c.From == from && c.To == to))
                 return false;
 
@@ -621,14 +674,15 @@ namespace CTS.NodeEditor
 
         private void DrawConnection(Graphics g, NodeConnection connection)
         {
-            using (var pen = new Pen(Color.White, 2))
+            using (var pen = new Pen(selectedConnections.Contains(connection) ? Color.Yellow : Color.White,
+                                   selectedConnections.Contains(connection) ? 3 : 2))
             {
                 var start = new Point(
-                    connection.From.Bounds.X + connection.From.Bounds.Width / 2,
-                    connection.From.Bounds.Y + connection.From.Bounds.Height / 2);
+                    connection.From.AbsolutePosition.X,
+                    connection.From.AbsolutePosition.Y);
                 var end = new Point(
-                    connection.To.Bounds.X + connection.To.Bounds.Width / 2,
-                    connection.To.Bounds.Y + connection.To.Bounds.Height / 2);
+                    connection.To.AbsolutePosition.X,
+                    connection.To.AbsolutePosition.Y);
 
                 // Draw Bezier curve for better aesthetics
                 var cp1 = new Point(start.X + 50, start.Y);
@@ -656,7 +710,53 @@ namespace CTS.NodeEditor
         #endregion
 
         #region Edit Operations
+        private bool IsMouseOverConnection(Point mousePos, NodeConnection connection)
+        {
+            var start = new Point(
+                connection.From.AbsolutePosition.X,
+                connection.From.AbsolutePosition.Y);
+            var end = new Point(
+                connection.To.AbsolutePosition.X,
+                connection.To.AbsolutePosition.Y);
 
+         
+            return DistanceToLine(mousePos, start, end) < 5; // 5 pixels tolerance
+        }
+        private float DistanceToLine(Point point, Point lineStart, Point lineEnd)
+        {
+            float lineLength = (float)Math.Sqrt(
+                Math.Pow(lineEnd.X - lineStart.X, 2) +
+                Math.Pow(lineEnd.Y - lineStart.Y, 2));
+
+            if (lineLength == 0)
+                return float.MaxValue;
+
+            // Calculate perpendicular distance from point to line using vector cross product
+            float distance = Math.Abs(
+                (point.Y - lineStart.Y) * (lineEnd.X - lineStart.X) -
+                (point.X - lineStart.X) * (lineEnd.Y - lineStart.Y)) / lineLength;
+
+            // Also check if the point is near the line segment, not just the infinite line
+            float dot1 = (point.X - lineStart.X) * (lineEnd.X - lineStart.X) +
+                        (point.Y - lineStart.Y) * (lineEnd.Y - lineStart.Y);
+            float dot2 = (point.X - lineEnd.X) * (lineStart.X - lineEnd.X) +
+                        (point.Y - lineEnd.Y) * (lineStart.Y - lineEnd.Y);
+
+            // If either dot product is negative, point is outside the line segment
+            if (dot1 < 0 || dot2 < 0)
+            {
+                // Return distance to nearest endpoint instead
+                float distToStart = (float)Math.Sqrt(
+                    Math.Pow(point.X - lineStart.X, 2) +
+                    Math.Pow(point.Y - lineStart.Y, 2));
+                float distToEnd = (float)Math.Sqrt(
+                    Math.Pow(point.X - lineEnd.X, 2) +
+                    Math.Pow(point.Y - lineEnd.Y, 2));
+                return Math.Min(distToStart, distToEnd);
+            }
+
+            return distance;
+        }
         private void DeleteSelectedNodes()
         {
             if (selectedNodes.Count == 0) return;
@@ -805,7 +905,6 @@ namespace CTS.NodeEditor
                 propertiesPanel.Controls.Add(propertyPanel);
             }
         }
-
         private MenuStrip CreateMenuBar()
         {
             var menuStrip = new MenuStrip();
@@ -854,10 +953,18 @@ namespace CTS.NodeEditor
             // Edit menu
             var editMenu = new ToolStripMenuItem("Edit");
 
-            var deleteMenuItem = new ToolStripMenuItem("Delete", null, (s, e) => DeleteSelectedNodes())
+            var deleteMenuItem = new ToolStripMenuItem("Delete Selected", null, (s, e) =>
+            {
+                if (selectedConnections.Count > 0)
+                    DeleteSelectedConnections();
+                else
+                    DeleteSelectedNodes();
+            })
             {
                 ShortcutKeys = Keys.Delete
             };
+
+            var deleteConnectionMenuItem = new ToolStripMenuItem("Delete Connection", null, (s, e) => DeleteSelectedConnections());
 
             var copyMenuItem = new ToolStripMenuItem("Copy", null, (s, e) => CopySelectedNodes())
             {
@@ -879,19 +986,19 @@ namespace CTS.NodeEditor
                 ShortcutKeys = Keys.Control | Keys.A
             };
 
-            var clearConnectionsMenuItem = new ToolStripMenuItem("Clear Connections");
+            var clearConnectionsMenuItem = new ToolStripMenuItem("Clear All Connections");
             clearConnectionsMenuItem.Click += (s, e) => ClearConnections();
 
-            var clearAllMenuItem = new ToolStripMenuItem("Clear All");
+            var clearAllMenuItem = new ToolStripMenuItem("Clear All Nodes");
             clearAllMenuItem.Click += (s, e) => ClearAllNodes();
 
             editMenu.DropDownItems.AddRange(new ToolStripItem[]
             {
-                cutMenuItem, copyMenuItem, pasteMenuItem,
-                new ToolStripSeparator(),
-                selectAllMenuItem, deleteMenuItem,
-                new ToolStripSeparator(),
-                clearConnectionsMenuItem, clearAllMenuItem
+        cutMenuItem, copyMenuItem, pasteMenuItem,
+        new ToolStripSeparator(),
+        selectAllMenuItem, deleteMenuItem, deleteConnectionMenuItem,
+        new ToolStripSeparator(),
+        clearConnectionsMenuItem, clearAllMenuItem
             });
 
             // Execute menu
@@ -908,7 +1015,6 @@ namespace CTS.NodeEditor
 
             return menuStrip;
         }
-
         private void NewGraph()
         {
             nodes.Clear();
@@ -1036,6 +1142,19 @@ namespace CTS.NodeEditor
                 }
             }
         }
+        private void DeleteSelectedConnections()
+        {
+            if (selectedConnections.Count == 0) return;
+
+            // Use ToList() to avoid modifying the collection during enumeration
+            foreach (var connection in selectedConnections.ToList())
+            {
+                connections.Remove(connection);
+            }
+
+            selectedConnections.Clear();
+            canvasPanel.Invalidate();
+        }
 
         private void ExecuteGraph()
         {
@@ -1049,6 +1168,12 @@ namespace CTS.NodeEditor
                     MessageBox.Show("Graph validation failed. Please check for errors.",
                                    "Validation Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
+                }
+
+                // Clear previous execution data
+                foreach (var node in nodes)
+                {
+                    ClearNodeOutputs(node);
                 }
 
                 // Get execution order (topological sort)
@@ -1067,12 +1192,16 @@ namespace CTS.NodeEditor
                     try
                     {
                         Logger.Log($"[NodeEditor] Executing {node.GetType().Name}");
-                        node.Execute();
 
                         // Highlight executing node
                         HighlightExecutingNode(node);
                         Application.DoEvents();
-                        System.Threading.Thread.Sleep(100); // Small delay to show execution
+
+                        // Execute node
+                        node.Execute();
+
+                        // Small delay to show execution
+                        System.Threading.Thread.Sleep(100);
                     }
                     catch (Exception ex)
                     {
@@ -1098,7 +1227,17 @@ namespace CTS.NodeEditor
                                "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
-
+        private void ClearNodeOutputs(BaseNode node)
+        {
+            // Use reflection to clear the outputData dictionary for all nodes
+            var field = typeof(BaseNode).GetField("outputData", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            if (field != null)
+            {
+                var outputData = field.GetValue(node) as Dictionary<string, object>;
+                if (outputData != null)
+                    outputData.Clear();
+            }
+        }
         private bool ValidateGraph()
         {
             Logger.Log("[NodeEditor] Validating graph");

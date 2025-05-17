@@ -2148,13 +2148,10 @@ namespace CTS
                     {
                         case ViewType.XY:
                             return CreateEmptyBitmap(mainForm.GetWidth(), mainForm.GetHeight());
-
                         case ViewType.XZ:
                             return CreateEmptyBitmap(mainForm.GetWidth(), mainForm.GetDepth());
-
                         case ViewType.YZ:
                             return CreateEmptyBitmap(mainForm.GetHeight(), mainForm.GetDepth());
-
                         default:
                             return new Bitmap(1, 1);
                     }
@@ -2169,19 +2166,16 @@ namespace CTS
                         sourceHeight = result.LabelVolume.GetLength(1);
                         sliceIndex = Math.Min(currentXYSlice, result.LabelVolume.GetLength(2) - 1);
                         break;
-
                     case ViewType.XZ:
                         sourceWidth = result.LabelVolume.GetLength(0);
                         sourceHeight = result.LabelVolume.GetLength(2);
                         sliceIndex = Math.Min(currentXZSlice, result.LabelVolume.GetLength(1) - 1);
                         break;
-
                     case ViewType.YZ:
                         sourceWidth = result.LabelVolume.GetLength(1);
                         sourceHeight = result.LabelVolume.GetLength(2);
                         sliceIndex = Math.Min(currentYZSlice, result.LabelVolume.GetLength(0) - 1);
                         break;
-
                     default:
                         return new Bitmap(1, 1);
                 }
@@ -2222,24 +2216,28 @@ namespace CTS
 
                     // Use a different approach to reduce memory pressure
                     const int maxRowsPerBatch = 50;
-                    int rowsPerBatch = Math.Min(maxRowsPerBatch, targetHeight);
-                    byte[] rgbValues = new byte[stride * rowsPerBatch];  // Process in batches
 
                     // Process the bitmap in batches of rows
-                    for (int yStart = 0; yStart < targetHeight; yStart += rowsPerBatch)
+                    for (int yStart = 0; yStart < targetHeight; yStart += maxRowsPerBatch)
                     {
                         if (token.IsCancellationRequested)
                             break;
 
-                        int rowsInBatch = Math.Min(rowsPerBatch, targetHeight - yStart);
-                        Array.Clear(rgbValues, 0, stride * rowsInBatch);  // Clear the buffer
+                        // FIXED: Calculate correct number of rows for this batch
+                        int rowsInBatch = Math.Min(maxRowsPerBatch, targetHeight - yStart);
+
+                        // Allocate a buffer just large enough for this batch
+                        byte[] rgbValues = new byte[stride * rowsInBatch];
+
+                        // Clear the buffer
+                        Array.Clear(rgbValues, 0, rgbValues.Length);
 
                         // Fill data for this batch of rows
                         FillPixelDataScaled(rgbValues, stride, targetWidth, rowsInBatch, yStart,
                                            viewType, sliceIndex, sourceWidth, sourceHeight, scaleFactor);
 
                         // Copy this batch to the bitmap
-                        Marshal.Copy(rgbValues, 0, IntPtr.Add(ptr, yStart * stride), stride * rowsInBatch);
+                        Marshal.Copy(rgbValues, 0, IntPtr.Add(ptr, yStart * stride), rgbValues.Length);
                     }
                 }
                 finally
@@ -2256,7 +2254,6 @@ namespace CTS
                 return CreateErrorBitmap($"Rendering error: {ex.Message}");
             }
         }
-
         private Bitmap CreateErrorBitmap(string errorMessage)
         {
             Bitmap bmp = new Bitmap(400, 100);
@@ -2272,7 +2269,7 @@ namespace CTS
         }
 
         private void FillPixelDataScaled(byte[] rgbValues, int stride, int targetWidth, int rowsInBatch, int yStart,
-                                ViewType viewType, int sliceIndex, int sourceWidth, int sourceHeight, float scaleFactor)
+                            ViewType viewType, int sliceIndex, int sourceWidth, int sourceHeight, float scaleFactor)
         {
             // Define constants for BGRA byte order
             const int bytesPerPixel = 4;
@@ -2290,6 +2287,9 @@ namespace CTS
             {
                 selectedParticleIds.Add(highlightedParticleId);
             }
+
+            // Calculate maximum buffer index to ensure we never exceed bounds
+            int maxBufferIndex = rgbValues.Length - bytesPerPixel;
 
             // Process each pixel
             for (int y = 0; y < rowsInBatch; y++)
@@ -2311,6 +2311,9 @@ namespace CTS
                     // Calculate the index in the byte array
                     int index = y * stride + targetX * bytesPerPixel;
 
+                    // CRITICAL SAFETY CHECK: Don't write beyond buffer length
+                    if (index > maxBufferIndex) continue;
+
                     // Default to black
                     byte r = 0, g = 0, b = 0, a = 255;
 
@@ -2323,9 +2326,9 @@ namespace CTS
                         switch (viewType)
                         {
                             case ViewType.XY:
-                                if (sourceX < result.LabelVolume.GetLength(0) &&
-                                    sourceY < result.LabelVolume.GetLength(1) &&
-                                    sliceIndex < result.LabelVolume.GetLength(2))
+                                if (sourceX >= 0 && sourceX < result.LabelVolume.GetLength(0) &&
+                                    sourceY >= 0 && sourceY < result.LabelVolume.GetLength(1) &&
+                                    sliceIndex >= 0 && sliceIndex < result.LabelVolume.GetLength(2))
                                 {
                                     label = result.LabelVolume[sourceX, sourceY, sliceIndex];
                                     if (volumeData != null && sourceX < volumeData.Width &&
@@ -2337,9 +2340,9 @@ namespace CTS
                                 break;
 
                             case ViewType.XZ:
-                                if (sourceX < result.LabelVolume.GetLength(0) &&
-                                    sliceIndex < result.LabelVolume.GetLength(1) &&
-                                    sourceY < result.LabelVolume.GetLength(2))
+                                if (sourceX >= 0 && sourceX < result.LabelVolume.GetLength(0) &&
+                                    sliceIndex >= 0 && sliceIndex < result.LabelVolume.GetLength(1) &&
+                                    sourceY >= 0 && sourceY < result.LabelVolume.GetLength(2))
                                 {
                                     label = result.LabelVolume[sourceX, sliceIndex, sourceY];
                                     if (volumeData != null && sourceX < volumeData.Width &&
@@ -2351,9 +2354,9 @@ namespace CTS
                                 break;
 
                             case ViewType.YZ:
-                                if (sliceIndex < result.LabelVolume.GetLength(0) &&
-                                    sourceX < result.LabelVolume.GetLength(1) &&
-                                    sourceY < result.LabelVolume.GetLength(2))
+                                if (sliceIndex >= 0 && sliceIndex < result.LabelVolume.GetLength(0) &&
+                                    sourceX >= 0 && sourceX < result.LabelVolume.GetLength(1) &&
+                                    sourceY >= 0 && sourceY < result.LabelVolume.GetLength(2))
                                 {
                                     label = result.LabelVolume[sliceIndex, sourceX, sourceY];
                                     if (volumeData != null && sliceIndex < volumeData.Width &&
@@ -2367,7 +2370,7 @@ namespace CTS
                     }
                     catch (IndexOutOfRangeException)
                     {
-                        // Silently handle any array index errors by setting label to 0
+                        // Silently catch index errors and treat as background pixel
                         label = 0;
                         grayValue = 0;
                     }
@@ -2417,7 +2420,6 @@ namespace CTS
                 }
             }
         }
-
         private void FillPixelDataOptimized(byte[] rgbValues, int stride, int width, int height,
                                            ViewType viewType, int sliceIndex, float scaleX, float scaleY,
                                            CancellationToken token)
@@ -3298,19 +3300,25 @@ namespace CTS
                     // Apply the label volume to the main view
                     progressForm.UpdateProgress(0, endSlice - startSlice + 1);
 
+                    // Get dimensions using LabelVolumeHelper
+                    int labelWidth = LabelVolumeHelper.GetWidth(result.LabelVolume);
+                    int labelHeight = LabelVolumeHelper.GetHeight(result.LabelVolume);
+                    int labelDepth = LabelVolumeHelper.GetDepth(result.LabelVolume);
+
                     for (int z = startSlice; z <= endSlice; z++)
                     {
                         // For 3D view, check if the z-index is valid for the label volume
-                        if (result.Is3D && z >= result.LabelVolume.GetLength(2))
+                        if (result.Is3D && z >= labelDepth)
                             continue;
 
                         int sliceZ = result.Is3D ? z : 0; // For 2D, we have just one slice at index 0
 
-                        for (int y = 0; y < mainForm.GetHeight() && y < result.LabelVolume.GetLength(1); y++)
+                        for (int y = 0; y < mainForm.GetHeight() && y < labelHeight; y++)
                         {
-                            for (int x = 0; x < mainForm.GetWidth() && x < result.LabelVolume.GetLength(0); x++)
+                            for (int x = 0; x < mainForm.GetWidth() && x < labelWidth; x++)
                             {
-                                int label = result.LabelVolume[x, y, sliceZ];
+                                // Use LabelVolumeHelper instead of direct indexing
+                                int label = LabelVolumeHelper.GetLabel(result.LabelVolume, x, y, sliceZ);
 
                                 if (label > 0)
                                 {
@@ -3334,6 +3342,13 @@ namespace CTS
                     // Update the main view
                     mainForm.RenderViews();
                     mainForm.SaveLabelsChk();
+
+                    // Refresh material list in the UI - THIS IS THE KEY ADDITION
+                    var controlForm = mainForm.Controls.OfType<ControlForm>().FirstOrDefault();
+                    if (controlForm != null)
+                    {
+                        controlForm.RefreshMaterialList();
+                    }
                 }
 
                 statusLabel.Text = "Particles exported to main view";
@@ -3347,7 +3362,6 @@ namespace CTS
                 Logger.Log($"[ParticleSeparatorForm] Export error: {ex.Message}\n{ex.StackTrace}");
             }
         }
-
         private static Color HsvToRgb(double h, double s, double v)
         {
             int hi = (int)(Math.Floor(h / 60)) % 6;

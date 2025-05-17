@@ -3,20 +3,21 @@ using ILGPU.Runtime;
 using ILGPU.Runtime.CPU;
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Collections.Concurrent;
+using static CTS.ParticleSeparator;
 
 namespace CTS
 {
     public class ParticleSeparator : IDisposable
     {
-        // Constants for array handling
-        private const int MAX_PARTICLES = 50000000; // Adjusted for .NET 4.8.1 limits
+        // Constants for array and processing handling
         private const int CHUNK_SIZE = 128; // Optimized chunk size for processing
         private const int MAX_ITERATIONS = 1000; // Maximum iterations for label propagation
+        private const int PARTICLE_BATCH_SIZE = 100000; // Process particles in batches
 
         private MainForm mainForm;
         private Material selectedMaterial;
@@ -73,13 +74,38 @@ namespace CTS
             }
         }
 
-        // Result of separation
+        // Optimized result class with on-demand particle analysis
         public class SeparationResult
         {
             public int[,,] LabelVolume { get; set; }
-            public List<Particle> Particles { get; set; }
+            private List<Particle> _particles;
+            public List<Particle> Particles
+            {
+                get
+                {
+                    // If particles haven't been analyzed yet, analyze them now
+                    if (_particles == null && LabelVolume != null && _analyzeParticlesFunc != null)
+                    {
+                        _particles = _analyzeParticlesFunc();
+                    }
+                    return _particles;
+                }
+                set
+                {
+                    _particles = value;
+                }
+            }
             public int CurrentSlice { get; set; }
             public bool Is3D { get; set; }
+
+            // Function to analyze particles on demand
+            private Func<List<Particle>> _analyzeParticlesFunc;
+
+            // Setup lazy loading of particles
+            public void SetParticleAnalysisFunction(Func<List<Particle>> analysisFunc)
+            {
+                _analyzeParticlesFunc = analysisFunc;
+            }
         }
 
         // Constructor
@@ -156,7 +182,6 @@ namespace CTS
                 return Separate2D(currentSlice, conservative, progress, cancellationToken);
             }
         }
-
         private SeparationResult Separate2D(int slice, bool conservative, IProgress<int> progress, CancellationToken cancellationToken)
         {
             int width = mainForm.GetWidth();
@@ -199,109 +224,6 @@ namespace CTS
             // Check for cancellation
             cancellationToken.ThrowIfCancellationRequested();
 
-            // Create particles
-            progress?.Report(60);
-
-            // Use concurrent collections for thread safety
-            ConcurrentDictionary<int, int> voxelCounts = new ConcurrentDictionary<int, int>();
-            ConcurrentDictionary<int, (int sumX, int sumY)> centers = new ConcurrentDictionary<int, (int, int)>();
-            ConcurrentDictionary<int, (int minX, int minY, int maxX, int maxY)> bounds =
-                new ConcurrentDictionary<int, (int, int, int, int)>();
-
-            // First pass: find all unique labels (in parallel)
-            var uniqueLabels = new ConcurrentBag<int>();
-
-            Parallel.For(0, height, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, y =>
-            {
-                for (int x = 0; x < width; x++)
-                {
-                    int label = labeledSlice[x, y];
-                    if (label > 0)
-                    {
-                        // Add to unique labels if not already added
-                        if (!voxelCounts.ContainsKey(label))
-                        {
-                            voxelCounts.TryAdd(label, 0);
-                            centers.TryAdd(label, (0, 0));
-                            bounds.TryAdd(label, (x, y, x, y));
-                            uniqueLabels.Add(label);
-                        }
-                    }
-                }
-            });
-
-            // Count voxels and compute centers (in parallel)
-            Parallel.ForEach(uniqueLabels, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, label =>
-            {
-                int count = 0;
-                int sumX = 0;
-                int sumY = 0;
-                int minX = int.MaxValue;
-                int minY = int.MaxValue;
-                int maxX = int.MinValue;
-                int maxY = int.MinValue;
-
-                for (int y = 0; y < height; y++)
-                {
-                    for (int x = 0; x < width; x++)
-                    {
-                        if (labeledSlice[x, y] == label)
-                        {
-                            count++;
-                            sumX += x;
-                            sumY += y;
-                            minX = Math.Min(minX, x);
-                            minY = Math.Min(minY, y);
-                            maxX = Math.Max(maxX, x);
-                            maxY = Math.Max(maxY, y);
-                        }
-                    }
-                }
-
-                voxelCounts[label] = count;
-                centers[label] = (sumX, sumY);
-                bounds[label] = (minX, minY, maxX, maxY);
-            });
-
-            // Create the particles from the collected data
-            List<Particle> particles = new List<Particle>();
-
-            foreach (var label in uniqueLabels)
-            {
-                int voxelCount = voxelCounts[label];
-                var center = centers[label];
-                var bound = bounds[label];
-
-                // Filter out small particles if conservative approach is selected
-                if (conservative && voxelCount < 10)
-                    continue;
-
-                Particle particle = new Particle
-                {
-                    Id = label,
-                    VoxelCount = voxelCount,
-                    VolumeMicrometers = voxelCount * mainForm.pixelSize * mainForm.pixelSize * 1e12,
-                    VolumeMillimeters = voxelCount * mainForm.pixelSize * mainForm.pixelSize * 1e6,
-                    Center = new Point3D
-                    {
-                        X = center.sumX / voxelCount,
-                        Y = center.sumY / voxelCount,
-                        Z = slice
-                    },
-                    Bounds = new BoundingBox
-                    {
-                        MinX = bound.minX,
-                        MinY = bound.minY,
-                        MinZ = slice,
-                        MaxX = bound.maxX,
-                        MaxY = bound.maxY,
-                        MaxZ = slice
-                    }
-                };
-
-                particles.Add(particle);
-            }
-
             // Create a 3D volume for consistent interface
             int[,,] labelVolume = new int[width, height, 1];
 
@@ -313,17 +235,131 @@ namespace CTS
                 }
             });
 
-            progress?.Report(100);
+            progress?.Report(60);
 
-            return new SeparationResult
+            // Create a function for deferred particle analysis
+            Func<List<Particle>> analyzeParticlesFunc = () =>
+            {
+                Logger.Log("[ParticleSeparator] Analyzing 2D particles on demand");
+
+                // Use concurrent collections for thread safety
+                ConcurrentDictionary<int, int> voxelCounts = new ConcurrentDictionary<int, int>();
+                ConcurrentDictionary<int, (int sumX, int sumY)> centers = new ConcurrentDictionary<int, (int, int)>();
+                ConcurrentDictionary<int, (int minX, int minY, int maxX, int maxY)> bounds =
+                    new ConcurrentDictionary<int, (int, int, int, int)>();
+
+                // First pass: find all unique labels (in parallel)
+                var uniqueLabels = new ConcurrentBag<int>();
+
+                Parallel.For(0, height, new ParallelOptions { MaxDegreeOfParallelism = maxThreads }, y =>
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        int label = labeledSlice[x, y];
+                        if (label > 0)
+                        {
+                            // Add to unique labels if not already added
+                            if (!voxelCounts.ContainsKey(label))
+                            {
+                                voxelCounts.TryAdd(label, 0);
+                                centers.TryAdd(label, (0, 0));
+                                bounds.TryAdd(label, (x, y, x, y));
+                                uniqueLabels.Add(label);
+                            }
+                        }
+                    }
+                });
+
+                // Count voxels and compute centers (in parallel)
+                Parallel.ForEach(uniqueLabels, new ParallelOptions { MaxDegreeOfParallelism = maxThreads }, label =>
+                {
+                    int count = 0;
+                    int sumX = 0;
+                    int sumY = 0;
+                    int minX = int.MaxValue;
+                    int minY = int.MaxValue;
+                    int maxX = int.MinValue;
+                    int maxY = int.MinValue;
+
+                    for (int y = 0; y < height; y++)
+                    {
+                        for (int x = 0; x < width; x++)
+                        {
+                            if (labeledSlice[x, y] == label)
+                            {
+                                count++;
+                                sumX += x;
+                                sumY += y;
+                                minX = Math.Min(minX, x);
+                                minY = Math.Min(minY, y);
+                                maxX = Math.Max(maxX, x);
+                                maxY = Math.Max(maxY, y);
+                            }
+                        }
+                    }
+
+                    voxelCounts[label] = count;
+                    centers[label] = (sumX, sumY);
+                    bounds[label] = (minX, minY, maxX, maxY);
+                });
+
+                // Create the particles from the collected data
+                List<Particle> particles = new List<Particle>();
+
+                foreach (var label in uniqueLabels)
+                {
+                    int voxelCount = voxelCounts[label];
+                    var center = centers[label];
+                    var bound = bounds[label];
+
+                    // Filter out small particles if conservative approach is selected
+                    if (conservative && voxelCount < 10)
+                        continue;
+
+                    Particle particle = new Particle
+                    {
+                        Id = label,
+                        VoxelCount = voxelCount,
+                        VolumeMicrometers = voxelCount * mainForm.pixelSize * mainForm.pixelSize * 1e12,
+                        VolumeMillimeters = voxelCount * mainForm.pixelSize * mainForm.pixelSize * 1e6,
+                        Center = new Point3D
+                        {
+                            X = center.sumX / voxelCount,
+                            Y = center.sumY / voxelCount,
+                            Z = slice
+                        },
+                        Bounds = new BoundingBox
+                        {
+                            MinX = bound.minX,
+                            MinY = bound.minY,
+                            MinZ = slice,
+                            MaxX = bound.maxX,
+                            MaxY = bound.maxY,
+                            MaxZ = slice
+                        }
+                    };
+
+                    particles.Add(particle);
+                }
+
+                Logger.Log($"[ParticleSeparator] 2D particle analysis completed: {particles.Count} particles");
+                return particles;
+            };
+
+            var result = new SeparationResult
             {
                 LabelVolume = labelVolume,
-                Particles = particles,
+                Particles = null, // Will be computed on demand
                 CurrentSlice = 0,
                 Is3D = false
             };
-        }
 
+            // Set up deferred processing
+            result.SetParticleAnalysisFunction(analyzeParticlesFunc);
+
+            progress?.Report(100);
+            return result;
+        }
         private SeparationResult Separate3D(bool conservative, IProgress<int> progress, CancellationToken cancellationToken)
         {
             int width = mainForm.GetWidth();
@@ -418,180 +454,181 @@ namespace CTS
                 // Check for cancellation
                 cancellationToken.ThrowIfCancellationRequested();
 
-                // Count particles and analyze using parallel operations
+                // Create result with lazy particle analysis
                 progress?.Report(75);
 
-                // First pass: find unique labels to avoid repeatedly scanning the whole volume
-                ConcurrentBag<int> uniqueLabels = new ConcurrentBag<int>();
-
-                Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
+                // Create a function for deferred particle analysis
+                Func<List<Particle>> analyzeParticlesFunc = () =>
                 {
-                    var localLabels = new HashSet<int>();
+                    Logger.Log("[ParticleSeparator] Starting on-demand 3D particle analysis");
+                    List<Particle> particles = new List<Particle>();
 
-                    for (int y = 0; y < height; y++)
+                    try
                     {
-                        for (int x = 0; x < width; x++)
+                        // First pass: find unique labels to avoid repeatedly scanning the whole volume
+                        ConcurrentDictionary<int, byte> uniqueLabelsDict = new ConcurrentDictionary<int, byte>();
+
+                        // Use LabelVolumeHelper instead of GetLength
+                        int labelWidth = LabelVolumeHelper.GetWidth(labeledVolume);
+                        int labelHeight = LabelVolumeHelper.GetHeight(labeledVolume);
+                        int labelDepth = LabelVolumeHelper.GetDepth(labeledVolume);
+
+                        Parallel.For(0, labelDepth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads }, z =>
                         {
-                            int label = labeledVolume[x, y, z];
-                            if (label > 0)
+                            for (int y = 0; y < labelHeight; y++)
                             {
-                                localLabels.Add(label);
-                            }
-                        }
-                    }
-
-                    foreach (var label in localLabels)
-                    {
-                        uniqueLabels.Add(label);
-                    }
-
-                    if (z % 10 == 0)
-                    {
-                        int progressValue = 75 + (z * 5) / depth;
-                        progress?.Report(progressValue);
-                    }
-                });
-
-                var uniqueLabelsSet = new HashSet<int>(uniqueLabels);
-                Logger.Log($"[Separate3D] Found {uniqueLabelsSet.Count} unique labels");
-
-                // Initialize tracking data structures
-                ConcurrentDictionary<int, int> voxelCounts = new ConcurrentDictionary<int, int>();
-                ConcurrentDictionary<int, (int sumX, int sumY, int sumZ)> centers =
-                    new ConcurrentDictionary<int, (int, int, int)>();
-                ConcurrentDictionary<int, (int minX, int minY, int minZ, int maxX, int maxY, int maxZ)> bounds =
-                    new ConcurrentDictionary<int, (int, int, int, int, int, int)>();
-
-                // Initialize all dictionaries with default values 
-                foreach (int label in uniqueLabelsSet)
-                {
-                    voxelCounts[label] = 0;
-                    centers[label] = (0, 0, 0);
-                    bounds[label] = (int.MaxValue, int.MaxValue, int.MaxValue, 0, 0, 0);
-                }
-
-                // Process particles in parallel by label
-                progress?.Report(80);
-
-                // Pre-compute full voxel counts per label
-                var labelVoxels = new ConcurrentDictionary<int, List<(int x, int y, int z)>>();
-
-                foreach (int label in uniqueLabelsSet)
-                {
-                    labelVoxels[label] = new List<(int, int, int)>();
-                }
-
-                // First collect all voxels for each label in parallel
-                Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
-                {
-                    for (int y = 0; y < height; y++)
-                    {
-                        for (int x = 0; x < width; x++)
-                        {
-                            int label = labeledVolume[x, y, z];
-                            if (label > 0)
-                            {
-                                lock (labelVoxels[label])
+                                for (int x = 0; x < labelWidth; x++)
                                 {
-                                    labelVoxels[label].Add((x, y, z));
+                                    // Use LabelVolumeHelper.GetLabel instead of direct indexing
+                                    int label = LabelVolumeHelper.GetLabel(labeledVolume, x, y, z);
+                                    if (label > 0)
+                                    {
+                                        uniqueLabelsDict.TryAdd(label, 1);
+                                    }
                                 }
                             }
+                        });
+
+                        var uniqueLabels = uniqueLabelsDict.Keys.ToList();
+                        Logger.Log($"[ParticleSeparator] Found {uniqueLabels.Count} unique particles to analyze");
+
+                        // Process particles in batches to avoid excessive memory usage
+                        for (int batchStart = 0; batchStart < uniqueLabels.Count; batchStart += PARTICLE_BATCH_SIZE)
+                        {
+                            int batchEnd = Math.Min(batchStart + PARTICLE_BATCH_SIZE, uniqueLabels.Count);
+                            Logger.Log($"[ParticleSeparator] Processing particle batch {batchStart}-{batchEnd} of {uniqueLabels.Count}");
+
+                            // Create dictionaries for this batch
+                            ConcurrentDictionary<int, int> voxelCounts = new ConcurrentDictionary<int, int>();
+                            ConcurrentDictionary<int, (int sumX, int sumY, int sumZ)> centers =
+                                new ConcurrentDictionary<int, (int, int, int)>();
+                            ConcurrentDictionary<int, (int minX, int minY, int minZ, int maxX, int maxY, int maxZ)> bounds =
+                                new ConcurrentDictionary<int, (int, int, int, int, int, int)>();
+
+                            // Get labels for this batch
+                            var batchLabels = uniqueLabels.GetRange(batchStart, batchEnd - batchStart);
+
+                            // Initialize dictionaries for this batch
+                            foreach (int label in batchLabels)
+                            {
+                                voxelCounts[label] = 0;
+                                centers[label] = (0, 0, 0);
+                                bounds[label] = (int.MaxValue, int.MaxValue, int.MaxValue, 0, 0, 0);
+                            }
+
+                            // Scan volume for these specific labels
+                            Parallel.For(0, labelDepth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads }, z =>
+                            {
+                                for (int y = 0; y < labelHeight; y++)
+                                {
+                                    for (int x = 0; x < labelWidth; x++)
+                                    {
+                                        // Use LabelVolumeHelper.GetLabel instead of direct indexing
+                                        int label = LabelVolumeHelper.GetLabel(labeledVolume, x, y, z);
+                                        if (label > 0 && batchLabels.Contains(label))
+                                        {
+                                            // Update voxel count atomically
+                                            voxelCounts.AddOrUpdate(
+                                                label,
+                                                1,
+                                                (key, oldCount) => oldCount + 1);
+
+                                            // Update center sums atomically
+                                            centers.AddOrUpdate(
+                                                label,
+                                                (x, y, z),
+                                                (key, oldSums) => (oldSums.sumX + x, oldSums.sumY + y, oldSums.sumZ + z));
+
+                                            // Update bounds atomically
+                                            bounds.AddOrUpdate(
+                                                label,
+                                                (x, y, z, x, y, z),
+                                                (key, oldBounds) => (
+                                                    Math.Min(oldBounds.minX, x),
+                                                    Math.Min(oldBounds.minY, y),
+                                                    Math.Min(oldBounds.minZ, z),
+                                                    Math.Max(oldBounds.maxX, x),
+                                                    Math.Max(oldBounds.maxY, y),
+                                                    Math.Max(oldBounds.maxZ, z)
+                                                ));
+                                        }
+                                    }
+                                }
+                            });
+
+                            // Create particles for this batch
+                            foreach (int label in batchLabels)
+                            {
+                                int voxelCount = voxelCounts[label];
+                                var center = centers[label];
+                                var bound = bounds[label];
+
+                                // Filter out small particles if conservative approach is selected
+                                if (conservative && voxelCount < 20)
+                                    continue;
+
+                                // Calculate volumes
+                                double pixelVolume = mainForm.pixelSize * mainForm.pixelSize * mainForm.pixelSize;
+                                double volumeMicrometers = voxelCount * pixelVolume * 1e18; // m³ to µm³
+                                double volumeMillimeters = voxelCount * pixelVolume * 1e9;  // m³ to mm³
+
+                                Particle particle = new Particle
+                                {
+                                    Id = label,
+                                    VoxelCount = voxelCount,
+                                    VolumeMicrometers = volumeMicrometers,
+                                    VolumeMillimeters = volumeMillimeters,
+                                    Center = voxelCount > 0 ? new Point3D
+                                    {
+                                        X = center.sumX / voxelCount,
+                                        Y = center.sumY / voxelCount,
+                                        Z = center.sumZ / voxelCount
+                                    } : new Point3D(),
+                                    Bounds = new BoundingBox
+                                    {
+                                        MinX = bound.minX,
+                                        MinY = bound.minY,
+                                        MinZ = bound.minZ,
+                                        MaxX = bound.maxX,
+                                        MaxY = bound.maxY,
+                                        MaxZ = bound.maxZ
+                                    }
+                                };
+
+                                particles.Add(particle);
+                            }
+
+                            // Clean up batch-specific resources
+                            voxelCounts = null;
+                            centers = null;
+                            bounds = null;
+                            GC.Collect();
                         }
                     }
-
-                    if (z % 10 == 0)
+                    catch (Exception ex)
                     {
-                        int progressValue = 80 + (z * 15) / depth;
-                        progress?.Report(progressValue);
-                    }
-                });
-
-                // Then process each label in parallel
-                Parallel.ForEach(uniqueLabelsSet, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, label =>
-                {
-                    int voxelCount = 0;
-                    int sumX = 0, sumY = 0, sumZ = 0;
-                    int minX = int.MaxValue, minY = int.MaxValue, minZ = int.MaxValue;
-                    int maxX = 0, maxY = 0, maxZ = 0;
-
-                    foreach (var (x, y, z) in labelVoxels[label])
-                    {
-                        voxelCount++;
-                        sumX += x;
-                        sumY += y;
-                        sumZ += z;
-                        minX = Math.Min(minX, x);
-                        minY = Math.Min(minY, y);
-                        minZ = Math.Min(minZ, z);
-                        maxX = Math.Max(maxX, x);
-                        maxY = Math.Max(maxY, y);
-                        maxZ = Math.Max(maxZ, z);
+                        Logger.Log($"[ParticleSeparator] Error during deferred particle analysis: {ex.Message}");
                     }
 
-                    voxelCounts[label] = voxelCount;
-                    centers[label] = (sumX, sumY, sumZ);
-                    bounds[label] = (minX, minY, minZ, maxX, maxY, maxZ);
-                });
+                    Logger.Log($"[ParticleSeparator] 3D particle analysis completed: {particles.Count} particles");
+                    return particles;
+                };
 
-                // Create particles
-                progress?.Report(95);
-                List<Particle> particles = new List<Particle>(uniqueLabelsSet.Count);
-
-                foreach (var label in uniqueLabelsSet)
-                {
-                    int voxelCount = voxelCounts[label];
-                    var center = centers[label];
-                    var bound = bounds[label];
-
-                    // Filter out small particles if conservative approach is selected
-                    if (conservative && voxelCount < 20)
-                        continue;
-
-                    // Calculate volumes
-                    double pixelVolume = mainForm.pixelSize * mainForm.pixelSize * mainForm.pixelSize;
-                    double volumeMicrometers = voxelCount * pixelVolume * 1e18; // m³ to µm³
-                    double volumeMillimeters = voxelCount * pixelVolume * 1e9;  // m³ to mm³
-
-                    Particle particle = new Particle
-                    {
-                        Id = label,
-                        VoxelCount = voxelCount,
-                        VolumeMicrometers = volumeMicrometers,
-                        VolumeMillimeters = volumeMillimeters,
-                        Center = new Point3D
-                        {
-                            X = center.sumX / voxelCount,
-                            Y = center.sumY / voxelCount,
-                            Z = center.sumZ / voxelCount
-                        },
-                        Bounds = new BoundingBox
-                        {
-                            MinX = bound.minX,
-                            MinY = bound.minY,
-                            MinZ = bound.minZ,
-                            MaxX = bound.maxX,
-                            MaxY = bound.maxY,
-                            MaxZ = bound.maxZ
-                        }
-                    };
-
-                    particles.Add(particle);
-                }
-
-                // Clean up memory
-                labelVoxels = null;
-                GC.Collect();
-
-                progress?.Report(100);
-                Logger.Log($"[Separate3D] Identified {particles.Count} particles");
-
-                return new SeparationResult
+                SeparationResult result = new SeparationResult
                 {
                     LabelVolume = labeledVolume,
-                    Particles = particles,
+                    Particles = null, // Will be computed on demand
                     CurrentSlice = depth / 2, // Start with middle slice for viewing
                     Is3D = true
                 };
+
+                // Set up deferred processing
+                result.SetParticleAnalysisFunction(analyzeParticlesFunc);
+
+                progress?.Report(100);
+                Logger.Log($"[Separate3D] Created result with deferred particle analysis");
+
+                return result;
             }
             catch (OutOfMemoryException ex)
             {
@@ -639,6 +676,8 @@ namespace CTS
                 {
                     for (int chunkX = 0; chunkX < numChunksX; chunkX++)
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
+
                         // Determine chunk bounds
                         int startX = chunkX * chunkSize;
                         int startY = chunkY * chunkSize;
@@ -845,156 +884,183 @@ namespace CTS
                 }
             });
 
-            // Analyze particles in parallel
-            List<Particle> particles = new List<Particle>();
-            ConcurrentBag<int> uniqueFinalLabels = new ConcurrentBag<int>();
-
-            // First identify all unique final labels
-            Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
+            // Create deferred particle analysis function
+            Func<List<Particle>> analyzeParticlesFunc = () =>
             {
-                var localLabels = new HashSet<int>();
+                Logger.Log("[ParticleSeparator] Starting on-demand particle analysis for large volume");
+                List<Particle> particles = new List<Particle>();
 
-                for (int y = 0; y < height; y++)
+                try
                 {
-                    for (int x = 0; x < width; x++)
+                    // Find all unique labels in the volume
+                    ConcurrentDictionary<int, byte> uniqueLabelsDict = new ConcurrentDictionary<int, byte>();
+
+                    Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads }, z =>
                     {
-                        int label = globalLabels[x, y, z];
-                        if (label > 0)
+                        HashSet<int> localLabels = new HashSet<int>();
+                        for (int y = 0; y < height; y++)
                         {
-                            localLabels.Add(label);
+                            for (int x = 0; x < width; x++)
+                            {
+                                int label = globalLabels[x, y, z];
+                                if (label > 0)
+                                {
+                                    localLabels.Add(label);
+                                }
+                            }
                         }
-                    }
-                }
 
-                foreach (var label in localLabels)
-                {
-                    uniqueFinalLabels.Add(label);
-                }
-            });
-
-            // Initialize particle data storage
-            var uniqueLabelsSet = new HashSet<int>(uniqueFinalLabels);
-            ConcurrentDictionary<int, int> voxelCounts = new ConcurrentDictionary<int, int>();
-            ConcurrentDictionary<int, (int sumX, int sumY, int sumZ)> centers = new ConcurrentDictionary<int, (int, int, int)>();
-            ConcurrentDictionary<int, (int minX, int minY, int minZ, int maxX, int maxY, int maxZ)> bounds =
-                new ConcurrentDictionary<int, (int, int, int, int, int, int)>();
-
-            // Pre-initialize dictionaries
-            foreach (var label in uniqueLabelsSet)
-            {
-                voxelCounts[label] = 0;
-                centers[label] = (0, 0, 0);
-                bounds[label] = (int.MaxValue, int.MaxValue, int.MaxValue, 0, 0, 0);
-            }
-
-            // Collect all voxels for each label
-            ConcurrentDictionary<int, ConcurrentBag<(int x, int y, int z)>> labelVoxels =
-                new ConcurrentDictionary<int, ConcurrentBag<(int, int, int)>>();
-
-            foreach (var label in uniqueLabelsSet)
-            {
-                labelVoxels[label] = new ConcurrentBag<(int, int, int)>();
-            }
-
-            // Collect voxels in parallel
-            Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
-            {
-                for (int y = 0; y < height; y++)
-                {
-                    for (int x = 0; x < width; x++)
-                    {
-                        int label = globalLabels[x, y, z];
-                        if (label > 0)
+                        foreach (int label in localLabels)
                         {
-                            labelVoxels[label].Add((x, y, z));
+                            uniqueLabelsDict.TryAdd(label, 1);
                         }
+                    });
+
+                    var uniqueLabels = uniqueLabelsDict.Keys.ToList();
+                    Logger.Log($"[ParticleSeparator] Found {uniqueLabels.Count} unique particles in large volume");
+
+                    // Process in batches to handle very large numbers of particles
+                    for (int batchStart = 0; batchStart < uniqueLabels.Count; batchStart += PARTICLE_BATCH_SIZE)
+                    {
+                        int batchEnd = Math.Min(batchStart + PARTICLE_BATCH_SIZE, uniqueLabels.Count);
+                        Logger.Log($"[ParticleSeparator] Processing large volume particle batch {batchStart}-{batchEnd} of {uniqueLabels.Count}");
+
+                        var batchLabels = uniqueLabels.GetRange(batchStart, batchEnd - batchStart);
+
+                        // Prepare counters and accumulators for this batch
+                        ConcurrentDictionary<int, int> voxelCounts = new ConcurrentDictionary<int, int>();
+                        ConcurrentDictionary<int, (int sumX, int sumY, int sumZ)> centers =
+                            new ConcurrentDictionary<int, (int, int, int)>();
+                        ConcurrentDictionary<int, (int minX, int minY, int minZ, int maxX, int maxY, int maxZ)> bounds =
+                            new ConcurrentDictionary<int, (int, int, int, int, int, int)>();
+
+                        // Initialize dictionaries for this batch
+                        foreach (int label in batchLabels)
+                        {
+                            voxelCounts[label] = 0;
+                            centers[label] = (0, 0, 0);
+                            bounds[label] = (int.MaxValue, int.MaxValue, int.MaxValue, 0, 0, 0);
+                        }
+
+                        // Process the volume in chunks for better cache coherence
+                        int slabSize = 16; // Process 16 slices at a time
+                        for (int slabStart = 0; slabStart < depth; slabStart += slabSize)
+                        {
+                            int slabEnd = Math.Min(slabStart + slabSize, depth);
+
+                            Parallel.For(slabStart, slabEnd, new ParallelOptions { MaxDegreeOfParallelism = maxThreads }, z =>
+                            {
+                                for (int y = 0; y < height; y++)
+                                {
+                                    for (int x = 0; x < width; x++)
+                                    {
+                                        int label = globalLabels[x, y, z];
+                                        if (label > 0 && batchLabels.Contains(label))
+                                        {
+                                            // Update voxel count
+                                            voxelCounts.AddOrUpdate(
+                                                label,
+                                                1,
+                                                (key, oldCount) => oldCount + 1);
+
+                                            // Update center coordinates
+                                            centers.AddOrUpdate(
+                                                label,
+                                                (x, y, z),
+                                                (key, oldSum) => (oldSum.sumX + x, oldSum.sumY + y, oldSum.sumZ + z));
+
+                                            // Update bounding box
+                                            bounds.AddOrUpdate(
+                                                label,
+                                                (x, y, z, x, y, z),
+                                                (key, oldBounds) => (
+                                                    Math.Min(oldBounds.minX, x),
+                                                    Math.Min(oldBounds.minY, y),
+                                                    Math.Min(oldBounds.minZ, z),
+                                                    Math.Max(oldBounds.maxX, x),
+                                                    Math.Max(oldBounds.maxY, y),
+                                                    Math.Max(oldBounds.maxZ, z)
+                                                ));
+                                        }
+                                    }
+                                }
+                            });
+                        }
+
+                        // Create particles for this batch
+                        foreach (int label in batchLabels)
+                        {
+                            int voxelCount = voxelCounts[label];
+                            var center = centers[label];
+                            var bound = bounds[label];
+
+                            // Filter out small particles if conservative approach is selected
+                            if (conservative && voxelCount < 20)
+                                continue;
+
+                            // Calculate volumes
+                            double pixelVolume = mainForm.pixelSize * mainForm.pixelSize * mainForm.pixelSize;
+                            double volumeMicrometers = voxelCount * pixelVolume * 1e18; // m³ to µm³
+                            double volumeMillimeters = voxelCount * pixelVolume * 1e9;  // m³ to mm³
+
+                            Particle particle = new Particle
+                            {
+                                Id = label,
+                                VoxelCount = voxelCount,
+                                VolumeMicrometers = volumeMicrometers,
+                                VolumeMillimeters = volumeMillimeters,
+                                Center = voxelCount > 0 ? new Point3D
+                                {
+                                    X = center.sumX / voxelCount,
+                                    Y = center.sumY / voxelCount,
+                                    Z = center.sumZ / voxelCount
+                                } : new Point3D(),
+                                Bounds = new BoundingBox
+                                {
+                                    MinX = bound.minX,
+                                    MinY = bound.minY,
+                                    MinZ = bound.minZ,
+                                    MaxX = bound.maxX,
+                                    MaxY = bound.maxY,
+                                    MaxZ = bound.maxZ
+                                }
+                            };
+
+                            particles.Add(particle);
+                        }
+
+                        // Clean up batch resources
+                        voxelCounts = null;
+                        centers = null;
+                        bounds = null;
+                        GC.Collect();
                     }
                 }
-            });
-
-            // Process each label in parallel
-            Parallel.ForEach(uniqueLabelsSet, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, label =>
-            {
-                int count = 0;
-                int sumX = 0, sumY = 0, sumZ = 0;
-                int minX = int.MaxValue, minY = int.MaxValue, minZ = int.MaxValue;
-                int maxX = 0, maxY = 0, maxZ = 0;
-
-                foreach (var (x, y, z) in labelVoxels[label])
+                catch (Exception ex)
                 {
-                    count++;
-                    sumX += x;
-                    sumY += y;
-                    sumZ += z;
-                    minX = Math.Min(minX, x);
-                    minY = Math.Min(minY, y);
-                    minZ = Math.Min(minZ, z);
-                    maxX = Math.Max(maxX, x);
-                    maxY = Math.Max(maxY, y);
-                    maxZ = Math.Max(maxZ, z);
+                    Logger.Log($"[ParticleSeparator] Error during large volume particle analysis: {ex.Message}");
                 }
 
-                voxelCounts[label] = count;
-                centers[label] = (sumX, sumY, sumZ);
-                bounds[label] = (minX, minY, minZ, maxX, maxY, maxZ);
-            });
+                Logger.Log($"[ParticleSeparator] Large volume particle analysis completed: {particles.Count} particles");
+                return particles;
+            };
 
-            // Create particles
-            foreach (var label in uniqueLabelsSet)
-            {
-                int voxelCount = voxelCounts[label];
-                var center = centers[label];
-                var bound = bounds[label];
-
-                // Filter out small particles if conservative approach is selected
-                if (conservative && voxelCount < 20)
-                    continue;
-
-                // Calculate volumes
-                double pixelVolume = mainForm.pixelSize * mainForm.pixelSize * mainForm.pixelSize;
-                double volumeMicrometers = voxelCount * pixelVolume * 1e18; // m³ to µm³
-                double volumeMillimeters = voxelCount * pixelVolume * 1e9;  // m³ to mm³
-
-                Particle particle = new Particle
-                {
-                    Id = label,
-                    VoxelCount = voxelCount,
-                    VolumeMicrometers = volumeMicrometers,
-                    VolumeMillimeters = volumeMillimeters,
-                    Center = new Point3D
-                    {
-                        X = center.sumX / voxelCount,
-                        Y = center.sumY / voxelCount,
-                        Z = center.sumZ / voxelCount
-                    },
-                    Bounds = new BoundingBox
-                    {
-                        MinX = bound.minX,
-                        MinY = bound.minY,
-                        MinZ = bound.minZ,
-                        MaxX = bound.maxX,
-                        MaxY = bound.maxY,
-                        MaxZ = bound.maxZ
-                    }
-                };
-
-                particles.Add(particle);
-            }
-
-            // Clean up memory
-            labelVoxels = null;
-            GC.Collect();
-
-            progress?.Report(100);
-            Logger.Log($"[Separate3DLarge] Identified {particles.Count} particles");
-
-            return new SeparationResult
+            // Create the result with deferred particle analysis
+            SeparationResult result = new SeparationResult
             {
                 LabelVolume = globalLabels,
-                Particles = particles,
+                Particles = null, // Will be computed on demand
                 CurrentSlice = depth / 2, // Start with middle slice for viewing
                 Is3D = true
             };
+
+            // Set up the deferred processing
+            result.SetParticleAnalysisFunction(analyzeParticlesFunc);
+
+            progress?.Report(100);
+            Logger.Log($"[Separate3DLarge] Created result with deferred particle analysis");
+
+            return result;
         }
 
         // Optimized thread-safe UnionFind implementation
@@ -1902,33 +1968,39 @@ namespace CTS
             int height = data.GetLength(1);
             int depth = data.GetLength(2);
 
-            // Process in optimized chunks
+            // Use an optimized chunk size for better memory locality
             int chunkSize = CHUNK_SIZE;
             int numChunksX = (width + chunkSize - 1) / chunkSize;
             int numChunksY = (height + chunkSize - 1) / chunkSize;
             int numChunksZ = (depth + chunkSize - 1) / chunkSize;
+            int totalChunks = numChunksX * numChunksY * numChunksZ;
 
             Logger.Log($"[ProcessLargeVolumeWithGPUChunks] Processing volume in {numChunksX}x{numChunksY}x{numChunksZ} chunks");
 
             // Create the final label volume
             int[,,] globalLabels = new int[width, height, depth];
-            var unionFind = new UnionFind();
-            var globalLabelCounter = new AtomicCounter(1);
+            UnionFind unionFind = new UnionFind();
+            int nextGlobalLabel = 1;
 
-            // Use a concurrent dictionary for thread-safe label mapping
-            var labelMap = new ConcurrentDictionary<(int chunkX, int chunkY, int chunkZ, int localLabel), int>();
+            // Use concurrent dictionary for thread safety
+            ConcurrentDictionary<(int chunkX, int chunkY, int chunkZ, int localLabel), int> labelMap =
+                new ConcurrentDictionary<(int, int, int, int), int>();
 
-            // Process chunks in parallel along Z-axis for memory efficiency
+            int chunksDone = 0;
+
+            // Create a thread-safe counter for label assignment
+            var labelCounter = new AtomicCounter(1);
+
+            // First pass: process each chunk in parallel
             Parallel.For(0, numChunksZ, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, chunkZ =>
             {
-                // Process chunks sequentially within each Z-slice
                 for (int chunkY = 0; chunkY < numChunksY; chunkY++)
                 {
                     for (int chunkX = 0; chunkX < numChunksX; chunkX++)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
 
-                        // Calculate chunk bounds
+                        // Determine chunk bounds
                         int startX = chunkX * chunkSize;
                         int startY = chunkY * chunkSize;
                         int startZ = chunkZ * chunkSize;
@@ -1941,13 +2013,13 @@ namespace CTS
 
                         // Skip empty chunks
                         bool hasData = false;
-                        for (int z = startZ; z < endZ && !hasData; z++)
+                        for (int z = 0; z < chunkDepth && !hasData; z++)
                         {
-                            for (int y = startY; y < endY && !hasData; y++)
+                            for (int y = 0; y < chunkHeight && !hasData; y++)
                             {
-                                for (int x = startX; x < endX && !hasData; x++)
+                                for (int x = 0; x < chunkWidth && !hasData; x++)
                                 {
-                                    if (data[x, y, z] > 0)
+                                    if (data[startX + x, startY + y, startZ + z] > 0)
                                     {
                                         hasData = true;
                                         break;
@@ -1967,35 +2039,19 @@ namespace CTS
                             {
                                 for (int x = 0; x < chunkWidth; x++)
                                 {
-                                    int globalX = startX + x;
-                                    int globalY = startY + y;
-                                    int globalZ = startZ + z;
-                                    chunkData[x, y, z] = data[globalX, globalY, globalZ];
+                                    chunkData[x, y, z] = data[startX + x, startY + y, startZ + z];
                                 }
                             }
                         }
 
-                        // Process chunk using GPU or CPU based on size
-                        int[,,] chunkLabels;
-                        if (chunkWidth * chunkHeight * chunkDepth <= 1_000_000) // Small enough for GPU
-                        {
-                            try
-                            {
-                                chunkLabels = LabelConnectedComponents3DGpu(chunkData, cancellationToken);
-                            }
-                            catch (Exception)
-                            {
-                                // Fall back to CPU if GPU fails
-                                chunkLabels = LabelConnectedComponents3DCpu(chunkData, cancellationToken);
-                            }
-                        }
-                        else
-                        {
-                            chunkLabels = LabelConnectedComponents3DCpu(chunkData, cancellationToken);
-                        }
+                        // Check for cancellation
+                        cancellationToken.ThrowIfCancellationRequested();
 
-                        // Find unique labels in chunk
-                        var chunkUniqueLabels = new HashSet<int>();
+                        // Process chunk - use CPU as we're already parallelizing chunks
+                        int[,,] chunkLabels = LabelConnectedComponents3DCpu(chunkData, cancellationToken);
+
+                        // Map chunk labels to global labels
+                        HashSet<int> chunkUniqueLabels = new HashSet<int>();
                         for (int z = 0; z < chunkDepth; z++)
                         {
                             for (int y = 0; y < chunkHeight; y++)
@@ -2010,10 +2066,9 @@ namespace CTS
                             }
                         }
 
-                        // Map chunk labels to global labels
                         foreach (int localLabel in chunkUniqueLabels)
                         {
-                            int newGlobalLabel = globalLabelCounter.GetAndIncrement();
+                            int newGlobalLabel = labelCounter.GetAndIncrement();
                             labelMap.TryAdd((chunkX, chunkY, chunkZ, localLabel), newGlobalLabel);
                             unionFind.MakeSet(newGlobalLabel);
                         }
@@ -2039,17 +2094,15 @@ namespace CTS
                             }
                         }
 
-                        // Clean up chunk memory
-                        chunkData = null;
-                        chunkLabels = null;
+                        Interlocked.Increment(ref chunksDone);
                     }
                 }
             });
 
-            // Connect components at chunk boundaries
+            // Second pass: merge connected components across chunk boundaries
             Logger.Log("[ProcessLargeVolumeWithGPUChunks] Connecting components across chunk boundaries");
 
-            // Process in Z-slices for better memory locality
+            // Process in slices for better memory locality
             Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
             {
                 for (int y = 0; y < height; y++)
@@ -2090,16 +2143,18 @@ namespace CTS
                     }
                 }
 
+                // Check for cancellation every slice
                 if (z % 10 == 0)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                 }
             });
 
-            // Apply final component labels
-            Logger.Log("[ProcessLargeVolumeWithGPUChunks] Applying final component labels");
+            // Third pass: apply final labels with a parallel approach
+            ConcurrentDictionary<int, int> finalLabelMap = new ConcurrentDictionary<int, int>();
+            var finalLabelCounter = new AtomicCounter(1);
 
-            // Collect all roots
+            // First collect all roots
             ConcurrentBag<int> roots = new ConcurrentBag<int>();
 
             Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
@@ -2131,15 +2186,12 @@ namespace CTS
             });
 
             // Create final label map
-            var finalLabelMap = new ConcurrentDictionary<int, int>();
-            var finalLabelCounter = new AtomicCounter(1);
-
             foreach (var root in new HashSet<int>(roots))
             {
                 finalLabelMap.TryAdd(root, finalLabelCounter.GetAndIncrement());
             }
 
-            // Apply final labels in parallel
+            // Now apply the final labels in parallel
             Parallel.For(0, depth, new ParallelOptions { MaxDegreeOfParallelism = maxThreads, CancellationToken = cancellationToken }, z =>
             {
                 for (int y = 0; y < height; y++)
@@ -2155,14 +2207,14 @@ namespace CTS
                     }
                 }
 
+                // Check for cancellation every slice
                 if (z % 10 == 0)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                 }
             });
 
-            Logger.Log($"[ProcessLargeVolumeWithGPUChunks] Identified {finalLabelMap.Count} connected components");
-
+            Logger.Log($"[ProcessLargeVolumeWithGPUChunks] Component labeling completed with {finalLabelMap.Count} components");
             return globalLabels;
         }
 
@@ -2346,47 +2398,92 @@ namespace CTS
                 rleData.Add((value, count));
             }
 
-            // Decompress RLE data into the volume (in parallel for large volumes)
-            if (depth > 1 && width * height * depth > 10_000_000)
-            {
-                // Parallel decompression for large volumes
-                // First, calculate indices for each run
-                int totalVoxels = width * height * depth;
-                int[] startIndices = new int[runCount];
-                int currentIndex = 0;
+            // For large volumes, use chunked decompression to reduce memory pressure
+            const int MAX_CHUNK_SIZE = 50_000_000; // 50 million voxels per chunk
+            long totalVoxels = (long)width * height * depth;
 
-                for (int i = 0; i < runCount; i++)
+            if (totalVoxels > MAX_CHUNK_SIZE)
+            {
+                // Determine optimal chunk size for the z-dimension
+                int zChunkSize = Math.Max(1, (int)(MAX_CHUNK_SIZE / ((long)width * height)));
+                int numZChunks = (depth + zChunkSize - 1) / zChunkSize;
+
+                Logger.Log($"[ReadRleCompressedVolume] Large volume detected, using {numZChunks} z-chunks of size {zChunkSize}");
+
+                // Calculate the start index for each RLE run
+                long[] startIndices = new long[rleData.Count];
+                long currentIndex = 0;
+
+                for (int i = 0; i < rleData.Count; i++)
                 {
                     startIndices[i] = currentIndex;
                     currentIndex += rleData[i].count;
                 }
 
-                // Then decompress in parallel
-                Parallel.For(0, runCount, i =>
+                // Process each z-chunk separately
+                for (int chunkIndex = 0; chunkIndex < numZChunks; chunkIndex++)
                 {
-                    var (value, count) = rleData[i];
-                    int startIdx = startIndices[i];
+                    int startZ = chunkIndex * zChunkSize;
+                    int endZ = Math.Min(startZ + zChunkSize, depth);
 
-                    for (int j = 0; j < count; j++)
+                    long chunkStartIndex = (long)startZ * width * height;
+                    long chunkEndIndex = (long)endZ * width * height;
+
+                    // Find which RLE runs intersect with this chunk
+                    List<(int runIndex, long runStartIndex, int value, int count)> chunkRuns = new List<(int, long, int, int)>();
+
+                    for (int runIndex = 0; runIndex < rleData.Count; runIndex++)
                     {
-                        int idx = startIdx + j;
-                        if (idx >= totalVoxels) break; // Safety check
+                        long runStartIndex = startIndices[runIndex];
+                        long runEndIndex = runStartIndex + rleData[runIndex].count - 1;
 
-                        int z = idx / (width * height);
-                        int remainder = idx % (width * height);
-                        int y = remainder / width;
-                        int x = remainder % width;
-
-                        if (x < width && y < height && z < depth) // Bounds check
+                        // Check if this run intersects with the current chunk
+                        if (runEndIndex >= chunkStartIndex && runStartIndex < chunkEndIndex)
                         {
-                            volume[x, y, z] = value;
+                            chunkRuns.Add((runIndex, runStartIndex, rleData[runIndex].value, rleData[runIndex].count));
                         }
+
+                        // If we've gone past the end of this chunk, we can stop checking
+                        if (runStartIndex >= chunkEndIndex)
+                            break;
                     }
-                });
+
+                    // Process runs for this chunk
+                    Parallel.ForEach(chunkRuns, run =>
+                    {
+                        int runIndex = run.runIndex;
+                        long runStartIndex = run.runStartIndex;
+                        int value = run.value;
+                        int count = run.count;
+
+                        // Calculate overlapping region
+                        long overlapStart = Math.Max(runStartIndex, chunkStartIndex);
+                        long overlapEnd = Math.Min(runStartIndex + count - 1, chunkEndIndex - 1);
+                        int overlapCount = (int)(overlapEnd - overlapStart + 1);
+
+                        // Process the overlapping voxels
+                        for (int i = 0; i < overlapCount; i++)
+                        {
+                            long voxelIndex = overlapStart + i;
+
+                            // Convert to volume coordinates
+                            int z = (int)(voxelIndex / (width * height));
+                            int remainder = (int)(voxelIndex % (width * height));
+                            int y = remainder / width;
+                            int x = remainder % width;
+
+                            // Set the value in the volume
+                            if (x < width && y < height && z < depth)
+                            {
+                                volume[x, y, z] = value;
+                            }
+                        }
+                    });
+                }
             }
             else
             {
-                // Sequential decompression for smaller volumes
+                // For smaller volumes, use the original decompression method
                 int index = 0;
                 foreach (var (value, count) in rleData)
                 {
@@ -2423,43 +2520,49 @@ namespace CTS
                 int currentSlice = reader.ReadInt32();
                 double pixelSize = reader.ReadDouble();
 
-                // Read label volume using parallel decompression for large datasets
+                Logger.Log($"[LoadFromBinaryFile] Loading separation result: {width}x{height}x{depth}, {particleCount} particles");
+
+                // Read label volume using optimized decompression
                 int[,,] labelVolume = ReadRleCompressedVolume(reader, width, height, depth);
 
-                // Read particles in parallel for large particle counts
+                // Read particles with optimized batch processing
                 List<Particle> particles = new List<Particle>(particleCount);
 
-                if (particleCount > 1000)
+                // For very large particle counts, process in batches
+                const int BATCH_SIZE = 10000;
+
+                for (int batchStart = 0; batchStart < particleCount; batchStart += BATCH_SIZE)
                 {
-                    // For large particle counts, read data into arrays first, then process in parallel
-                    int[] ids = new int[particleCount];
-                    int[] voxelCounts = new int[particleCount];
-                    double[] volumesMicrometers = new double[particleCount];
-                    double[] volumesMillimeters = new double[particleCount];
+                    int batchEnd = Math.Min(batchStart + BATCH_SIZE, particleCount);
+                    int batchSize = batchEnd - batchStart;
 
-                    int[] centersX = new int[particleCount];
-                    int[] centersY = new int[particleCount];
-                    int[] centersZ = new int[particleCount];
+                    Logger.Log($"[LoadFromBinaryFile] Loading particle batch {batchStart}-{batchEnd} of {particleCount}");
 
-                    int[] minX = new int[particleCount];
-                    int[] minY = new int[particleCount];
-                    int[] minZ = new int[particleCount];
-                    int[] maxX = new int[particleCount];
-                    int[] maxY = new int[particleCount];
-                    int[] maxZ = new int[particleCount];
+                    // Pre-allocate arrays for batch data
+                    int[] ids = new int[batchSize];
+                    int[] voxelCounts = new int[batchSize];
+                    double[] volumesMicrometers = new double[batchSize];
+                    double[] volumesMillimeters = new double[batchSize];
+                    int[] centersX = new int[batchSize];
+                    int[] centersY = new int[batchSize];
+                    int[] centersZ = new int[batchSize];
+                    int[] minX = new int[batchSize];
+                    int[] minY = new int[batchSize];
+                    int[] minZ = new int[batchSize];
+                    int[] maxX = new int[batchSize];
+                    int[] maxY = new int[batchSize];
+                    int[] maxZ = new int[batchSize];
 
-                    // Read all data sequentially
-                    for (int i = 0; i < particleCount; i++)
+                    // Read batch data sequentially
+                    for (int i = 0; i < batchSize; i++)
                     {
                         ids[i] = reader.ReadInt32();
                         voxelCounts[i] = reader.ReadInt32();
                         volumesMicrometers[i] = reader.ReadDouble();
                         volumesMillimeters[i] = reader.ReadDouble();
-
                         centersX[i] = reader.ReadInt32();
                         centersY[i] = reader.ReadInt32();
                         centersZ[i] = reader.ReadInt32();
-
                         minX[i] = reader.ReadInt32();
                         minY[i] = reader.ReadInt32();
                         minZ[i] = reader.ReadInt32();
@@ -2468,29 +2571,22 @@ namespace CTS
                         maxZ[i] = reader.ReadInt32();
                     }
 
-                    // Create particles in parallel
-                    particles = new List<Particle>(particleCount);
-                    for (int i = 0; i < particleCount; i++)
+                    // Process batch in parallel
+                    var batchParticles = new Particle[batchSize];
+                    Parallel.For(0, batchSize, i =>
                     {
-                        particles.Add(null); // Pre-allocate slots
-                    }
-
-                    Parallel.For(0, particleCount, i =>
-                    {
-                        Particle particle = new Particle
+                        batchParticles[i] = new Particle
                         {
                             Id = ids[i],
                             VoxelCount = voxelCounts[i],
                             VolumeMicrometers = volumesMicrometers[i],
                             VolumeMillimeters = volumesMillimeters[i],
-
                             Center = new Point3D
                             {
                                 X = centersX[i],
                                 Y = centersY[i],
                                 Z = centersZ[i]
                             },
-
                             Bounds = new BoundingBox
                             {
                                 MinX = minX[i],
@@ -2501,42 +2597,10 @@ namespace CTS
                                 MaxZ = maxZ[i]
                             }
                         };
-
-                        particles[i] = particle;
                     });
-                }
-                else
-                {
-                    // For smaller counts, use simpler sequential approach
-                    for (int i = 0; i < particleCount; i++)
-                    {
-                        Particle particle = new Particle
-                        {
-                            Id = reader.ReadInt32(),
-                            VoxelCount = reader.ReadInt32(),
-                            VolumeMicrometers = reader.ReadDouble(),
-                            VolumeMillimeters = reader.ReadDouble(),
 
-                            Center = new Point3D
-                            {
-                                X = reader.ReadInt32(),
-                                Y = reader.ReadInt32(),
-                                Z = reader.ReadInt32()
-                            },
-
-                            Bounds = new BoundingBox
-                            {
-                                MinX = reader.ReadInt32(),
-                                MinY = reader.ReadInt32(),
-                                MinZ = reader.ReadInt32(),
-                                MaxX = reader.ReadInt32(),
-                                MaxY = reader.ReadInt32(),
-                                MaxZ = reader.ReadInt32()
-                            }
-                        };
-
-                        particles.Add(particle);
-                    }
+                    // Add batch to result
+                    particles.AddRange(batchParticles);
                 }
 
                 return new SeparationResult
@@ -2560,6 +2624,41 @@ namespace CTS
             {
                 Logger.Log($"[ParticleSeparator] Error during disposal: {ex.Message}");
             }
+        }
+    }
+    public class SeparationResult
+    {
+        private int[,,] _labelVolume;
+        public int[,,] LabelVolume
+        {
+            get => _labelVolume;
+            set => _labelVolume = value;
+        }
+
+        private List<Particle> _particles;
+        public List<Particle> Particles
+        {
+            get
+            {
+                // If particles haven't been analyzed yet, analyze them now
+                if (_particles == null && _labelVolume != null && _analyzeParticlesFunc != null)
+                {
+                    _particles = _analyzeParticlesFunc();
+                }
+                // Always return a non-null list to avoid rendering issues
+                return _particles ?? new List<Particle>();
+            }
+            set => _particles = value;
+        }
+
+        public int CurrentSlice { get; set; }
+        public bool Is3D { get; set; }
+
+        private Func<List<Particle>> _analyzeParticlesFunc;
+
+        public void SetParticleAnalysisFunction(Func<List<Particle>> analysisFunc)
+        {
+            _analyzeParticlesFunc = analysisFunc;
         }
     }
 }

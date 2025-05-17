@@ -9,14 +9,14 @@ using Terminal.Gui;
 using System.Text.Json;
 using System.Text;
 
-namespace ParallelComputingNodeServer
+namespace ParallelComputingClientserver
 {
     class Program
     {
         private static readonly CancellationTokenSource _cancellationTokenSource = new();
         private static readonly ManualResetEvent _exitEvent = new(false);
         private static ServerConfig _config = new();
-        private static List<NodeInfo> _connectedNodes = new();
+        private static List<ClientInfo> _connectedClients = new();
         private static Context _ilgpuContext;
         private static Accelerator _accelerator;
         private static View beaconIndicator;
@@ -31,7 +31,7 @@ namespace ParallelComputingNodeServer
 
         static async Task Main(string[] args)
         {
-            Console.WriteLine("Initializing Parallel Computing Node Server...");
+            Console.WriteLine("Initializing Parallel Computing Client Server...");
 
             // Initialize ILGPU
             InitializeILGPU();
@@ -163,7 +163,7 @@ namespace ParallelComputingNodeServer
                         ServerName = hostname,
                         ServerIP = GetLocalIPAddress(),
                         ServerPort = _config.ServerPort,
-                        NodesConnected = _connectedNodes.Count,
+                        ClientsConnected = _connectedClients.Count,
                         GpuEnabled = _accelerator != null && !(_accelerator is CPUAccelerator),
                         Timestamp = DateTime.Now
                     };
@@ -237,15 +237,15 @@ namespace ParallelComputingNodeServer
             {
                 // Get client info
                 var endpoint = (IPEndPoint)client.Client.RemoteEndPoint;
-                var nodeInfo = new NodeInfo
+                var ClientInfo = new ClientInfo
                 {
-                    NodeIP = endpoint.Address.ToString(),
-                    NodePort = endpoint.Port,
+                    ClientIP = endpoint.Address.ToString(),
+                    ClientPort = endpoint.Port,
                     ConnectedAt = DateTime.Now
                 };
 
-                Console.WriteLine($"Client connected: {nodeInfo.NodeIP}:{nodeInfo.NodePort}");
-                _connectedNodes.Add(nodeInfo);
+                Console.WriteLine($"Client connected: {ClientInfo.ClientIP}:{ClientInfo.ClientPort}");
+                _connectedClients.Add(ClientInfo);
 
                 // Handle client communication
                 using var stream = client.GetStream();
@@ -273,7 +273,7 @@ namespace ParallelComputingNodeServer
                         }
 
                         // Process the message (placeholder for actual logic)
-                        var response = ProcessClientMessage(message, nodeInfo);
+                        var response = ProcessClientMessage(message, ClientInfo);
 
                         // Send response
                         var responseBytes = Encoding.UTF8.GetBytes(response);
@@ -287,8 +287,8 @@ namespace ParallelComputingNodeServer
                 }
 
                 // Cleanup when client disconnects
-                _connectedNodes.Remove(nodeInfo);
-                Console.WriteLine($"Client disconnected: {nodeInfo.NodeIP}:{nodeInfo.NodePort}");
+                _connectedClients.Remove(ClientInfo);
+                Console.WriteLine($"Client disconnected: {ClientInfo.ClientIP}:{ClientInfo.ClientPort}");
             }
             catch (Exception ex)
             {
@@ -299,7 +299,7 @@ namespace ParallelComputingNodeServer
                 client.Dispose();
             }
         }
-        private static string ProcessClientMessage(string message, NodeInfo nodeInfo)
+        private static string ProcessClientMessage(string message, ClientInfo ClientInfo)
         {
             try
             {
@@ -380,7 +380,7 @@ namespace ParallelComputingNodeServer
             var top = Application.Top;
 
             // Create a window that takes up the full screen
-            var win = new Window("Parallel Computing Node Server")
+            var win = new Window("Parallel Computing Client Server")
             {
                 X = 0,
                 Y = 0,
@@ -393,7 +393,7 @@ namespace ParallelComputingNodeServer
             var statusBar = new StatusBar(new StatusItem[] {
         new StatusItem(Key.F1, "~F1~ Help", ShowHelp),
         new StatusItem(Key.F2, "~F2~ Settings", ShowSettings),
-        new StatusItem(Key.F3, "~F3~ Nodes", ShowNodes),
+        new StatusItem(Key.F3, "~F3~ Clients", ShowClients),
         new StatusItem(Key.F4, "~F4~ About", ShowAbout),
         new StatusItem(Key.F10, "~F10~ Quit", () => Application.RequestStop())
     });
@@ -429,7 +429,7 @@ namespace ParallelComputingNodeServer
             table.Rows.Add("Server Port", _config.ServerPort.ToString());
             table.Rows.Add("Beacon Port", _config.BeaconPort.ToString());
             table.Rows.Add("Beacon Interval", $"{_config.BeaconIntervalMs} ms");
-            table.Rows.Add("Connected Nodes", "0");
+            table.Rows.Add("Connected Clients", "0");
             table.Rows.Add("GPU Accelerator", _accelerator?.Name ?? "None");
 
             // Set the table to the view
@@ -476,10 +476,10 @@ namespace ParallelComputingNodeServer
             // Create a timer to update the UI periodically
             Application.MainLoop.AddTimeout(TimeSpan.FromSeconds(1), (_) =>
             {
-                // Update connected nodes count
+                // Update connected Clients count
                 if (table.Rows.Count > 5)
                 {
-                    table.Rows[5]["Value"] = _connectedNodes.Count.ToString();
+                    table.Rows[5]["Value"] = _connectedClients.Count.ToString();
                     tableView.SetNeedsDisplay();
                 }
 
@@ -572,7 +572,7 @@ namespace ParallelComputingNodeServer
                 Y = 1,
                 Width = Dim.Fill() - 2,
                 Height = Dim.Fill() - 4,
-                Text = "CTS - Parallel Computing Node Server\n" +
+                Text = "CTS - Parallel Computing Client Server\n" +
                       $"Version {versionStr}\n\n" +
                       "University of Fribourg\n" +
                       "Geosciences Department\n\n" +
@@ -600,15 +600,15 @@ namespace ParallelComputingNodeServer
                 Y = 1,
                 Width = Dim.Fill() - 2,
                 Height = Dim.Fill() - 4,
-                Text = "Parallel Computing Node Server\n\n" +
+                Text = "Parallel Computing Client Server\n\n" +
                       "F1: Show this help screen\n" +
                       "F2: Configure server settings\n" +
-                      "F3: View connected nodes\n" +
+                      "F3: View connected Clients\n" +
                       "F10: Exit the application\n\n" +
-                      "This server manages a network of compute nodes that can\n" +
+                      "This server manages a network of compute Clients that can\n" +
                       "perform parallel computations using ILGPU.\n\n" +
-                      "The server broadcasts a beacon to help nodes discover it\n" +
-                      "and coordinates computation tasks across all nodes."
+                      "The server broadcasts a beacon to help Clients discover it\n" +
+                      "and coordinates computation tasks across all Clients."
             };
 
             var okButton = new Button("OK")
@@ -725,9 +725,9 @@ namespace ParallelComputingNodeServer
             Application.Run(dialog);
         }
 
-        private static void ShowNodes()
+        private static void ShowClients()
         {
-            var dialog = new Dialog("Connected Nodes", 70, 20);
+            var dialog = new Dialog("Connected Clients", 70, 20);
 
             var listView = new ListView()
             {
@@ -737,21 +737,21 @@ namespace ParallelComputingNodeServer
                 Height = Dim.Fill() - 4
             };
 
-            var nodeList = new List<string>();
-            if (_connectedNodes.Count == 0)
+            var ClientList = new List<string>();
+            if (_connectedClients.Count == 0)
             {
-                nodeList.Add("No nodes connected");
+                ClientList.Add("No Clients connected");
             }
             else
             {
-                nodeList.Add($"{"IP Address",-15} {"Port",-8} {"Connected Since",-20} {"Status",-10}");
-                foreach (var node in _connectedNodes)
+                ClientList.Add($"{"IP Address",-15} {"Port",-8} {"Connected Since",-20} {"Status",-10}");
+                foreach (var Client in _connectedClients)
                 {
-                    nodeList.Add($"{node.NodeIP,-15} {node.NodePort,-8} {node.ConnectedAt,-20} {"Active",-10}");
+                    ClientList.Add($"{Client.ClientIP,-15} {Client.ClientPort,-8} {Client.ConnectedAt,-20} {"Active",-10}");
                 }
             }
 
-            listView.SetSource(nodeList);
+            listView.SetSource(ClientList);
 
             var closeButton = new Button("Close")
             {
@@ -775,7 +775,7 @@ namespace ParallelComputingNodeServer
             results.AppendLine($"Hostname: {System.Environment.MachineName}");
             results.AppendLine($"OS: {System.Runtime.InteropServices.RuntimeInformation.OSDescription}");
             results.AppendLine($"Processor Count: {Environment.ProcessorCount}");
-            results.AppendLine($"Connected Nodes: {_connectedNodes.Count}");
+            results.AppendLine($"Connected Clients: {_connectedClients.Count}");
             results.AppendLine();
 
             // Memory Usage
@@ -1005,10 +1005,10 @@ exit";
         public int BeaconIntervalMs { get; set; } = 5000;
     }
 
-    public class NodeInfo
+    public class ClientInfo
     {
-        public string NodeIP { get; set; }
-        public int NodePort { get; set; }
+        public string ClientIP { get; set; }
+        public int ClientPort { get; set; }
         public DateTime ConnectedAt { get; set; }
         public string Status { get; set; } = "Active";
     }
@@ -1018,7 +1018,7 @@ exit";
         public string ServerName { get; set; }
         public string ServerIP { get; set; }
         public int ServerPort { get; set; }
-        public int NodesConnected { get; set; }
+        public int ClientsConnected { get; set; }
         public bool GpuEnabled { get; set; }
         public DateTime Timestamp { get; set; }
     }

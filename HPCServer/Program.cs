@@ -567,7 +567,7 @@ namespace ParallelComputingClientserver
                       "This server manages a network of compute nodes that can\n" +
                       "perform parallel computations using ILGPU.\n\n" +
                       "The server broadcasts a beacon to help nodes discover it\n" +
-                      "and coordinates computation tasks across all Clients."
+                      "and coordinates computation tasks across them."
             };
 
             var okButton = new Button("OK")

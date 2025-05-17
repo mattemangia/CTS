@@ -6,16 +6,315 @@ using System.Windows.Forms;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading.Tasks;
 using Krypton.Toolkit;
 using Krypton.Navigator;
 using CTS.Modules.NodeEditor.Nodes;
 
 namespace CTS.NodeEditor
 {
+    // Node Type Info class definition
+    public class NodeTypeInfo
+    {
+        public string Category { get; set; }
+        public string Name { get; set; }
+        public Type NodeType { get; set; }
+        public Color Color { get; set; }
+
+        public NodeTypeInfo(string category, string name, Type nodeType, Color color)
+        {
+            Category = category;
+            Name = name;
+            NodeType = nodeType;
+            Color = color;
+        }
+    }
+
+    // Data structures for serialization
+    [Serializable]
+    public class NodeGraphData
+    {
+        public List<NodeData> Nodes { get; set; }
+        public List<ConnectionData> Connections { get; set; }
+    }
+
+    [Serializable]
+    public class NodeData
+    {
+        public string Id { get; set; }
+        public string Type { get; set; }
+        public Point Position { get; set; }
+        public Color Color { get; set; }
+    }
+
+    [Serializable]
+    public class ConnectionData
+    {
+        public string FromNodeId { get; set; }
+        public string FromPinName { get; set; }
+        public string ToNodeId { get; set; }
+        public string ToPinName { get; set; }
+    }
+
+    // Custom converters for JSON serialization
+    public class PointJsonConverter : JsonConverter<Point>
+    {
+        public override Point Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            if (reader.TokenType != JsonTokenType.StartObject)
+                throw new JsonException();
+
+            int x = 0, y = 0;
+            while (reader.Read())
+            {
+                if (reader.TokenType == JsonTokenType.EndObject)
+                    return new Point(x, y);
+
+                if (reader.TokenType == JsonTokenType.PropertyName)
+                {
+                    string propertyName = reader.GetString();
+                    reader.Read();
+
+                    switch (propertyName)
+                    {
+                        case "X":
+                            x = reader.GetInt32();
+                            break;
+                        case "Y":
+                            y = reader.GetInt32();
+                            break;
+                    }
+                }
+            }
+            throw new JsonException();
+        }
+
+        public override void Write(Utf8JsonWriter writer, Point value, JsonSerializerOptions options)
+        {
+            writer.WriteStartObject();
+            writer.WriteNumber("X", value.X);
+            writer.WriteNumber("Y", value.Y);
+            writer.WriteEndObject();
+        }
+    }
+
+    public class ColorJsonConverter : JsonConverter<Color>
+    {
+        public override Color Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            if (reader.TokenType != JsonTokenType.StartObject)
+                throw new JsonException();
+
+            int a = 255, r = 0, g = 0, b = 0;
+            while (reader.Read())
+            {
+                if (reader.TokenType == JsonTokenType.EndObject)
+                    return Color.FromArgb(a, r, g, b);
+
+                if (reader.TokenType == JsonTokenType.PropertyName)
+                {
+                    string propertyName = reader.GetString();
+                    reader.Read();
+
+                    switch (propertyName)
+                    {
+                        case "A":
+                            a = reader.GetInt32();
+                            break;
+                        case "R":
+                            r = reader.GetInt32();
+                            break;
+                        case "G":
+                            g = reader.GetInt32();
+                            break;
+                        case "B":
+                            b = reader.GetInt32();
+                            break;
+                    }
+                }
+            }
+            throw new JsonException();
+        }
+
+        public override void Write(Utf8JsonWriter writer, Color value, JsonSerializerOptions options)
+        {
+            writer.WriteStartObject();
+            writer.WriteNumber("A", value.A);
+            writer.WriteNumber("R", value.R);
+            writer.WriteNumber("G", value.G);
+            writer.WriteNumber("B", value.B);
+            writer.WriteEndObject();
+        }
+    }
+
     public class NodeEditorForm : KryptonPanel
     {
+        // Custom double-buffered panel class for the canvas
+        private class DoubleBufferedPanel : Panel
+        {
+            public DoubleBufferedPanel()
+            {
+                this.SetStyle(ControlStyles.AllPaintingInWmPaint, true);
+                this.SetStyle(ControlStyles.OptimizedDoubleBuffer, true);
+                this.SetStyle(ControlStyles.UserPaint, true);
+                this.SetStyle(ControlStyles.ResizeRedraw, true);
+                this.UpdateStyles();
+            }
+        }
+
+        // Dialog for cluster options
+        private class ClusterOptionsDialog : KryptonForm
+        {
+            private KryptonCheckBox chkUseCluster;
+
+            public bool UseCluster { get; private set; }
+
+            public ClusterOptionsDialog(bool currentValue)
+            {
+                UseCluster = currentValue;
+
+                this.Text = "Compute Cluster Options";
+                this.Size = new Size(400, 200);
+                this.FormBorderStyle = FormBorderStyle.FixedDialog;
+                this.MaximizeBox = false;
+                this.MinimizeBox = false;
+                this.StartPosition = FormStartPosition.CenterParent;
+
+                var panel = new Panel
+                {
+                    Dock = DockStyle.Fill,
+                    Padding = new Padding(20)
+                };
+
+                chkUseCluster = new KryptonCheckBox
+                {
+                    Text = "Use Compute Cluster for Node Execution",
+                    Checked = UseCluster,
+                    Location = new Point(20, 20),
+                    AutoSize = true
+                };
+
+                var label = new Label
+                {
+                    Text = "When enabled, node processing tasks will be distributed across available compute endpoints in the cluster.",
+                    Location = new Point(40, 50),
+                    Size = new Size(300, 40),
+                    AutoSize = false
+                };
+
+                var btnOK = new KryptonButton
+                {
+                    Text = "OK",
+                    DialogResult = DialogResult.OK,
+                    Location = new Point(120, 110),
+                    Width = 80
+                };
+
+                var btnCancel = new KryptonButton
+                {
+                    Text = "Cancel",
+                    DialogResult = DialogResult.Cancel,
+                    Location = new Point(210, 110),
+                    Width = 80
+                };
+
+                btnOK.Click += (s, e) =>
+                {
+                    UseCluster = chkUseCluster.Checked;
+                };
+
+                panel.Controls.Add(chkUseCluster);
+                panel.Controls.Add(label);
+                panel.Controls.Add(btnOK);
+                panel.Controls.Add(btnCancel);
+
+                this.Controls.Add(panel);
+                this.AcceptButton = btnOK;
+                this.CancelButton = btnCancel;
+            }
+        }
+
+        // Progress form for cluster execution
+        private class ClusterExecutionProgressForm : KryptonForm
+        {
+            private ProgressBar progressBar;
+            private Label lblStatus;
+            private int totalNodes;
+
+            public ClusterExecutionProgressForm(int totalNodeCount)
+            {
+                this.totalNodes = totalNodeCount;
+
+                this.Text = "Cluster Execution Progress";
+                this.Size = new Size(400, 150);
+                this.FormBorderStyle = FormBorderStyle.FixedDialog;
+                this.MaximizeBox = false;
+                this.MinimizeBox = false;
+                this.StartPosition = FormStartPosition.CenterParent;
+
+                lblStatus = new Label
+                {
+                    Text = "Executing graph on compute cluster...",
+                    Dock = DockStyle.Top,
+                    Height = 30,
+                    TextAlign = ContentAlignment.MiddleCenter
+                };
+
+                progressBar = new ProgressBar
+                {
+                    Dock = DockStyle.Top,
+                    Height = 25,
+                    Maximum = totalNodes,
+                    Value = 0,
+                    Margin = new Padding(20, 10, 20, 10)
+                };
+
+                var panel = new Panel
+                {
+                    Dock = DockStyle.Fill,
+                    Padding = new Padding(20)
+                };
+
+                panel.Controls.Add(progressBar);
+                panel.Controls.Add(lblStatus);
+
+                this.Controls.Add(panel);
+            }
+
+            public void UpdateProgress(int completedNodes)
+            {
+                if (InvokeRequired)
+                {
+                    Invoke(new Action<int>(UpdateProgress), completedNodes);
+                    return;
+                }
+
+                progressBar.Value = Math.Min(completedNodes, totalNodes);
+                lblStatus.Text = $"Executing graph on compute cluster... ({completedNodes}/{totalNodes})";
+                Application.DoEvents();
+            }
+        }
+
+        // Helper class for cluster endpoint items in combobox
+        private class ClusterEndpointItem
+        {
+            public ComputeEndpoint Endpoint { get; }
+            public string DisplayText { get; }
+
+            public ClusterEndpointItem(ComputeEndpoint endpoint, string displayText)
+            {
+                Endpoint = endpoint;
+                DisplayText = displayText;
+            }
+
+            public override string ToString()
+            {
+                return DisplayText;
+            }
+        }
+
         private MainForm mainForm;
-        private Panel canvasPanel;
+        private DoubleBufferedPanel canvasPanel;
         private Panel toolboxPanel;
         private Panel propertiesPanel;
         private List<BaseNode> nodes;
@@ -33,9 +332,32 @@ namespace CTS.NodeEditor
         // For copy/paste
         private List<BaseNode> copiedNodes;
         private List<NodeConnection> copiedConnections;
+
+        // Cluster support
+        private CheckBox chkUseCluster;
+        private ComboBox cmbEndpoints;
+        private Label lblClusterStatus;
+        private bool useCluster = false;
+
+        // Flickering fix
+        private BufferedGraphicsContext context;
+        private BufferedGraphics grafx;
+
         public static NodeEditorForm Instance { get; private set; }
 
         public IEnumerable<NodeConnection> Connections => connections.AsReadOnly();
+
+        public bool UseCluster
+        {
+            get { return useCluster; }
+            set
+            {
+                useCluster = value;
+                if (chkUseCluster != null)
+                    chkUseCluster.Checked = value;
+                UpdateClusterStatus();
+            }
+        }
 
         public NodeEditorForm(MainForm mainForm)
         {
@@ -45,48 +367,181 @@ namespace CTS.NodeEditor
             selectedNodes = new List<BaseNode>();
             copiedNodes = new List<BaseNode>();
             copiedConnections = new List<NodeConnection>();
-            selectedConnections = new List<NodeConnection>(); 
+            selectedConnections = new List<NodeConnection>();
 
             // Set the static instance
             NodeEditorForm.Instance = this;
 
+            // Initialize buffered graphics context safely after components are created
+            context = BufferedGraphicsManager.Current;
+
             InitializeComponent();
-            InitializeMenuBar();
             SetupNodeTypes();
             SetupKeyboardHandling();
+
+            // Initialize buffer only after components are fully created and sized
+            this.HandleCreated += (s, e) => {
+                try
+                {
+                    if (canvasPanel != null && canvasPanel.Width > 0 && canvasPanel.Height > 0 && context != null)
+                    {
+                        context.MaximumBuffer = new Size(Math.Max(1, canvasPanel.Width + 1),
+                                                         Math.Max(1, canvasPanel.Height + 1));
+                        grafx = context.Allocate(canvasPanel.CreateGraphics(),
+                            new Rectangle(0, 0, canvasPanel.Width, canvasPanel.Height));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[NodeEditor] Buffer initialization error: {ex.Message}");
+                }
+            };
+
+            // Handle resize event to recreate the buffer graphics
+            this.SizeChanged += (s, e) => {
+                try
+                {
+                    if (grafx != null)
+                    {
+                        grafx.Dispose();
+                        grafx = null;
+                    }
+
+                    if (canvasPanel != null && canvasPanel.Width > 0 && canvasPanel.Height > 0 && context != null)
+                    {
+                        context.MaximumBuffer = new Size(Math.Max(1, canvasPanel.Width + 1),
+                                                         Math.Max(1, canvasPanel.Height + 1));
+                        grafx = context.Allocate(canvasPanel.CreateGraphics(),
+                            new Rectangle(0, 0, canvasPanel.Width, canvasPanel.Height));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[NodeEditor] Buffer resize error: {ex.Message}");
+                }
+            };
         }
+
+        private bool isUpdatingUI = false;
 
         private void InitializeComponent()
         {
             this.Text = "Node Editor";
             this.Size = new Size(1200, 800);
 
-            // Create the main layout
-            var mainLayout = new TableLayoutPanel
+            // Create a very simple layout structure
+            TableLayoutPanel mainLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                RowCount = 3,
+                ColumnCount = 1,
+                BackColor = Color.FromArgb(35, 35, 38)
+            };
+
+            // Define three rows: Menu, Cluster Controls, Main Content
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30)); // Menu bar - fixed height
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40)); // Cluster controls - fixed height
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); // Main content - fills remaining space
+
+            // 1. Create the menu bar
+            var menuStrip = CreateMenuBar();
+            menuStrip.Dock = DockStyle.Fill;
+
+            // Add menu to first row
+            mainLayout.Controls.Add(menuStrip, 0, 0);
+
+            // 2. Create cluster controls panel
+            var clusterPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.FromArgb(45, 45, 48),
+                Padding = new Padding(5)
+            };
+
+            // Create a flow layout for the cluster controls
+            var clusterFlow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                AutoSize = true
+            };
+
+            // Create regular Windows Forms checkbox
+            chkUseCluster = new CheckBox
+            {
+                Text = "Use Compute Cluster",
+                Margin = new Padding(10, 5, 10, 0),
+                ForeColor = Color.White,
+                BackColor = Color.FromArgb(45, 45, 48),
+                Checked = useCluster,
+                FlatStyle = FlatStyle.Flat
+            };
+
+            // Set up event handler with safety mechanism
+            chkUseCluster.CheckedChanged += SafeCheckedChangedHandler;
+
+            // Create a standard ComboBox
+            cmbEndpoints = new ComboBox
+            {
+                Width = 250,
+                DropDownWidth = 300,
+                Margin = new Padding(5, 5, 10, 0),
+                ForeColor = Color.White,
+                BackColor = Color.FromArgb(60, 60, 60),
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                FlatStyle = FlatStyle.Flat
+            };
+
+            // Create status label
+            lblClusterStatus = new Label
+            {
+                Text = "Cluster disabled",
+                AutoSize = true,
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = Color.Silver,
+                Margin = new Padding(5, 8, 5, 0)
+            };
+
+            // Add controls to flow layout
+            clusterFlow.Controls.Add(chkUseCluster);
+            clusterFlow.Controls.Add(cmbEndpoints);
+            clusterFlow.Controls.Add(lblClusterStatus);
+
+            // Add flow layout to cluster panel
+            clusterPanel.Controls.Add(clusterFlow);
+
+            // Add cluster panel to second row
+            mainLayout.Controls.Add(clusterPanel, 0, 1);
+
+            // 3. Create content panel (contains toolbox, canvas, properties)
+            var contentPanel = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 3,
-                RowCount = 1
+                RowCount = 1,
+                BackColor = Color.FromArgb(35, 35, 38)
             };
 
-            // Add column styles
-            mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 200));
-            mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 250));
+            // Define column proportions for the content area - adjust to make toolbox narrower
+            contentPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 220)); // Fixed width toolbox (narrower)
+            contentPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));  // Canvas (fills remaining space)
+            contentPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 250)); // Properties panel
 
-            // Create toolbox panel
+            // Create toolbox panel with AutoScroll enabled
             toolboxPanel = new Panel
             {
                 Dock = DockStyle.Fill,
                 BackColor = Color.FromArgb(45, 45, 48),
-                BorderStyle = BorderStyle.Fixed3D
+                Margin = new Padding(1, 1, 0, 1),
+                AutoScroll = true // Enable scrolling for toolbox
             };
 
             var toolboxLabel = new Label
             {
                 Text = "Node Toolbox",
                 Dock = DockStyle.Top,
-                Height = 30,
+                Height = 15,
                 ForeColor = Color.White,
                 TextAlign = ContentAlignment.MiddleCenter,
                 BackColor = Color.FromArgb(35, 35, 38)
@@ -94,45 +549,270 @@ namespace CTS.NodeEditor
 
             toolboxPanel.Controls.Add(toolboxLabel);
 
-            // Create canvas panel
-            canvasPanel = new Panel
+            // Create canvas panel with double-buffering to prevent flickering
+            canvasPanel = new DoubleBufferedPanel
             {
                 Dock = DockStyle.Fill,
                 BackColor = Color.FromArgb(30, 30, 30),
-                BorderStyle = BorderStyle.Fixed3D
+                Margin = new Padding(1)
             };
 
             canvasPanel.MouseDown += Canvas_MouseDown;
             canvasPanel.MouseMove += Canvas_MouseMove;
             canvasPanel.MouseUp += Canvas_MouseUp;
             canvasPanel.Paint += Canvas_Paint;
+            canvasPanel.Resize += Canvas_Resize;
 
             // Create properties panel
             propertiesPanel = new Panel
             {
                 Dock = DockStyle.Fill,
                 BackColor = Color.FromArgb(45, 45, 48),
-                BorderStyle = BorderStyle.Fixed3D
+                Margin = new Padding(0, 1, 1, 1),
+                AutoScroll = true // Enable scrolling for properties panel
             };
 
-            var propertiesLabel = new Label
+            /*var propertiesLabel = new Label
             {
                 Text = "Properties",
                 Dock = DockStyle.Top,
-                Height = 30,
+                Height = 15,
                 ForeColor = Color.White,
                 TextAlign = ContentAlignment.MiddleCenter,
                 BackColor = Color.FromArgb(35, 35, 38)
             };
 
-            propertiesPanel.Controls.Add(propertiesLabel);
+            propertiesPanel.Controls.Add(propertiesLabel);*/
 
-            // Add panels to main layout
-            mainLayout.Controls.Add(toolboxPanel, 0, 0);
-            mainLayout.Controls.Add(canvasPanel, 1, 0);
-            mainLayout.Controls.Add(propertiesPanel, 2, 0);
+            // Add panels to content layout
+            contentPanel.Controls.Add(toolboxPanel, 0, 0);
+            contentPanel.Controls.Add(canvasPanel, 1, 0);
+            contentPanel.Controls.Add(propertiesPanel, 2, 0);
 
+            // Add content panel to third row
+            mainLayout.Controls.Add(contentPanel, 0, 2);
+
+            // Add main layout to form
             this.Controls.Add(mainLayout);
+
+            // Initialize endpoints list
+            RefreshClusterEndpoints();
+        }
+
+        private void Canvas_Resize(object sender, EventArgs e)
+        {
+            try
+            {
+                // Recreate the buffer when the canvas is resized
+                if (grafx != null)
+                {
+                    grafx.Dispose();
+                    grafx = null;
+                }
+
+                if (canvasPanel != null && canvasPanel.Width > 0 && canvasPanel.Height > 0 && context != null)
+                {
+                    context.MaximumBuffer = new Size(Math.Max(1, canvasPanel.Width + 1),
+                                                    Math.Max(1, canvasPanel.Height + 1));
+                    grafx = context.Allocate(canvasPanel.CreateGraphics(),
+                        new Rectangle(0, 0, Math.Max(1, canvasPanel.Width), Math.Max(1, canvasPanel.Height)));
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log error but prevent crash
+                Logger.Log($"[NodeEditor] Error in Canvas_Resize: {ex.Message}");
+            }
+        }
+
+        private void AddClusterControls(FlowLayoutPanel buttonPanel)
+        {
+            // Create a panel to hold cluster controls with increased margins for spacing
+            var clusterPanel = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(10, 5, 5, 5),  // Increased left margin
+                Padding = new Padding(10, 5, 10, 5), // Increased padding
+                BorderStyle = BorderStyle.FixedSingle,
+                BackColor = Color.FromArgb(40, 40, 45)
+            };
+
+            // For KryptonCheckBox we need to set the StateCommon properties
+            chkUseCluster = new CheckBox
+            {
+                Text = "Use Compute Cluster",
+                Checked = useCluster,
+                Margin = new Padding(5),
+            };
+
+            // Set the text color explicitly using the Krypton styling system
+
+
+            chkUseCluster.CheckedChanged += (s, e) =>
+            {
+                useCluster = chkUseCluster.Checked;
+                UpdateClusterStatus();
+            };
+
+            cmbEndpoints = new ComboBox
+            {
+                Width = 200,
+                DropDownWidth = 250,
+                Margin = new Padding(10, 5, 5, 5),  // Increased left margin for spacing
+                ForeColor = Color.White,
+            };
+
+            // Set text colors for the ComboBox
+
+
+            lblClusterStatus = new Label
+            {
+                AutoSize = true,
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = Color.Silver,
+                Margin = new Padding(10, 5, 5, 5)  // Increased left margin for spacing
+            };
+
+            clusterPanel.Controls.Add(chkUseCluster);
+            clusterPanel.Controls.Add(cmbEndpoints);
+            clusterPanel.Controls.Add(lblClusterStatus);
+
+            // Add to button panel
+            buttonPanel.Controls.Add(clusterPanel);
+
+            // Initialize endpoints list
+            RefreshClusterEndpoints();
+        }
+        private void SafeCheckedChangedHandler(object sender, EventArgs e)
+        {
+            try
+            {
+                // Prevent recursive UI updates
+                if (isUpdatingUI)
+                    return;
+
+                isUpdatingUI = true;
+
+                // Update the useCluster flag
+                useCluster = chkUseCluster.Checked;
+
+                // Update UI based on the new state
+                UpdateClusterStatus();
+            }
+            catch (Exception ex)
+            {
+                // Log the error but prevent application crash
+                Logger.Log($"[NodeEditor] Error in checkbox event: {ex.Message}");
+            }
+            finally
+            {
+                isUpdatingUI = false;
+            }
+        }
+        private bool isEventHandlerActive = false;
+
+        private void RefreshClusterEndpoints()
+        {
+            try
+            {
+                // Prevent recursive UI updates
+                if (isUpdatingUI)
+                    return;
+
+                isUpdatingUI = true;
+
+                if (cmbEndpoints == null)
+                    return;
+
+                cmbEndpoints.Items.Clear();
+
+                if (mainForm != null && mainForm.ComputeEndpoints != null && mainForm.ComputeEndpoints.Count > 0)
+                {
+                    foreach (var endpoint in mainForm.ComputeEndpoints)
+                    {
+                        string gpuInfo = endpoint.HasGPU ? " (GPU)" : "";
+                        string displayText = $"{endpoint.Name} - {endpoint.IP}:{endpoint.Port}{gpuInfo}";
+                        cmbEndpoints.Items.Add(displayText);
+                    }
+
+                    if (cmbEndpoints.Items.Count > 0)
+                        cmbEndpoints.SelectedIndex = 0;
+
+                    if (chkUseCluster != null)
+                        chkUseCluster.Enabled = true;
+                }
+                else
+                {
+                    cmbEndpoints.Items.Add("No endpoints available");
+                    cmbEndpoints.SelectedIndex = 0;
+
+                    // Even with no endpoints, allow the checkbox to be clicked
+                    if (chkUseCluster != null)
+                        chkUseCluster.Enabled = true;
+
+                    // Only update the checked state if we're not in an event handler already
+                    if (!isEventHandlerActive && chkUseCluster != null)
+                        chkUseCluster.Checked = false;
+
+                    useCluster = chkUseCluster != null ? chkUseCluster.Checked : false;
+                }
+
+                UpdateClusterStatus();
+            }
+            catch (Exception ex)
+            {
+                // Log the error but prevent application crash
+                Logger.Log($"[NodeEditor] Error refreshing endpoints: {ex.Message}");
+            }
+            finally
+            {
+                isUpdatingUI = false;
+            }
+        }
+
+        private void UpdateClusterStatus()
+        {
+            try
+            {
+                isEventHandlerActive = true;
+
+                if (lblClusterStatus == null)
+                    return;
+
+                if (useCluster && mainForm != null && mainForm.ComputeEndpoints != null && mainForm.ComputeEndpoints.Count > 0)
+                {
+                    int availableEndpoints = mainForm.ComputeEndpoints.Count(e => e.IsConnected && !e.IsBusy);
+                    lblClusterStatus.Text = $"Cluster: {availableEndpoints}/{mainForm.ComputeEndpoints.Count} endpoints";
+                    lblClusterStatus.ForeColor = Color.LightGreen;
+                    if (cmbEndpoints != null)
+                        cmbEndpoints.Enabled = true;
+                }
+                else if (useCluster)
+                {
+                    lblClusterStatus.Text = "No endpoints available";
+                    lblClusterStatus.ForeColor = Color.Orange;
+                    if (cmbEndpoints != null)
+                        cmbEndpoints.Enabled = false;
+                }
+                else
+                {
+                    lblClusterStatus.Text = "Cluster disabled";
+                    lblClusterStatus.ForeColor = Color.Silver;
+                    if (cmbEndpoints != null)
+                        cmbEndpoints.Enabled = false;
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log the error but prevent application crash
+                Logger.Log($"[NodeEditor] Error updating cluster status: {ex.Message}");
+            }
+            finally
+            {
+                isEventHandlerActive = false;
+            }
         }
 
         private void SetupKeyboardHandling()
@@ -148,8 +828,9 @@ namespace CTS.NodeEditor
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
             HandleKeyDown(new KeyEventArgs(keyData));
-            return true; 
+            return base.ProcessCmdKey(ref msg, keyData);
         }
+
         private void NodeEditorForm_KeyDown(object sender, KeyEventArgs e)
         {
             HandleKeyDown(e);
@@ -210,6 +891,7 @@ namespace CTS.NodeEditor
                     break;
             }
         }
+
         private void InitializeMenuBar()
         {
             var menuStrip = CreateMenuBar();
@@ -220,59 +902,58 @@ namespace CTS.NodeEditor
         private void SetupNodeTypes()
         {
             var nodeTypes = new List<NodeTypeInfo>
-    {
-        // Input nodes (Green theme)
-        new NodeTypeInfo("Input", "Current Dataset", typeof(CurrentDatasetNode), Color.FromArgb(120, 200, 120)),
-        new NodeTypeInfo("Input", "Volume Data", typeof(VolumeDataNode), Color.FromArgb(120, 200, 120)),
-        new NodeTypeInfo("Input", "Label Data", typeof(LabelDataNode), Color.FromArgb(120, 200, 120)),
-        new NodeTypeInfo("Input", "Label", typeof(LabelNode), Color.FromArgb(255, 180, 100)),
-        new NodeTypeInfo("Input", "Current Label", typeof(CurrentLabelNode), Color.FromArgb(120, 200, 120)),
-        new NodeTypeInfo("Input", "Load Dataset", typeof(LoadDatasetNode), Color.FromArgb(100, 180, 100)),
-        new NodeTypeInfo("Input", "Load Multiple Datasets", typeof(LoadMultipleDatasetNode), Color.FromArgb(100, 180, 100)),
-        new NodeTypeInfo("Input", "Dataset Decompression", typeof(DatasetDecompressionNode), Color.FromArgb(120, 200, 120)),
-        
-        // Processing nodes (Blue theme)
-        new NodeTypeInfo("Tools", "Brightness & Contrast", typeof(BrightnessContrastNode), Color.FromArgb(100, 150, 255)),
-        new NodeTypeInfo("Tools", "Resample Volume", typeof(ResampleVolumeNode), Color.FromArgb(100, 180, 255)),
-        new NodeTypeInfo("Tools", "Threshold", typeof(ThresholdNode), Color.FromArgb(100, 150, 255)),
-        new NodeTypeInfo("Tools", "Segment Anything", typeof(SegmentAnythingNode), Color.FromArgb(100, 150, 255)),
-        new NodeTypeInfo("Tools", "MicroSAM", typeof(MicroSAMNode), Color.FromArgb(100, 150, 255)),
-        new NodeTypeInfo("Tools", "Grounding DINO", typeof(GroundingDINONode), Color.FromArgb(100, 150, 255)),
-        new NodeTypeInfo("Tools", "Interpolate", typeof(InterpolateNode), Color.FromArgb(100, 150, 255)),
-        new NodeTypeInfo("Tools", "Manual Thresholding", typeof(ManualThresholdingNode), Color.FromArgb(120, 180, 255)),
-        new NodeTypeInfo("Tools", "Binarize", typeof(BinarizeNode), Color.FromArgb(100, 150, 255)),
-        new NodeTypeInfo("Tools", "Remove Small Islands", typeof(RemoveSmallIslandsNode), Color.FromArgb(120, 180, 255)),
+            {
+                // Input nodes (Green theme)
+                new NodeTypeInfo("Input", "Current Dataset", typeof(CurrentDatasetNode), Color.FromArgb(120, 200, 120)),
+                new NodeTypeInfo("Input", "Volume Data", typeof(VolumeDataNode), Color.FromArgb(120, 200, 120)),
+                new NodeTypeInfo("Input", "Label Data", typeof(LabelDataNode), Color.FromArgb(120, 200, 120)),
+                new NodeTypeInfo("Input", "Label", typeof(LabelNode), Color.FromArgb(255, 180, 100)),
+                new NodeTypeInfo("Input", "Current Label", typeof(CurrentLabelNode), Color.FromArgb(120, 200, 120)),
+                new NodeTypeInfo("Input", "Load Dataset", typeof(LoadDatasetNode), Color.FromArgb(100, 180, 100)),
+                new NodeTypeInfo("Input", "Load Multiple Datasets", typeof(LoadMultipleDatasetNode), Color.FromArgb(100, 180, 100)),
+                new NodeTypeInfo("Input", "Dataset Decompression", typeof(DatasetDecompressionNode), Color.FromArgb(120, 200, 120)),
+                
+                // Processing nodes (Blue theme)
+                new NodeTypeInfo("Tools", "Brightness & Contrast", typeof(BrightnessContrastNode), Color.FromArgb(100, 150, 255)),
+                new NodeTypeInfo("Tools", "Resample Volume", typeof(ResampleVolumeNode), Color.FromArgb(100, 180, 255)),
+                new NodeTypeInfo("Tools", "Threshold", typeof(ThresholdNode), Color.FromArgb(100, 150, 255)),
+                new NodeTypeInfo("Tools", "Segment Anything", typeof(SegmentAnythingNode), Color.FromArgb(100, 150, 255)),
+                new NodeTypeInfo("Tools", "MicroSAM", typeof(MicroSAMNode), Color.FromArgb(100, 150, 255)),
+                new NodeTypeInfo("Tools", "Grounding DINO", typeof(GroundingDINONode), Color.FromArgb(100, 150, 255)),
+                new NodeTypeInfo("Tools", "Interpolate", typeof(InterpolateNode), Color.FromArgb(100, 150, 255)),
+                new NodeTypeInfo("Tools", "Manual Thresholding", typeof(ManualThresholdingNode), Color.FromArgb(120, 180, 255)),
+                new NodeTypeInfo("Tools", "Binarize", typeof(BinarizeNode), Color.FromArgb(100, 150, 255)),
+                new NodeTypeInfo("Tools", "Remove Small Islands", typeof(RemoveSmallIslandsNode), Color.FromArgb(120, 180, 255)),
+                
+                // Simulation nodes (Purple theme)
+                new NodeTypeInfo("Simulation", "Pore Network", typeof(PoreNetworkNode), Color.FromArgb(180, 100, 255)),
+                new NodeTypeInfo("Simulation", "Acoustic", typeof(AcousticSimulationNode), Color.FromArgb(180, 100, 255)),
+                new NodeTypeInfo("Simulation", "Triaxial", typeof(TriaxialSimulationNode), Color.FromArgb(180, 100, 255)),
+                
+                // Filtering nodes (Teal theme)
+                new NodeTypeInfo("Filters", "Band Detection", typeof(BandDetectionNode), Color.FromArgb(100, 200, 200)),
+                new NodeTypeInfo("Filters", "Transform", typeof(TransformDatasetNode), Color.FromArgb(100, 200, 200)),
+                new NodeTypeInfo("Filters", "Core Extraction", typeof(CoreExtractionNode), Color.FromArgb(100, 200, 200)),
+                new NodeTypeInfo("Filters", "Image Filter", typeof(FilterNode), Color.FromArgb(100, 200, 200)),
+                
+                // Material nodes (Orange theme)
+                new NodeTypeInfo("Materials", "Add Material", typeof(AddMaterialNode), Color.FromArgb(255, 180, 100)),
+                new NodeTypeInfo("Materials", "Remove Material", typeof(RemoveMaterialNode), Color.FromArgb(255, 180, 100)),
+                new NodeTypeInfo("Materials", "Merge Materials", typeof(MergeMaterialsNode), Color.FromArgb(255, 180, 100)),
+                new NodeTypeInfo("Materials", "Extract Material", typeof(ExtractMaterialsNode), Color.FromArgb(180, 100, 255)),
+                new NodeTypeInfo("Materials", "Material Density", typeof(DensityNode), Color.FromArgb(255, 180, 100)),
+                
+                // Output nodes (Red theme)
+                new NodeTypeInfo("Output", "Export Image Stack", typeof(ExportImageStackNode), Color.FromArgb(255, 120, 120)),
+                new NodeTypeInfo("Output", "Save Dataset", typeof(SaveDatasetNode), Color.FromArgb(255, 120, 120)),
+                new NodeTypeInfo("Output", "Save Labels", typeof(SaveLabelsNode), Color.FromArgb(255, 120, 120)),
+                new NodeTypeInfo("Output", "Replace Current", typeof(ReplaceCurrentNode), Color.FromArgb(255, 140, 120)),
+                new NodeTypeInfo("Output", "Statistics", typeof(StatisticsNode), Color.FromArgb(255, 120, 120)),
+                new NodeTypeInfo("Output", "Dataset Compression", typeof(DatasetCompressionNode), Color.FromArgb(255, 120, 120)),
 
-        
-        // Simulation nodes (Purple theme)
-        new NodeTypeInfo("Simulation", "Pore Network", typeof(PoreNetworkNode), Color.FromArgb(180, 100, 255)),
-        new NodeTypeInfo("Simulation", "Acoustic", typeof(AcousticSimulationNode), Color.FromArgb(180, 100, 255)),
-        new NodeTypeInfo("Simulation", "Triaxial", typeof(TriaxialSimulationNode), Color.FromArgb(180, 100, 255)),
-        
-        // Filtering nodes (Teal theme)
-        new NodeTypeInfo("Filters", "Band Detection", typeof(BandDetectionNode), Color.FromArgb(100, 200, 200)),
-        new NodeTypeInfo("Filters", "Transform", typeof(TransformDatasetNode), Color.FromArgb(100, 200, 200)),
-        new NodeTypeInfo("Filters", "Core Extraction", typeof(CoreExtractionNode), Color.FromArgb(100, 200, 200)),
-        new NodeTypeInfo("Filters", "Image Filter", typeof(FilterNode), Color.FromArgb(100, 200, 200)),
-        
-        // Material nodes (Orange theme)
-        new NodeTypeInfo("Materials", "Add Material", typeof(AddMaterialNode), Color.FromArgb(255, 180, 100)),
-        new NodeTypeInfo("Materials", "Remove Material", typeof(RemoveMaterialNode), Color.FromArgb(255, 180, 100)),
-        new NodeTypeInfo("Materials", "Merge Materials", typeof(MergeMaterialsNode), Color.FromArgb(255, 180, 100)),
-        new NodeTypeInfo("Materials", "Extract Material", typeof(ExtractMaterialsNode), Color.FromArgb(180, 100, 255)),
-        new NodeTypeInfo("Materials", "Material Density", typeof(DensityNode), Color.FromArgb(255, 180, 100)),
-        
-        // Output nodes (Red theme)
-        new NodeTypeInfo("Output", "Export Image Stack", typeof(ExportImageStackNode), Color.FromArgb(255, 120, 120)),
-        new NodeTypeInfo("Output", "Save Dataset", typeof(SaveDatasetNode), Color.FromArgb(255, 120, 120)),
-        new NodeTypeInfo("Output", "Save Labels", typeof(SaveLabelsNode), Color.FromArgb(255, 120, 120)),
-        new NodeTypeInfo("Output", "Replace Current", typeof(ReplaceCurrentNode), Color.FromArgb(255, 140, 120)),
-        new NodeTypeInfo("Output", "Statistics", typeof(StatisticsNode), Color.FromArgb(255, 120, 120)),
-        new NodeTypeInfo("Output", "Dataset Compression", typeof(DatasetCompressionNode), Color.FromArgb(255, 120, 120)),
-
-        //Analysis Nodes (Violet theme)
-        new NodeTypeInfo("Analysis", "Material Statistics", typeof(MaterialStatisticsNode), Color.FromArgb(160, 120, 200)),
-    };
+                //Analysis Nodes (Violet theme)
+                new NodeTypeInfo("Analysis", "Material Statistics", typeof(MaterialStatisticsNode), Color.FromArgb(160, 120, 200)),
+            };
 
             // Create a TreeView for nodes with collapsible categories
             var toolboxTree = new TreeView
@@ -316,7 +997,9 @@ namespace CTS.NodeEditor
                     CreateNode(nodeTypeInfo);
                 }
             };
-
+            var emptyLabel = new Label();
+            emptyLabel.Text = " ";
+            toolboxPanel.Controls.Add(emptyLabel);
             toolboxPanel.Controls.Add(toolboxTree);
         }
 
@@ -347,8 +1030,13 @@ namespace CTS.NodeEditor
         }
 
         #region Canvas Event Handlers
+
+        private Point lastMousePosition; // To track mouse movements
+
         private void Canvas_MouseDown(object sender, MouseEventArgs e)
         {
+            lastMousePosition = e.Location; // Store initial position
+
             // Check if clicking on a node or pin
             foreach (var node in nodes.Reverse<BaseNode>())
             {
@@ -367,7 +1055,7 @@ namespace CTS.NodeEditor
                     }
 
                     // Handle multi-selection with Ctrl key
-                    if (Control.ModifierKeys == Keys.Control)
+                    if ((Control.ModifierKeys & Keys.Control) == Keys.Control)
                     {
                         if (selectedNodes.Contains(node))
                         {
@@ -414,7 +1102,7 @@ namespace CTS.NodeEditor
             {
                 if (IsMouseOverConnection(e.Location, connection))
                 {
-                    if (Control.ModifierKeys == Keys.Control)
+                    if ((Control.ModifierKeys & Keys.Control) == Keys.Control)
                     {
                         // Toggle selection with Ctrl
                         if (selectedConnections.Contains(connection))
@@ -430,7 +1118,7 @@ namespace CTS.NodeEditor
                     }
 
                     // Clear node selection when selecting connections
-                    if (Control.ModifierKeys != Keys.Control)
+                    if ((Control.ModifierKeys & Keys.Control) != Keys.Control)
                     {
                         selectedNodes.Clear();
                         selectedNode = null;
@@ -447,7 +1135,7 @@ namespace CTS.NodeEditor
             selectedConnections.Clear();
 
             // Start rectangle selection if no node clicked
-            if (Control.ModifierKeys != Keys.Control)
+            if ((Control.ModifierKeys & Keys.Control) != Keys.Control)
             {
                 selectedNodes.Clear();
             }
@@ -461,53 +1149,101 @@ namespace CTS.NodeEditor
             UpdatePropertiesPanel(null);
             canvasPanel.Invalidate();
         }
+
         private void Canvas_MouseMove(object sender, MouseEventArgs e)
         {
+            // Avoid excessive processing for small mouse movements to reduce flickering
+            if (Math.Abs(e.X - lastMousePosition.X) < 1 &&
+                Math.Abs(e.Y - lastMousePosition.Y) < 1)
+            {
+                return;
+            }
+
             if (isDragging && selectedNodes.Count > 0)
             {
-                // Calculate movement delta
-                int dx = e.X - (selectedNode.Position.X + dragOffset.X);
-                int dy = e.Y - (selectedNode.Position.Y + dragOffset.Y);
+                // Calculate movement delta from last position
+                int dx = e.X - lastMousePosition.X;
+                int dy = e.Y - lastMousePosition.Y;
 
-                // Move all selected nodes
-                foreach (var node in selectedNodes)
+                if (dx != 0 || dy != 0) // Only process if there's actual movement
                 {
-                    node.Position = new Point(
-                        node.Position.X + dx,
-                        node.Position.Y + dy);
+                    // Move all selected nodes by the delta
+                    foreach (var node in selectedNodes)
+                    {
+                        node.Position = new Point(
+                            node.Position.X + dx,
+                            node.Position.Y + dy);
+                    }
+
+                    // Update last position
+                    lastMousePosition = e.Location;
+
+                    // Redraw with double buffering
+                    canvasPanel.Invalidate();
                 }
-                canvasPanel.Invalidate();
             }
             else if (isConnecting && connectingPin != null)
             {
+                // We only need to redraw if the mouse has moved significantly
+                lastMousePosition = e.Location;
                 canvasPanel.Invalidate();
             }
             else if (isMultiSelecting)
             {
-                // Update selection rectangle
-                selectionRectangle = new Rectangle(
-                    Math.Min(selectionStart.X, e.X),
-                    Math.Min(selectionStart.Y, e.Y),
-                    Math.Abs(e.X - selectionStart.X),
-                    Math.Abs(e.Y - selectionStart.Y));
+                // Update selection rectangle based on mouse movement
+                int left = Math.Min(selectionStart.X, e.X);
+                int top = Math.Min(selectionStart.Y, e.Y);
+                int width = Math.Abs(e.X - selectionStart.X);
+                int height = Math.Abs(e.Y - selectionStart.Y);
 
-                // Select nodes within rectangle
-                foreach (var node in nodes)
+                Rectangle newSelectionRect = new Rectangle(left, top, width, height);
+
+                // Only update if the selection rectangle has changed significantly
+                if (Math.Abs(newSelectionRect.Width - selectionRectangle.Width) > 1 ||
+                    Math.Abs(newSelectionRect.Height - selectionRectangle.Height) > 1 ||
+                    Math.Abs(newSelectionRect.X - selectionRectangle.X) > 1 ||
+                    Math.Abs(newSelectionRect.Y - selectionRectangle.Y) > 1)
                 {
-                    if (selectionRectangle.IntersectsWith(node.Bounds))
+                    selectionRectangle = newSelectionRect;
+
+                    // Update node selection based on the new rectangle
+                    // Track if selection actually changed to avoid unnecessary redraws
+                    bool selectionChanged = false;
+
+                    foreach (var node in nodes)
                     {
-                        if (!selectedNodes.Contains(node))
+                        bool wasSelected = selectedNodes.Contains(node);
+                        bool shouldBeSelected = selectionRectangle.IntersectsWith(node.Bounds);
+
+                        if ((Control.ModifierKeys & Keys.Control) != Keys.Control)
                         {
-                            selectedNodes.Add(node);
+                            // Standard selection behavior - replace selection
+                            if (shouldBeSelected && !wasSelected)
+                            {
+                                selectedNodes.Add(node);
+                                selectionChanged = true;
+                            }
+                            else if (!shouldBeSelected && wasSelected)
+                            {
+                                selectedNodes.Remove(node);
+                                selectionChanged = true;
+                            }
+                        }
+                        else
+                        {
+                            // Ctrl key behavior - add to selection
+                            if (shouldBeSelected && !wasSelected)
+                            {
+                                selectedNodes.Add(node);
+                                selectionChanged = true;
+                            }
                         }
                     }
-                    else if (Control.ModifierKeys != Keys.Control)
-                    {
-                        selectedNodes.Remove(node);
-                    }
-                }
 
-                canvasPanel.Invalidate();
+                    // Only redraw if selection changed or rectangle size changed significantly
+                    lastMousePosition = e.Location;
+                    canvasPanel.Invalidate();
+                }
             }
         }
 
@@ -540,6 +1276,7 @@ namespace CTS.NodeEditor
 
             isDragging = false;
             isMultiSelecting = false;
+            canvasPanel.Invalidate();
         }
 
         private bool CanConnect(NodePin from, NodePin to)
@@ -567,53 +1304,147 @@ namespace CTS.NodeEditor
 
         private void Canvas_Paint(object sender, PaintEventArgs e)
         {
-            var g = e.Graphics;
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-
-            // Draw grid
-            DrawGrid(g);
-
-            // Draw connections
-            foreach (var connection in connections)
+            try
             {
-                DrawConnection(g, connection);
-            }
-
-            // Draw temporary connection while connecting
-            if (isConnecting && connectingPin != null)
-            {
-                var mousePos = canvasPanel.PointToClient(MousePosition);
-                DrawTempConnection(g, connectingPin, mousePos);
-            }
-
-            // Draw nodes
-            foreach (var node in nodes)
-            {
-                DrawNode(g, node);
-            }
-
-            // Draw selection rectangle
-            if (isMultiSelecting)
-            {
-                using (var pen = new Pen(Color.Yellow, 1))
-                using (var brush = new SolidBrush(Color.FromArgb(50, Color.Yellow)))
+                // Use direct painting if buffered graphics not ready yet
+                if (grafx == null)
                 {
-                    g.FillRectangle(brush, selectionRectangle);
-                    g.DrawRectangle(pen, selectionRectangle);
+                    // Fallback direct drawing
+                    var g = e.Graphics;
+                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                    g.Clear(canvasPanel.BackColor);
+                    DrawGrid(g);
+
+                    foreach (var connection in connections)
+                    {
+                        DrawConnection(g, connection);
+                    }
+
+                    if (isConnecting && connectingPin != null)
+                    {
+                        var mousePos = canvasPanel.PointToClient(MousePosition);
+                        DrawTempConnection(g, connectingPin, mousePos);
+                    }
+
+                    foreach (var node in nodes)
+                    {
+                        DrawNode(g, node);
+                    }
+
+                    if (isMultiSelecting)
+                    {
+                        using (var pen = new Pen(Color.Yellow, 1))
+                        using (var brush = new SolidBrush(Color.FromArgb(50, Color.Yellow)))
+                        {
+                            g.FillRectangle(brush, selectionRectangle);
+                            g.DrawRectangle(pen, selectionRectangle);
+                        }
+                    }
+
+                    return;
+                }
+
+                // Recreate buffer if size changed
+                if (e.ClipRectangle.Width > 0 && e.ClipRectangle.Height > 0 &&
+                    (e.ClipRectangle.Width != canvasPanel.Width || e.ClipRectangle.Height != canvasPanel.Height))
+                {
+                    if (grafx != null)
+                    {
+                        grafx.Dispose();
+                        grafx = null;
+                    }
+
+                    if (context != null)
+                    {
+                        context.MaximumBuffer = new Size(Math.Max(1, canvasPanel.Width + 1),
+                                                        Math.Max(1, canvasPanel.Height + 1));
+                        grafx = context.Allocate(canvasPanel.CreateGraphics(),
+                            new Rectangle(0, 0, Math.Max(1, canvasPanel.Width), Math.Max(1, canvasPanel.Height)));
+                    }
+                }
+
+                // Get graphics object from the buffer
+                if (grafx != null)
+                {
+                    Graphics g = grafx.Graphics;
+
+                    // Clear the background
+                    g.Clear(canvasPanel.BackColor);
+
+                    // Set high quality rendering
+                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                    g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                    g.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
+
+                    // Draw grid
+                    DrawGrid(g);
+
+                    // Draw connections
+                    foreach (var connection in connections)
+                    {
+                        DrawConnection(g, connection);
+                    }
+
+                    // Draw temporary connection while connecting
+                    if (isConnecting && connectingPin != null)
+                    {
+                        var mousePos = canvasPanel.PointToClient(MousePosition);
+                        DrawTempConnection(g, connectingPin, mousePos);
+                    }
+
+                    // Draw nodes
+                    foreach (var node in nodes)
+                    {
+                        DrawNode(g, node);
+                    }
+
+                    // Draw selection rectangle
+                    if (isMultiSelecting)
+                    {
+                        using (var pen = new Pen(Color.Yellow, 1))
+                        using (var brush = new SolidBrush(Color.FromArgb(50, Color.Yellow)))
+                        {
+                            g.FillRectangle(brush, selectionRectangle);
+                            g.DrawRectangle(pen, selectionRectangle);
+                        }
+                    }
+
+                    // Render the buffered graphics to the screen
+                    grafx.Render(e.Graphics);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log error but prevent crash
+                Logger.Log($"[NodeEditor] Error in Canvas_Paint: {ex.Message}");
+
+                // Try direct rendering as fallback
+                try
+                {
+                    var g = e.Graphics;
+                    g.Clear(canvasPanel.BackColor);
+                    g.DrawString("Rendering error - please resize window",
+                                 new Font("Arial", 10), Brushes.White, new PointF(10, 10));
+                }
+                catch
+                {
+                    // If even direct rendering fails, just ignore to prevent crash
                 }
             }
         }
 
         private void DrawGrid(Graphics g)
         {
+            // Draw grid more efficiently
+            int gridSpacing = 20;
             using (var pen = new Pen(Color.FromArgb(40, 40, 40), 1))
             {
-                int spacing = 20;
-                for (int x = 0; x < canvasPanel.Width; x += spacing)
+                // Only draw grid lines in the visible area
+                for (int x = 0; x < canvasPanel.Width; x += gridSpacing)
                 {
                     g.DrawLine(pen, x, 0, x, canvasPanel.Height);
                 }
-                for (int y = 0; y < canvasPanel.Height; y += spacing)
+                for (int y = 0; y < canvasPanel.Height; y += gridSpacing)
                 {
                     g.DrawLine(pen, 0, y, canvasPanel.Width, y);
                 }
@@ -697,8 +1528,8 @@ namespace CTS.NodeEditor
             using (var pen = new Pen(Color.Yellow, 2))
             {
                 var start = new Point(
-                    from.Bounds.X + from.Bounds.Width / 2,
-                    from.Bounds.Y + from.Bounds.Height / 2);
+                    from.AbsolutePosition.X,
+                    from.AbsolutePosition.Y);
 
                 var cp1 = new Point(start.X + 50, start.Y);
                 var cp2 = new Point(to.X - 50, to.Y);
@@ -719,9 +1550,10 @@ namespace CTS.NodeEditor
                 connection.To.AbsolutePosition.X,
                 connection.To.AbsolutePosition.Y);
 
-         
+
             return DistanceToLine(mousePos, start, end) < 5; // 5 pixels tolerance
         }
+
         private float DistanceToLine(Point point, Point lineStart, Point lineEnd)
         {
             float lineLength = (float)Math.Sqrt(
@@ -757,6 +1589,7 @@ namespace CTS.NodeEditor
 
             return distance;
         }
+
         private void DeleteSelectedNodes()
         {
             if (selectedNodes.Count == 0) return;
@@ -905,6 +1738,7 @@ namespace CTS.NodeEditor
                 propertiesPanel.Controls.Add(propertyPanel);
             }
         }
+
         private MenuStrip CreateMenuBar()
         {
             var menuStrip = new MenuStrip();
@@ -940,6 +1774,11 @@ namespace CTS.NodeEditor
                 {
                     // Ask the docking manager to hide this page
                     page.Hide();
+                    if (grafx != null)
+                    {
+                        grafx.Dispose();
+                        grafx = null;
+                    }
                     this.Dispose();
                 }
                 else
@@ -994,11 +1833,11 @@ namespace CTS.NodeEditor
 
             editMenu.DropDownItems.AddRange(new ToolStripItem[]
             {
-        cutMenuItem, copyMenuItem, pasteMenuItem,
-        new ToolStripSeparator(),
-        selectAllMenuItem, deleteMenuItem, deleteConnectionMenuItem,
-        new ToolStripSeparator(),
-        clearConnectionsMenuItem, clearAllMenuItem
+                cutMenuItem, copyMenuItem, pasteMenuItem,
+                new ToolStripSeparator(),
+                selectAllMenuItem, deleteMenuItem, deleteConnectionMenuItem,
+                new ToolStripSeparator(),
+                clearConnectionsMenuItem, clearAllMenuItem
             });
 
             // Execute menu
@@ -1009,12 +1848,39 @@ namespace CTS.NodeEditor
             var validateMenuItem = new ToolStripMenuItem("Validate Graph");
             validateMenuItem.Click += (s, e) => ValidateGraph();
 
-            executeMenu.DropDownItems.AddRange(new ToolStripItem[] { executeAllMenuItem, validateMenuItem });
+            // Add compute cluster specific menu items
+            var configureClusterMenuItem = new ToolStripMenuItem("Configure Cluster Options");
+            configureClusterMenuItem.Click += (s, e) => ShowClusterOptions();
+
+            var refreshClusterMenuItem = new ToolStripMenuItem("Refresh Cluster Endpoints");
+            refreshClusterMenuItem.Click += (s, e) => RefreshClusterEndpoints();
+
+            executeMenu.DropDownItems.AddRange(new ToolStripItem[] {
+                executeAllMenuItem,
+                validateMenuItem,
+                new ToolStripSeparator(),
+                configureClusterMenuItem,
+                refreshClusterMenuItem
+            });
 
             menuStrip.Items.AddRange(new ToolStripItem[] { fileMenu, editMenu, executeMenu });
 
             return menuStrip;
         }
+
+        private void ShowClusterOptions()
+        {
+            using (var dialog = new ClusterOptionsDialog(useCluster))
+            {
+                if (dialog.ShowDialog() == DialogResult.OK)
+                {
+                    useCluster = dialog.UseCluster;
+                    chkUseCluster.Checked = useCluster;
+                    UpdateClusterStatus();
+                }
+            }
+        }
+
         private void NewGraph()
         {
             nodes.Clear();
@@ -1065,7 +1931,7 @@ namespace CTS.NodeEditor
                         string json = JsonSerializer.Serialize(graphData, new JsonSerializerOptions
                         {
                             WriteIndented = true,
-                            Converters = { new PointConverter(), new ColorConverter() }
+                            Converters = { new PointJsonConverter(), new ColorJsonConverter() }
                         });
                         File.WriteAllText(dialog.FileName, json);
                         Logger.Log($"[NodeEditor] Saved graph to {dialog.FileName}");
@@ -1093,7 +1959,7 @@ namespace CTS.NodeEditor
                         string json = File.ReadAllText(dialog.FileName);
                         var graphData = JsonSerializer.Deserialize<NodeGraphData>(json, new JsonSerializerOptions
                         {
-                            Converters = { new PointConverter(), new ColorConverter() }
+                            Converters = { new PointJsonConverter(), new ColorJsonConverter() }
                         });
 
                         // Clear existing graph
@@ -1142,6 +2008,7 @@ namespace CTS.NodeEditor
                 }
             }
         }
+
         private void DeleteSelectedConnections()
         {
             if (selectedConnections.Count == 0) return;
@@ -1154,6 +2021,17 @@ namespace CTS.NodeEditor
 
             selectedConnections.Clear();
             canvasPanel.Invalidate();
+        }
+
+        private void ClearAllNodes()
+        {
+            var result = MessageBox.Show("Are you sure you want to clear all nodes?",
+                                        "Confirm Clear", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+
+            if (result == DialogResult.Yes)
+            {
+                NewGraph();
+            }
         }
 
         private void ExecuteGraph()
@@ -1186,29 +2064,39 @@ namespace CTS.NodeEditor
                     return;
                 }
 
-                // Execute nodes in order
-                foreach (var node in executionOrder)
+                bool useClusterForExecution = useCluster && mainForm.ComputeEndpoints != null &&
+                                           mainForm.ComputeEndpoints.Any(e => e.IsConnected && !e.IsBusy);
+
+                if (useClusterForExecution)
                 {
-                    try
+                    ExecuteGraphOnCluster(executionOrder);
+                }
+                else
+                {
+                    // Execute nodes locally in order
+                    foreach (var node in executionOrder)
                     {
-                        Logger.Log($"[NodeEditor] Executing {node.GetType().Name}");
+                        try
+                        {
+                            Logger.Log($"[NodeEditor] Executing {node.GetType().Name}");
 
-                        // Highlight executing node
-                        HighlightExecutingNode(node);
-                        Application.DoEvents();
+                            // Highlight executing node
+                            HighlightExecutingNode(node);
+                            Application.DoEvents();
 
-                        // Execute node
-                        node.Execute();
+                            // Execute node
+                            node.Execute();
 
-                        // Small delay to show execution
-                        System.Threading.Thread.Sleep(100);
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Log($"[NodeEditor] Error executing {node.GetType().Name}: {ex.Message}");
-                        MessageBox.Show($"Error executing {node.GetType().Name}: {ex.Message}",
-                                       "Execution Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        return;
+                            // Small delay to show execution
+                            System.Threading.Thread.Sleep(100);
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[NodeEditor] Error executing {node.GetType().Name}: {ex.Message}");
+                            MessageBox.Show($"Error executing {node.GetType().Name}: {ex.Message}",
+                                         "Execution Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            return;
+                        }
                     }
                 }
 
@@ -1218,15 +2106,104 @@ namespace CTS.NodeEditor
 
                 Logger.Log("[NodeEditor] Graph execution completed successfully");
                 MessageBox.Show("Graph execution completed successfully!",
-                               "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                             "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
                 Logger.Log($"[NodeEditor] Error during graph execution: {ex.Message}");
                 MessageBox.Show($"Error during graph execution: {ex.Message}",
-                               "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                             "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
+
+        // Cluster execution method
+        private void ExecuteGraphOnCluster(List<BaseNode> executionOrder)
+        {
+            Logger.Log("[NodeEditor] Executing graph on compute cluster");
+
+            // Show progress form
+            using (var progressForm = new ClusterExecutionProgressForm(executionOrder.Count))
+            {
+                progressForm.Show(this);
+
+                // Process each node sequentially for now
+                int completedNodes = 0;
+
+                foreach (var node in executionOrder)
+                {
+                    try
+                    {
+                        // Find an available endpoint
+                        var endpoint = FindAvailableEndpoint();
+                        if (endpoint == null)
+                        {
+                            MessageBox.Show("No available compute endpoints found. Execution aborted.",
+                                          "Cluster Execution Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            break;
+                        }
+
+                        Logger.Log($"[NodeEditor] Executing {node.GetType().Name} on {endpoint.Name}");
+
+                        // Mark endpoint as busy
+                        endpoint.SetBusy(true);
+
+                        // Highlight executing node
+                        HighlightExecutingNode(node);
+                        Application.DoEvents();
+
+                        // Prepare the command - simplified, in reality would need to serialize node parameters
+                        var nodeType = node.GetType().Name;
+                        var command = new
+                        {
+                            Command = "EXECUTE_NODE",
+                            NodeType = nodeType,
+                            Parameters = new { } // Would need to serialize node parameters
+                        };
+
+                        // Send to endpoint and wait for response
+                        string resultJson = endpoint.SendCommandAsync(
+                            System.Text.Json.JsonSerializer.Serialize(command)).GetAwaiter().GetResult();
+
+                        // Still execute locally for the demo
+                        node.Execute();
+
+                        // Mark endpoint as free
+                        endpoint.SetBusy(false);
+
+                        // Update progress
+                        completedNodes++;
+                        progressForm.UpdateProgress(completedNodes);
+
+                        // Small delay to show execution
+                        System.Threading.Thread.Sleep(100);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[NodeEditor] Error executing {node.GetType().Name} on cluster: {ex.Message}");
+                        MessageBox.Show($"Error executing {node.GetType().Name} on cluster: {ex.Message}",
+                                     "Execution Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        break;
+                    }
+                }
+
+                progressForm.Close();
+            }
+        }
+
+        // Helper method to find an available endpoint
+        private ComputeEndpoint FindAvailableEndpoint()
+        {
+            if (mainForm.ComputeEndpoints == null || mainForm.ComputeEndpoints.Count == 0)
+                return null;
+
+            var selected = cmbEndpoints.SelectedItem as ClusterEndpointItem;
+            if (selected != null && selected.Endpoint.IsConnected && !selected.Endpoint.IsBusy)
+                return selected.Endpoint;
+
+            // If no specific endpoint is selected or it's not available, find any available one
+            return mainForm.ComputeEndpoints.FirstOrDefault(e => e.IsConnected && !e.IsBusy);
+        }
+
         private void ClearNodeOutputs(BaseNode node)
         {
             // Use reflection to clear the outputData dictionary for all nodes
@@ -1238,6 +2215,7 @@ namespace CTS.NodeEditor
                     outputData.Clear();
             }
         }
+
         private bool ValidateGraph()
         {
             Logger.Log("[NodeEditor] Validating graph");
@@ -1400,148 +2378,37 @@ namespace CTS.NodeEditor
             canvasPanel.Invalidate();
         }
 
-        private void ClearAllNodes()
+        protected override void Dispose(bool disposing)
         {
-            var result = MessageBox.Show("Are you sure you want to clear all nodes?",
-                                        "Confirm Clear", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-
-            if (result == DialogResult.Yes)
+            if (disposing)
             {
-                NewGraph();
-            }
-        }
-    }
-
-    public class NodeTypeInfo
-    {
-        public string Category { get; set; }
-        public string Name { get; set; }
-        public Type NodeType { get; set; }
-        public Color Color { get; set; }
-
-        public NodeTypeInfo(string category, string name, Type nodeType, Color color)
-        {
-            Category = category;
-            Name = name;
-            NodeType = nodeType;
-            Color = color;
-        }
-    }
-
-    // Data structures for serialization
-    [Serializable]
-    public class NodeGraphData
-    {
-        public List<NodeData> Nodes { get; set; }
-        public List<ConnectionData> Connections { get; set; }
-    }
-
-    [Serializable]
-    public class NodeData
-    {
-        public string Id { get; set; }
-        public string Type { get; set; }
-        public Point Position { get; set; }
-        public Color Color { get; set; }
-    }
-
-    [Serializable]
-    public class ConnectionData
-    {
-        public string FromNodeId { get; set; }
-        public string FromPinName { get; set; }
-        public string ToNodeId { get; set; }
-        public string ToPinName { get; set; }
-    }
-
-    // Custom converters for JSON serialization
-    public class PointConverter : JsonConverter<Point>
-    {
-        public override Point Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
-        {
-            if (reader.TokenType != JsonTokenType.StartObject)
-                throw new JsonException();
-
-            int x = 0, y = 0;
-            while (reader.Read())
-            {
-                if (reader.TokenType == JsonTokenType.EndObject)
-                    return new Point(x, y);
-
-                if (reader.TokenType == JsonTokenType.PropertyName)
+                try
                 {
-                    string propertyName = reader.GetString();
-                    reader.Read();
-
-                    switch (propertyName)
+                    if (grafx != null)
                     {
-                        case "X":
-                            x = reader.GetInt32();
-                            break;
-                        case "Y":
-                            y = reader.GetInt32();
-                            break;
+                        grafx.Dispose();
+                        grafx = null;
+                    }
+
+                    // Release static instance reference if this instance is being disposed
+                    if (NodeEditorForm.Instance == this)
+                    {
+                        NodeEditorForm.Instance = null;
                     }
                 }
+                catch (Exception ex)
+                {
+                    // Log but don't crash during disposal
+                    Logger.Log($"[NodeEditor] Error during disposal: {ex.Message}");
+                }
             }
-            throw new JsonException();
-        }
-
-        public override void Write(Utf8JsonWriter writer, Point value, JsonSerializerOptions options)
-        {
-            writer.WriteStartObject();
-            writer.WriteNumber("X", value.X);
-            writer.WriteNumber("Y", value.Y);
-            writer.WriteEndObject();
+            base.Dispose(disposing);
         }
     }
 
-    public class ColorConverter : JsonConverter<Color>
+    // Add Tag property to BaseNode class
+    public static class BaseNodeExtensions
     {
-        public override Color Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
-        {
-            if (reader.TokenType != JsonTokenType.StartObject)
-                throw new JsonException();
-
-            int a = 255, r = 0, g = 0, b = 0;
-            while (reader.Read())
-            {
-                if (reader.TokenType == JsonTokenType.EndObject)
-                    return Color.FromArgb(a, r, g, b);
-
-                if (reader.TokenType == JsonTokenType.PropertyName)
-                {
-                    string propertyName = reader.GetString();
-                    reader.Read();
-
-                    switch (propertyName)
-                    {
-                        case "A":
-                            a = reader.GetInt32();
-                            break;
-                        case "R":
-                            r = reader.GetInt32();
-                            break;
-                        case "G":
-                            g = reader.GetInt32();
-                            break;
-                        case "B":
-                            b = reader.GetInt32();
-                            break;
-                    }
-                }
-            }
-            throw new JsonException();
-        }
-
-        public override void Write(Utf8JsonWriter writer, Color value, JsonSerializerOptions options)
-        {
-            writer.WriteStartObject();
-            writer.WriteNumber("A", value.A);
-            writer.WriteNumber("R", value.R);
-            writer.WriteNumber("G", value.G);
-            writer.WriteNumber("B", value.B);
-            writer.WriteEndObject();
-        }
+        public static object Tag { get; set; }
     }
 }

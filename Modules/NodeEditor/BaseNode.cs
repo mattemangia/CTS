@@ -15,7 +15,7 @@ namespace CTS.NodeEditor
         public Color Color { get; set; }
         protected List<NodePin> inputs;
         protected List<NodePin> outputs;
-
+        public object Tag { get; set; }
         public BaseNode(Point position)
         {
             Position = position;

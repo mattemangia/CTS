@@ -29,6 +29,21 @@ namespace CTS.Modules.NodeEditor.Nodes
         public bool IncludeGrayscale { get; set; } = true;
         public bool IncludeMaterials { get; set; } = true;
 
+        // Data model classes to store volume data from input pins
+        private class VolumeData
+        {
+            public byte[,,] Data { get; set; }
+            public int Width { get; set; }
+            public int Height { get; set; }
+            public int Depth { get; set; }
+        }
+
+        private class MaterialData
+        {
+            public int ID { get; set; }
+            public Color Color { get; set; }
+        }
+
         public ExportImageStackNode(Point position) : base(position)
         {
             Color = Color.FromArgb(255, 120, 120); // Red theme for output nodes
@@ -237,15 +252,17 @@ namespace CTS.Modules.NodeEditor.Nodes
 
             try
             {
-                // Get MainForm reference to access the dataset
-                var mainForm = Application.OpenForms.OfType<MainForm>().FirstOrDefault();
+                // Get data from input pins
+                var volumeData = GetInputData("Volume") as VolumeData;
+                var labelsData = GetInputData("Labels") as VolumeData;
+                var materials = GetMaterialsFromLabels(labelsData);
 
-                bool hasVolume = mainForm?.volumeData != null && IncludeGrayscale;
-                bool hasLabels = mainForm?.volumeLabels != null && IncludeMaterials;
+                bool hasVolume = volumeData != null && IncludeGrayscale;
+                bool hasLabels = labelsData != null && IncludeMaterials;
 
                 if (!hasVolume && !hasLabels)
                 {
-                    MessageBox.Show("No data is available to export. Please load a dataset first or enable at least one data type.",
+                    MessageBox.Show("No data is available to export. Please connect valid data sources.",
                         "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
@@ -256,13 +273,27 @@ namespace CTS.Modules.NodeEditor.Nodes
                     Directory.CreateDirectory(OutputFolder);
                 }
 
+                // Get dimensions from the data
+                int width, height, depth;
+                if (hasVolume)
+                {
+                    width = volumeData.Width;
+                    height = volumeData.Height;
+                    depth = volumeData.Depth;
+                }
+                else
+                {
+                    width = labelsData.Width;
+                    height = labelsData.Height;
+                    depth = labelsData.Depth;
+                }
+
                 // Calculate number of digits for padding
-                int depth = mainForm.GetDepth();
                 int digits = depth.ToString().Length;
-                string formatString = D(digits);
+                string formatString = $"D{digits}";
 
                 // Show progress dialog
-                using (var progress = new ProgressFormWithProgress($"Exporting {depth} images..."))
+                using (var progress = new ProgressDialog($"Exporting {depth} images..."))
                 {
                     progress.Show();
 
@@ -275,14 +306,14 @@ namespace CTS.Modules.NodeEditor.Nodes
                             {
                                 // Update progress
                                 int percentage = (int)((z + 1) * 100.0 / depth);
-                                progress.Report(percentage);
+                                progress.ReportProgress(percentage);
 
                                 // Create the output filename with proper padding
                                 string fileName = $"{FilePrefix}{(z + StartingIndex).ToString(formatString)}.{GetFileExtension()}";
                                 string outputPath = Path.Combine(OutputFolder, fileName);
 
                                 // Create the slice image
-                                using (Bitmap slice = CreateSliceImage(mainForm, z, hasVolume, hasLabels))
+                                using (Bitmap slice = CreateSliceImage(volumeData, labelsData, materials, z, width, height, hasVolume, hasLabels))
                                 {
                                     slice.Save(outputPath, ExportFormat);
                                 }
@@ -320,12 +351,6 @@ namespace CTS.Modules.NodeEditor.Nodes
             }
         }
 
-
-        private string D(int count)
-        {
-            return "D" + count;
-        }
-
         private string GetFileExtension()
         {
             if (ExportFormat == ImageFormat.Png) return "png";
@@ -335,11 +360,115 @@ namespace CTS.Modules.NodeEditor.Nodes
             return "png";
         }
 
-        private Bitmap CreateSliceImage(MainForm mainForm, int z, bool includeGrayscale, bool includeMaterials)
+        private Dictionary<byte, MaterialData> GetMaterialsFromLabels(VolumeData labelsData)
         {
-            int width = mainForm.GetWidth();
-            int height = mainForm.GetHeight();
+            var result = new Dictionary<byte, MaterialData>();
 
+            if (labelsData == null)
+                return result;
+
+            // Try to get materials from the connected label node
+            var labelNodeData = GetInputData("Labels") as Dictionary<string, object>;
+
+            if (labelNodeData != null && labelNodeData.ContainsKey("Materials"))
+            {
+                var materials = labelNodeData["Materials"] as List<Material>;
+                if (materials != null && materials.Count > 0)
+                {
+                    // Convert the Material objects to our internal MaterialData representation
+                    foreach (var material in materials)
+                    {
+                        if (material.ID > 0 || material.IsExterior) // Include exterior (ID 0) and all other materials
+                        {
+                            result[material.ID] = new MaterialData
+                            {
+                                ID = material.ID,
+                                Color = material.Color
+                            };
+                        }
+                    }
+                    return result;
+                }
+            }
+
+            // Fallback: If no materials were found from the input node,
+            // extract unique material IDs from the label data and create dummy materials
+            var uniqueLabels = new HashSet<byte>();
+
+            // Sample the volume to find unique labels
+            for (int z = 0; z < labelsData.Depth; z += Math.Max(1, labelsData.Depth / 10))
+            {
+                for (int y = 0; y < labelsData.Height; y += Math.Max(1, labelsData.Height / 10))
+                {
+                    for (int x = 0; x < labelsData.Width; x += Math.Max(1, labelsData.Width / 10))
+                    {
+                        byte label = labelsData.Data[x, y, z];
+                        if (label > 0)
+                            uniqueLabels.Add(label);
+                    }
+                }
+            }
+
+            // Create a random but consistent color for each unique label
+            var random = new Random(42); // Fixed seed for consistent colors
+
+            foreach (byte label in uniqueLabels)
+            {
+                // Create a deterministic color based on the label ID
+                int hue = (label * 137) % 360; // Use prime number to spread out the hues
+                Color color = ColorFromHSV(hue, 0.8, 0.9);
+
+                result[label] = new MaterialData
+                {
+                    ID = label,
+                    Color = color
+                };
+            }
+
+            // Always include exterior material (ID 0) with transparent color
+            if (!result.ContainsKey(0))
+            {
+                result[0] = new MaterialData
+                {
+                    ID = 0,
+                    Color = Color.Transparent
+                };
+            }
+
+            return result;
+        }
+
+        // Helper method to create a color from HSV values
+        private Color ColorFromHSV(double hue, double saturation, double value)
+        {
+            int hi = Convert.ToInt32(Math.Floor(hue / 60)) % 6;
+            double f = hue / 60 - Math.Floor(hue / 60);
+
+            value = value * 255;
+            int v = Convert.ToInt32(value);
+            int p = Convert.ToInt32(value * (1 - saturation));
+            int q = Convert.ToInt32(value * (1 - f * saturation));
+            int t = Convert.ToInt32(value * (1 - (1 - f) * saturation));
+
+            if (hi == 0)
+                return Color.FromArgb(255, v, t, p);
+            else if (hi == 1)
+                return Color.FromArgb(255, q, v, p);
+            else if (hi == 2)
+                return Color.FromArgb(255, p, v, t);
+            else if (hi == 3)
+                return Color.FromArgb(255, p, q, v);
+            else if (hi == 4)
+                return Color.FromArgb(255, t, p, v);
+            else
+                return Color.FromArgb(255, v, p, q);
+        }
+
+        private Bitmap CreateSliceImage(VolumeData volumeData, VolumeData labelsData,
+                                      Dictionary<byte, MaterialData> materials,
+                                      int z, int width, int height,
+                                      bool includeGrayscale, bool includeMaterials)
+        {
             // Create a new bitmap
             Bitmap bmp = new Bitmap(width, height, PixelFormat.Format24bppRgb);
 
@@ -368,35 +497,31 @@ namespace CTS.Modules.NodeEditor.Nodes
                             byte r = 0, g = 0, b = 0;
 
                             // Get grayscale value
-                            if (includeGrayscale && mainForm.volumeData != null)
+                            if (includeGrayscale && volumeData != null)
                             {
-                                byte gVal = mainForm.volumeData[x, y, z];
+                                byte gVal = volumeData.Data[x, y, z];
                                 r = g = b = gVal;
                             }
 
                             // Apply label color if present
-                            if (includeMaterials && mainForm.volumeLabels != null)
+                            if (includeMaterials && labelsData != null)
                             {
-                                byte label = mainForm.volumeLabels[x, y, z];
-                                if (label != 0)
+                                byte label = labelsData.Data[x, y, z];
+                                if (label != 0 && materials.TryGetValue(label, out var material))
                                 {
-                                    var material = mainForm.Materials.FirstOrDefault(m => m.ID == label);
-                                    if (material != null)
+                                    if (includeGrayscale)
                                     {
-                                        if (includeGrayscale)
-                                        {
-                                            // Blend with grayscale
-                                            r = (byte)((r + material.Color.R) / 2);
-                                            g = (byte)((g + material.Color.G) / 2);
-                                            b = (byte)((b + material.Color.B) / 2);
-                                        }
-                                        else
-                                        {
-                                            // Just use material color
-                                            r = material.Color.R;
-                                            g = material.Color.G;
-                                            b = material.Color.B;
-                                        }
+                                        // Blend with grayscale
+                                        r = (byte)((r + material.Color.R) / 2);
+                                        g = (byte)((g + material.Color.G) / 2);
+                                        b = (byte)((b + material.Color.B) / 2);
+                                    }
+                                    else
+                                    {
+                                        // Just use material color
+                                        r = material.Color.R;
+                                        g = material.Color.G;
+                                        b = material.Color.B;
                                     }
                                 }
                             }
@@ -416,6 +541,54 @@ namespace CTS.Modules.NodeEditor.Nodes
 
             return bmp;
         }
-    }
 
+        // Basic progress dialog implementation
+        private class ProgressDialog : Form
+        {
+            private ProgressBar progressBar;
+            private Label statusLabel;
+
+            public ProgressDialog(string title)
+            {
+                this.Text = title;
+                this.Size = new Size(400, 120);
+                this.FormBorderStyle = FormBorderStyle.FixedDialog;
+                this.StartPosition = FormStartPosition.CenterScreen;
+                this.ControlBox = false;
+
+                statusLabel = new Label
+                {
+                    Text = "Preparing...",
+                    Dock = DockStyle.Top,
+                    Height = 30,
+                    TextAlign = ContentAlignment.MiddleCenter
+                };
+
+                progressBar = new ProgressBar
+                {
+                    Dock = DockStyle.Fill,
+                    Minimum = 0,
+                    Maximum = 100,
+                    Value = 0,
+                    Style = ProgressBarStyle.Continuous
+                };
+
+                this.Controls.Add(progressBar);
+                this.Controls.Add(statusLabel);
+            }
+
+            public void ReportProgress(int percentage)
+            {
+                if (this.InvokeRequired)
+                {
+                    this.Invoke(new Action<int>(ReportProgress), percentage);
+                }
+                else
+                {
+                    progressBar.Value = Math.Min(100, Math.Max(0, percentage));
+                    statusLabel.Text = $"Exporting: {percentage}%";
+                }
+            }
+        }
+    }
 }

@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Net;
 using Terminal.Gui;
 using System.Text.Json;
+using System.Text;
 
 namespace ParallelComputingNodeServer
 {

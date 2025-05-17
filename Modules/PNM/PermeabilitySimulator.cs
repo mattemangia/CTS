@@ -218,6 +218,47 @@ namespace CTS
             return result;
         }
         /// <summary>
+        /// Seleziona i pori di inlet e di outlet: tutti quelli il cui centro si trova
+        /// entro uno spessore pari a 2 × raggio medio dalla faccia iniziale o finale
+        /// lungo l’asse di flusso scelto.
+        /// Tutte le coordinate e i raggi sono in µm.
+        /// </summary>
+        private static void SelectBoundaryPores(
+            PoreNetworkModel model,
+            FlowAxis axis,
+            out List<Pore> inletPores,
+            out List<Pore> outletPores)
+        {
+            if (model == null) throw new ArgumentNullException(nameof(model));
+            if (model.Pores == null || model.Pores.Count == 0)
+                throw new ArgumentException("Il modello non contiene pori.", nameof(model));
+
+            double avgRadius = model.Pores.Average(p => p.Radius);  // µm
+            double layer = 2.0 * avgRadius;                     // µm
+
+            // Delegato per estrarre la coordinata desiderata (X, Y o Z)
+            Func<Pore, double> coord;
+            switch (axis)
+            {
+                case FlowAxis.X:
+                    coord = p => p.Center.X;
+                    break;
+                case FlowAxis.Y:
+                    coord = p => p.Center.Y;
+                    break;
+                default: // FlowAxis.Z
+                    coord = p => p.Center.Z;
+                    break;
+            }
+
+            double minCoord = model.Pores.Min(coord);
+            double maxCoord = model.Pores.Max(coord);
+
+            inletPores = model.Pores.Where(p => coord(p) - minCoord <= layer).ToList();
+            outletPores = model.Pores.Where(p => maxCoord - coord(p) <= layer).ToList();
+        }
+
+        /// <summary>
         /// Prepares common calculation data used by all methods
         /// </summary>
         private async Task PrepareCommonCalculations(PermeabilitySimulationResult result, IProgress<int> progress = null)
@@ -279,207 +320,133 @@ namespace CTS
             });
         }
 
-        /// <summary>
-        /// CPU implementation of permeability simulation using Darcy's law
-        /// </summary>
-        private async Task SimulatePermeabilityDarcyCPU(PermeabilitySimulationResult result, IProgress<int> progress = null)
+        /// <summary>CPU implementation of permeability simulation using Darcy’s law.</summary>
+        private async Task SimulatePermeabilityDarcyCPU(
+    PermeabilitySimulationResult result,
+    IProgress<int> progress = null)
         {
             await Task.Run(() =>
             {
-                // Get model data
                 var model = result.Model;
                 var axis = result.FlowAxis;
-                double viscosity = result.Viscosity;
-                double inputPressure = result.InputPressure;
-                double outputPressure = result.OutputPressure;
+                double viscosity = result.Viscosity;      // Pa·s
+                double pIn = result.InputPressure;  // Pa
+                double pOut = result.OutputPressure; // Pa
 
-                // Get the axis coordinate for sorting
-                Func<Pore, double> getAxisCoordinate;
-                switch (axis)
+                /* ----------------------------------------------------------------- */
+                /* 1.  Boundary pores                                                */
+                /* ----------------------------------------------------------------- */
+                List<Pore> inletPores, outletPores;
+                SelectBoundaryPores(model, axis, out inletPores, out outletPores);
+                progress?.Report(10);
+
+                /* ----------------------------------------------------------------- */
+                /* 2.  Assemble conductivity matrix                                  */
+                /* ----------------------------------------------------------------- */
+                int n = model.Pores.Count;
+
+                var idToIdx = new Dictionary<int, int>(n);
+                for (int i = 0; i < n; ++i) idToIdx[model.Pores[i].Id] = i;
+
+                var A = new double[n * n];   // row-major
+                var b = new double[n];
+                var x = new double[n];       // unknown pressures
+
+                var fixedPore = new bool[n];
+
+                foreach (var p in inletPores)
                 {
-                    case FlowAxis.X:
-                        getAxisCoordinate = p => p.Center.X;
-                        break;
-
-                    case FlowAxis.Y:
-                        getAxisCoordinate = p => p.Center.Y;
-                        break;
-
-                    case FlowAxis.Z:
-                    default:
-                        getAxisCoordinate = p => p.Center.Z;
-                        break;
+                    int i = idToIdx[p.Id];
+                    x[i] = pIn;
+                    fixedPore[i] = true;
+                }
+                foreach (var p in outletPores)
+                {
+                    int i = idToIdx[p.Id];
+                    x[i] = pOut;
+                    fixedPore[i] = true;
                 }
 
-                // Sort pores by axis coordinate - use stable sort for consistency
-                var sortedPores = model.Pores.OrderBy(getAxisCoordinate).ThenBy(p => p.Id).ToList();
-
-                // Find inlet and outlet pores (10% from ends)
-                int numInletPores = Math.Max(1, (int)(model.Pores.Count * 0.1));
-                int numOutletPores = numInletPores;
-
-                var inletPores = sortedPores.Take(numInletPores).ToList();
-                var outletPores = sortedPores.Skip(sortedPores.Count - numOutletPores).ToList();
-
-                progress?.Report(20);
-
-                // Set up the conductivity matrix and right-hand side vector
-                int numPores = model.Pores.Count;
-                double[] conductivityMatrix = new double[numPores * numPores];
-                double[] rhs = new double[numPores];
-                bool[] isFixed = new bool[numPores];
-
-                // Initialize the pressure field
-                double[] pressures = new double[numPores];
-
-                // Create dictionary for fast access to pore index
-                Dictionary<int, int> poreIdToIndex = new Dictionary<int, int>();
-                for (int i = 0; i < model.Pores.Count; i++)
+                /* throat conductivities (Hagen–Poiseuille) */
+                var Kt = new double[model.Throats.Count];
+                for (int t = 0; t < model.Throats.Count; ++t)
                 {
-                    poreIdToIndex[model.Pores[i].Id] = i;
+                    var th = model.Throats[t];
+                    double r = th.Radius * 1e-6;           // m
+                    double L = Math.Max(1e-12, th.Length * 1e-6);
+                    Kt[t] = Math.PI * Math.Pow(r, 4) / (8.0 * viscosity * L);
                 }
 
-                // Set pressure boundary conditions
-                foreach (var pore in inletPores)
+                /* fill matrix */
+                for (int t = 0; t < model.Throats.Count; ++t)
                 {
-                    int idx = poreIdToIndex[pore.Id];
-                    pressures[idx] = inputPressure;
-                    isFixed[idx] = true;
+                    var th = model.Throats[t];
+                    int i = idToIdx[th.PoreId1];
+                    int j = idToIdx[th.PoreId2];
+                    double k = Kt[t];
+
+                    A[i * n + i] += k;
+                    A[j * n + j] += k;
+                    A[i * n + j] -= k;
+                    A[j * n + i] -= k;
                 }
 
-                foreach (var pore in outletPores)
+                /* impose Dirichlet rows for fixed pores */
+                for (int i = 0; i < n; ++i)
                 {
-                    int idx = poreIdToIndex[pore.Id];
-                    pressures[idx] = outputPressure;
-                    isFixed[idx] = true;
-                }
+                    if (!fixedPore[i]) continue;
 
-                progress?.Report(30);
+                    for (int j = 0; j < n; ++j)
+                        A[i * n + j] = (i == j ? 1.0 : 0.0);
 
-                // Calculate throat conductivities based on Hagen-Poiseuille equation (Q = πr⁴Δp / 8μL)
-                double[] throatConductivities = new double[model.Throats.Count];
-                for (int i = 0; i < model.Throats.Count; i++)
-                {
-                    var throat = model.Throats[i];
-
-                    // Convert from µm to m for calculation
-                    double radius = throat.Radius * 1e-6; // µm to m
-                    double length = throat.Length * 1e-6; // µm to m
-
-                    // Calculate hydraulic conductivity (π*r^4) / (8*μ*L)
-                    double conductivity = Math.PI * Math.Pow(radius, 4) / (8 * viscosity * length);
-                    throatConductivities[i] = conductivity;
+                    b[i] = x[i];
                 }
 
                 progress?.Report(40);
 
-                // Set up the linear system for internal pores (mass conservation)
-                for (int i = 0; i < numPores; i++)
-                {
-                    if (isFixed[i])
-                    {
-                        // For fixed pressure pores, set diagonal to 1 and RHS to fixed pressure
-                        conductivityMatrix[i * numPores + i] = 1.0;
-                        rhs[i] = pressures[i];
-                    }
-                    else
-                    {
-                        // For internal pores, apply mass conservation: sum of flows = 0
-                        // Find all throats connected to this pore
-                        int poreId = model.Pores[i].Id;
-
-                        // For each throat connected to this pore
-                        foreach (var throat in model.Throats)
-                        {
-                            if (throat.PoreId1 == poreId || throat.PoreId2 == poreId)
-                            {
-                                // Get other pore
-                                int otherPoreId = throat.PoreId1 == poreId ? throat.PoreId2 : throat.PoreId1;
-                                int otherPoreIndex = poreIdToIndex[otherPoreId];
-
-                                // Get throat index
-                                int throatIndex = model.Throats.IndexOf(throat);
-                                double conductivity = throatConductivities[throatIndex];
-
-                                // Add to diagonal (self)
-                                conductivityMatrix[i * numPores + i] += conductivity;
-
-                                // Add to off-diagonal (connection to other pore)
-                                conductivityMatrix[i * numPores + otherPoreIndex] -= conductivity;
-                            }
-                        }
-                    }
-                }
-
-                progress?.Report(50);
-
-                // Solve the linear system using a simple Gauss-Seidel iterative solver
-                double tolerance = 1e-10;
-                int maxIterations = 10000;
-                SolveLinearSystem(conductivityMatrix, rhs, pressures, numPores, maxIterations, tolerance);
-
+                /* ----------------------------------------------------------------- */
+                /* 3.  Solve Ax = b (Gauss–Seidel)                                   */
+                /* ----------------------------------------------------------------- */
+                SolveLinearSystem(A, b, x, n, 10_000, 1e-10);  // existing helper :contentReference[oaicite:0]{index=0}:contentReference[oaicite:1]{index=1}
                 progress?.Report(70);
 
-                // Calculate flow rates through each throat
-                double totalFlowRate = 0;
+                /* ----------------------------------------------------------------- */
+                /* 4.  Flow-rate and permeability                                    */
+                /* ----------------------------------------------------------------- */
+                double totalQ = 0.0;
+                var throatQ = new Dictionary<int, double>(model.Throats.Count);
 
-                // Store the pressure at each pore for visualization
-                var pressureField = new Dictionary<int, double>();
-                for (int i = 0; i < model.Pores.Count; i++)
+                foreach (var th in model.Throats)
                 {
-                    pressureField[model.Pores[i].Id] = pressures[i];
+                    int i = idToIdx[th.PoreId1];
+                    int j = idToIdx[th.PoreId2];
+                    double q = Kt[model.Throats.IndexOf(th)] * (x[i] - x[j]);
+                    throatQ[th.Id] = q;
+
+                    bool iIn = inletPores.Contains(model.Pores[i]);
+                    bool jIn = inletPores.Contains(model.Pores[j]);
+
+                    if (iIn ^ jIn) totalQ += Math.Abs(q);
                 }
 
-                // Calculate the flow rate through each throat
-                var throatFlowRates = new Dictionary<int, double>();
-                foreach (var throat in model.Throats)
-                {
-                    int pore1Index = poreIdToIndex[throat.PoreId1];
-                    int pore2Index = poreIdToIndex[throat.PoreId2];
+                double ΔP = Math.Abs(pIn - pOut);
+                double k_m2 = (totalQ * viscosity * result.ModelLength)
+                              / (result.ModelArea * ΔP);
+                double k_D = k_m2 / 9.869233e-13;  // Darcy
 
-                    double pressureDrop = pressures[pore1Index] - pressures[pore2Index];
-                    int throatIndex = model.Throats.IndexOf(throat);
-                    double conductivity = throatConductivities[throatIndex];
-
-                    double flowRate = conductivity * pressureDrop;
-                    throatFlowRates[throat.Id] = flowRate;
-
-                    // Calculate contribution to total flow (only count flow across the boundary)
-                    var pore1 = model.Pores.First(p => p.Id == throat.PoreId1);
-                    var pore2 = model.Pores.First(p => p.Id == throat.PoreId2);
-
-                    // Check if one pore is inlet and one is outlet
-                    bool pore1IsInlet = inletPores.Contains(pore1);
-                    bool pore2IsInlet = inletPores.Contains(pore2);
-                    bool pore1IsOutlet = outletPores.Contains(pore1);
-                    bool pore2IsOutlet = outletPores.Contains(pore2);
-
-                    if ((pore1IsInlet && !pore1IsOutlet && !pore2IsInlet && !pore2IsOutlet) ||
-                        (pore2IsInlet && !pore2IsOutlet && !pore1IsInlet && !pore1IsOutlet))
-                    {
-                        totalFlowRate += Math.Abs(flowRate);
-                    }
-                }
-
-                // Pressure drop
-                double deltaP = Math.Abs(inputPressure - outputPressure);
-
-                // Calculate permeability using Darcy's Law: k = (Q * μ * L) / (A * ΔP)
-                double permeability = (totalFlowRate * viscosity * result.ModelLength) / (result.ModelArea * deltaP);
-
-                // Convert from m² to Darcy (1 Darcy = 9.869233e-13 m²)
-                double permeabilityDarcy = permeability / 9.869233e-13;
-
-                // Update result
-                result.PermeabilityDarcy = permeabilityDarcy;
-                result.PermeabilityMilliDarcy = permeabilityDarcy * 1000;
-                result.PressureField = pressureField;
-                result.TotalFlowRate = totalFlowRate;
-                result.ThroatFlowRates = throatFlowRates;
+                /* ----------------------------------------------------------------- */
+                /* 5.  Store results                                                 */
+                /* ----------------------------------------------------------------- */
+                result.PermeabilityDarcy = k_D;
+                result.PermeabilityMilliDarcy = k_D * 1e3;
+                result.TotalFlowRate = totalQ;
+                result.ThroatFlowRates = throatQ;
                 result.InletPores = inletPores.Select(p => p.Id).ToList();
                 result.OutletPores = outletPores.Select(p => p.Id).ToList();
+                result.PressureField = model.Pores.ToDictionary(p => p.Id, p => x[idToIdx[p.Id]]);
 
-                Logger.Log($"[PermeabilitySimulator] Darcy CPU simulation completed. Permeability: {permeabilityDarcy:F4} Darcy");
+                progress?.Report(100);
+                Logger.Log($"[PermeabilitySimulator] CPU Darcy permeability = {k_D:F4} D");
             });
         }
 
@@ -544,8 +511,8 @@ namespace CTS
                     int numInletPores = Math.Max(1, (int)(model.Pores.Count * 0.1));
                     int numOutletPores = numInletPores;
 
-                    var inletPores = sortedPores.Take(numInletPores).ToList();
-                    var outletPores = sortedPores.Skip(sortedPores.Count - numOutletPores).ToList();
+                    List<Pore> inletPores, outletPores;
+                    SelectBoundaryPores(model, axis, out inletPores, out outletPores);
 
                     progress?.Report(20);
 
@@ -1100,100 +1067,84 @@ namespace CTS
         }
 
         // Fill lattice grid from pore network model
-        private void FillLatticeFromPoreNetwork(byte[,,] lattice, PoreNetworkModel model,
-                                               double minX, double minY, double minZ,
-                                               double resolution, int nx, int ny, int nz)
+        private static void FillLatticeFromPoreNetwork(
+    byte[,,] lattice,
+    PoreNetworkModel model,
+    double minX,
+    double minY,
+    double minZ,
+    double resolution,
+    int nx,
+    int ny,
+    int nz)
         {
-            // First, fill in all pores
+            if (lattice == null) throw new ArgumentNullException(nameof(lattice));
+            if (model == null) throw new ArgumentNullException(nameof(model));
+
+            /* ----------------------------  pores  ---------------------------------- */
             foreach (var pore in model.Pores)
             {
-                int centerX = (int)((pore.Center.X - minX) / resolution);
-                int centerY = (int)((pore.Center.Y - minY) / resolution);
-                int centerZ = (int)((pore.Center.Z - minZ) / resolution);
+                int cx = (int)((pore.Center.X - minX) / resolution);
+                int cy = (int)((pore.Center.Y - minY) / resolution);
+                int cz = (int)((pore.Center.Z - minZ) / resolution);
 
-                // Calculate pore radius in grid cells
-                int radiusCells = Math.Max(1, (int)(pore.Radius / resolution));
+                int rad = Math.Max(1, (int)Math.Round(pore.Radius / resolution));
 
-                // Fill sphere for the pore
-                for (int dx = -radiusCells; dx <= radiusCells; dx++)
-                {
-                    for (int dy = -radiusCells; dy <= radiusCells; dy++)
-                    {
-                        for (int dz = -radiusCells; dz <= radiusCells; dz++)
+                for (int dx = -rad; dx <= rad; ++dx)
+                    for (int dy = -rad; dy <= rad; ++dy)
+                        for (int dz = -rad; dz <= rad; ++dz)
                         {
-                            // Check if the cell is within the sphere and within grid bounds
-                            if (dx * dx + dy * dy + dz * dz <= radiusCells * radiusCells)
-                            {
-                                int x = centerX + dx;
-                                int y = centerY + dy;
-                                int z = centerZ + dz;
+                            if (dx * dx + dy * dy + dz * dz > rad * rad) continue;
 
-                                if (x >= 0 && x < nx && y >= 0 && y < ny && z >= 0 && z < nz)
-                                {
-                                    lattice[x, y, z] = 1; // Fluid cell
-                                }
-                            }
+                            int x = cx + dx;
+                            int y = cy + dy;
+                            int z = cz + dz;
+
+                            if (x >= 0 && x < nx && y >= 0 && y < ny && z >= 0 && z < nz)
+                                lattice[x, y, z] = 1;               // mark as fluid
                         }
-                    }
-                }
             }
 
-            // Then, fill in all throats (as cylinders)
+            /* ----------------------------  throats  -------------------------------- */
             foreach (var throat in model.Throats)
             {
-                var pore1 = model.Pores.FirstOrDefault(p => p.Id == throat.PoreId1);
-                var pore2 = model.Pores.FirstOrDefault(p => p.Id == throat.PoreId2);
+                var p1 = model.Pores.First(p => p.Id == throat.PoreId1);
+                var p2 = model.Pores.First(p => p.Id == throat.PoreId2);
 
-                if (pore1 != null && pore2 != null)
+                int x1 = (int)((p1.Center.X - minX) / resolution);
+                int y1 = (int)((p1.Center.Y - minY) / resolution);
+                int z1 = (int)((p1.Center.Z - minZ) / resolution);
+
+                int x2 = (int)((p2.Center.X - minX) / resolution);
+                int y2 = (int)((p2.Center.Y - minY) / resolution);
+                int z2 = (int)((p2.Center.Z - minZ) / resolution);
+
+                int rad = Math.Max(1, (int)Math.Round(throat.Radius / resolution));
+
+                foreach (var (vx, vy, vz) in BresenhamLine3D(x1, y1, z1, x2, y2, z2))
                 {
-                    // Get throat endpoints in grid coordinates
-                    int x1 = (int)((pore1.Center.X - minX) / resolution);
-                    int y1 = (int)((pore1.Center.Y - minY) / resolution);
-                    int z1 = (int)((pore1.Center.Z - minZ) / resolution);
-
-                    int x2 = (int)((pore2.Center.X - minX) / resolution);
-                    int y2 = (int)((pore2.Center.Y - minY) / resolution);
-                    int z2 = (int)((pore2.Center.Z - minZ) / resolution);
-
-                    // Calculate throat radius in grid cells
-                    int radiusCells = Math.Max(1, (int)(throat.Radius / resolution));
-
-                    // Use 3D Bresenham algorithm to draw the throat centerline
-                    List<(int, int, int)> centerline = BresenhamLine3D(x1, y1, z1, x2, y2, z2);
-
-                    // For each point on the centerline, add a sphere with the throat radius
-                    foreach (var (x, y, z) in centerline)
-                    {
-                        for (int dx = -radiusCells; dx <= radiusCells; dx++)
-                        {
-                            for (int dy = -radiusCells; dy <= radiusCells; dy++)
+                    for (int dx = -rad; dx <= rad; ++dx)
+                        for (int dy = -rad; dy <= rad; ++dy)
+                            for (int dz = -rad; dz <= rad; ++dz)
                             {
-                                for (int dz = -radiusCells; dz <= radiusCells; dz++)
-                                {
-                                    if (dx * dx + dy * dy + dz * dz <= radiusCells * radiusCells)
-                                    {
-                                        int nx1 = x + dx;
-                                        int ny1 = y + dy;
-                                        int nz1 = z + dz;
+                                if (dx * dx + dy * dy + dz * dz > rad * rad) continue;
 
-                                        if (nx1 >= 0 && nx1 < nx && ny1 >= 0 && ny1 < ny && nz1 >= 0 && nz1 < nz)
-                                        {
-                                            lattice[nx1, ny1, nz1] = 1; // Fluid cell
-                                        }
-                                    }
-                                }
+                                int x = vx + dx;
+                                int y = vy + dy;
+                                int z = vz + dz;
+
+                                if (x >= 0 && x < nx && y >= 0 && y < ny && z >= 0 && z < nz)
+                                    lattice[x, y, z] = 1;
                             }
-                        }
-                    }
                 }
             }
         }
 
         // 3D Bresenham line algorithm to determine cells between two points
-        private List<(int, int, int)> BresenhamLine3D(int x1, int y1, int z1, int x2, int y2, int z2)
+        private static IEnumerable<(int x, int y, int z)> BresenhamLine3D(
+    int x1, int y1, int z1,
+    int x2, int y2, int z2)
         {
-            List<(int, int, int)> points = new List<(int, int, int)>();
-
             int dx = Math.Abs(x2 - x1);
             int dy = Math.Abs(y2 - y1);
             int dz = Math.Abs(z2 - z1);
@@ -1202,169 +1153,209 @@ namespace CTS
             int sy = y1 < y2 ? 1 : -1;
             int sz = z1 < z2 ? 1 : -1;
 
-            int dm = Math.Max(dx, Math.Max(dy, dz));
+            int err1, err2;
 
-            if (dm == 0)
+            /* determina l’asse dominante */
+            if (dx >= dy && dx >= dz)                 // X dominante
             {
-                // Both points are the same
-                points.Add((x1, y1, z1));
-                return points;
+                err1 = 2 * dy - dx;
+                err2 = 2 * dz - dx;
+
+                for (int i = 0; i <= dx; ++i)
+                {
+                    yield return (x1, y1, z1);
+
+                    if (err1 > 0)
+                    {
+                        y1 += sy;
+                        err1 -= 2 * dx;
+                    }
+                    if (err2 > 0)
+                    {
+                        z1 += sz;
+                        err2 -= 2 * dx;
+                    }
+                    err1 += 2 * dy;
+                    err2 += 2 * dz;
+                    x1 += sx;
+                }
             }
-
-            int x = x1;
-            int y = y1;
-            int z = z1;
-
-            for (int i = 0; i <= dm; i++)
+            else if (dy >= dx && dy >= dz)            // Y dominante
             {
-                points.Add((x, y, z));
+                err1 = 2 * dx - dy;
+                err2 = 2 * dz - dy;
 
-                int e1 = (i * dx) / dm;
-                int e2 = (i * dy) / dm;
-                int e3 = (i * dz) / dm;
+                for (int i = 0; i <= dy; ++i)
+                {
+                    yield return (x1, y1, z1);
 
-                x = x1 + e1 * sx;
-                y = y1 + e2 * sy;
-                z = z1 + e3 * sz;
+                    if (err1 > 0)
+                    {
+                        x1 += sx;
+                        err1 -= 2 * dy;
+                    }
+                    if (err2 > 0)
+                    {
+                        z1 += sz;
+                        err2 -= 2 * dy;
+                    }
+                    err1 += 2 * dx;
+                    err2 += 2 * dz;
+                    y1 += sy;
+                }
             }
+            else                                      // Z dominante
+            {
+                err1 = 2 * dy - dz;
+                err2 = 2 * dx - dz;
 
-            return points;
+                for (int i = 0; i <= dz; ++i)
+                {
+                    yield return (x1, y1, z1);
+
+                    if (err1 > 0)
+                    {
+                        y1 += sy;
+                        err1 -= 2 * dz;
+                    }
+                    if (err2 > 0)
+                    {
+                        x1 += sx;
+                        err2 -= 2 * dz;
+                    }
+                    err1 += 2 * dy;
+                    err2 += 2 * dx;
+                    z1 += sz;
+                }
+            }
         }
 
         // Identify inlet and outlet boundary cells based on flow axis
-        private void IdentifyBoundaryCells(byte[,,] lattice, PermeabilitySimulator.FlowAxis axis,
-                                          HashSet<(int, int, int)> inletCells,
-                                          HashSet<(int, int, int)> outletCells,
-                                          int nx, int ny, int nz)
+        private static void IdentifyBoundaryCells(
+    byte[,,] lattice,
+    FlowAxis axis,
+    HashSet<(int x, int y, int z)> inlet,
+    HashSet<(int x, int y, int z)> outlet,
+    int nx, int ny, int nz)
         {
-            // Determine boundary planes based on flow axis
+            if (lattice == null) throw new ArgumentNullException(nameof(lattice));
+            if (inlet == null || outlet == null) throw new ArgumentNullException();
+
+            /* ------------------------------------------------------------------ */
+            /* find the first and last fluid-bearing planes along the flow axis   */
+            /* ------------------------------------------------------------------ */
+            int first = -1, last = -1;
+
             switch (axis)
             {
-                case PermeabilitySimulator.FlowAxis.X:
-                    // X-axis: left (min X) is inlet, right (max X) is outlet
-                    for (int y = 0; y < ny; y++)
-                    {
-                        for (int z = 0; z < nz; z++)
-                        {
-                            // Find the first fluid cell from the left
-                            for (int x = 0; x < nx / 10; x++)
-                            {
-                                if (lattice[x, y, z] == 1)
-                                {
-                                    inletCells.Add((x, y, z));
-                                    break;
-                                }
-                            }
-
-                            // Find the first fluid cell from the right
-                            for (int x = nx - 1; x > nx - nx / 10; x--)
-                            {
-                                if (lattice[x, y, z] == 1)
-                                {
-                                    outletCells.Add((x, y, z));
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                case FlowAxis.X:
+                    for (int x = 0; x < nx && first < 0; ++x)
+                        if (PlaneHasFluidX(lattice, x, ny, nz)) first = x;
+                    for (int x = nx - 1; x >= 0 && last < 0; --x)
+                        if (PlaneHasFluidX(lattice, x, ny, nz)) last = x;
                     break;
 
-                case PermeabilitySimulator.FlowAxis.Y:
-                    // Y-axis: bottom (min Y) is inlet, top (max Y) is outlet
-                    for (int x = 0; x < nx; x++)
-                    {
-                        for (int z = 0; z < nz; z++)
-                        {
-                            // Find the first fluid cell from the bottom
-                            for (int y = 0; y < ny / 10; y++)
-                            {
-                                if (lattice[x, y, z] == 1)
-                                {
-                                    inletCells.Add((x, y, z));
-                                    break;
-                                }
-                            }
-
-                            // Find the first fluid cell from the top
-                            for (int y = ny - 1; y > ny - ny / 10; y--)
-                            {
-                                if (lattice[x, y, z] == 1)
-                                {
-                                    outletCells.Add((x, y, z));
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                case FlowAxis.Y:
+                    for (int y = 0; y < ny && first < 0; ++y)
+                        if (PlaneHasFluidY(lattice, y, nx, nz)) first = y;
+                    for (int y = ny - 1; y >= 0 && last < 0; --y)
+                        if (PlaneHasFluidY(lattice, y, nx, nz)) last = y;
                     break;
 
-                case PermeabilitySimulator.FlowAxis.Z:
-                default:
-                    // Z-axis: front (min Z) is inlet, back (max Z) is outlet
-                    for (int x = 0; x < nx; x++)
-                    {
-                        for (int y = 0; y < ny; y++)
-                        {
-                            // Find the first fluid cell from the front
-                            for (int z = 0; z < nz / 10; z++)
-                            {
-                                if (lattice[x, y, z] == 1)
-                                {
-                                    inletCells.Add((x, y, z));
-                                    break;
-                                }
-                            }
+                default: /* FlowAxis.Z */
+                    for (int z = 0; z < nz && first < 0; ++z)
+                        if (PlaneHasFluidZ(lattice, z, nx, ny)) first = z;
+                    for (int z = nz - 1; z >= 0 && last < 0; --z)
+                        if (PlaneHasFluidZ(lattice, z, nx, ny)) last = z;
+                    break;
+            }
 
-                            // Find the first fluid cell from the back
-                            for (int z = nz - 1; z > nz - nz / 10; z--)
-                            {
-                                if (lattice[x, y, z] == 1)
-                                {
-                                    outletCells.Add((x, y, z));
-                                    break;
-                                }
-                            }
+            if (first < 0 || last < 0) return;          // no fluid at all
+
+            /* ------------------------------------------------------------------ */
+            /* collect all fluid cells on the inlet and outlet planes             */
+            /* ------------------------------------------------------------------ */
+            switch (axis)
+            {
+                case FlowAxis.X:
+                    for (int y = 0; y < ny; ++y)
+                        for (int z = 0; z < nz; ++z)
+                        {
+                            if (lattice[first, y, z] == 1) inlet.Add((first, y, z));
+                            if (lattice[last, y, z] == 1) outlet.Add((last, y, z));
                         }
-                    }
+                    break;
+
+                case FlowAxis.Y:
+                    for (int x = 0; x < nx; ++x)
+                        for (int z = 0; z < nz; ++z)
+                        {
+                            if (lattice[x, first, z] == 1) inlet.Add((x, first, z));
+                            if (lattice[x, last, z] == 1) outlet.Add((x, last, z));
+                        }
+                    break;
+
+                default: /* Z */
+                    for (int x = 0; x < nx; ++x)
+                        for (int y = 0; y < ny; ++y)
+                        {
+                            if (lattice[x, y, first] == 1) inlet.Add((x, y, first));
+                            if (lattice[x, y, last] == 1) outlet.Add((x, y, last));
+                        }
                     break;
             }
         }
 
-        // Generate default boundary cells if none are identified
-        private HashSet<(int, int, int)> GenerateDefaultBoundary(byte[,,] lattice, PermeabilitySimulator.FlowAxis axis,
-                                                                bool isInlet, int nx, int ny, int nz)
+        /// <summary>Returns <c>true</c> if the X = <paramref name="x"/> plane has any fluid.</summary>
+        private static bool PlaneHasFluidX(byte[,,] lat, int x, int ny, int nz)
         {
-            HashSet<(int, int, int)> boundaryCells = new HashSet<(int, int, int)>();
+            for (int y = 0; y < ny; ++y) for (int z = 0; z < nz; ++z)
+                    if (lat[x, y, z] == 1) return true;
+            return false;
+        }
+        private static bool PlaneHasFluidY(byte[,,] lat, int y, int nx, int nz)
+        {
+            for (int x = 0; x < nx; ++x) for (int z = 0; z < nz; ++z)
+                    if (lat[x, y, z] == 1) return true;
+            return false;
+        }
+        private static bool PlaneHasFluidZ(byte[,,] lat, int z, int nx, int ny)
+        {
+            for (int x = 0; x < nx; ++x) for (int y = 0; y < ny; ++y)
+                    if (lat[x, y, z] == 1) return true;
+            return false;
+        }
 
+        // Generate default boundary cells if none are identified
+        private static HashSet<(int, int, int)> GenerateDefaultBoundary(
+     byte[,,] lattice,
+     FlowAxis axis,
+     bool inlet,
+     int nx, int ny, int nz)
+        {
+            var set = new HashSet<(int, int, int)>();
             switch (axis)
             {
-                case PermeabilitySimulator.FlowAxis.X:
-                    int xPlane = isInlet ? 0 : nx - 1;
+                case FlowAxis.X:
+                    int x = inlet ? 0 : nx - 1;
                     for (int y = 0; y < ny; y++)
                         for (int z = 0; z < nz; z++)
-                            if (lattice[xPlane, y, z] == 1)
-                                boundaryCells.Add((xPlane, y, z));
+                            if (lattice[x, y, z] == 1) set.Add((x, y, z));
                     break;
-
-                case PermeabilitySimulator.FlowAxis.Y:
-                    int yPlane = isInlet ? 0 : ny - 1;
-                    for (int x = 0; x < nx; x++)
+                case FlowAxis.Y:
+                    int yPlane = inlet ? 0 : ny - 1;
+                    for (int xi = 0; xi < nx; xi++)
                         for (int z = 0; z < nz; z++)
-                            if (lattice[x, yPlane, z] == 1)
-                                boundaryCells.Add((x, yPlane, z));
+                            if (lattice[xi, yPlane, z] == 1) set.Add((xi, yPlane, z));
                     break;
-
-                case PermeabilitySimulator.FlowAxis.Z:
                 default:
-                    int zPlane = isInlet ? 0 : nz - 1;
-                    for (int x = 0; x < nx; x++)
-                        for (int y = 0; y < ny; y++)
-                            if (lattice[x, y, zPlane] == 1)
-                                boundaryCells.Add((x, y, zPlane));
+                    int zPlane = inlet ? 0 : nz - 1;
+                    for (int xi = 0; xi < nx; xi++)
+                        for (int yi = 0; yi < ny; yi++)
+                            if (lattice[xi, yi, zPlane] == 1) set.Add((xi, yi, zPlane));
                     break;
             }
-
-            return boundaryCells;
+            return set;
         }
 
         // Initialize equilibrium distribution functions
@@ -1780,187 +1771,144 @@ namespace CTS
 
         // Map lattice results to pore pressure field for visualization
         // Add this to the MapLatticeToPoreResults method to ensure proper pressure range
-        private void MapLatticeToPoreResults(PermeabilitySimulationResult result, PoreNetworkModel model,
-                                           double[,,] pressure, byte[,,] lattice,
-                                           double minX, double minY, double minZ,
-                                           double resolution, int nx, int ny, int nz)
+        private static void MapLatticeToPoreResults(
+    PermeabilitySimulationResult result,
+    PoreNetworkModel model,
+    double[,,] pressure,
+    byte[,,] lattice,
+    double minX,
+    double minY,
+    double minZ,
+    double resolution,
+    int nx,
+    int ny,
+    int nz)
         {
-            // First, ensure pressure field has sufficient variation
-            // Find min/max pressure in the lattice grid to normalize values
-            double minPressure = double.MaxValue;
-            double maxPressure = double.MinValue;
+            if (result == null) throw new ArgumentNullException(nameof(result));
+            if (model == null) throw new ArgumentNullException(nameof(model));
+            if (pressure == null) throw new ArgumentNullException(nameof(pressure));
+            if (lattice == null) throw new ArgumentNullException(nameof(lattice));
 
-            // Default fallback values in case we can't find valid pressures in the lattice
-            double defaultMinPressure = result.OutputPressure;
-            double defaultMaxPressure = result.InputPressure;
+            /* -------- 1. extrema check – create a synthetic gradient if needed ----- */
+            double minP = double.MaxValue, maxP = double.MinValue;
 
-            // Scan the lattice for min/max pressure values
-            bool foundValidValues = false;
-            for (int x = 0; x < nx; x++)
-            {
-                for (int y = 0; y < ny; y++)
-                {
-                    for (int z = 0; z < nz; z++)
-                    {
-                        if (lattice[x, y, z] == 1) // Only check fluid cells
+            for (int x = 0; x < nx; ++x)
+                for (int y = 0; y < ny; ++y)
+                    for (int z = 0; z < nz; ++z)
+                        if (lattice[x, y, z] == 1 && pressure[x, y, z] > 0.0)
                         {
-                            if (pressure[x, y, z] > 0) // Only count positive pressure values
-                            {
-                                minPressure = Math.Min(minPressure, pressure[x, y, z]);
-                                maxPressure = Math.Max(maxPressure, pressure[x, y, z]);
-                                foundValidValues = true;
-                            }
+                            double p = pressure[x, y, z];
+                            if (p < minP) minP = p;
+                            if (p > maxP) maxP = p;
                         }
-                    }
-                }
-            }
 
-            // If we didn't find valid pressure values, apply a linear pressure gradient
-            if (!foundValidValues || Math.Abs(maxPressure - minPressure) < 1e-6)
+            if (maxP - minP < 1e-6)
             {
                 Logger.Log("[PermeabilitySimulator] LBM pressure field has insufficient variation, applying artificial gradient");
 
-                // Determine flow axis for pressure gradient
-                int axisIndex;
-                switch (result.FlowAxis)
-                {
-                    case FlowAxis.X: axisIndex = 0; break;
-                    case FlowAxis.Y: axisIndex = 1; break;
-                    case FlowAxis.Z: default: axisIndex = 2; break;
-                }
-
-                // Apply linear pressure gradient along flow axis
-                for (int x = 0; x < nx; x++)
-                {
-                    for (int y = 0; y < ny; y++)
-                    {
-                        for (int z = 0; z < nz; z++)
-                        {
+                for (int x = 0; x < nx; ++x)
+                    for (int y = 0; y < ny; ++y)
+                        for (int z = 0; z < nz; ++z)
                             if (lattice[x, y, z] == 1)
                             {
-                                int pos;
-                                int size;
-
-                                switch (axisIndex)
+                                double t = 0.0;
+                                switch (result.FlowAxis)
                                 {
-                                    case 0: pos = x; size = nx; break;
-                                    case 1: pos = y; size = ny; break;
-                                    default: pos = z; size = nz; break;
+                                    case FlowAxis.X: t = (double)x / (nx - 1); break;
+                                    case FlowAxis.Y: t = (double)y / (ny - 1); break;
+                                    default: t = (double)z / (nz - 1); break;
                                 }
-
-                                // Linear interpolation from inlet to outlet
-                                double normalizedPos = (double)pos / size;
-                                pressure[x, y, z] = defaultMaxPressure - normalizedPos * (defaultMaxPressure - defaultMinPressure);
+                                pressure[x, y, z] = result.InputPressure - t * (result.InputPressure - result.OutputPressure);
                             }
-                        }
-                    }
-                }
 
-                // Update min/max for mapping
-                minPressure = defaultMinPressure;
-                maxPressure = defaultMaxPressure;
+                minP = result.OutputPressure;
+                maxP = result.InputPressure;
             }
 
-            Logger.Log($"[PermeabilitySimulator] LBM pressure range: {minPressure:F2} to {maxPressure:F2} Pa");
+            /* -------- 2. guarantee inlet/outlet lists ----------------------------- */
+            if (result.InletPores == null || result.OutletPores == null ||
+                result.InletPores.Count == 0 || result.OutletPores.Count == 0)
+            {
+                List<Pore> inlet, outlet;
+                SelectBoundaryPores(model, result.FlowAxis, out inlet, out outlet);
+                result.InletPores = inlet.Select(p => p.Id).ToList();
+                result.OutletPores = outlet.Select(p => p.Id).ToList();
+            }
 
-            // Create pressure field for visualization
-            result.LatticeBoltzmannPressureField = new Dictionary<int, double>();
+            /* -------- 3. build pressure field on the pores ------------------------ */
+            var field = result.LatticeBoltzmannPressureField ?? new Dictionary<int, double>(model.Pores.Count);
 
-            // Map pressure from lattice to pores
             foreach (var pore in model.Pores)
             {
-                // Get grid coordinates of the pore center
                 int cx = (int)((pore.Center.X - minX) / resolution);
                 int cy = (int)((pore.Center.Y - minY) / resolution);
                 int cz = (int)((pore.Center.Z - minZ) / resolution);
 
-                // Ensure the coordinates are within bounds
                 cx = Math.Max(0, Math.Min(nx - 1, cx));
                 cy = Math.Max(0, Math.Min(ny - 1, cy));
                 cz = Math.Max(0, Math.Min(nz - 1, cz));
 
-                // Get pressure at pore center (if it's a fluid cell)
+                double p;
+
                 if (lattice[cx, cy, cz] == 1)
                 {
-                    result.LatticeBoltzmannPressureField[pore.Id] = pressure[cx, cy, cz];
+                    p = pressure[cx, cy, cz];
                 }
                 else
                 {
-                    // If pore center is not a fluid cell, search nearby for fluid cells
-                    double avgPressure = 0;
-                    int count = 0;
+                    /* search neighbour voxels inside the pore radius */
+                    int rad = Math.Max(1, (int)Math.Round(pore.Radius / resolution));
+                    double sum = 0.0;
+                    int cnt = 0;
 
-                    int radius = (int)(pore.Radius / resolution);
-                    for (int dx = -radius; dx <= radius; dx++)
-                    {
-                        for (int dy = -radius; dy <= radius; dy++)
-                        {
-                            for (int dz = -radius; dz <= radius; dz++)
+                    for (int dx = -rad; dx <= rad; ++dx)
+                        for (int dy = -rad; dy <= rad; ++dy)
+                            for (int dz = -rad; dz <= rad; ++dz)
                             {
-                                int x = cx + dx;
-                                int y = cy + dy;
-                                int z = cz + dz;
+                                int x = cx + dx, y = cy + dy, z = cz + dz;
+                                if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) continue;
+                                if (lattice[x, y, z] != 1) continue;
+                                if (dx * dx + dy * dy + dz * dz > rad * rad) continue;
 
-                                if (x >= 0 && x < nx && y >= 0 && y < ny && z >= 0 && z < nz &&
-                                    lattice[x, y, z] == 1)
-                                {
-                                    avgPressure += pressure[x, y, z];
-                                    count++;
-                                }
+                                sum += pressure[x, y, z];
+                                ++cnt;
                             }
-                        }
-                    }
 
-                    if (count > 0)
-                    {
-                        result.LatticeBoltzmannPressureField[pore.Id] = avgPressure / count;
-                    }
+                    if (cnt > 0)
+                        p = sum / cnt;
                     else
                     {
-                        // If no fluid cells found, interpolate based on position
-                        double normalizedPos;
+                        /* fall back to linear interpolation along the flow axis */
+                        double t;
                         switch (result.FlowAxis)
                         {
                             case FlowAxis.X:
-                                normalizedPos = (pore.Center.X - model.Pores.Min(p => p.Center.X)) /
-                                    (model.Pores.Max(p => p.Center.X) - model.Pores.Min(p => p.Center.X));
+                                t = (pore.Center.X - model.Pores.Min(q => q.Center.X)) /
+                                    (model.Pores.Max(q => q.Center.X) - model.Pores.Min(q => q.Center.X));
                                 break;
                             case FlowAxis.Y:
-                                normalizedPos = (pore.Center.Y - model.Pores.Min(p => p.Center.Y)) /
-                                    (model.Pores.Max(p => p.Center.Y) - model.Pores.Min(p => p.Center.Y));
+                                t = (pore.Center.Y - model.Pores.Min(q => q.Center.Y)) /
+                                    (model.Pores.Max(q => q.Center.Y) - model.Pores.Min(q => q.Center.Y));
                                 break;
-                            case FlowAxis.Z:
                             default:
-                                normalizedPos = (pore.Center.Z - model.Pores.Min(p => p.Center.Z)) /
-                                    (model.Pores.Max(p => p.Center.Z) - model.Pores.Min(p => p.Center.Z));
+                                t = (pore.Center.Z - model.Pores.Min(q => q.Center.Z)) /
+                                    (model.Pores.Max(q => q.Center.Z) - model.Pores.Min(q => q.Center.Z));
                                 break;
                         }
-
-                        // Linear pressure gradient for pores with no nearby fluid cells
-                        double pressureValue = minPressure + normalizedPos * (maxPressure - minPressure);
-                        result.LatticeBoltzmannPressureField[pore.Id] = pressureValue;
+                        p = maxP - t * (maxP - minP);
                     }
                 }
+
+                field[pore.Id] = p;
             }
 
-            // Ensure inlet/outlet pores have correct pressures
-            foreach (int poreId in result.InletPores)
-            {
-                if (result.LatticeBoltzmannPressureField.ContainsKey(poreId))
-                {
-                    result.LatticeBoltzmannPressureField[poreId] = maxPressure;
-                }
-            }
+            /* -------- 4. enforce exact inlet/outlet pressures --------------------- */
+            foreach (int id in result.InletPores) field[id] = maxP;
+            foreach (int id in result.OutletPores) field[id] = minP;
 
-            foreach (int poreId in result.OutletPores)
-            {
-                if (result.LatticeBoltzmannPressureField.ContainsKey(poreId))
-                {
-                    result.LatticeBoltzmannPressureField[poreId] = minPressure;
-                }
-            }
+            result.LatticeBoltzmannPressureField = field;
 
-            Logger.Log($"[PermeabilitySimulator] Created LBM pressure field for {result.LatticeBoltzmannPressureField.Count} pores");
+            Logger.Log($"[PermeabilitySimulator] Created LBM pressure field for {field.Count} pores");
         }
 
         /// <summary>

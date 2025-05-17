@@ -296,7 +296,7 @@ namespace CTS
                 mainLayout.RowStyles[i] = new RowStyle(SizeType.Percent, 50F);
             }
         }
-
+        ControlForm controlForm;
         private void InitializeDocking()
         {
             _dockingManager = new KryptonDockingManager();
@@ -304,7 +304,7 @@ namespace CTS
             _dockingManager.ManageFloating("Floating", this);
 
             // Create the control form
-            var controlForm = new ControlForm(this) { Dock = DockStyle.Fill };
+            controlForm = new ControlForm(this) { Dock = DockStyle.Fill };
 
             // Create the vertical toolbar
             verticalToolbar = new VerticalToolbar(controlForm, this);
@@ -1104,6 +1104,7 @@ namespace CTS
             finally
             {
                 await this.SafeInvokeAsync(() => progressForm?.Close());
+                controlForm.lblPixelSize.Text = $"Pixel Size: {pixelSize * 1e6:F2} µm";
             }
         }
         private void ShowError(string title, string message)
@@ -4908,7 +4909,7 @@ namespace CTS
 
             // Update the window title with new dimensions
             this.Text = $"CT Segmentation Suite - {width}x{height}x{depth} (Pixel Size: {pixelSize:0.000000} m)";
-
+            controlForm.lblPixelSize.Text = $"Pixel Size: {pixelSize * 1e6:0.00} µm";
             // Refresh all the views
             RenderViews(ViewType.All);
 
@@ -4916,8 +4917,31 @@ namespace CTS
         }
         public void UpdatePixelSize(double newPixelSize)
         {
+            // Prevent setting zero or negative pixel size
+            if (newPixelSize <= 0)
+            {
+                Logger.Log($"[MainForm:UpdatePixelSize] Cannot set pixel size to {newPixelSize}");
+                // Optional: Show a message box here
+                return;
+            }
+
             pixelSize = newPixelSize;
-            Logger.Log($"[MainForm] Pixel size updated to {pixelSize:0.000000e-6} µm");
+            Logger.Log($"[MainForm] Pixel size updated to {pixelSize:E6} m ({pixelSize * 1e6:0.00} µm)");
+
+            // Update the window title to report the new pixel size
+            this.Text = $"CT Segmentation Suite - {width}x{height}x{depth} (Pixel Size: {pixelSize * 1e6:0.00} µm)";
+
+            // Trigger a re-render to update the scale bar in the views
+            // Note: This is asynchronous, but the rest of the method can continue.
+            RenderViews(ViewType.All);
+
+            // If OrthogonalViewPanel has a pixel size property, update it too.
+            if (orthogonalView != null)
+            {
+                // Assuming OrthogonalViewPanel has a public property or method like UpdatePixelSizeInfo
+                // orthogonalView.UpdatePixelSizeInformation(pixelSize);
+                // Or if it reads directly from MainForm, no action needed here.
+            }
         }
 
         #endregion

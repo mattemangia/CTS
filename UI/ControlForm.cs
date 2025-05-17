@@ -34,13 +34,15 @@ namespace CTS
         public MeasurementManager measurementManager;
         public MeasurementForm measurementForm;
 
+
         // New UI elements in the left panel.
         private Button btnInterpolate;
         private Button btnExtractFromMaterial;
         private TrackBar toolSizeSlider;
         private Label toolSizeLabel;
         private Timer brushOverlayTimer;
-
+        public Label lblPixelSize;
+        private Button btnChangePixelSize;
         private MainForm mainForm;
         private ListBox lstMaterials;
         private Button btnAddMaterial;
@@ -1476,7 +1478,37 @@ namespace CTS
             };
             btnScreenshot.Click += (s, e) => mainForm.SaveScreenshot();
             rightPanel.Controls.Add(btnScreenshot);
+            // Panel for Pixel Size controls
+            FlowLayoutPanel pixelSizePanel = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                Margin = new Padding(0, 10, 0, 0) // Add some space above
+            };
 
+            // Pixel Size Label
+            lblPixelSize = new Label
+            {
+                Text = "Pixel Size: N/A", // Initial text
+                AutoSize = true,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = new Padding(0, 5, 5, 0) // Adjust margin for flow
+            };
+            pixelSizePanel.Controls.Add(lblPixelSize);
+
+            // Change Pixel Size Button
+            btnChangePixelSize = new Button
+            {
+                Text = "Change",
+                Width = 80,
+                Height = 25,
+                Enabled = true 
+            };
+            btnChangePixelSize.Click += BtnChangePixelSize_Click;
+            pixelSizePanel.Controls.Add(btnChangePixelSize);
+
+            // Add the panel to the right panel's flow
+            rightPanel.Controls.Add(pixelSizePanel);
             return rightPanel;
         }
         private void ToolsMenuItem_Click(object sender, EventArgs e)
@@ -2456,6 +2488,154 @@ namespace CTS
                 }
             }
         }
+        /// <summary>
+        /// Updates the label showing the current pixel size.
+        /// </summary>
+        private void UpdatePixelSizeLabel()
+        {
+            if (mainForm.volumeData == null && mainForm.volumeLabels == null)
+            {
+                lblPixelSize.Text = "Pixel Size: N/A";
+                btnChangePixelSize.Enabled = false;
+                return;
+            }
+
+            double pixelSizeMeters = mainForm.GetPixelSize(); // This is already in meters (e.g., 1e-6)
+
+            // Decide whether to show in micrometers or millimeters
+            string labelText;
+            if (pixelSizeMeters < 1e-3) // Less than 1 mm
+            {
+                double pixelSizeMicrometers = pixelSizeMeters * 1e6;
+                labelText = $"Pixel Size: {pixelSizeMicrometers:0.00} µm";
+            }
+            else // 1 mm or more
+            {
+                double pixelSizeMillimeters = pixelSizeMeters * 1e3;
+                labelText = $"Pixel Size: {pixelSizeMillimeters:0.00} mm";
+            }
+
+            lblPixelSize.Text = labelText;
+            btnChangePixelSize.Enabled = true;
+        }
+        /// <summary>
+        /// Handles the click event for the Change Pixel Size button.
+        /// </summary>
+        private void BtnChangePixelSize_Click(object sender, EventArgs e)
+        {
+            double? newPixelSize = ShowChangePixelSizeDialog();
+
+            if (newPixelSize.HasValue)
+            {
+                mainForm.UpdatePixelSize(newPixelSize.Value);
+                UpdatePixelSizeLabel(); // Update the label on the ControlForm
+            }
+        }
+        /// <summary>
+        /// Shows a dialog to prompt the user for a new pixel size and unit.
+        /// </summary>
+        /// <returns>The new pixel size in meters, or null if canceled or invalid.</returns>
+        private double? ShowChangePixelSizeDialog()
+        {
+            // Ensure we're on the UI thread, although this method is only called by UI events
+            if (this.InvokeRequired)
+            {
+                return (double?)this.Invoke(new Func<double?>(ShowChangePixelSizeDialog));
+            }
+
+            // Get the current pixel size to pre-fill the dialog
+            double currentPixelSizeMeters = mainForm.GetPixelSize();
+
+            using (Form form = new Form()
+            {
+                Text = "Change Pixel Size",
+                Width = 280,
+                Height = 150,
+                StartPosition = FormStartPosition.CenterParent,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                MaximizeBox = false,
+                MinimizeBox = false,
+                Icon = this.mainForm.Icon // Use the MainForm icon
+            })
+            {
+                Label lbl = new Label() { Text = "New size:", Left = 10, Top = 20, AutoSize = true };
+                TextBox txtVal = new TextBox() { Left = 80, Top = 18, Width = 80 };
+                ComboBox cbUnits = new ComboBox()
+                {
+                    Left = 170,
+                    Top = 18,
+                    Width = 80,
+                    DropDownStyle = ComboBoxStyle.DropDownList
+                };
+                cbUnits.Items.Add("µm");
+                cbUnits.Items.Add("mm");
+
+
+                Button ok = new Button()
+                {
+                    Text = "OK",
+                    Left = 80,
+                    Top = 60,
+                    Width = 80,
+                    DialogResult = DialogResult.OK
+                };
+
+                Button cancel = new Button()
+                {
+                    Text = "Cancel",
+                    Left = 170,
+                    Top = 60,
+                    Width = 80,
+                    DialogResult = DialogResult.Cancel
+                };
+
+                form.Controls.Add(lbl);
+                form.Controls.Add(txtVal);
+                form.Controls.Add(cbUnits);
+                form.Controls.Add(ok);
+                form.Controls.Add(cancel);
+
+                form.AcceptButton = ok;
+                form.CancelButton = cancel;
+
+                // Pre-fill the dialog based on current pixel size
+                if (currentPixelSizeMeters < 1e-3) // Show in micrometers
+                {
+                    txtVal.Text = (currentPixelSizeMeters * 1e6).ToString("0.##"); // Format nicely
+                    cbUnits.SelectedItem = "µm";
+                    if (cbUnits.SelectedIndex == -1) cbUnits.SelectedIndex = 0; // Default to µm if not found
+                }
+                else // Show in millimeters
+                {
+                    txtVal.Text = (currentPixelSizeMeters * 1e3).ToString("0.##"); // Format nicely
+                    cbUnits.SelectedItem = "mm";
+                    if (cbUnits.SelectedIndex == -1) cbUnits.SelectedIndex = 1; // Default to mm if not found
+                }
+
+
+                // Show dialog
+                if (form.ShowDialog(this) == DialogResult.OK)
+                {
+                    if (double.TryParse(txtVal.Text, out double val) && val > 0)
+                    {
+                        string unit = cbUnits.SelectedItem?.ToString() ?? "µm"; // Default unit if none selected
+
+                        // Convert value to meters
+                        if (unit == "mm")
+                            return val * 1e-3;
+                        else // Default to µm
+                            return val * 1e-6;
+                    }
+                    else
+                    {
+                        MessageBox.Show("Invalid pixel size value.", "Input Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return null; // Indicate invalid input
+                    }
+                }
+                return null; // Indicate dialog was cancelled
+            }
+        }
+
         public void UpdateToolUI(SegmentationTool tool)
         {
             // Update current tool

@@ -410,7 +410,6 @@
   </ItemGroup>
   <ItemGroup>
     <Folder Include=".vs\CTSegmenter\v17\" />
-    <Folder Include="HPCServer\" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Cyotek.Drawing.BitmapFont">

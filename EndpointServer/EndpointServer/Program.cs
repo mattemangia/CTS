@@ -14,35 +14,57 @@ namespace ParallelComputingEndpoint
         private static EndpointNetworkService _networkService;
         private static EndpointComputeService _computeService;
         private static UIManager _uiManager;
+        private static EndpointNodeProcessingService _nodeProcessingService;
+        private static LogPanel _logPanel;
 
         static async Task Main(string[] args)
         {
-            Console.WriteLine("Initializing Parallel Computing Endpoint...");
+            try
+            {
+                Console.WriteLine("Initializing Parallel Computing Endpoint...");
 
-            // Load or create configuration
-            _config = LoadConfig();
+                // Load or create configuration
+                _config = LoadConfig();
 
-            // Initialize services
-            _computeService = new EndpointComputeService();
-            _networkService = new EndpointNetworkService(_config, _computeService);
-            _uiManager = new UIManager(_config, _networkService, _computeService);
+                // Initialize compute service first
+                _computeService = new EndpointComputeService();
 
-            // Initialize hardware
-            await _computeService.InitializeAsync();
+                // Initialize hardware
+                await _computeService.InitializeAsync();
 
-            // Start UI
-            _uiManager.Run();
+                // Initialize services
+                _networkService = new EndpointNetworkService(_config, _computeService);
+                _uiManager = new UIManager(_config, _networkService, _computeService);
 
-            // When UI exits, stop all services
-            _cancellationTokenSource.Cancel();
+                // Get LogPanel reference after UI init
+                Application.Init();
+                _uiManager.BuildUI(); // Assicurati che BuildUI sia public
+                _logPanel = _uiManager.LogPanel;
 
-            // Clean up resources
-            _computeService.Dispose();
+                // Create node processing service with LogPanel
+                _nodeProcessingService = new EndpointNodeProcessingService(_computeService, _logPanel);
 
-            // Save config when exiting
-            SaveConfig(_config);
+                // Start UI
+                Application.Run();
 
-            Console.WriteLine("Endpoint shutdown complete.");
+                // When UI exits, stop all services
+                _cancellationTokenSource.Cancel();
+
+                // Clean up resources
+                _computeService.Dispose();
+                _networkService.Shutdown();
+
+                // Save config when exiting
+                SaveConfig(_config);
+
+                Console.WriteLine("Endpoint shutdown complete.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Fatal error: {ex.Message}");
+                Console.WriteLine(ex.StackTrace);
+                Console.ReadKey();
+            }
         }
 
         private static EndpointConfig LoadConfig()
@@ -112,5 +134,11 @@ namespace ParallelComputingEndpoint
         public int BeaconPort { get; set; } = 7001;
         public string EndpointName { get; set; } = Environment.MachineName;
         public bool AutoConnect { get; set; } = false;
+
+        // Metodo statico per la compatibilità con altri file
+        public static EndpointConfig Load()
+        {
+            return new EndpointConfig();
+        }
     }
 }

@@ -780,15 +780,28 @@ namespace CTS.NodeEditor
         {
             try
             {
-                isEventHandlerActive = true;
-
+                // Check for null controls first
                 if (lblClusterStatus == null)
                     return;
 
-                if (useCluster && mainForm != null && mainForm.ComputeEndpoints != null && mainForm.ComputeEndpoints.Count > 0)
+                // Safe access to endpoints list
+                var endpoints = mainForm?.ComputeEndpoints;
+                int endpointCount = endpoints?.Count ?? 0;
+                int availableEndpoints = 0;
+
+                if (endpoints != null)
                 {
-                    int availableEndpoints = mainForm.ComputeEndpoints.Count(e => e.IsConnected && !e.IsBusy);
-                    lblClusterStatus.Text = $"Cluster: {availableEndpoints}/{mainForm.ComputeEndpoints.Count} endpoints";
+                    // Only count endpoints that are actually connected
+                    foreach (var endpoint in endpoints)
+                    {
+                        if (endpoint != null && endpoint.IsConnected && !endpoint.IsBusy)
+                            availableEndpoints++;
+                    }
+                }
+
+                if (useCluster && endpoints != null && endpointCount > 0)
+                {
+                    lblClusterStatus.Text = $"Cluster: {availableEndpoints}/{endpointCount} endpoints";
                     lblClusterStatus.ForeColor = Color.LightGreen;
                     if (cmbEndpoints != null)
                         cmbEndpoints.Enabled = true;
@@ -812,10 +825,6 @@ namespace CTS.NodeEditor
             {
                 // Log the error but prevent application crash
                 Logger.Log($"[NodeEditor] Error updating cluster status: {ex.Message}");
-            }
-            finally
-            {
-                isEventHandlerActive = false;
             }
         }
 

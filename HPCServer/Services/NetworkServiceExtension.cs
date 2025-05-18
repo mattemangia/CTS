@@ -50,8 +50,8 @@ namespace ParallelComputingServer.Services
     /// </summary>
     public partial class NetworkService
     {
-        private DatasetTransferService _datasetTransferService;
-        private DatasetTransferCommands _datasetTransferCommands;
+        // These field declarations are removed to avoid duplication with NetworkService.cs
+        // The fields are already declared in the main NetworkService.cs file
 
         // This method can be called during service initialization
         public void InitializeDatasetTransfer(DatasetTransferService datasetTransferService)

@@ -101,10 +101,15 @@ namespace CTS
                     Connection = null;
                     IsConnected = false;
                     ConnectionStatusChanged?.Invoke(this, false);
+
+                    // Ensure all endpoints associated with this server are also marked as disconnected
+                    foreach (var endpoint in ConnectedEndpoints.ToList())
+                    {
+                        endpoint.Disconnect();
+                    }
                 }
             }
         }
-
         public async Task<string> SendCommandAsync(string command)
         {
             if (!IsConnected)
@@ -466,10 +471,23 @@ namespace CTS
         public async Task<string> SendCommandAsync(string command)
         {
             // If we have a parent server, ALWAYS use it instead of direct connection
-            if (ParentServer != null && ParentServer.IsConnected)
+            if (ParentServer != null)
             {
-                Logger.Log($"[ComputeEndpoint] Sending command to {Name} via parent server");
-                return await SendCommandViaServerAsync(command);
+                if (ParentServer.IsConnected)
+                {
+                    Logger.Log($"[ComputeEndpoint] Sending command to {Name} via parent server");
+                    return await SendCommandViaServerAsync(command);
+                }
+                else
+                {
+                    // Parent server is not connected - ensure this endpoint is also marked as disconnected
+                    if (IsConnected)
+                    {
+                        Logger.Log($"[ComputeEndpoint] Parent server for {Name} is disconnected, marking endpoint as disconnected");
+                        Disconnect();
+                    }
+                    throw new InvalidOperationException($"Parent server for endpoint {Name} is not connected");
+                }
             }
 
             // Only use direct connection if no parent server is available
@@ -485,15 +503,38 @@ namespace CTS
                 // Read response with timeout
                 using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
                 {
-                    // Simple response reading
-                    byte[] responseBuffer = new byte[8192];
-                    int bytesRead = await Stream.ReadAsync(responseBuffer, 0, responseBuffer.Length, cts.Token);
-                    return Encoding.UTF8.GetString(responseBuffer, 0, bytesRead);
+                    try
+                    {
+                        // Simple response reading
+                        byte[] responseBuffer = new byte[8192];
+                        int bytesRead = await Stream.ReadAsync(responseBuffer, 0, responseBuffer.Length, cts.Token);
+                        return Encoding.UTF8.GetString(responseBuffer, 0, bytesRead);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        Logger.Log($"[ComputeEndpoint] Command timeout for {Name} - marking as disconnected");
+                        Disconnect();
+                        throw new TimeoutException($"Communication with endpoint {Name} timed out");
+                    }
                 }
+            }
+            catch (IOException ex)
+            {
+                Logger.Log($"[ComputeEndpoint] IO Error communicating with {Name}: {ex.Message}");
+                // Mark as disconnected
+                Disconnect();
+                throw;
             }
             catch (Exception ex)
             {
                 Logger.Log($"[ComputeEndpoint] Error sending command to {Name}: {ex.Message}");
+
+                // For any network-related exceptions, make sure to disconnect
+                if (ex is SocketException || ex is ObjectDisposedException || ex is InvalidOperationException)
+                {
+                    Disconnect();
+                }
+
                 throw;
             }
         }
@@ -790,7 +831,11 @@ namespace CTS
                     {
                         // Server timed out
                         Logger.Log($"[ComputeClusterManager] Server timed out: {server.Name} ({server.IP}:{server.Port})");
+
+                        // This will also disconnect all associated endpoints
                         server.Disconnect();
+
+                        // Remove from server list
                         servers.RemoveAt(i);
                         ServerRemoved?.Invoke(this, server);
                     }
@@ -824,6 +869,9 @@ namespace CTS
                                 catch (Exception ex)
                                 {
                                     Logger.Log($"[ComputeClusterManager] Error parsing ping response from {server.Name}: {ex.Message}");
+                                    // Mark server as disconnected since we couldn't parse its response
+                                    server.Disconnect();
+                                    ServerStatusChanged?.Invoke(this, server);
                                 }
 
                                 // Refresh endpoint list (less frequently)
@@ -834,19 +882,18 @@ namespace CTS
                             }
                             catch (OperationCanceledException)
                             {
-                                // Timeout occurred, but don't disconnect yet
+                                // Timeout occurred
                                 Logger.Log($"[ComputeClusterManager] Keep-alive timeout for {server.Name}");
+                                server.Disconnect();
+                                ServerStatusChanged?.Invoke(this, server);
                             }
                             catch (Exception ex)
                             {
                                 Logger.Log($"[ComputeClusterManager] Error in keep-alive for {server.Name}: {ex.Message}");
 
-                                // Set server as disconnected but don't remove it yet
-                                if (server.IsConnected)
-                                {
-                                    server.Disconnect();
-                                    ServerStatusChanged?.Invoke(this, server);
-                                }
+                                // Set server as disconnected
+                                server.Disconnect();
+                                ServerStatusChanged?.Invoke(this, server);
                             }
                         });
                     }

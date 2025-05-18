@@ -25,7 +25,9 @@ namespace ParallelComputingServer.Services
         public event EventHandler<DateTime> BeaconSent;
         public event EventHandler<DateTime> KeepAliveReceived;
         public event EventHandler ClientsUpdated;
-
+        private DatasetTransferService _datasetTransferService;
+        private DatasetTransferCommands _datasetTransferCommands;
+        
         public NetworkService(ServerConfig config, ComputeService computeService, EndpointService endpointService)
         {
             _config = config;
@@ -33,7 +35,7 @@ namespace ParallelComputingServer.Services
             _endpointService = endpointService;
 
             // Initialize the node processing service
-            _nodeProcessingService = new NodeProcessingService(computeService);
+            InitializeNodeProcessingService();
         }
 
         public List<ClientInfo> GetConnectedClients() => _connectedClients;
@@ -103,7 +105,7 @@ namespace ParallelComputingServer.Services
         }
         private void InitializeNodeProcessingService()
         {
-            _nodeProcessingService = new NodeProcessingService(_computeService);
+            _nodeProcessingService = new NodeProcessingService(_computeService, _endpointService);
         }
         public async Task StartServerAsync(CancellationToken cancellationToken)
         {

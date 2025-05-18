@@ -5,10 +5,17 @@ using Terminal.Gui;
 
 namespace ParallelComputingEndpoint
 {
+    public interface INodeHandler
+    {
+        Task<Dictionary<string, string>> ProcessAsync(
+            Dictionary<string, string> inputData,
+            Dictionary<string, byte[]> binaryData,
+            EndpointComputeService computeService);
+    }
     public class UIManager
     {
         private readonly EndpointConfig _config;
-        private readonly EndpointNetworkService _networkService;
+        private EndpointNetworkService _networkService;
         private readonly EndpointComputeService _computeService;
 
         private StatusPanel _statusPanel;
@@ -17,20 +24,42 @@ namespace ParallelComputingEndpoint
         private ColorScheme _connectedColorScheme;
         private ColorScheme _disconnectedColorScheme;
 
+        public LogPanel LogPanel => _logPanel;
+
         public UIManager(
-            EndpointConfig config,
-            EndpointNetworkService networkService,
-            EndpointComputeService computeService)
+         EndpointConfig config,
+         EndpointNetworkService networkService,
+         EndpointComputeService computeService)
         {
             _config = config;
             _networkService = networkService;
             _computeService = computeService;
 
-            // Subscribe to network service events
-            _networkService.ConnectionStatusChanged += OnConnectionStatusChanged;
-            _networkService.MessageReceived += OnMessageReceived;
+            if (_networkService != null)
+            {
+                // Subscribe to network service events
+                _networkService.ConnectionStatusChanged += OnConnectionStatusChanged;
+                _networkService.MessageReceived += OnMessageReceived;
+            }
         }
+        public void UpdateNetworkService(EndpointNetworkService networkService)
+        {
+            // Unsubscribe from old events if necessary
+            if (_networkService != null)
+            {
+                _networkService.ConnectionStatusChanged -= OnConnectionStatusChanged;
+                _networkService.MessageReceived -= OnMessageReceived;
+            }
 
+            _networkService = networkService;
+
+            // Subscribe to new events
+            if (_networkService != null)
+            {
+                _networkService.ConnectionStatusChanged += OnConnectionStatusChanged;
+                _networkService.MessageReceived += OnMessageReceived;
+            }
+        }
         public void Run()
         {
             Application.Init();
@@ -49,7 +78,7 @@ namespace ParallelComputingEndpoint
             Application.Run();
         }
 
-        private void BuildUI()
+        public void BuildUI()
         {
             var top = Application.Top;
 
@@ -122,6 +151,12 @@ namespace ParallelComputingEndpoint
 
             // Initialize log with a welcome message
             _logPanel.AddLog("Endpoint initialized. Use F3 to scan for and connect to a server.");
+
+            // FIX: Use UpdateNetworkService instead of direct assignment to properly handle event subscriptions
+            if (_networkService == null)
+            {
+                UpdateNetworkService(new EndpointNetworkService(_config, _computeService, _logPanel));
+            }
 
             // If autoconnect is enabled, show a message
             if (_config.AutoConnect)

@@ -21,18 +21,21 @@ namespace ParallelComputingEndpoint
         private string _currentTaskId;
         private CancellationTokenSource _listenerCts;
         private EndpointNodeProcessingService _nodeProcessingService;
+        private readonly LogPanel _logPanel;  // Aggiungere questo campo
+
         public event EventHandler<List<ServerInfo>> ServersDiscovered;
         public event EventHandler<bool> ConnectionStatusChanged;
         public event EventHandler<string> MessageReceived;
 
-        public EndpointNetworkService(EndpointConfig config, EndpointComputeService computeService)
+        public EndpointNetworkService(EndpointConfig config, EndpointComputeService computeService, LogPanel logPanel = null)
         {
             _config = config;
             _computeService = computeService;
+            _logPanel = logPanel;
             _computeService.CpuLoadUpdated += OnCpuLoadUpdated;
 
             // Initialize node processing service
-            _nodeProcessingService = new EndpointNodeProcessingService(computeService);
+            _nodeProcessingService = new EndpointNodeProcessingService(computeService, _logPanel);
         }
 
         public bool IsConnected => _isConnected;
@@ -98,7 +101,7 @@ namespace ParallelComputingEndpoint
                 var message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
                 Console.WriteLine($"Received message: {message}");
 
-                string response = "";
+                string response = "";  // Define response variable here
 
                 try
                 {
@@ -154,6 +157,7 @@ namespace ParallelComputingEndpoint
                                     ShutdownEndpoint();
                                 });
                                 break;
+
                             case "GET_AVAILABLE_NODES":
                                 response = _nodeProcessingService.GetAvailableNodeTypes();
                                 break;
@@ -165,7 +169,9 @@ namespace ParallelComputingEndpoint
                                     string nodeType = nodeTypeElement.GetString();
                                     string inputData = inputDataElement.GetString();
 
+                                    Console.WriteLine($"Executing node {nodeType} on endpoint");
                                     response = await _nodeProcessingService.ProcessNodeAsync(nodeType, inputData);
+                                    Console.WriteLine($"Node {nodeType} execution completed");
                                 }
                                 else
                                 {
@@ -500,6 +506,7 @@ namespace ParallelComputingEndpoint
                             MessageReceived?.Invoke(this, "Execute task command received");
                             await SendAcknowledgmentAsync("Task received, processing not yet implemented");
                             break;
+
 
                         default:
                             MessageReceived?.Invoke(this, $"Received unknown command: {command}");

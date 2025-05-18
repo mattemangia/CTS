@@ -12,33 +12,29 @@ namespace ParallelComputingEndpoint
     {
         private readonly EndpointComputeService _computeService;
         private Dictionary<string, INodeHandler> _nodeHandlers = new Dictionary<string, INodeHandler>();
+        private readonly LogPanel _logPanel;
 
-        public EndpointNodeProcessingService(EndpointComputeService computeService)
+        public EndpointNodeProcessingService(EndpointComputeService computeService, LogPanel logPanel = null)
         {
             _computeService = computeService;
+            _logPanel = logPanel;
             RegisterNodeHandlers();
         }
 
         private void RegisterNodeHandlers()
         {
             // Register the available node handlers
-/*
-            // Tools nodes
             _nodeHandlers.Add("BrightnessContrastNode", new BrightnessContrastNodeHandler());
-            _nodeHandlers.Add("ResampleVolumeNode", new ResampleVolumeNodeHandler());
-            _nodeHandlers.Add("ThresholdNode", new ThresholdNodeHandler());
-            _nodeHandlers.Add("ManualThresholdingNode", new ManualThresholdingNodeHandler());
-            _nodeHandlers.Add("BinarizeNode", new BinarizeNodeHandler());
-            _nodeHandlers.Add("RemoveSmallIslandsNode", new RemoveSmallIslandsNodeHandler());
-
-            // Simulation nodes
-            _nodeHandlers.Add("PoreNetworkNode", new PoreNetworkNodeHandler());
-            _nodeHandlers.Add("AcousticSimulationNode", new AcousticSimulationNodeHandler());
-            _nodeHandlers.Add("TriaxialSimulationNode", new TriaxialSimulationNodeHandler());
-            _nodeHandlers.Add("NMRSimulationNode", new NMRSimulationNodeHandler());
-
-            // Filter nodes
-            _nodeHandlers.Add("FilterNode", new FilterNodeHandler());*/
+            // _nodeHandlers.Add("ResampleVolumeNode", new ResampleVolumeNodeHandler());
+            // _nodeHandlers.Add("ThresholdNode", new ThresholdNodeHandler());
+            // _nodeHandlers.Add("ManualThresholdingNode", new ManualThresholdingNodeHandler());
+            // _nodeHandlers.Add("BinarizeNode", new BinarizeNodeHandler());
+            // _nodeHandlers.Add("RemoveSmallIslandsNode", new RemoveSmallIslandsNodeHandler());
+            // _nodeHandlers.Add("PoreNetworkNode", new PoreNetworkNodeHandler());
+            // _nodeHandlers.Add("AcousticSimulationNode", new AcousticSimulationNodeHandler());
+            // _nodeHandlers.Add("TriaxialSimulationNode", new TriaxialSimulationNodeHandler());
+            // _nodeHandlers.Add("NMRSimulationNode", new NMRSimulationNodeHandler());
+            // _nodeHandlers.Add("FilterNode", new FilterNodeHandler());
         }
 
         public string GetAvailableNodeTypes()
@@ -54,12 +50,18 @@ namespace ParallelComputingEndpoint
 
         public async Task<string> ProcessNodeAsync(string nodeType, string compressedData)
         {
+            var progressTracker = new NodeProcessingProgressTracker(_logPanel);
+            progressTracker.Show(nodeType);
+
             try
             {
                 Console.WriteLine($"Processing node: {nodeType}");
+                progressTracker.SetStage(ProcessingStage.ReceivingData);
 
                 if (!_nodeHandlers.TryGetValue(nodeType, out var handler))
                 {
+                    progressTracker.SetStage(ProcessingStage.Failed, $"Node type {nodeType} is not supported");
+                    progressTracker.Close();
                     return JsonSerializer.Serialize(new
                     {
                         Status = "Error",
@@ -68,6 +70,9 @@ namespace ParallelComputingEndpoint
                 }
 
                 // Decompress and deserialize the input data
+                progressTracker.SetDetails("Decompressione dati in corso...");
+                progressTracker.UpdateProgress(10);
+
                 byte[] compressedBytes = Convert.FromBase64String(compressedData);
                 Dictionary<string, string> inputData = new Dictionary<string, string>();
                 Dictionary<string, byte[]> binaryData = new Dictionary<string, byte[]>();
@@ -81,12 +86,14 @@ namespace ParallelComputingEndpoint
                     int metadataLength = BitConverter.ToInt32(lengthBuffer, 0);
 
                     // Read metadata
+                    progressTracker.UpdateProgress(20);
                     byte[] metadataBuffer = new byte[metadataLength];
                     decompressStream.Read(metadataBuffer, 0, metadataLength);
                     string jsonMetadata = Encoding.UTF8.GetString(metadataBuffer);
                     inputData = JsonSerializer.Deserialize<Dictionary<string, string>>(jsonMetadata);
 
                     // Read binary keys length
+                    progressTracker.UpdateProgress(30);
                     decompressStream.Read(lengthBuffer, 0, 4);
                     int binaryKeysLength = BitConverter.ToInt32(lengthBuffer, 0);
 
@@ -97,8 +104,19 @@ namespace ParallelComputingEndpoint
                     List<string> binaryKeys = JsonSerializer.Deserialize<List<string>>(jsonBinaryKeys);
 
                     // Read binary data
+                    progressTracker.UpdateProgress(40);
                     foreach (var key in binaryKeys)
                     {
+                        if (progressTracker.IsCancelled)
+                        {
+                            progressTracker.Close();
+                            return JsonSerializer.Serialize(new
+                            {
+                                Status = "Cancelled",
+                                Message = "Operation cancelled by user"
+                            });
+                        }
+
                         // Read key length
                         decompressStream.Read(lengthBuffer, 0, 4);
                         int keyLength = BitConverter.ToInt32(lengthBuffer, 0);
@@ -116,13 +134,40 @@ namespace ParallelComputingEndpoint
                         byte[] valueBuffer = new byte[valueLength];
                         decompressStream.Read(valueBuffer, 0, valueLength);
                         binaryData[keyName] = valueBuffer;
+
+                        progressTracker.SetDetails($"Lettura blocco dati: {keyName}");
                     }
                 }
 
                 // Process the node with the handler
+                progressTracker.SetStage(ProcessingStage.ProcessingData);
+                progressTracker.UpdateProgress(50);
+
+                // Extract volume dimensions for progress reporting
+                int width = 0, height = 0, depth = 0;
+                if (inputData.TryGetValue("Width", out string widthStr)) int.TryParse(widthStr, out width);
+                if (inputData.TryGetValue("Height", out string heightStr)) int.TryParse(heightStr, out height);
+                if (inputData.TryGetValue("Depth", out string depthStr)) int.TryParse(depthStr, out depth);
+
+                int totalVoxels = width * height * depth;
+                progressTracker.SetDetails($"Elaborazione volume {width}x{height}x{depth}");
+
+                // Aggiungi il tracking del progresso al handler (se supportato)
+                if (handler is IProgressTrackable trackableHandler)
+                {
+                    trackableHandler.SetProgressCallback((percent) => {
+                        // Scala la percentuale per coprire solo una parte dell'elaborazione complessiva (50%-90%)
+                        int scaledPercent = 50 + (int)(percent * 0.4);
+                        progressTracker.UpdateProgress(scaledPercent);
+                    });
+                }
+
                 var outputData = await handler.ProcessAsync(inputData, binaryData, _computeService);
 
                 // Serialize and compress the output data
+                progressTracker.SetStage(ProcessingStage.SendingResults);
+                progressTracker.UpdateProgress(90);
+
                 string jsonOutput = JsonSerializer.Serialize(outputData);
                 string base64Data;
 
@@ -137,6 +182,10 @@ namespace ParallelComputingEndpoint
                     base64Data = Convert.ToBase64String(memoryStream.ToArray());
                 }
 
+                progressTracker.SetStage(ProcessingStage.Completed);
+                progressTracker.UpdateProgress(100);
+                progressTracker.Close();
+
                 return JsonSerializer.Serialize(new
                 {
                     Status = "OK",
@@ -145,6 +194,9 @@ namespace ParallelComputingEndpoint
             }
             catch (Exception ex)
             {
+                progressTracker.SetStage(ProcessingStage.Failed, $"Error: {ex.Message}");
+                progressTracker.Close();
+
                 Console.WriteLine($"Error processing node: {ex.Message}");
                 return JsonSerializer.Serialize(new
                 {
@@ -154,69 +206,4 @@ namespace ParallelComputingEndpoint
             }
         }
     }
-
-    // Interface for node handlers
-    public interface INodeHandler
-    {
-        Task<Dictionary<string, string>> ProcessAsync(
-            Dictionary<string, string> inputData,
-            Dictionary<string, byte[]> binaryData,
-            EndpointComputeService computeService);
-    }
-
-    // Base class for node handlers
-    public abstract class BaseNodeHandler : INodeHandler
-    {
-        public abstract Task<Dictionary<string, string>> ProcessAsync(
-            Dictionary<string, string> inputData,
-            Dictionary<string, byte[]> binaryData,
-            EndpointComputeService computeService);
-
-        // Helper method to log node processing
-        protected void LogProcessing(string nodeType)
-        {
-            Console.WriteLine($"Processing {nodeType}...");
-        }
-    }
-
-    // Node handler implementations
-    #region Tool Node Handlers
-
-   /* public class BrightnessContrastNodeHandler : BaseNodeHandler
-    {
-        public override async Task<Dictionary<string, string>> ProcessAsync(
-            Dictionary<string, string> inputData,
-            Dictionary<string, byte[]> binaryData,
-            EndpointComputeService computeService)
-        {
-            LogProcessing("Brightness & Contrast");
-
-            await Task.Delay(500); // Simulate processing time
-
-            var outputData = new Dictionary<string, string>();
-
-            if (inputData.TryGetValue("Volume", out string volumeData))
-            {
-                if (volumeData.StartsWith("binary_ref:"))
-                {
-                    string binaryKey = volumeData.Substring("binary_ref:".Length);
-                    if (binaryData.TryGetValue(binaryKey, out byte[] binaryValue))
-                    {
-                        // Process binary data (placeholder implementation)
-                        outputData["Volume"] = "Processed brightness and contrast data";
-                    }
-                }
-                else
-                {
-                    // Process regular data
-                    outputData["Volume"] = "Processed brightness and contrast data";
-                }
-            }
-
-            return outputData;
-        }
-    }*/
-
-
-    #endregion
 }

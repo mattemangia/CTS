@@ -5,10 +5,11 @@ using Terminal.Gui;
 using ParallelComputingServer.Config;
 using ParallelComputingServer.Services;
 using ParallelComputingServer.UI;
+using ILGPU.Util;
 
 namespace ParallelComputingServer.UI
 {
-    public class UIManager
+    public partial class UIManager
     {
         private readonly ServerConfig _config;
         private readonly NetworkService _networkService;
@@ -61,15 +62,21 @@ namespace ParallelComputingServer.UI
             top.Add(win);
 
             // Create status bar with menu options (add F6 for logs)
-            var statusBar = new StatusBar(new StatusItem[] {
-                new StatusItem(Key.F1, "~F1~ Help", ShowHelp),
-                new StatusItem(Key.F2, "~F2~ Settings", ShowSettings),
-                new StatusItem(Key.F3, "~F3~ Clients", ShowClients),
-                new StatusItem(Key.F4, "~F4~ Endpoints", ShowEndpoints),
-                new StatusItem(Key.F5, "~F5~ About", ShowAbout),
-                new StatusItem(Key.F6, "~F6~ Logs", ShowLogs), // New logs menu item
-                new StatusItem(Key.F10, "~F10~ Quit", () => Application.RequestStop())
-            });
+            var items = new List<StatusItem> {
+    new StatusItem(Key.F1,  "~F1~ Help",     ShowHelp),
+    new StatusItem(Key.F2,  "~F2~ Settings", ShowSettings),
+    new StatusItem(Key.F3,  "~F3~ Clients",  ShowClients),
+    new StatusItem(Key.F4,  "~F4~ Endpoints",ShowEndpoints),
+    new StatusItem(Key.F5,  "~F5~ About",    ShowAbout),
+    new StatusItem(Key.F6,  "~F6~ Logs",     ShowLogs)
+};
+
+            if (_datasetTransferService != null)                       // ← add F7 only if wired
+                items.Add(new StatusItem(Key.F7, "~F7~ Transfers", ShowTransfers));
+
+            items.Add(new StatusItem(Key.F10, "~F10~ Quit", () => Application.RequestStop()));
+
+            var statusBar = new StatusBar(items.ToArray());
             top.Add(statusBar);
 
             // Add the main status panel
@@ -81,7 +88,8 @@ namespace ParallelComputingServer.UI
                 Height = Dim.Fill() - 1 // Leave space for status bar
             };
             win.Add(statusPanel);
-
+            if (_datasetTransferService != null)          
+                AddTransferStatusToUI(win);
             // Initialize the log panel (hidden initially)
             _logPanel = new LogPanel();
             TuiLogger.Initialize(_logPanel);

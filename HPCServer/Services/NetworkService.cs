@@ -14,13 +14,13 @@ using ParallelComputingServer.Models;
 
 namespace ParallelComputingServer.Services
 {
-    public class NetworkService
+    public partial class NetworkService
     {
         private readonly ServerConfig _config;
         private readonly ComputeService _computeService;
         private readonly EndpointService _endpointService;
         private List<ClientInfo> _connectedClients = new();
-
+        private NodeProcessingService _nodeProcessingService;
         // Event handlers for UI updates
         public event EventHandler<DateTime> BeaconSent;
         public event EventHandler<DateTime> KeepAliveReceived;
@@ -31,6 +31,9 @@ namespace ParallelComputingServer.Services
             _config = config;
             _computeService = computeService;
             _endpointService = endpointService;
+
+            // Initialize the node processing service
+            _nodeProcessingService = new NodeProcessingService(computeService);
         }
 
         public List<ClientInfo> GetConnectedClients() => _connectedClients;
@@ -97,6 +100,10 @@ namespace ParallelComputingServer.Services
             }
 
             Console.WriteLine("Beacon service stopped.");
+        }
+        private void InitializeNodeProcessingService()
+        {
+            _nodeProcessingService = new NodeProcessingService(_computeService);
         }
         public async Task StartServerAsync(CancellationToken cancellationToken)
         {
@@ -280,7 +287,38 @@ namespace ParallelComputingServer.Services
 
                         case "FORWARD_TO_ENDPOINT":
                             return await ForwardCommandToEndpoint(commandObj, cancellationToken);
+                        case "GET_AVAILABLE_NODES":
+                            // Return the list of node types this server can process
+                            if (_nodeProcessingService == null)
+                            {
+                                InitializeNodeProcessingService();
+                            }
+                            return _nodeProcessingService.GetAvailableNodeTypes();
 
+                        case "EXECUTE_NODE":
+                            // Execute a node and return the results
+                            if (commandObj.TryGetProperty("NodeType", out JsonElement nodeTypeElement) &&
+                                commandObj.TryGetProperty("InputData", out JsonElement inputDataElement))
+                            {
+                                string nodeType = nodeTypeElement.GetString();
+                                string inputData = inputDataElement.GetString();
+
+                                // Initialize node processing service if not already done
+                                if (_nodeProcessingService == null)
+                                {
+                                    InitializeNodeProcessingService();
+                                }
+
+                                return await _nodeProcessingService.ProcessNodeAsync(nodeType, inputData);
+                            }
+                            else
+                            {
+                                return JsonSerializer.Serialize(new
+                                {
+                                    Status = "Error",
+                                    Message = "Missing required parameters: NodeType and/or InputData"
+                                });
+                            }
                         default:
                             return "{\"Status\":\"Error\",\"Message\":\"Unknown command\"}";
                     }

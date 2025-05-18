@@ -19,26 +19,43 @@ namespace ParallelComputingServer
             var endpointService = new Services.EndpointService(config);
             var networkService = new Services.NetworkService(config, computeService, endpointService);
             var uiManager = new UI.UIManager(config, networkService, computeService, endpointService);
-
+            string datasetStoragePath = Path.Combine(AppContext.BaseDirectory, "datasets");
+            var datasetTransferService = new Services.DatasetTransferService(datasetStoragePath, computeService);
+            uiManager.AddDatasetTransferService(datasetTransferService);
             // Initialize ILGPU
-            await computeService.InitializeAsync();
+            try
+            {
+                // normal startup + run
+                await computeService.InitializeAsync();
 
-            // Start network services
-            Task beaconTask = networkService.StartBeaconServiceAsync(_cancellationTokenSource.Token);
-            Task serverTask = networkService.StartServerAsync(_cancellationTokenSource.Token);
-            Task endpointTask = endpointService.StartEndpointServiceAsync(_cancellationTokenSource.Token);
+                using var cts = new CancellationTokenSource();
+                var beaconTask = networkService.StartBeaconServiceAsync(cts.Token);
+                var serverTask = networkService.StartServerAsync(cts.Token);
+                var endpointTask = endpointService.StartEndpointServiceAsync(cts.Token);
 
-            // Initialize and run the TUI
-            uiManager.Run();
-
-            // When TUI exits, stop all services
-            _cancellationTokenSource.Cancel();
-            await Task.WhenAll(beaconTask, serverTask, endpointTask);
-
-            // Clean up resources
-            computeService.Dispose();
+                uiManager.Run();          // ← blocks until user quits
+                cts.Cancel();             // ask background services to stop
+                await Task.WhenAll(beaconTask, serverTask, endpointTask);
+            }
+            finally
+            {
+                // guaranteed to run—even on Ctrl-C or unhandled exception
+                EmptyDirectory(datasetStoragePath);
+                computeService.Dispose();
+                datasetTransferService.Dispose();   // optional: if you add IDisposable (see below)
+            }
 
             Console.WriteLine("Server shutdown complete.");
+        }
+        static void EmptyDirectory(string path)
+        {
+            if (!Directory.Exists(path)) return;
+
+            foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+                File.Delete(file);
+
+            foreach (var dir in Directory.EnumerateDirectories(path))
+                Directory.Delete(dir, recursive: true);
         }
     }
 }

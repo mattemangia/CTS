@@ -20,7 +20,7 @@ namespace ParallelComputingEndpoint
         private bool _isConnected = false;
         private string _currentTaskId;
         private CancellationTokenSource _listenerCts;
-
+        private EndpointNodeProcessingService _nodeProcessingService;
         public event EventHandler<List<ServerInfo>> ServersDiscovered;
         public event EventHandler<bool> ConnectionStatusChanged;
         public event EventHandler<string> MessageReceived;
@@ -30,6 +30,9 @@ namespace ParallelComputingEndpoint
             _config = config;
             _computeService = computeService;
             _computeService.CpuLoadUpdated += OnCpuLoadUpdated;
+
+            // Initialize node processing service
+            _nodeProcessingService = new EndpointNodeProcessingService(computeService);
         }
 
         public bool IsConnected => _isConnected;
@@ -150,6 +153,28 @@ namespace ParallelComputingEndpoint
                                     await Task.Delay(500);
                                     ShutdownEndpoint();
                                 });
+                                break;
+                            case "GET_AVAILABLE_NODES":
+                                response = _nodeProcessingService.GetAvailableNodeTypes();
+                                break;
+
+                            case "EXECUTE_NODE":
+                                if (msgObj.TryGetProperty("NodeType", out JsonElement nodeTypeElement) &&
+                                    msgObj.TryGetProperty("InputData", out JsonElement inputDataElement))
+                                {
+                                    string nodeType = nodeTypeElement.GetString();
+                                    string inputData = inputDataElement.GetString();
+
+                                    response = await _nodeProcessingService.ProcessNodeAsync(nodeType, inputData);
+                                }
+                                else
+                                {
+                                    response = JsonSerializer.Serialize(new
+                                    {
+                                        Status = "Error",
+                                        Message = "Missing required parameters: NodeType and/or InputData"
+                                    });
+                                }
                                 break;
 
                             default:

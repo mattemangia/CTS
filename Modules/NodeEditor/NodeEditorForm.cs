@@ -10,6 +10,9 @@ using System.Threading.Tasks;
 using Krypton.Toolkit;
 using Krypton.Navigator;
 using CTS.Modules.NodeEditor.Nodes;
+using System.IO.Compression;
+using System.Runtime.Serialization.Formatters.Binary;
+using System.Text;
 
 namespace CTS.NodeEditor
 {
@@ -313,7 +316,7 @@ namespace CTS.NodeEditor
             }
         }
 
-        private MainForm mainForm;
+        public MainForm mainForm;
         private DoubleBufferedPanel canvasPanel;
         private Panel toolboxPanel;
         private Panel propertiesPanel;
@@ -343,6 +346,7 @@ namespace CTS.NodeEditor
         private BufferedGraphicsContext context;
         private BufferedGraphics grafx;
 
+        private List<string> availableServerNodeTypes = new List<string>();
         public static NodeEditorForm Instance { get; private set; }
 
         public IEnumerable<NodeConnection> Connections => connections.AsReadOnly();
@@ -929,7 +933,7 @@ namespace CTS.NodeEditor
                 new NodeTypeInfo("Simulation", "Pore Network", typeof(PoreNetworkNode), Color.FromArgb(180, 100, 255)),
                 new NodeTypeInfo("Simulation", "Acoustic", typeof(AcousticSimulationNode), Color.FromArgb(180, 100, 255)),
                 new NodeTypeInfo("Simulation", "Triaxial", typeof(TriaxialSimulationNode), Color.FromArgb(180, 100, 255)),
-                
+                new NodeTypeInfo("Simulation", "NMR Simulation", typeof(TriaxialSimulationNode), Color.FromArgb(180, 100, 255)),
                 // Filtering nodes (Teal theme)
                 new NodeTypeInfo("Filters", "Band Detection", typeof(BandDetectionNode), Color.FromArgb(100, 200, 200)),
                 new NodeTypeInfo("Filters", "Transform", typeof(TransformDatasetNode), Color.FromArgb(100, 200, 200)),
@@ -2115,60 +2119,148 @@ namespace CTS.NodeEditor
                              "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
+        private async Task<bool> QueryServerForAvailableNodes(ComputeEndpoint endpoint)
+        {
+            try
+            {
+                Logger.Log($"[NodeEditor] Querying server {endpoint.Name} for available node types...");
+
+                // Create command to query server
+                var command = new
+                {
+                    Command = "GET_AVAILABLE_NODES"
+                };
+
+                string commandJson = JsonSerializer.Serialize(command);
+                string resultJson = await endpoint.SendCommandAsync(commandJson);
+
+                // Parse the result
+                var result = JsonSerializer.Deserialize<JsonElement>(resultJson);
+
+                if (result.TryGetProperty("Status", out JsonElement statusElement) &&
+                    statusElement.GetString() == "OK")
+                {
+                    availableServerNodeTypes.Clear();
+
+                    if (result.TryGetProperty("AvailableNodes", out JsonElement nodesElement))
+                    {
+                        foreach (var node in nodesElement.EnumerateArray())
+                        {
+                            availableServerNodeTypes.Add(node.GetString());
+                        }
+
+                        Logger.Log($"[NodeEditor] Server has {availableServerNodeTypes.Count} available node types");
+                        return true;
+                    }
+                }
+
+                Logger.Log($"[NodeEditor] Error querying server: {resultJson}");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[NodeEditor] Error querying server for available nodes: {ex.Message}");
+                return false;
+            }
+        }
+        private List<BaseNode> PlanGraphExecution(List<BaseNode> executionOrder)
+        {
+            if (!useCluster || availableServerNodeTypes.Count == 0)
+            {
+                // If cluster is disabled or no available nodes, execute everything locally
+                return executionOrder;
+            }
+
+            // Mark nodes for local or remote execution
+            foreach (var node in executionOrder)
+            {
+                string nodeTypeName = node.GetType().Name;
+                bool isServerAvailable = availableServerNodeTypes.Contains(nodeTypeName);
+
+                // Set a tag on the node to indicate execution target
+                node.Tag = isServerAvailable ? "Remote" : "Local";
+
+                // Input and Output nodes are always handled locally, but their data gets transferred
+                if (nodeTypeName.EndsWith("DataNode") || nodeTypeName.EndsWith("DatasetNode") ||
+                    nodeTypeName.Contains("Export") || nodeTypeName.Contains("Save"))
+                {
+                    node.Tag = "Local";
+                }
+            }
+
+            return executionOrder;
+        }
 
         // Cluster execution method
-        private void ExecuteGraphOnCluster(List<BaseNode> executionOrder)
+        private async Task ExecuteGraphOnCluster(List<BaseNode> executionOrder)
         {
             Logger.Log("[NodeEditor] Executing graph on compute cluster");
+
+            // First, query the server for available nodes
+            var endpoint = FindAvailableEndpoint();
+            if (endpoint == null)
+            {
+                MessageBox.Show("No available compute endpoints found. Execution aborted.",
+                              "Cluster Execution Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            // Query for available node types
+            bool querySuccess = await QueryServerForAvailableNodes(endpoint);
+            if (!querySuccess)
+            {
+                MessageBox.Show("Failed to query server for available node types. Execution aborted.",
+                              "Cluster Execution Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            // Plan execution based on available node types
+            executionOrder = PlanGraphExecution(executionOrder);
 
             // Show progress form
             using (var progressForm = new ClusterExecutionProgressForm(executionOrder.Count))
             {
                 progressForm.Show(this);
 
-                // Process each node sequentially for now
+                // Process each node sequentially
                 int completedNodes = 0;
 
                 foreach (var node in executionOrder)
                 {
                     try
                     {
-                        // Find an available endpoint
-                        var endpoint = FindAvailableEndpoint();
-                        if (endpoint == null)
-                        {
-                            MessageBox.Show("No available compute endpoints found. Execution aborted.",
-                                          "Cluster Execution Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                            break;
-                        }
-
-                        Logger.Log($"[NodeEditor] Executing {node.GetType().Name} on {endpoint.Name}");
-
-                        // Mark endpoint as busy
-                        endpoint.SetBusy(true);
-
                         // Highlight executing node
                         HighlightExecutingNode(node);
                         Application.DoEvents();
 
-                        // Prepare the command - simplified, in reality would need to serialize node parameters
-                        var nodeType = node.GetType().Name;
-                        var command = new
+                        string executionTarget = node.Tag as string ?? "Local";
+
+                        if (executionTarget == "Remote")
                         {
-                            Command = "EXECUTE_NODE",
-                            NodeType = nodeType,
-                            Parameters = new { } // Would need to serialize node parameters
-                        };
+                            // Execute node on the server
+                            Logger.Log($"[NodeEditor] Executing {node.GetType().Name} remotely on {endpoint.Name}");
 
-                        // Send to endpoint and wait for response
-                        string resultJson = endpoint.SendCommandAsync(
-                            System.Text.Json.JsonSerializer.Serialize(command)).GetAwaiter().GetResult();
+                            // Mark endpoint as busy
+                            endpoint.SetBusy(true);
 
-                        // Still execute locally for the demo
-                        node.Execute();
+                            bool success = await ExecuteNodeRemotely(node, endpoint);
 
-                        // Mark endpoint as free
-                        endpoint.SetBusy(false);
+                            // Mark endpoint as free
+                            endpoint.SetBusy(false);
+
+                            if (!success)
+                            {
+                                // Fallback to local execution if remote execution fails
+                                Logger.Log($"[NodeEditor] Remote execution failed, falling back to local execution for {node.GetType().Name}");
+                                node.Execute();
+                            }
+                        }
+                        else
+                        {
+                            // Execute the node locally
+                            Logger.Log($"[NodeEditor] Executing {node.GetType().Name} locally");
+                            node.Execute();
+                        }
 
                         // Update progress
                         completedNodes++;
@@ -2179,17 +2271,184 @@ namespace CTS.NodeEditor
                     }
                     catch (Exception ex)
                     {
-                        Logger.Log($"[NodeEditor] Error executing {node.GetType().Name} on cluster: {ex.Message}");
-                        MessageBox.Show($"Error executing {node.GetType().Name} on cluster: {ex.Message}",
+                        Logger.Log($"[NodeEditor] Error executing {node.GetType().Name}: {ex.Message}");
+                        MessageBox.Show($"Error executing {node.GetType().Name}: {ex.Message}",
                                      "Execution Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        break;
+                        return;
+                    }
+                }
+            }
+        }
+        private async Task<bool> ExecuteNodeRemotely(BaseNode node, ComputeEndpoint endpoint)
+        {
+            MemoryStream memoryStream = null;
+            GZipStream compressionStream = null;
+            StreamWriter writer = null;
+
+            try
+            {
+                Logger.Log($"[NodeEditor] Executing {node.GetType().Name} remotely on {endpoint.Name}...");
+
+                // Collect input data for the node - use a serializable dictionary structure
+                Dictionary<string, string> inputData = new Dictionary<string, string>();
+                Dictionary<string, byte[]> binaryData = new Dictionary<string, byte[]>();
+
+                foreach (var pin in node.GetAllPins().Where(p => !p.IsOutput))
+                {
+                    var data = node.GetInputData(pin.Name);
+                    if (data != null)
+                    {
+                        if (data is byte[] binaryValue)
+                        {
+                            // For binary data, store a reference and add to binary collection
+                            string binaryKey = $"binary_{pin.Name}";
+                            binaryData[binaryKey] = binaryValue;
+                            inputData[pin.Name] = $"binary_ref:{binaryKey}";
+                        }
+                        else if (data is System.Drawing.Bitmap bitmap)
+                        {
+                            // Special handling for bitmaps
+                            string binaryKey = $"binary_{pin.Name}";
+                            using (MemoryStream ms = new MemoryStream())
+                            {
+                                bitmap.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                                binaryData[binaryKey] = ms.ToArray();
+                            }
+                            inputData[pin.Name] = $"bitmap_ref:{binaryKey}";
+                        }
+                        else
+                        {
+                            // For simple types, store as JSON string
+                            try
+                            {
+                                inputData[pin.Name] = JsonSerializer.Serialize(data);
+                            }
+                            catch
+                            {
+                                // If serialization fails, use ToString()
+                                inputData[pin.Name] = data.ToString();
+                            }
+                        }
                     }
                 }
 
-                progressForm.Close();
+                // Create a data package that includes metadata and binary data
+                var dataPackage = new Dictionary<string, object>();
+                dataPackage["metadata"] = inputData;
+                dataPackage["binary_keys"] = binaryData.Keys.ToList();
+
+                // Serialize the metadata
+                string jsonMetadata = JsonSerializer.Serialize(dataPackage["metadata"]);
+                string jsonBinaryKeys = JsonSerializer.Serialize(dataPackage["binary_keys"]);
+
+                // Compress everything together
+                memoryStream = new MemoryStream();
+                compressionStream = new GZipStream(memoryStream, CompressionMode.Compress);
+                writer = new StreamWriter(compressionStream);
+
+                // Write metadata size, metadata, binary keys size, binary keys
+                byte[] metadataBytes = Encoding.UTF8.GetBytes(jsonMetadata);
+                byte[] binaryKeysBytes = Encoding.UTF8.GetBytes(jsonBinaryKeys);
+
+                // Format: [metadata length][metadata json][binary keys length][binary keys json][binary data]
+                compressionStream.Write(BitConverter.GetBytes(metadataBytes.Length), 0, 4);
+                compressionStream.Write(metadataBytes, 0, metadataBytes.Length);
+                compressionStream.Write(BitConverter.GetBytes(binaryKeysBytes.Length), 0, 4);
+                compressionStream.Write(binaryKeysBytes, 0, binaryKeysBytes.Length);
+
+                // Write each binary block with its length prefix
+                foreach (var entry in binaryData)
+                {
+                    byte[] keyBytes = Encoding.UTF8.GetBytes(entry.Key);
+                    byte[] valueBytes = entry.Value;
+
+                    compressionStream.Write(BitConverter.GetBytes(keyBytes.Length), 0, 4);
+                    compressionStream.Write(keyBytes, 0, keyBytes.Length);
+                    compressionStream.Write(BitConverter.GetBytes(valueBytes.Length), 0, 4);
+                    compressionStream.Write(valueBytes, 0, valueBytes.Length);
+                }
+
+                // Close all the streams to ensure data is flushed
+                writer.Close();
+                compressionStream.Close();
+
+                string compressedBase64Data = Convert.ToBase64String(memoryStream.ToArray());
+
+                // Create command to execute node on server
+                var command = new Dictionary<string, string>();
+                command["Command"] = "EXECUTE_NODE";
+                command["NodeType"] = node.GetType().Name;
+                command["InputData"] = compressedBase64Data;
+
+                string commandJson = JsonSerializer.Serialize(command);
+                string resultJson = await endpoint.SendCommandAsync(commandJson);
+
+                // Parse the result
+                var result = JsonSerializer.Deserialize<JsonElement>(resultJson);
+
+                if (result.TryGetProperty("Status", out JsonElement statusElement) &&
+                    statusElement.GetString() == "OK")
+                {
+                    if (result.TryGetProperty("OutputData", out JsonElement outputDataElement))
+                    {
+                        string base64Data = outputDataElement.GetString();
+                        byte[] compressedBytes = Convert.FromBase64String(base64Data);
+
+                        // Decompress and deserialize the output data
+                        using (MemoryStream compressedStream = new MemoryStream(compressedBytes))
+                        using (GZipStream decompressStream = new GZipStream(compressedStream, CompressionMode.Decompress))
+                        using (StreamReader reader = new StreamReader(decompressStream))
+                        {
+                            string json = reader.ReadToEnd();
+                            var outputData = JsonSerializer.Deserialize<Dictionary<string, string>>(json);
+
+                            // Apply the output data to the node
+                            foreach (var entry in outputData)
+                            {
+                                // Handle binary data references
+                                if (entry.Value.StartsWith("binary_ref:") || entry.Value.StartsWith("bitmap_ref:"))
+                                {
+                                    // We would need to extract the binary data from the response
+                                    // For now, placeholder implementation
+                                    node.SetOutputData(entry.Key, "Binary data processed");
+                                }
+                                else
+                                {
+                                    try
+                                    {
+                                        // Try to deserialize as appropriate type
+                                        var deserializedValue = JsonSerializer.Deserialize<object>(entry.Value);
+                                        node.SetOutputData(entry.Key, deserializedValue);
+                                    }
+                                    catch
+                                    {
+                                        // If deserialization fails, use the string as is
+                                        node.SetOutputData(entry.Key, entry.Value);
+                                    }
+                                }
+                            }
+
+                            return true;
+                        }
+                    }
+                }
+
+                Logger.Log($"[NodeEditor] Error executing node remotely: {resultJson}");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[NodeEditor] Error executing node remotely: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                // Clean up resources
+                if (writer != null) writer.Dispose();
+                if (compressionStream != null) compressionStream.Dispose();
+                if (memoryStream != null) memoryStream.Dispose();
             }
         }
-
         // Helper method to find an available endpoint
         private ComputeEndpoint FindAvailableEndpoint()
         {

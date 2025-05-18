@@ -54,7 +54,7 @@ namespace ParallelComputingEndpoint
             var top = Application.Top;
 
             // Create a window that takes up the full screen
-            var win = new Window("CTS - Parallel Computing Endpoint")
+            var win = new Window("CTS - Parallel Computing Endpoint (CTS/PCE)")
             {
                 X = 0,
                 Y = 0,
@@ -167,7 +167,7 @@ namespace ParallelComputingEndpoint
                 Y = 1,
                 Width = Dim.Fill() - 2,
                 Height = 18, // Fixed height
-                Text = "Parallel Computing Endpoint\n\n" +
+                Text = "CTS - Parallel Computing Endpoint (CTS/PCE)\n\n" +
                       "F1: Show this help screen\n" +
                       "F2: Configure endpoint settings\n" +
                       "F3: Scan for and connect to servers\n" +
@@ -405,7 +405,7 @@ namespace ParallelComputingEndpoint
                 Y = 1,
                 Width = Dim.Fill() - 2,
                 Height = 14, // Fixed height
-                Text = "CTS - Parallel Computing Endpoint\n" +
+                Text = "CTS - Parallel Computing Endpoint (CTS/PCE)\n" +
                       $"Version {versionStr}\n\n" +
                       "University of Fribourg\n" +
                       "Geosciences Department\n\n" +

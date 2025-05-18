@@ -5,7 +5,9 @@ VisualStudioVersion = 17.12.35707.178
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CTS", "CTS.csproj", "{A890BC78-2B81-4116-A284-9A76A35D1996}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HPCServer", "HPCServer\HPCServer.csproj", "{BC2597CD-9AE4-C2D9-5260-9620F94572C3}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ParallelComputingServer", "HPCServer\ParallelComputingServer.csproj", "{BC2597CD-9AE4-C2D9-5260-9620F94572C3}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ParallelcomputingEndpoint", "EndpointServer\EndpointServer\ParallelcomputingEndpoint.csproj", "{CFA3AE0F-8EB2-4265-84F0-666280A55022}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -31,6 +33,14 @@ Global
 		{BC2597CD-9AE4-C2D9-5260-9620F94572C3}.Release|x64.Build.0 = Release|Any CPU
 		{BC2597CD-9AE4-C2D9-5260-9620F94572C3}.Release|x86.ActiveCfg = Release|Any CPU
 		{BC2597CD-9AE4-C2D9-5260-9620F94572C3}.Release|x86.Build.0 = Release|Any CPU
+		{CFA3AE0F-8EB2-4265-84F0-666280A55022}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{CFA3AE0F-8EB2-4265-84F0-666280A55022}.Debug|x64.Build.0 = Debug|Any CPU
+		{CFA3AE0F-8EB2-4265-84F0-666280A55022}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{CFA3AE0F-8EB2-4265-84F0-666280A55022}.Debug|x86.Build.0 = Debug|Any CPU
+		{CFA3AE0F-8EB2-4265-84F0-666280A55022}.Release|x64.ActiveCfg = Release|Any CPU
+		{CFA3AE0F-8EB2-4265-84F0-666280A55022}.Release|x64.Build.0 = Release|Any CPU
+		{CFA3AE0F-8EB2-4265-84F0-666280A55022}.Release|x86.ActiveCfg = Release|Any CPU
+		{CFA3AE0F-8EB2-4265-84F0-666280A55022}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

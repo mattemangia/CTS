@@ -103,7 +103,6 @@ namespace ParallelComputingServer.Services
                         endpointInfo = new EndpointInfo
                         {
                             EndpointIP = endpoint.Address.ToString(),
-                            EndpointPort = endpoint.Port,
                             ConnectedAt = DateTime.Now
                         };
 
@@ -124,6 +123,20 @@ namespace ParallelComputingServer.Services
                         if (registrationObj.TryGetProperty("GpuEnabled", out JsonElement gpuElement))
                         {
                             endpointInfo.GpuEnabled = gpuElement.GetBoolean();
+                        }
+
+                        // Check if the endpoint has specified a listening port
+                        if (registrationObj.TryGetProperty("ListeningPort", out JsonElement listeningPortElement))
+                        {
+                            // Use the listening port provided by the endpoint
+                            endpointInfo.EndpointPort = listeningPortElement.GetInt32();
+                            Console.WriteLine($"Registered endpoint {endpointInfo.Name} listening port: {endpointInfo.EndpointPort}");
+                        }
+                        else
+                        {
+                            // Fallback to the source port if no listening port is provided (for backward compatibility)
+                            endpointInfo.EndpointPort = endpoint.Port;
+                            Console.WriteLine($"Warning: Endpoint {endpointInfo.Name} did not provide a listening port, using source port: {endpointInfo.EndpointPort}");
                         }
 
                         // Send registration confirmation
@@ -225,7 +238,79 @@ namespace ParallelComputingServer.Services
                 client.Dispose();
             }
         }
+        public async Task<string> SendCommandToEndpoint(EndpointInfo endpoint, string commandType)
+        {
+            try
+            {
+                // First make sure the endpoint exists in our list
+                var targetEndpoint = _connectedEndpoints.FirstOrDefault(e => e.Name == endpoint.Name);
+                if (targetEndpoint == null)
+                {
+                    return "{\"Status\":\"Error\",\"Message\":\"Endpoint not found\"}";
+                }
 
+                Console.WriteLine($"Connecting to endpoint at {endpoint.EndpointIP}:{endpoint.EndpointPort}");
+                using var client = new TcpClient();
+
+                // Connect with timeout
+                var connectTask = client.ConnectAsync(endpoint.EndpointIP, endpoint.EndpointPort);
+                var timeoutTask = Task.Delay(5000);
+
+                await Task.WhenAny(connectTask, timeoutTask);
+
+                if (timeoutTask.IsCompleted)
+                {
+                    Console.WriteLine($"Connection to endpoint {endpoint.Name} timed out");
+                    return "{\"Status\":\"Error\",\"Message\":\"Connection to endpoint timed out\"}";
+                }
+
+                if (!client.Connected)
+                {
+                    Console.WriteLine($"Failed to connect to endpoint {endpoint.Name}");
+                    return "{\"Status\":\"Error\",\"Message\":\"Failed to connect to endpoint\"}";
+                }
+
+                // Connected successfully
+                Console.WriteLine($"Connected to endpoint {endpoint.Name}, sending {commandType} command");
+                using NetworkStream stream = client.GetStream();
+                var command = new { Command = commandType };
+                string commandJson = JsonSerializer.Serialize(command);
+                byte[] commandBytes = Encoding.UTF8.GetBytes(commandJson);
+                await stream.WriteAsync(commandBytes, 0, commandBytes.Length);
+
+                // Read response with timeout
+                Console.WriteLine($"Waiting for response from endpoint {endpoint.Name}");
+                var buffer = new byte[8192];
+                var readTask = stream.ReadAsync(buffer, 0, buffer.Length);
+                timeoutTask = Task.Delay(5000);
+
+                await Task.WhenAny(readTask, timeoutTask);
+
+                if (timeoutTask.IsCompleted)
+                {
+                    Console.WriteLine($"Reading response from endpoint {endpoint.Name} timed out");
+                    // For actions like RESTART/SHUTDOWN, timeout might be expected
+                    return "{\"Status\":\"OK\",\"Message\":\"Command sent to endpoint (no response received)\"}";
+                }
+
+                // Got response
+                int bytesRead = await readTask;
+                string response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                Console.WriteLine($"Received {bytesRead} bytes response from endpoint {endpoint.Name}");
+
+                return response;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error sending {commandType} command to endpoint {endpoint.Name}: {ex.Message}");
+                return $"{{\"Status\":\"Error\",\"Message\":\"Error sending {commandType} command to endpoint: {ex.Message}\"}}";
+            }
+        }
+
+        public async Task<string> RunEndpointDiagnostics(EndpointInfo endpoint)
+        {
+            return await SendCommandToEndpoint(endpoint, "DIAGNOSTICS");
+        }
         private void UpdateEndpointStatus(string message, EndpointInfo endpointInfo)
         {
             try

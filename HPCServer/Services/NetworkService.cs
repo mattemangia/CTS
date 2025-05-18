@@ -81,7 +81,7 @@ namespace ParallelComputingServer.Services
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"Beacon service error: {ex.Message}");
+                        //Console.WriteLine($"Beacon service error: {ex.Message}");
                         // Add a small delay on error to prevent CPU spinning
                         await Task.Delay(1000, cancellationToken);
                     }
@@ -93,7 +93,7 @@ namespace ParallelComputingServer.Services
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Beacon service error: {ex.Message}");
+                //Console.WriteLine($"Beacon service error: {ex.Message}");
             }
 
             Console.WriteLine("Beacon service stopped.");
@@ -130,7 +130,7 @@ namespace ParallelComputingServer.Services
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"Server error accepting client: {ex.Message}");
+                        //Console.WriteLine($"Server error accepting client: {ex.Message}");
                         // Add a small delay on error to prevent CPU spinning
                         await Task.Delay(1000, cancellationToken);
                     }
@@ -155,7 +155,7 @@ namespace ParallelComputingServer.Services
                     ConnectedAt = DateTime.Now
                 };
 
-                Console.WriteLine($"Client connected: {clientInfo.ClientIP}:{clientInfo.ClientPort}");
+                //Console.WriteLine($"Client connected: {clientInfo.ClientIP}:{clientInfo.ClientPort}");
                 _connectedClients.Add(clientInfo);
                 ClientsUpdated?.Invoke(this, EventArgs.Empty);
 
@@ -201,7 +201,7 @@ namespace ParallelComputingServer.Services
                 // Cleanup when client disconnects
                 _connectedClients.Remove(clientInfo);
                 ClientsUpdated?.Invoke(this, EventArgs.Empty);
-                Console.WriteLine($"Client disconnected: {clientInfo.ClientIP}:{clientInfo.ClientPort}");
+                //Console.WriteLine($"Client disconnected: {clientInfo.ClientIP}:{clientInfo.ClientPort}");
             }
             catch (Exception ex)
             {
@@ -349,7 +349,7 @@ namespace ParallelComputingServer.Services
                     // Use endpoint from our list
                     endpointIP = endpoint.EndpointIP;
                     endpointPort = endpoint.EndpointPort;
-                    Console.WriteLine($"Found endpoint {endpointName} at {endpointIP}:{endpointPort}");
+                    //Console.WriteLine($"Found endpoint {endpointName} at {endpointIP}:{endpointPort}");
                 }
 
                 // Create diagnostics command
@@ -359,7 +359,7 @@ namespace ParallelComputingServer.Services
                 // Connect to the endpoint and send command
                 try
                 {
-                    Console.WriteLine($"Connecting to endpoint at {endpointIP}:{endpointPort}");
+                    //Console.WriteLine($"Connecting to endpoint at {endpointIP}:{endpointPort}");
                     using var client = new TcpClient();
 
                     // Connect with timeout
@@ -370,7 +370,7 @@ namespace ParallelComputingServer.Services
 
                     if (timeoutTask.IsCompleted)
                     {
-                        Console.WriteLine($"Connection to endpoint {endpointName} timed out");
+                        //Console.WriteLine($"Connection to endpoint {endpointName} timed out");
                         return JsonSerializer.Serialize(new
                         {
                             Status = "Error",
@@ -380,7 +380,7 @@ namespace ParallelComputingServer.Services
 
                     if (!client.Connected)
                     {
-                        Console.WriteLine($"Failed to connect to endpoint {endpointName}");
+                        //Console.WriteLine($"Failed to connect to endpoint {endpointName}");
                         return JsonSerializer.Serialize(new
                         {
                             Status = "Error",
@@ -389,13 +389,13 @@ namespace ParallelComputingServer.Services
                     }
 
                     // Connected successfully
-                    Console.WriteLine($"Connected to endpoint {endpointName}, sending diagnostics command");
+                   // Console.WriteLine($"Connected to endpoint {endpointName}, sending diagnostics command");
                     using NetworkStream stream = client.GetStream();
                     byte[] commandBytes = Encoding.UTF8.GetBytes(diagCommandJson);
                     await stream.WriteAsync(commandBytes, 0, commandBytes.Length, cancellationToken);
 
                     // Read response with timeout
-                    Console.WriteLine($"Waiting for diagnostics response from endpoint {endpointName}");
+                    //Console.WriteLine($"Waiting for diagnostics response from endpoint {endpointName}");
                     var buffer = new byte[32768]; // Larger buffer for diagnostics results
                     var readTask = stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken);
                     timeoutTask = Task.Delay(15000, cancellationToken); // Longer timeout for diagnostics
@@ -404,7 +404,7 @@ namespace ParallelComputingServer.Services
 
                     if (timeoutTask.IsCompleted)
                     {
-                        Console.WriteLine($"Reading diagnostics response from endpoint {endpointName} timed out");
+                        //Console.WriteLine($"Reading diagnostics response from endpoint {endpointName} timed out");
                         return JsonSerializer.Serialize(new
                         {
                             Status = "Error",
@@ -415,7 +415,7 @@ namespace ParallelComputingServer.Services
                     // Got response
                     int bytesRead = await readTask;
                     string response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    Console.WriteLine($"Received {bytesRead} bytes diagnostics response from endpoint {endpointName}");
+                    //Console.WriteLine($"Received {bytesRead} bytes diagnostics response from endpoint {endpointName}");
 
                     // Return diagnostics result
                     return JsonSerializer.Serialize(new
@@ -426,7 +426,7 @@ namespace ParallelComputingServer.Services
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Error running diagnostics on endpoint {endpointName}: {ex.Message}");
+                    //Console.WriteLine($"Error running diagnostics on endpoint {endpointName}: {ex.Message}");
                     return JsonSerializer.Serialize(new
                     {
                         Status = "Error",
@@ -436,7 +436,7 @@ namespace ParallelComputingServer.Services
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error processing endpoint diagnostics command: {ex.Message}");
+                //Console.WriteLine($"Error processing endpoint diagnostics command: {ex.Message}");
                 return JsonSerializer.Serialize(new
                 {
                     Status = "Error",
@@ -492,14 +492,14 @@ namespace ParallelComputingServer.Services
                     }
 
                     // Use provided IP/port for direct connection
-                    Console.WriteLine($"Endpoint {endpointName} not in connected list, attempting direct connection to {endpointIP}:{endpointPort}");
+                   // Console.WriteLine($"Endpoint {endpointName} not in connected list, attempting direct connection to {endpointIP}:{endpointPort}");
                 }
                 else
                 {
                     // Use endpoint from our list
                     endpointIP = endpoint.EndpointIP;
                     endpointPort = endpoint.EndpointPort;
-                    Console.WriteLine($"Found endpoint {endpointName} at {endpointIP}:{endpointPort}");
+                   // Console.WriteLine($"Found endpoint {endpointName} at {endpointIP}:{endpointPort}");
                 }
 
                 // Create action command
@@ -509,7 +509,7 @@ namespace ParallelComputingServer.Services
                 // Connect to the endpoint and send command
                 try
                 {
-                    Console.WriteLine($"Connecting to endpoint at {endpointIP}:{endpointPort}");
+                    //Console.WriteLine($"Connecting to endpoint at {endpointIP}:{endpointPort}");
                     using var client = new TcpClient();
 
                     // Connect with timeout
@@ -520,7 +520,7 @@ namespace ParallelComputingServer.Services
 
                     if (timeoutTask.IsCompleted)
                     {
-                        Console.WriteLine($"Connection to endpoint {endpointName} timed out");
+                        //Console.WriteLine($"Connection to endpoint {endpointName} timed out");
                         return JsonSerializer.Serialize(new
                         {
                             Status = "Error",
@@ -530,7 +530,7 @@ namespace ParallelComputingServer.Services
 
                     if (!client.Connected)
                     {
-                        Console.WriteLine($"Failed to connect to endpoint {endpointName}");
+                        //Console.WriteLine($"Failed to connect to endpoint {endpointName}");
                         return JsonSerializer.Serialize(new
                         {
                             Status = "Error",
@@ -539,13 +539,13 @@ namespace ParallelComputingServer.Services
                     }
 
                     // Connected successfully
-                    Console.WriteLine($"Connected to endpoint {endpointName}, sending {action} command");
+                    //Console.WriteLine($"Connected to endpoint {endpointName}, sending {action} command");
                     using NetworkStream stream = client.GetStream();
                     byte[] commandBytes = Encoding.UTF8.GetBytes(actionCommandJson);
                     await stream.WriteAsync(commandBytes, 0, commandBytes.Length, cancellationToken);
 
                     // Read response with timeout
-                    Console.WriteLine($"Waiting for response from endpoint {endpointName}");
+                    //Console.WriteLine($"Waiting for response from endpoint {endpointName}");
                     var buffer = new byte[8192];
                     var readTask = stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken);
                     timeoutTask = Task.Delay(5000, cancellationToken);
@@ -554,7 +554,7 @@ namespace ParallelComputingServer.Services
 
                     if (timeoutTask.IsCompleted)
                     {
-                        Console.WriteLine($"Reading response from endpoint {endpointName} timed out");
+                        //Console.WriteLine($"Reading response from endpoint {endpointName} timed out");
                         // For actions like RESTART/SHUTDOWN, timeout might be expected
                         return JsonSerializer.Serialize(new
                         {
@@ -566,13 +566,13 @@ namespace ParallelComputingServer.Services
                     // Got response
                     int bytesRead = await readTask;
                     string response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    Console.WriteLine($"Received {bytesRead} bytes response from endpoint {endpointName}");
+                    //Console.WriteLine($"Received {bytesRead} bytes response from endpoint {endpointName}");
 
                     return response;
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Error sending {action} command to endpoint {endpointName}: {ex.Message}");
+                    //Console.WriteLine($"Error sending {action} command to endpoint {endpointName}: {ex.Message}");
                     return JsonSerializer.Serialize(new
                     {
                         Status = "Error",
@@ -582,7 +582,7 @@ namespace ParallelComputingServer.Services
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error processing endpoint {action} command: {ex.Message}");
+                //Console.WriteLine($"Error processing endpoint {action} command: {ex.Message}");
                 return JsonSerializer.Serialize(new
                 {
                     Status = "Error",
@@ -647,20 +647,20 @@ namespace ParallelComputingServer.Services
                     }
 
                     // Use provided IP/port
-                    Console.WriteLine($"Endpoint {endpointName} not in connected list, attempting direct connection to {endpointIP}:{endpointPort}");
+                    //Console.WriteLine($"Endpoint {endpointName} not in connected list, attempting direct connection to {endpointIP}:{endpointPort}");
                 }
                 else
                 {
                     // Use endpoint from our list
                     endpointIP = endpoint.EndpointIP;
                     endpointPort = endpoint.EndpointPort;
-                    Console.WriteLine($"Found endpoint {endpointName} at {endpointIP}:{endpointPort}");
+                   // Console.WriteLine($"Found endpoint {endpointName} at {endpointIP}:{endpointPort}");
                 }
 
                 // Connect to the endpoint and forward the command
                 try
                 {
-                    Console.WriteLine($"Connecting to endpoint at {endpointIP}:{endpointPort}");
+                   // Console.WriteLine($"Connecting to endpoint at {endpointIP}:{endpointPort}");
                     using var client = new TcpClient();
 
                     // Connect with timeout
@@ -671,7 +671,7 @@ namespace ParallelComputingServer.Services
 
                     if (timeoutTask.IsCompleted)
                     {
-                        Console.WriteLine($"Connection to endpoint {endpointName} timed out");
+                        //Console.WriteLine($"Connection to endpoint {endpointName} timed out");
                         return JsonSerializer.Serialize(new
                         {
                             Status = "Error",
@@ -681,7 +681,7 @@ namespace ParallelComputingServer.Services
 
                     if (!client.Connected)
                     {
-                        Console.WriteLine($"Failed to connect to endpoint {endpointName}");
+                        //Console.WriteLine($"Failed to connect to endpoint {endpointName}");
                         return JsonSerializer.Serialize(new
                         {
                             Status = "Error",
@@ -690,13 +690,13 @@ namespace ParallelComputingServer.Services
                     }
 
                     // Connected successfully, send the command
-                    Console.WriteLine($"Connected to endpoint {endpointName}, forwarding command");
+                    //Console.WriteLine($"Connected to endpoint {endpointName}, forwarding command");
                     using NetworkStream stream = client.GetStream();
                     byte[] commandBytes = Encoding.UTF8.GetBytes(forwardedCommand);
                     await stream.WriteAsync(commandBytes, 0, commandBytes.Length, cancellationToken);
 
                     // Read response with timeout
-                    Console.WriteLine($"Waiting for response from endpoint {endpointName}");
+                    //Console.WriteLine($"Waiting for response from endpoint {endpointName}");
                     var buffer = new byte[16384]; // Larger buffer for potential large responses
                     var readTask = stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken);
                     timeoutTask = Task.Delay(10000, cancellationToken); // 10 second timeout
@@ -705,7 +705,7 @@ namespace ParallelComputingServer.Services
 
                     if (timeoutTask.IsCompleted)
                     {
-                        Console.WriteLine($"Reading response from endpoint {endpointName} timed out");
+                        //Console.WriteLine($"Reading response from endpoint {endpointName} timed out");
                         return JsonSerializer.Serialize(new
                         {
                             Status = "Error",
@@ -716,13 +716,13 @@ namespace ParallelComputingServer.Services
                     // Got response
                     int bytesRead = await readTask;
                     string response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    Console.WriteLine($"Received {bytesRead} bytes response from endpoint {endpointName}");
+                   // Console.WriteLine($"Received {bytesRead} bytes response from endpoint {endpointName}");
 
                     return response;
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Error forwarding command to endpoint {endpointName}: {ex.Message}");
+                    //Console.WriteLine($"Error forwarding command to endpoint {endpointName}: {ex.Message}");
                     return JsonSerializer.Serialize(new
                     {
                         Status = "Error",
@@ -732,7 +732,7 @@ namespace ParallelComputingServer.Services
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error in command forwarding: {ex.Message}");
+                //Console.WriteLine($"Error in command forwarding: {ex.Message}");
                 return JsonSerializer.Serialize(new
                 {
                     Status = "Error",

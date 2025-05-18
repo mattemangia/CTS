@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using System.IO;
 
 namespace ParallelComputingEndpoint
 {
@@ -14,10 +15,12 @@ namespace ParallelComputingEndpoint
         private readonly EndpointConfig _config;
         private readonly EndpointComputeService _computeService;
         private TcpClient _serverConnection;
+        private TcpListener _tcpListener;
+        private int _listeningPort = 7010;
         private bool _isConnected = false;
         private string _currentTaskId;
+        private CancellationTokenSource _listenerCts;
 
-        // Events
         public event EventHandler<List<ServerInfo>> ServersDiscovered;
         public event EventHandler<bool> ConnectionStatusChanged;
         public event EventHandler<string> MessageReceived;
@@ -26,49 +29,217 @@ namespace ParallelComputingEndpoint
         {
             _config = config;
             _computeService = computeService;
-
-            // Subscribe to compute service events
             _computeService.CpuLoadUpdated += OnCpuLoadUpdated;
         }
 
         public bool IsConnected => _isConnected;
 
+        public async Task StartListenerAsync()
+        {
+            if (_tcpListener != null) return;
+
+            try
+            {
+                _listenerCts = new CancellationTokenSource();
+                _tcpListener = new TcpListener(IPAddress.Any, _listeningPort);
+                _tcpListener.Start();
+
+                Console.WriteLine($"Endpoint now listening for direct connections on port {_listeningPort}");
+
+                _ = AcceptConnectionsAsync(_listenerCts.Token);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error starting TCP listener: {ex.Message}");
+                _tcpListener = null;
+
+                _listeningPort++;
+                Console.WriteLine($"Trying alternative port: {_listeningPort}");
+                await StartListenerAsync();
+            }
+        }
+
+        private async Task AcceptConnectionsAsync(CancellationToken cancellationToken)
+        {
+            try
+            {
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    var client = await _tcpListener.AcceptTcpClientAsync().WaitAsync(cancellationToken);
+                    _ = HandleIncomingConnectionAsync(client, cancellationToken);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected when cancellation is requested
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error accepting connections: {ex.Message}");
+            }
+        }
+
+        private async Task HandleIncomingConnectionAsync(TcpClient client, CancellationToken cancellationToken)
+        {
+            try
+            {
+                var endpoint = (IPEndPoint)client.Client.RemoteEndPoint;
+                Console.WriteLine($"Incoming connection from {endpoint.Address}:{endpoint.Port}");
+
+                using var stream = client.GetStream();
+                var buffer = new byte[8192];
+
+                int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken);
+                if (bytesRead == 0) return;
+
+                var message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                Console.WriteLine($"Received message: {message}");
+
+                string response = "";
+
+                try
+                {
+                    var msgObj = JsonSerializer.Deserialize<JsonElement>(message);
+
+                    if (msgObj.TryGetProperty("Command", out JsonElement commandElement))
+                    {
+                        string command = commandElement.GetString();
+
+                        switch (command)
+                        {
+                            case "DIAGNOSTICS":
+                                MessageReceived?.Invoke(this, "Running diagnostics requested by direct connection...");
+                                string diagnosticsResult = _computeService.RunBenchmark();
+                                response = JsonSerializer.Serialize(new
+                                {
+                                    Status = "OK",
+                                    Message = "Diagnostics completed",
+                                    DiagnosticsResult = diagnosticsResult
+                                });
+                                break;
+
+                            case "PING":
+                                response = JsonSerializer.Serialize(new
+                                {
+                                    Status = "OK",
+                                    Message = "Pong"
+                                });
+                                break;
+
+                            case "RESTART":
+                                response = JsonSerializer.Serialize(new
+                                {
+                                    Status = "OK",
+                                    Message = "Restart command received"
+                                });
+
+                                Task.Run(async () => {
+                                    await Task.Delay(500);
+                                    RestartEndpoint();
+                                });
+                                break;
+
+                            case "SHUTDOWN":
+                                response = JsonSerializer.Serialize(new
+                                {
+                                    Status = "OK",
+                                    Message = "Shutdown command received"
+                                });
+
+                                Task.Run(async () => {
+                                    await Task.Delay(500);
+                                    ShutdownEndpoint();
+                                });
+                                break;
+
+                            default:
+                                response = JsonSerializer.Serialize(new
+                                {
+                                    Status = "Error",
+                                    Message = $"Unknown command: {command}"
+                                });
+                                break;
+                        }
+                    }
+                    else
+                    {
+                        response = JsonSerializer.Serialize(new
+                        {
+                            Status = "Error",
+                            Message = "Invalid message format"
+                        });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error processing message: {ex.Message}");
+                    response = JsonSerializer.Serialize(new
+                    {
+                        Status = "Error",
+                        Message = $"Error processing message: {ex.Message}"
+                    });
+                }
+
+                var responseBytes = Encoding.UTF8.GetBytes(response);
+                await stream.WriteAsync(responseBytes, 0, responseBytes.Length, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error handling incoming connection: {ex.Message}");
+            }
+            finally
+            {
+                client.Dispose();
+            }
+        }
+
         public async Task<List<ServerInfo>> ScanForServersAsync(int timeoutMs = 3000)
         {
             var servers = new List<ServerInfo>();
-            var uniqueServers = new HashSet<string>(); // To prevent duplicates
+            var uniqueServers = new HashSet<string>();
 
             using var udpClient = new UdpClient();
             udpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-            udpClient.Client.Bind(new IPEndPoint(IPAddress.Any, _config.BeaconPort));
 
-            // Set receive timeout
+            int beaconPort = 7001;
+            if (_config != null && _config.BeaconPort > 0)
+            {
+                beaconPort = _config.BeaconPort;
+            }
+            udpClient.Client.Bind(new IPEndPoint(IPAddress.Any, beaconPort));
+
             var cancellationTokenSource = new CancellationTokenSource(timeoutMs);
             var token = cancellationTokenSource.Token;
 
             try
             {
-                Console.WriteLine($"Scanning for servers on port {_config.BeaconPort}...");
+                Console.WriteLine($"Scanning for servers on port {beaconPort}...");
 
                 while (!token.IsCancellationRequested)
                 {
                     try
                     {
-                        var result = await udpClient.ReceiveAsync(token);
+                        UdpReceiveResult result;
+                        try
+                        {
+                            result = await udpClient.ReceiveAsync().WaitAsync(token);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            break;
+                        }
+
                         var message = Encoding.UTF8.GetString(result.Buffer);
 
                         try
                         {
-                            // Parse beacon message
                             var beaconMessage = JsonSerializer.Deserialize<ServerInfo>(message);
 
-                            // Add to list if not already present
                             string serverKey = $"{beaconMessage.ServerIP}:{beaconMessage.ServerPort}";
                             if (!uniqueServers.Contains(serverKey))
                             {
                                 uniqueServers.Add(serverKey);
                                 servers.Add(beaconMessage);
-
                                 Console.WriteLine($"Server found: {beaconMessage.ServerName} ({beaconMessage.ServerIP})");
                             }
                         }
@@ -77,10 +248,9 @@ namespace ParallelComputingEndpoint
                             Console.WriteLine($"Error parsing beacon message: {ex.Message}");
                         }
                     }
-                    catch (OperationCanceledException)
+                    catch (Exception ex)
                     {
-                        // Timeout reached
-                        break;
+                        Console.WriteLine($"Error receiving UDP data: {ex.Message}");
                     }
                 }
             }
@@ -89,9 +259,7 @@ namespace ParallelComputingEndpoint
                 Console.WriteLine($"Error scanning for servers: {ex.Message}");
             }
 
-            // Notify listeners
             ServersDiscovered?.Invoke(this, servers);
-
             return servers;
         }
 
@@ -99,30 +267,32 @@ namespace ParallelComputingEndpoint
         {
             try
             {
-                // Disconnect first if already connected
+                if (_tcpListener == null)
+                {
+                    await StartListenerAsync();
+                }
+
                 if (_isConnected)
                 {
                     await DisconnectAsync();
                 }
 
-                // Use the correct endpoint port (7002) from the server config
-                // If the port passed is the general server port (7000), adjust to endpoint port
                 if (serverPort == 7000)
                 {
-                    serverPort = 7002; // Use the endpoint port instead of the client port
+                    serverPort = 7002;
                     Console.WriteLine($"Adjusting to use endpoint port: {serverPort}");
                 }
 
                 _serverConnection = new TcpClient();
                 await _serverConnection.ConnectAsync(serverIp, serverPort);
 
-                // Send registration message
                 var registrationMessage = new
                 {
                     Command = "REGISTER",
                     Name = _config.EndpointName,
                     HardwareInfo = _computeService.HardwareInfo,
-                    GpuEnabled = _computeService.GpuAvailable
+                    GpuEnabled = _computeService.GpuAvailable,
+                    ListeningPort = _listeningPort
                 };
 
                 var message = JsonSerializer.Serialize(registrationMessage);
@@ -131,12 +301,10 @@ namespace ParallelComputingEndpoint
                 var stream = _serverConnection.GetStream();
                 await stream.WriteAsync(bytes, 0, bytes.Length);
 
-                // Read registration response
                 var buffer = new byte[4096];
                 int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
                 var response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
 
-                // Parse response
                 var responseObj = JsonSerializer.Deserialize<JsonElement>(response);
                 if (responseObj.TryGetProperty("Status", out JsonElement statusElement) &&
                     statusElement.GetString() == "OK")
@@ -144,14 +312,10 @@ namespace ParallelComputingEndpoint
                     _isConnected = true;
                     ConnectionStatusChanged?.Invoke(this, true);
 
-                    // Update configuration
                     _config.ServerIP = serverIp;
                     _config.ServerPort = serverPort;
 
-                    // Start listener for server messages
                     _ = ListenForServerMessagesAsync();
-
-                    // Start sending status updates
                     _ = SendStatusUpdatesAsync();
 
                     Console.WriteLine($"Connected to server at {serverIp}:{serverPort}");
@@ -190,7 +354,6 @@ namespace ParallelComputingEndpoint
                 {
                     if (_serverConnection.Connected)
                     {
-                        // Send disconnect message
                         var disconnectMessage = new
                         {
                             Command = "DISCONNECT"
@@ -218,6 +381,20 @@ namespace ParallelComputingEndpoint
             }
         }
 
+        public void Shutdown()
+        {
+            try
+            {
+                _listenerCts?.Cancel();
+                _tcpListener?.Stop();
+                _tcpListener = null;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error stopping TCP listener: {ex.Message}");
+            }
+        }
+
         private async Task ListenForServerMessagesAsync()
         {
             try
@@ -231,17 +408,13 @@ namespace ParallelComputingEndpoint
 
                     if (bytesRead == 0)
                     {
-                        // Connection closed
                         break;
                     }
 
                     var message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-
-                    // Process message
                     await ProcessServerMessageAsync(message);
                 }
 
-                // Connection lost
                 _isConnected = false;
                 ConnectionStatusChanged?.Invoke(this, false);
                 MessageReceived?.Invoke(this, "Connection to server lost.");
@@ -272,11 +445,9 @@ namespace ParallelComputingEndpoint
                             break;
 
                         case "RESTART":
-                            // Send acknowledgment first
                             await SendAcknowledgmentAsync("Restart command received");
                             MessageReceived?.Invoke(this, "Restart command received from server. Restarting...");
 
-                            // Schedule restart after a short delay to allow response to be sent
                             Task.Run(async () => {
                                 await Task.Delay(500);
                                 RestartEndpoint();
@@ -284,11 +455,9 @@ namespace ParallelComputingEndpoint
                             break;
 
                         case "SHUTDOWN":
-                            // Send acknowledgment first
                             await SendAcknowledgmentAsync("Shutdown command received");
                             MessageReceived?.Invoke(this, "Shutdown command received from server. Shutting down...");
 
-                            // Schedule shutdown after a short delay to allow response to be sent
                             Task.Run(async () => {
                                 await Task.Delay(500);
                                 ShutdownEndpoint();
@@ -296,14 +465,15 @@ namespace ParallelComputingEndpoint
                             break;
 
                         case "DIAGNOSTICS":
-                            // Run diagnostics and send results back
                             MessageReceived?.Invoke(this, "Running diagnostics requested by server...");
                             string diagnosticsResult = _computeService.RunBenchmark();
                             await SendDiagnosticsResultAsync(diagnosticsResult);
                             break;
 
                         case "EXECUTE_TASK":
-                            
+                            // Execute task when implemented
+                            MessageReceived?.Invoke(this, "Execute task command received");
+                            await SendAcknowledgmentAsync("Task received, processing not yet implemented");
                             break;
 
                         default:
@@ -320,6 +490,7 @@ namespace ParallelComputingEndpoint
                 await SendErrorResponseAsync($"Error processing message: {ex.Message}");
             }
         }
+
         private async Task SendAcknowledgmentAsync(string message)
         {
             try
@@ -344,6 +515,7 @@ namespace ParallelComputingEndpoint
                 Console.WriteLine($"Error sending acknowledgment: {ex.Message}");
             }
         }
+
         private async Task SendDiagnosticsResultAsync(string diagnosticsResult)
         {
             try
@@ -394,16 +566,15 @@ namespace ParallelComputingEndpoint
                 Console.WriteLine($"Error sending error response: {ex.Message}");
             }
         }
+
         private void RestartEndpoint()
         {
             Console.WriteLine("Endpoint restart initiated...");
 
             try
             {
-                // Create a restart script based on the platform
                 if (OperatingSystem.IsWindows())
                 {
-                    // Windows batch script
                     string scriptPath = Path.Combine(Path.GetTempPath(), "restart_endpoint.bat");
                     string batch = $@"@echo off
 timeout /t 2 /nobreak > nul
@@ -422,7 +593,6 @@ exit";
                 }
                 else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
                 {
-                    // Linux/macOS shell script
                     string scriptPath = Path.Combine(Path.GetTempPath(), "restart_endpoint.sh");
                     string shell = $@"#!/bin/bash
 sleep 2
@@ -430,7 +600,6 @@ nohup ""{System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName}"" >
 exit";
                     File.WriteAllText(scriptPath, shell);
 
-                    // Make script executable
                     var chmodInfo = new System.Diagnostics.ProcessStartInfo
                     {
                         FileName = "chmod",
@@ -459,8 +628,7 @@ exit";
                 Console.WriteLine($"Error creating restart script: {ex.Message}");
             }
 
-            // Exit the application
-            Environment.Exit(42); // Special code for restart
+            Environment.Exit(42);
         }
 
         private void ShutdownEndpoint()
@@ -468,6 +636,7 @@ exit";
             Console.WriteLine("Endpoint shutdown initiated...");
             Environment.Exit(0);
         }
+
         private async Task SendPongAsync()
         {
             try
@@ -503,7 +672,8 @@ exit";
                         Command = "STATUS_UPDATE",
                         CpuLoad = _computeService.GetCpuLoad(),
                         Status = string.IsNullOrEmpty(_currentTaskId) ? "Available" : "Processing",
-                        CurrentTask = _currentTaskId ?? "None"
+                        CurrentTask = _currentTaskId ?? "None",
+                        ListeningPort = _listeningPort
                     };
 
                     var message = JsonSerializer.Serialize(statusMessage);
@@ -512,7 +682,6 @@ exit";
                     var stream = _serverConnection.GetStream();
                     await stream.WriteAsync(bytes, 0, bytes.Length);
 
-                    // Send status updates every 5 seconds
                     await Task.Delay(5000);
                 }
             }
@@ -556,8 +725,7 @@ exit";
 
         private void OnCpuLoadUpdated(object sender, double cpuLoad)
         {
-            // If we want to immediately send a status update when CPU load changes significantly,
-            // we could implement that here. For now, we're just sending updates periodically.
+            // This is intentionally empty as we're using periodic status updates
         }
     }
 

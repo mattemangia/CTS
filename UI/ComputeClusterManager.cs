@@ -17,6 +17,293 @@ using Timer = System.Threading.Timer;
 namespace CTS
 {
     /// <summary>
+    /// Class representing a server node in the compute cluster
+    /// </summary>
+    public class ComputeServer
+    {
+        public string Name { get; set; }
+        public string IP { get; set; }
+        public int Port { get; set; }
+        public int EndpointPort { get; set; } // Port for endpoints to connect to
+        public bool IsConnected { get; private set; }
+        public bool IsBusy { get; private set; }
+        public DateTime LastSeen { get; set; }
+        public bool HasGPU { get; set; }
+        public string AcceleratorType { get; set; }
+        public List<ComputeEndpoint> ConnectedEndpoints { get; private set; } = new List<ComputeEndpoint>();
+        public TcpClient Connection { get; set; }
+        public NetworkStream Stream { get; private set; }
+
+        public event EventHandler<bool> ConnectionStatusChanged;
+        public event EventHandler EndpointsUpdated;
+
+        public ComputeServer(string name, string ip, int port)
+        {
+            Name = name;
+            IP = ip;
+            Port = port;
+            EndpointPort = 7002; // Default endpoint port
+            LastSeen = DateTime.Now;
+        }
+
+        public async Task ConnectAsync()
+        {
+            try
+            {
+                Connection = new TcpClient();
+                await Connection.ConnectAsync(IP, Port);
+                Stream = Connection.GetStream();
+                IsConnected = true;
+                ConnectionStatusChanged?.Invoke(this, true);
+
+                // After connecting, query for connected endpoints
+                await RefreshEndpointsAsync();
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ComputeServer] Failed to connect to {Name}: {ex.Message}");
+                IsConnected = false;
+                ConnectionStatusChanged?.Invoke(this, false);
+                throw;
+            }
+        }
+
+        public void Disconnect()
+        {
+            if (IsConnected)
+            {
+                try
+                {
+                    Stream?.Close();
+                    Connection?.Close();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[ComputeServer] Error disconnecting from {Name}: {ex.Message}");
+                }
+                finally
+                {
+                    Stream = null;
+                    Connection = null;
+                    IsConnected = false;
+                    ConnectionStatusChanged?.Invoke(this, false);
+                }
+            }
+        }
+
+        public async Task<string> SendCommandAsync(string command)
+        {
+            if (!IsConnected)
+                throw new InvalidOperationException("Server is not connected");
+
+            try
+            {
+                byte[] commandBytes = Encoding.UTF8.GetBytes(command);
+                await Stream.WriteAsync(commandBytes, 0, commandBytes.Length);
+
+                // Read response with timeout
+                using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+                {
+                    // Simple response reading
+                    byte[] responseBuffer = new byte[8192];
+                    int bytesRead = await Stream.ReadAsync(responseBuffer, 0, responseBuffer.Length, cts.Token);
+                    return Encoding.UTF8.GetString(responseBuffer, 0, bytesRead);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ComputeServer] Error sending command to {Name}: {ex.Message}");
+                throw;
+            }
+        }
+
+        public async Task RefreshEndpointsAsync()
+        {
+            if (!IsConnected)
+                return;
+
+            try
+            {
+                // Query server for connected endpoints
+                var command = new { Command = "LIST_ENDPOINTS" };
+                string response = await SendCommandAsync(JsonSerializer.Serialize(command));
+
+                try
+                {
+                    // First log the actual response for debugging
+                    Logger.Log($"[ComputeServer] Endpoint list response: {response}");
+
+                    var responseObj = JsonSerializer.Deserialize<JsonElement>(response);
+
+                    if (responseObj.TryGetProperty("Status", out JsonElement statusElement) &&
+                        statusElement.GetString() == "OK")
+                    {
+                        if (responseObj.TryGetProperty("Endpoints", out JsonElement endpointsElement))
+                        {
+                            // Parse the endpoints array
+                            var endpoints = new List<ComputeEndpoint>();
+
+                            foreach (JsonElement endpointElement in endpointsElement.EnumerateArray())
+                            {
+                                try
+                                {
+                                    var endpoint = new ComputeEndpoint(
+                                        endpointElement.GetProperty("Name").GetString(),
+                                        endpointElement.GetProperty("EndpointIP").GetString(),
+                                        endpointElement.GetProperty("EndpointPort").GetInt32()
+                                    );
+
+                                    // Set additional properties
+                                    endpoint.ConnectedAt = endpointElement.TryGetProperty("ConnectedAt", out var connectedAtElem) ?
+                                        connectedAtElem.GetDateTime() : DateTime.Now;
+                                    endpoint.HasGPU = endpointElement.TryGetProperty("GpuEnabled", out var gpuElem) ?
+                                        gpuElem.GetBoolean() : false;
+                                    endpoint.Status = endpointElement.TryGetProperty("Status", out var statusElem) ?
+                                        statusElem.GetString() : "Available";
+                                    endpoint.CpuLoad = endpointElement.TryGetProperty("CpuLoadPercent", out var cpuLoadElem) ?
+                                        cpuLoadElem.GetDouble() : 0;
+
+                                    endpoint.ParentServer = this;
+                                    endpoints.Add(endpoint);
+                                }
+                                catch (Exception ex)
+                                {
+                                    Logger.Log($"[ComputeServer] Error parsing endpoint info: {ex.Message}");
+                                }
+                            }
+
+                            // Update the list
+                            ConnectedEndpoints = endpoints;
+                            EndpointsUpdated?.Invoke(this, EventArgs.Empty);
+                        }
+                    }
+                    else
+                    {
+                        // If we don't get an OK status or no Endpoints field, try the fallback endpoint command
+                        await RefreshEndpointsFallbackAsync();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[ComputeServer] Error parsing endpoints response: {ex.Message}");
+                    await RefreshEndpointsFallbackAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ComputeServer] Error refreshing endpoints: {ex.Message}");
+            }
+        }
+
+        // Fallback method if LIST_ENDPOINTS is not implemented on the server
+        private async Task RefreshEndpointsFallbackAsync()
+        {
+            try
+            {
+                // Try alternative command to get endpoint info
+                var command = new { Command = "GET_ENDPOINTS" };
+                string response = await SendCommandAsync(JsonSerializer.Serialize(command));
+
+                try
+                {
+                    var responseObj = JsonSerializer.Deserialize<JsonElement>(response);
+
+                    if (responseObj.TryGetProperty("EndpointCount", out JsonElement countElement))
+                    {
+                        int endpointCount = countElement.GetInt32();
+
+                        // Create dummy endpoints if we only have the count
+                        var endpoints = new List<ComputeEndpoint>();
+
+                        for (int i = 0; i < endpointCount; i++)
+                        {
+                            var endpoint = new ComputeEndpoint(
+                                $"Endpoint-{i + 1}",
+                                "Unknown", // We don't have the IP
+                                0          // We don't have the port
+                            );
+
+                            endpoint.Status = "Connected";
+                            endpoint.ParentServer = this;
+                            endpoints.Add(endpoint);
+                        }
+
+                        // Update the list
+                        ConnectedEndpoints = endpoints;
+                        EndpointsUpdated?.Invoke(this, EventArgs.Empty);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[ComputeServer] Error in fallback endpoint refresh: {ex.Message}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ComputeServer] Fallback endpoint refresh failed: {ex.Message}");
+            }
+        }
+
+        public void UpdateFromBeacon(BeaconMessage beacon)
+        {
+            Name = beacon.ServerName;
+            EndpointPort = 7002; // Assume default endpoint port (should be included in beacon)
+            HasGPU = beacon.GpuEnabled;
+            LastSeen = DateTime.Now;
+        }
+
+        public void SetBusy(bool busy)
+        {
+            IsBusy = busy;
+        }
+
+        public async Task<bool> LaunchSimulationAsync(SimulationParameters parameters)
+        {
+            if (!IsConnected)
+                return false;
+
+            try
+            {
+                // Send simulation parameters to the server
+                var command = new
+                {
+                    Command = "START_SIMULATION",
+                    Parameters = parameters
+                };
+
+                string response = await SendCommandAsync(JsonSerializer.Serialize(command));
+                var responseObj = JsonSerializer.Deserialize<JsonElement>(response);
+
+                return responseObj.TryGetProperty("Status", out JsonElement statusElement) &&
+                       statusElement.GetString() == "OK";
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ComputeServer] Error launching simulation on {Name}: {ex.Message}");
+                return false;
+            }
+        }
+
+        public async Task<SimulationExecutionStatus> GetSimulationStatusAsync()
+        {
+            if (!IsConnected)
+                return new SimulationExecutionStatus { Status = "Disconnected" };
+
+            try
+            {
+                var command = new { Command = "GET_SIMULATION_STATUS" };
+                string response = await SendCommandAsync(JsonSerializer.Serialize(command));
+                return JsonSerializer.Deserialize<SimulationExecutionStatus>(response);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ComputeServer] Error getting simulation status from {Name}: {ex.Message}");
+                return new SimulationExecutionStatus { Status = "Error", Message = ex.Message };
+            }
+        }
+    }
+
+    /// <summary>
     /// Class representing a remote compute endpoint in the cluster
     /// </summary>
     public class ComputeEndpoint
@@ -26,10 +313,15 @@ namespace CTS
         public int Port { get; set; }
         public bool IsConnected { get; private set; }
         public bool IsBusy { get; private set; }
-        public DateTime LastSeen { get; set; }
+        public DateTime ConnectedAt { get; set; }
+        public string Status { get; set; } = "Unknown";
         public bool HasGPU { get; set; }
-        public string AcceleratorType { get; set; }
-        public int ConnectedNodes { get; set; }
+        public string HardwareInfo { get; set; }
+        public double CpuLoad { get; set; }
+        public string CurrentTask { get; set; } = "None";
+        public ComputeServer ParentServer { get; set; }
+
+        // Direct connection properties (for backward compatibility)
         public TcpClient Connection { get; set; }
         public NetworkStream Stream { get; private set; }
 
@@ -40,13 +332,25 @@ namespace CTS
             Name = name;
             IP = ip;
             Port = port;
-            LastSeen = DateTime.Now;
+            ConnectedAt = DateTime.Now;
         }
 
+        /// <summary>
+        /// Connect directly to the endpoint (legacy mode)
+        /// </summary>
         public async Task ConnectAsync()
         {
             try
             {
+                // If there's a parent server and it's connected, use it
+                if (ParentServer != null && ParentServer.IsConnected)
+                {
+                    IsConnected = true;
+                    ConnectionStatusChanged?.Invoke(this, true);
+                    return;
+                }
+
+                // Otherwise fall back to direct connection (legacy mode)
                 Connection = new TcpClient();
                 await Connection.ConnectAsync(IP, Port);
                 Stream = Connection.GetStream();
@@ -62,6 +366,9 @@ namespace CTS
             }
         }
 
+        /// <summary>
+        /// Disconnect from the endpoint
+        /// </summary>
         public void Disconnect()
         {
             if (IsConnected)
@@ -85,8 +392,17 @@ namespace CTS
             }
         }
 
+        /// <summary>
+        /// Send a command to the endpoint directly (legacy mode)
+        /// </summary>
         public async Task<string> SendCommandAsync(string command)
         {
+            // If we have a parent server, use it instead of direct connection
+            if (ParentServer != null && ParentServer.IsConnected)
+            {
+                return await SendCommandViaServerAsync(command);
+            }
+
             if (!IsConnected)
                 throw new InvalidOperationException("Endpoint is not connected");
 
@@ -111,39 +427,90 @@ namespace CTS
             }
         }
 
-        public void UpdateFromBeacon(BeaconMessage beacon)
+        /// <summary>
+        /// Send command to the endpoint through the parent server
+        /// </summary>
+        public async Task<string> SendCommandViaServerAsync(string command)
         {
-            Name = beacon.ServerName;
-            ConnectedNodes = beacon.NodesConnected;
-            HasGPU = beacon.GpuEnabled;
-            LastSeen = DateTime.Now;
+            if (ParentServer == null || !ParentServer.IsConnected)
+                throw new InvalidOperationException("Parent server is not connected");
+
+            try
+            {
+                // Send command to server that will forward to endpoint
+                var forwardCommand = new
+                {
+                    Command = "FORWARD_TO_ENDPOINT",
+                    EndpointName = Name,
+                    EndpointIP = IP,
+                    EndpointPort = Port,
+                    ForwardedCommand = command
+                };
+
+                return await ParentServer.SendCommandAsync(JsonSerializer.Serialize(forwardCommand));
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ComputeEndpoint] Error sending command to {Name} via server: {ex.Message}");
+                throw;
+            }
         }
 
+        /// <summary>
+        /// Set the busy state of the endpoint
+        /// </summary>
         public void SetBusy(bool busy)
         {
             IsBusy = busy;
         }
+
+        /// <summary>
+        /// Run diagnostics on the endpoint
+        /// </summary>
+        public async Task<string> RunDiagnosticsAsync()
+        {
+            try
+            {
+                var command = new { Command = "DIAGNOSTICS" };
+
+                // If we have a parent server, use it
+                if (ParentServer != null && ParentServer.IsConnected)
+                {
+                    return await SendCommandViaServerAsync(JsonSerializer.Serialize(command));
+                }
+                else
+                {
+                    // Otherwise use direct connection
+                    return await SendCommandAsync(JsonSerializer.Serialize(command));
+                }
+            }
+            catch (Exception ex)
+            {
+                return $"Error running diagnostics: {ex.Message}";
+            }
+        }
     }
 
     /// <summary>
-    /// Manager class for handling compute endpoints in the cluster
+    /// Manager class for handling servers and endpoints in the compute cluster
     /// </summary>
-    public class ComputeEndpointManager
+    public class ComputeClusterManager
     {
-        private List<ComputeEndpoint> endpoints = new List<ComputeEndpoint>();
+        private List<ComputeServer> servers = new List<ComputeServer>();
         private UdpClient beaconListener;
         private CancellationTokenSource cts = new CancellationTokenSource();
-        private int beaconPort = 7001; // Same as in Program.cs
+        private int beaconPort = 7001;
         private Timer keepAliveTimer;
         private const int KeepAliveInterval = 5000; // 5 seconds
 
-        public event EventHandler<ComputeEndpoint> EndpointDiscovered;
+        public event EventHandler<ComputeServer> ServerDiscovered;
+        public event EventHandler<ComputeServer> ServerStatusChanged;
+        public event EventHandler<ComputeServer> ServerRemoved;
         public event EventHandler<ComputeEndpoint> EndpointStatusChanged;
-        public event EventHandler<ComputeEndpoint> EndpointRemoved;
 
-        public List<ComputeEndpoint> Endpoints => endpoints.ToList(); // Return a copy
+        public List<ComputeServer> Servers => servers.ToList(); // Return a copy
 
-        public ComputeEndpointManager()
+        public ComputeClusterManager()
         {
             keepAliveTimer = new Timer(KeepAliveTimerCallback, null, KeepAliveInterval, KeepAliveInterval);
         }
@@ -160,21 +527,21 @@ namespace CTS
                 }
                 catch (Exception ex)
                 {
-                    Logger.Log($"[ComputeEndpointManager] Failed to bind to port {beaconPort}: {ex.Message}");
-                    Logger.Log("[ComputeEndpointManager] Trying to bind to any available port");
+                    Logger.Log($"[ComputeClusterManager] Failed to bind to port {beaconPort}: {ex.Message}");
+                    Logger.Log("[ComputeClusterManager] Trying to bind to any available port");
                     beaconListener.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
                 }
 
                 beaconListener.EnableBroadcast = true;
 
-                Logger.Log("[ComputeEndpointManager] Started beacon discovery service");
+                Logger.Log("[ComputeClusterManager] Started server discovery service");
 
                 while (!cts.Token.IsCancellationRequested)
                 {
                     try
                     {
                         // Use a cancellation token source with timeout
-                        using (var receiveTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token)) 
+                        using (var receiveTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token))
                             receiveTimeoutCts.CancelAfter(TimeSpan.FromSeconds(10)); // 10-second timeout
                         var result = await beaconListener.ReceiveAsync();
                         var message = Encoding.UTF8.GetString(result.Buffer);
@@ -189,7 +556,7 @@ namespace CTS
                         catch (JsonException)
                         {
                             // Invalid JSON format - ignore
-                            Logger.Log($"[ComputeEndpointManager] Received invalid beacon format");
+                            Logger.Log($"[ComputeClusterManager] Received invalid beacon format");
                         }
                     }
                     catch (OperationCanceledException)
@@ -198,24 +565,24 @@ namespace CTS
                     }
                     catch (Exception ex)
                     {
-                        Logger.Log($"[ComputeEndpointManager] Error receiving beacon: {ex.Message}");
+                        Logger.Log($"[ComputeClusterManager] Error receiving beacon: {ex.Message}");
                     }
                 }
             }
             catch (Exception ex)
             {
-                Logger.Log($"[ComputeEndpointManager] Discovery error: {ex.Message}");
+                Logger.Log($"[ComputeClusterManager] Discovery error: {ex.Message}");
             }
             finally
             {
                 beaconListener?.Close();
-                Logger.Log("[ComputeEndpointManager] Beacon discovery service stopped");
+                Logger.Log("[ComputeClusterManager] Server discovery service stopped");
             }
         }
 
         public void StopDiscovery()
         {
-            Logger.Log("[ComputeEndpointManager] Stopping discovery service");
+            Logger.Log("[ComputeClusterManager] Stopping discovery service");
             cts.Cancel();
             beaconListener?.Close();
         }
@@ -227,219 +594,314 @@ namespace CTS
                 // Use server IP from the beacon if available, otherwise use the sender's IP
                 string serverIP = !string.IsNullOrEmpty(message.ServerIP) ? message.ServerIP : endpoint.Address.ToString();
 
-                // Check if we already know this endpoint
-                var existingEndpoint = endpoints.FirstOrDefault(e =>
-                    e.IP == serverIP && e.Port == message.ServerPort);
+                // Check if we already know this server
+                var existingServer = servers.FirstOrDefault(s =>
+                    s.IP == serverIP && s.Port == message.ServerPort);
 
-                if (existingEndpoint != null)
+                if (existingServer != null)
                 {
-                    // Update existing endpoint
-                    existingEndpoint.UpdateFromBeacon(message);
-                    EndpointStatusChanged?.Invoke(this, existingEndpoint);
+                    // Update existing server
+                    existingServer.UpdateFromBeacon(message);
+                    ServerStatusChanged?.Invoke(this, existingServer);
                 }
                 else
                 {
-                    // Create new endpoint
-                    var newEndpoint = new ComputeEndpoint(message.ServerName, serverIP, message.ServerPort);
-                    newEndpoint.UpdateFromBeacon(message);
-                    endpoints.Add(newEndpoint);
+                    // Create new server
+                    var newServer = new ComputeServer(message.ServerName, serverIP, message.ServerPort);
+                    newServer.UpdateFromBeacon(message);
 
-                    Logger.Log($"[ComputeEndpointManager] Discovered new compute endpoint: {newEndpoint.Name} at {newEndpoint.IP}:{newEndpoint.Port}");
-                    EndpointDiscovered?.Invoke(this, newEndpoint);
+                    // Subscribe to server events
+                    newServer.EndpointsUpdated += (sender, e) => {
+                        ServerStatusChanged?.Invoke(this, newServer);
+                    };
+
+                    servers.Add(newServer);
+
+                    Logger.Log($"[ComputeClusterManager] Discovered new server: {newServer.Name} at {newServer.IP}:{newServer.Port}");
+                    ServerDiscovered?.Invoke(this, newServer);
                 }
             }
             catch (Exception ex)
             {
-                Logger.Log($"[ComputeEndpointManager] Error processing beacon message: {ex.Message}");
+                Logger.Log($"[ComputeClusterManager] Error processing beacon message: {ex.Message}");
             }
         }
 
         private void KeepAliveTimerCallback(object state)
         {
-            // Check for endpoints that haven't been seen in a while
+            // Check for servers that haven't been seen in a while
             var now = DateTime.Now;
             var timeoutThreshold = TimeSpan.FromSeconds(15);
 
-            for (int i = endpoints.Count - 1; i >= 0; i--)
+            for (int i = servers.Count - 1; i >= 0; i--)
             {
-                var endpoint = endpoints[i];
-                if (now - endpoint.LastSeen > timeoutThreshold)
+                var server = servers[i];
+                if (now - server.LastSeen > timeoutThreshold)
                 {
-                    // Endpoint timed out
-                    Logger.Log($"[ComputeEndpointManager] Endpoint timed out: {endpoint.Name} ({endpoint.IP}:{endpoint.Port})");
-                    endpoint.Disconnect();
-                    endpoints.RemoveAt(i);
-                    EndpointRemoved?.Invoke(this, endpoint);
+                    // Server timed out
+                    Logger.Log($"[ComputeClusterManager] Server timed out: {server.Name} ({server.IP}:{server.Port})");
+                    server.Disconnect();
+                    servers.RemoveAt(i);
+                    ServerRemoved?.Invoke(this, server);
                 }
             }
 
-            // Send keep-alive to connected endpoints
-            foreach (var endpoint in endpoints.Where(e => e.IsConnected))
+            // Send keep-alive to connected servers and refresh endpoint information
+            foreach (var server in servers.Where(s => s.IsConnected))
             {
                 try
                 {
-                    // This should really be done in a separate task to avoid blocking the timer
+                    // Use a separate task to avoid blocking the timer
                     Task.Run(async () =>
                     {
                         try
                         {
                             // Send a simple ping command
                             var command = new { Command = "PING" };
-                            await endpoint.SendCommandAsync(JsonSerializer.Serialize(command));
+                            await server.SendCommandAsync(JsonSerializer.Serialize(command));
+
+                            // Refresh endpoint list every time
+                            await server.RefreshEndpointsAsync();
                         }
-                        catch
+                        catch (Exception ex)
                         {
-                            endpoint.Disconnect();
-                            EndpointStatusChanged?.Invoke(this, endpoint);
+                            Logger.Log($"[ComputeClusterManager] Error in keep-alive for {server.Name}: {ex.Message}");
+                            server.Disconnect();
+                            ServerStatusChanged?.Invoke(this, server);
                         }
                     });
                 }
-                catch
+                catch (Exception ex)
                 {
-                    endpoint.Disconnect();
-                    EndpointStatusChanged?.Invoke(this, endpoint);
+                    Logger.Log($"[ComputeClusterManager] Error scheduling keep-alive for {server.Name}: {ex.Message}");
+                    server.Disconnect();
+                    ServerStatusChanged?.Invoke(this, server);
                 }
             }
         }
 
-        public async Task ConnectToEndpointAsync(ComputeEndpoint endpoint)
+        public async Task ConnectToServerAsync(ComputeServer server)
         {
-            await endpoint.ConnectAsync();
-            EndpointStatusChanged?.Invoke(this, endpoint);
+            await server.ConnectAsync();
+            ServerStatusChanged?.Invoke(this, server);
         }
 
-        public void DisconnectEndpoint(ComputeEndpoint endpoint)
+        public void DisconnectServer(ComputeServer server)
         {
-            endpoint.Disconnect();
-            EndpointStatusChanged?.Invoke(this, endpoint);
+            server.Disconnect();
+            ServerStatusChanged?.Invoke(this, server);
         }
 
-        public async Task RestartEndpointAsync(ComputeEndpoint endpoint)
+        public async Task RestartServerAsync(ComputeServer server)
         {
-            if (!endpoint.IsConnected)
-                await endpoint.ConnectAsync();
+            if (!server.IsConnected)
+                await server.ConnectAsync();
 
             // Send restart command
             var command = new { Command = "RESTART" };
-            await endpoint.SendCommandAsync(JsonSerializer.Serialize(command));
+            await server.SendCommandAsync(JsonSerializer.Serialize(command));
 
-            // The endpoint will disconnect and reconnect, but we'll monitor it via beacon
-            endpoint.Disconnect();
-            EndpointStatusChanged?.Invoke(this, endpoint);
+            // The server will disconnect and reconnect, but we'll monitor it via beacon
+            server.Disconnect();
+            ServerStatusChanged?.Invoke(this, server);
         }
 
-        public async Task ShutdownEndpointAsync(ComputeEndpoint endpoint)
+        public async Task ShutdownServerAsync(ComputeServer server)
         {
-            if (!endpoint.IsConnected)
-                await endpoint.ConnectAsync();
+            if (!server.IsConnected)
+                await server.ConnectAsync();
 
             // Send shutdown command
             var command = new { Command = "SHUTDOWN" };
-            await endpoint.SendCommandAsync(JsonSerializer.Serialize(command));
+            await server.SendCommandAsync(JsonSerializer.Serialize(command));
 
-            // The endpoint will shutdown and stop sending beacons
-            endpoint.Disconnect();
-            EndpointStatusChanged?.Invoke(this, endpoint);
+            // The server will shutdown and stop sending beacons
+            server.Disconnect();
+            ServerStatusChanged?.Invoke(this, server);
         }
 
-        public async Task<string> RunDiagnosticsAsync(ComputeEndpoint endpoint)
+        public async Task<string> RunServerDiagnosticsAsync(ComputeServer server)
         {
-            if (!endpoint.IsConnected)
-                await endpoint.ConnectAsync();
+            if (!server.IsConnected)
+                await server.ConnectAsync();
 
-            endpoint.SetBusy(true);
-            EndpointStatusChanged?.Invoke(this, endpoint);
+            server.SetBusy(true);
+            ServerStatusChanged?.Invoke(this, server);
 
             try
             {
                 // Send diagnostics command
                 var command = new { Command = "DIAGNOSTICS" };
-                var result = await endpoint.SendCommandAsync(JsonSerializer.Serialize(command));
+                var result = await server.SendCommandAsync(JsonSerializer.Serialize(command));
                 return result;
             }
             finally
             {
-                endpoint.SetBusy(false);
-                EndpointStatusChanged?.Invoke(this, endpoint);
+                server.SetBusy(false);
+                ServerStatusChanged?.Invoke(this, server);
             }
         }
 
-        public void AddEndpointManually(string name, string ip, int port)
+        public async Task<string> RunEndpointDiagnosticsAsync(ComputeEndpoint endpoint)
         {
-            // Check if endpoint already exists
-            var existingEndpoint = endpoints.FirstOrDefault(e => e.IP == ip && e.Port == port);
-            if (existingEndpoint != null)
+            if (endpoint.ParentServer == null || !endpoint.ParentServer.IsConnected)
+                throw new InvalidOperationException("Parent server is not connected");
+
+            try
             {
-                Logger.Log($"[ComputeEndpointManager] Endpoint at {ip}:{port} already exists");
+                return await endpoint.RunDiagnosticsAsync();
+            }
+            catch (Exception ex)
+            {
+                return $"Error running diagnostics: {ex.Message}";
+            }
+        }
+
+        public async Task<bool> LaunchSimulationAsync(ComputeServer server, SimulationParameters parameters)
+        {
+            if (!server.IsConnected)
+                await server.ConnectAsync();
+
+            return await server.LaunchSimulationAsync(parameters);
+        }
+
+        public async Task<bool> LaunchSimulationOnAllServersAsync(SimulationParameters parameters)
+        {
+            bool allSucceeded = true;
+
+            foreach (var server in servers.Where(s => s.IsConnected))
+            {
+                try
+                {
+                    bool success = await server.LaunchSimulationAsync(parameters);
+                    if (!success)
+                        allSucceeded = false;
+                }
+                catch
+                {
+                    allSucceeded = false;
+                }
+            }
+
+            return allSucceeded;
+        }
+
+        public void AddServerManually(string name, string ip, int port)
+        {
+            // Check if server already exists
+            var existingServer = servers.FirstOrDefault(s => s.IP == ip && s.Port == port);
+            if (existingServer != null)
+            {
+                Logger.Log($"[ComputeClusterManager] Server at {ip}:{port} already exists");
                 return;
             }
 
-            var newEndpoint = new ComputeEndpoint(name, ip, port);
-            endpoints.Add(newEndpoint);
-            Logger.Log($"[ComputeEndpointManager] Manually added endpoint: {name} at {ip}:{port}");
-            EndpointDiscovered?.Invoke(this, newEndpoint);
+            var newServer = new ComputeServer(name, ip, port);
+
+            // Subscribe to server events
+            newServer.EndpointsUpdated += (sender, e) => {
+                ServerStatusChanged?.Invoke(this, newServer);
+            };
+
+            servers.Add(newServer);
+            Logger.Log($"[ComputeClusterManager] Manually added server: {name} at {ip}:{port}");
+            ServerDiscovered?.Invoke(this, newServer);
         }
 
-        public void SaveEndpoints(string filePath)
+        public void SaveServers(string filePath)
         {
-            var endpointsData = endpoints.Select(e => new
+            var serversData = servers.Select(s => new
             {
-                e.Name,
-                e.IP,
-                e.Port,
-                e.HasGPU,
-                e.AcceleratorType
+                s.Name,
+                s.IP,
+                s.Port,
+                s.EndpointPort,
+                s.HasGPU,
+                s.AcceleratorType
             }).ToList();
 
-            string json = JsonSerializer.Serialize(endpointsData, new JsonSerializerOptions { WriteIndented = true });
+            string json = JsonSerializer.Serialize(serversData, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(filePath, json);
-            Logger.Log($"[ComputeEndpointManager] Saved {endpoints.Count} endpoints to {filePath}");
+            Logger.Log($"[ComputeClusterManager] Saved {servers.Count} servers to {filePath}");
         }
 
-        public void LoadEndpoints(string filePath)
+        public void LoadServers(string filePath)
         {
             if (!File.Exists(filePath))
             {
-                Logger.Log($"[ComputeEndpointManager] Endpoint file not found: {filePath}");
+                Logger.Log($"[ComputeClusterManager] Server file not found: {filePath}");
                 return;
             }
 
             try
             {
                 string json = File.ReadAllText(filePath);
-                var endpointsData = JsonSerializer.Deserialize<List<EndpointData>>(json);
+                var serversData = JsonSerializer.Deserialize<List<ServerData>>(json);
 
-                foreach (var data in endpointsData)
+                foreach (var data in serversData)
                 {
-                    // Skip if endpoint already exists
-                    if (endpoints.Any(e => e.IP == data.IP && e.Port == data.Port))
+                    // Skip if server already exists
+                    if (servers.Any(s => s.IP == data.IP && s.Port == data.Port))
                         continue;
 
-                    var newEndpoint = new ComputeEndpoint(data.Name, data.IP, data.Port);
-                    newEndpoint.HasGPU = data.HasGPU;
-                    newEndpoint.AcceleratorType = data.AcceleratorType;
+                    var newServer = new ComputeServer(data.Name, data.IP, data.Port);
+                    newServer.EndpointPort = data.EndpointPort;
+                    newServer.HasGPU = data.HasGPU;
+                    newServer.AcceleratorType = data.AcceleratorType;
 
-                    endpoints.Add(newEndpoint);
-                    EndpointDiscovered?.Invoke(this, newEndpoint);
+                    // Subscribe to server events
+                    newServer.EndpointsUpdated += (sender, e) => {
+                        ServerStatusChanged?.Invoke(this, newServer);
+                    };
+
+                    servers.Add(newServer);
+                    ServerDiscovered?.Invoke(this, newServer);
                 }
 
-                Logger.Log($"[ComputeEndpointManager] Loaded {endpointsData.Count} endpoints from {filePath}");
+                Logger.Log($"[ComputeClusterManager] Loaded {serversData.Count} servers from {filePath}");
             }
             catch (Exception ex)
             {
-                Logger.Log($"[ComputeEndpointManager] Error loading endpoints: {ex.Message}");
+                Logger.Log($"[ComputeClusterManager] Error loading servers: {ex.Message}");
                 throw;
             }
         }
 
-        private class EndpointData
+        private class ServerData
         {
             public string Name { get; set; }
             public string IP { get; set; }
             public int Port { get; set; }
+            public int EndpointPort { get; set; }
             public bool HasGPU { get; set; }
             public string AcceleratorType { get; set; }
         }
+    }
+
+    /// <summary>
+    /// Parameters for simulation execution
+    /// </summary>
+    public class SimulationParameters
+    {
+        public string SimulationName { get; set; }
+        public string DataPath { get; set; }
+        public int Iterations { get; set; }
+        public bool UseGPU { get; set; }
+        public Dictionary<string, object> AdditionalParams { get; set; } = new Dictionary<string, object>();
+    }
+
+    /// <summary>
+    /// Status information for a running simulation
+    /// </summary>
+    public class SimulationExecutionStatus
+    {
+        public string Status { get; set; } // Running, Completed, Error, etc.
+        public int CompletionPercentage { get; set; }
+        public string Message { get; set; }
+        public DateTime StartTime { get; set; }
+        public DateTime? EndTime { get; set; }
+        public int ActiveEndpoints { get; set; }
+        public Dictionary<string, object> Results { get; set; }
     }
 
     /// <summary>
@@ -447,8 +909,10 @@ namespace CTS
     /// </summary>
     public class ComputeClusterForm : KryptonForm
     {
-        private ComputeEndpointManager manager = new ComputeEndpointManager();
+        private ComputeClusterManager manager = new ComputeClusterManager();
+        private List<ComputeServer> selectedServers = new List<ComputeServer>();
         private List<ComputeEndpoint> selectedEndpoints = new List<ComputeEndpoint>();
+        private Dictionary<ComputeServer, ServerNodeControl> serverControls = new Dictionary<ComputeServer, ServerNodeControl>();
         private Dictionary<ComputeEndpoint, EndpointControl> endpointControls = new Dictionary<ComputeEndpoint, EndpointControl>();
         private MainForm mainForm;
 
@@ -463,6 +927,7 @@ namespace CTS
         private KryptonButton btnAddManually;
         private KryptonButton btnSave;
         private KryptonButton btnLoad;
+        private KryptonButton btnLaunchSimulation;
         private System.Windows.Forms.Timer refreshTimer;
 
         public ComputeClusterForm(MainForm mainForm)
@@ -475,9 +940,10 @@ namespace CTS
             Task.Run(async () => await manager.StartDiscoveryAsync());
 
             // Set up event handlers
-            manager.EndpointDiscovered += Manager_EndpointDiscovered;
+            manager.ServerDiscovered += Manager_ServerDiscovered;
+            manager.ServerStatusChanged += Manager_ServerStatusChanged;
+            manager.ServerRemoved += Manager_ServerRemoved;
             manager.EndpointStatusChanged += Manager_EndpointStatusChanged;
-            manager.EndpointRemoved += Manager_EndpointRemoved;
 
             // Set up refresh timer to update the UI
             refreshTimer = new System.Windows.Forms.Timer();
@@ -486,15 +952,15 @@ namespace CTS
             refreshTimer.Start();
 
             LogMessage("Compute Cluster Manager started");
-            LogMessage("Scanning for available compute endpoints...");
+            LogMessage("Scanning for available compute servers...");
         }
 
         private void InitializeComponent()
         {
             // Set form properties
             this.Text = "Compute Cluster Manager";
-            this.Size = new Size(840, 600);
-            this.MinimumSize = new Size(800, 600);
+            this.Size = new Size(1000, 700);
+            this.MinimumSize = new Size(900, 650);
             this.StartPosition = FormStartPosition.CenterParent;
             this.BackColor = Color.FromArgb(30, 30, 30);
             this.ForeColor = Color.White;
@@ -529,20 +995,22 @@ namespace CTS
             btnRestart = CreateButton("Restart");
             btnShutdown = CreateButton("Shutdown");
             btnRunDiagnostics = CreateButton("Diagnostics");
-            btnAddManually = CreateButton("Add Manually");
+            btnAddManually = CreateButton("Add Server");
             btnSave = CreateButton("Save List");
             btnLoad = CreateButton("Load List");
+            btnLaunchSimulation = CreateButton("Launch Simulation");
+            btnLaunchSimulation.Width = 140;
 
             buttonPanel.Controls.AddRange(new Control[]
             {
                 btnConnect, btnDisconnect, btnRestart, btnShutdown,
-                btnRunDiagnostics, btnAddManually, btnSave, btnLoad
+                btnRunDiagnostics, btnAddManually, btnSave, btnLoad, btnLaunchSimulation
             });
 
             // Middle panel for topology map
             KryptonGroupBox topologyGroup = new KryptonGroupBox();
             topologyGroup.Dock = DockStyle.Fill;
-            topologyGroup.Text = "Compute Endpoint Topology";
+            topologyGroup.Text = "Compute Cluster Topology";
             topologyGroup.PaletteMode = PaletteMode.Office2010Black;
 
             topologyPanel = new FlowLayoutPanel
@@ -555,7 +1023,16 @@ namespace CTS
                 Padding = new Padding(10)
             };
 
-            topologyGroup.Panel.Controls.Add(topologyPanel);
+            // Use a panel that will draw lines between nodes
+            var topologyHostPanel = new ConnectionsPanel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.FromArgb(20, 20, 20),
+                AutoScroll = true
+            };
+            topologyHostPanel.Controls.Add(topologyPanel);
+
+            topologyGroup.Panel.Controls.Add(topologyHostPanel);
 
             // Bottom panel for output
             KryptonGroupBox outputGroup = new KryptonGroupBox();
@@ -590,13 +1067,15 @@ namespace CTS
             btnAddManually.Click += btnAddManually_Click;
             btnSave.Click += btnSave_Click;
             btnLoad.Click += btnLoad_Click;
+            btnLaunchSimulation.Click += btnLaunchSimulation_Click;
 
-            // Initially disable buttons until endpoints are selected
+            // Initially disable buttons until nodes are selected
             btnConnect.Enabled = false;
             btnDisconnect.Enabled = false;
             btnRestart.Enabled = false;
             btnShutdown.Enabled = false;
             btnRunDiagnostics.Enabled = false;
+            btnLaunchSimulation.Enabled = false;
         }
 
         private KryptonButton CreateButton(string text)
@@ -614,92 +1093,221 @@ namespace CTS
 
         private void RefreshTimer_Tick(object sender, EventArgs e)
         {
-            // Update the endpoint controls
+            // Update the node controls
+            foreach (var kvp in serverControls)
+            {
+                kvp.Value.UpdateDisplay();
+            }
+
             foreach (var kvp in endpointControls)
             {
                 kvp.Value.UpdateDisplay();
             }
 
             // Update button states based on selection
-            bool hasSelection = selectedEndpoints.Count > 0;
-            bool hasConnected = selectedEndpoints.Any(endpoint => endpoint.IsConnected);
+            UpdateButtonStates();
 
-            btnConnect.Enabled = hasSelection && selectedEndpoints.Any(endpoint => !endpoint.IsConnected);
-            btnDisconnect.Enabled = hasConnected;
-            btnRestart.Enabled = hasConnected;
-            btnShutdown.Enabled = hasConnected;
-            btnRunDiagnostics.Enabled = hasConnected;
+            // Refresh the panel to update connection lines
+            topologyPanel.Parent.Refresh();
         }
 
-        private void Manager_EndpointDiscovered(object sender, ComputeEndpoint e)
+        private void UpdateButtonStates()
+        {
+            bool hasServerSelected = selectedServers.Count > 0;
+            bool hasEndpointSelected = selectedEndpoints.Count > 0;
+            bool hasConnectedServer = selectedServers.Any(s => s.IsConnected);
+            bool hasConnectedEndpoint = selectedEndpoints.Any(e => e.IsConnected);
+
+            btnConnect.Enabled = (hasServerSelected && selectedServers.Any(s => !s.IsConnected)) ||
+                              (hasEndpointSelected && selectedEndpoints.Any(e => !e.IsConnected));
+            btnDisconnect.Enabled = hasConnectedServer || hasConnectedEndpoint;
+            btnRestart.Enabled = hasConnectedServer || hasConnectedEndpoint;
+            btnShutdown.Enabled = hasConnectedServer || hasConnectedEndpoint;
+            btnRunDiagnostics.Enabled = hasConnectedServer || hasConnectedEndpoint;
+            btnLaunchSimulation.Enabled = hasConnectedServer;
+        }
+
+        private void Manager_ServerDiscovered(object sender, ComputeServer server)
         {
             if (this.InvokeRequired)
             {
-                this.BeginInvoke(new Action(() => Manager_EndpointDiscovered(sender, e)));
+                this.BeginInvoke(new Action(() => Manager_ServerDiscovered(sender, server)));
                 return;
             }
 
-            // Create a visual control for the endpoint
-            var control = new EndpointControl(e);
-            control.Selected += EndpointControl_Selected;
+            // Create a visual control for the server
+            var control = new ServerNodeControl(server);
+            control.Selected += ServerNodeControl_Selected;
+            control.DoubleClicked += ServerNodeControl_DoubleClicked;
 
-            endpointControls[e] = control;
+            serverControls[server] = control;
             topologyPanel.Controls.Add(control);
 
-            LogMessage($"Discovered endpoint: {e.Name} ({e.IP}:{e.Port})");
+            LogMessage($"Discovered server: {server.Name} ({server.IP}:{server.Port})");
 
-            // If this is the first endpoint discovered, let's add it to the mainForm endpoints list
-            if (mainForm.ComputeEndpoints == null)
-            {
-                mainForm.ComputeEndpoints = new List<ComputeEndpoint>();
-            }
-
-            if (!mainForm.ComputeEndpoints.Any(ep => ep.IP == e.IP && ep.Port == e.Port))
-            {
-                mainForm.ComputeEndpoints.Add(e);
-            }
+            // Subscribe to the server's endpoints updated event
+            server.EndpointsUpdated += (s, e) => UpdateServerEndpoints(server);
         }
 
-        private void Manager_EndpointStatusChanged(object sender, ComputeEndpoint e)
+        private void UpdateServerEndpoints(ComputeServer server)
         {
             if (this.InvokeRequired)
             {
-                this.BeginInvoke(new Action(() => Manager_EndpointStatusChanged(sender, e)));
+                this.BeginInvoke(new Action(() => UpdateServerEndpoints(server)));
                 return;
             }
 
-            if (endpointControls.TryGetValue(e, out var control))
+            // Update endpoint controls for this server
+            foreach (var endpoint in server.ConnectedEndpoints)
+            {
+                if (!endpointControls.ContainsKey(endpoint))
+                {
+                    var control = new EndpointControl(endpoint);
+                    control.Selected += EndpointControl_Selected;
+                    endpointControls[endpoint] = control;
+                    topologyPanel.Controls.Add(control);
+                }
+            }
+
+            // Remove endpoints that are no longer connected
+            var endpointsToRemove = endpointControls.Keys
+                .Where(e => e.ParentServer == server && !server.ConnectedEndpoints.Contains(e))
+                .ToList();
+
+            foreach (var endpoint in endpointsToRemove)
+            {
+                var control = endpointControls[endpoint];
+                topologyPanel.Controls.Remove(control);
+                endpointControls.Remove(endpoint);
+                selectedEndpoints.Remove(endpoint);
+                control.Dispose();
+            }
+
+            // Refresh display
+            serverControls[server].UpdateDisplay();
+            topologyPanel.Parent.Refresh();
+        }
+
+        private void Manager_ServerStatusChanged(object sender, ComputeServer server)
+        {
+            if (this.InvokeRequired)
+            {
+                this.BeginInvoke(new Action(() => Manager_ServerStatusChanged(sender, server)));
+                return;
+            }
+
+            if (serverControls.TryGetValue(server, out var control))
             {
                 control.UpdateDisplay();
             }
         }
 
-        private void Manager_EndpointRemoved(object sender, ComputeEndpoint e)
+        private void Manager_ServerRemoved(object sender, ComputeServer server)
         {
             if (this.InvokeRequired)
             {
-                this.BeginInvoke(new Action(() => Manager_EndpointRemoved(sender, e)));
+                this.BeginInvoke(new Action(() => Manager_ServerRemoved(sender, server)));
                 return;
             }
 
-            if (endpointControls.TryGetValue(e, out var control))
+            if (serverControls.TryGetValue(server, out var control))
             {
                 topologyPanel.Controls.Remove(control);
-                endpointControls.Remove(e);
-                selectedEndpoints.Remove(e);
+                serverControls.Remove(server);
+                selectedServers.Remove(server);
                 control.Dispose();
             }
 
-            LogMessage($"Endpoint removed: {e.Name} ({e.IP}:{e.Port})");
+            // Also remove all endpoints connected to this server
+            var endpointsToRemove = endpointControls.Keys
+                .Where(e => e.ParentServer == server)
+                .ToList();
 
-            // Remove from mainForm's list too
-            if (mainForm.ComputeEndpoints != null)
+            foreach (var endpoint in endpointsToRemove)
             {
-                var endpointToRemove = mainForm.ComputeEndpoints.FirstOrDefault(ep => ep.IP == e.IP && ep.Port == e.Port);
-                if (endpointToRemove != null)
+                var epControl = endpointControls[endpoint];
+                topologyPanel.Controls.Remove(epControl);
+                endpointControls.Remove(endpoint);
+                selectedEndpoints.Remove(endpoint);
+                epControl.Dispose();
+            }
+
+            LogMessage($"Server removed: {server.Name} ({server.IP}:{server.Port})");
+        }
+
+        private void Manager_EndpointStatusChanged(object sender, ComputeEndpoint endpoint)
+        {
+            if (this.InvokeRequired)
+            {
+                this.BeginInvoke(new Action(() => Manager_EndpointStatusChanged(sender, endpoint)));
+                return;
+            }
+
+            if (endpointControls.TryGetValue(endpoint, out var control))
+            {
+                control.UpdateDisplay();
+            }
+        }
+
+        private void ServerNodeControl_Selected(object sender, EventArgs args)
+        {
+            var control = sender as ServerNodeControl;
+            if (control != null)
+            {
+                // Check if Ctrl is pressed for multi-select
+                bool ctrlPressed = (Control.ModifierKeys & Keys.Control) == Keys.Control;
+
+                if (!ctrlPressed)
                 {
-                    mainForm.ComputeEndpoints.Remove(endpointToRemove);
+                    // Deselect all other nodes
+                    foreach (var kvp in serverControls)
+                    {
+                        if (kvp.Value != control)
+                        {
+                            kvp.Value.IsSelected = false;
+                        }
+                    }
+                    foreach (var kvp in endpointControls)
+                    {
+                        kvp.Value.IsSelected = false;
+                    }
+                    selectedServers.Clear();
+                    selectedEndpoints.Clear();
                 }
+
+                // Toggle selection of clicked server
+                if (control.IsSelected)
+                {
+                    selectedServers.Add(control.Server);
+                }
+                else
+                {
+                    selectedServers.Remove(control.Server);
+                }
+
+                UpdateButtonStates();
+            }
+        }
+
+        private void ServerNodeControl_DoubleClicked(object sender, EventArgs args)
+        {
+            var control = sender as ServerNodeControl;
+            if (control != null && !control.Server.IsConnected)
+            {
+                // Auto-connect on double-click
+                Task.Run(async () =>
+                {
+                    try
+                    {
+                        LogMessage($"Connecting to {control.Server.Name}...");
+                        await manager.ConnectToServerAsync(control.Server);
+                        LogMessage($"Connected to {control.Server.Name} successfully");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogMessage($"Failed to connect to {control.Server.Name}: {ex.Message}");
+                    }
+                });
             }
         }
 
@@ -713,7 +1321,11 @@ namespace CTS
 
                 if (!ctrlPressed)
                 {
-                    // Deselect all other endpoints
+                    // Deselect all other nodes
+                    foreach (var kvp in serverControls)
+                    {
+                        kvp.Value.IsSelected = false;
+                    }
                     foreach (var kvp in endpointControls)
                     {
                         if (kvp.Value != control)
@@ -721,6 +1333,7 @@ namespace CTS
                             kvp.Value.IsSelected = false;
                         }
                     }
+                    selectedServers.Clear();
                     selectedEndpoints.Clear();
                 }
 
@@ -733,90 +1346,136 @@ namespace CTS
                 {
                     selectedEndpoints.Remove(control.Endpoint);
                 }
+
+                UpdateButtonStates();
             }
         }
 
         private async void btnConnect_Click(object sender, EventArgs e)
         {
-            if (selectedEndpoints.Count == 0)
-                return;
+            // Connect to selected servers
+            foreach (var server in selectedServers.ToList())
+            {
+                if (!server.IsConnected)
+                {
+                    try
+                    {
+                        LogMessage($"Connecting to server {server.Name}...");
+                        await manager.ConnectToServerAsync(server);
+                        LogMessage($"Connected to server {server.Name} successfully");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogMessage($"Failed to connect to server {server.Name}: {ex.Message}");
+                    }
+                }
+            }
 
             // Connect to selected endpoints
-            btnConnect.Enabled = false;
-
             foreach (var endpoint in selectedEndpoints.ToList())
             {
                 if (!endpoint.IsConnected)
                 {
                     try
                     {
-                        LogMessage($"Connecting to {endpoint.Name}...");
-                        await manager.ConnectToEndpointAsync(endpoint);
-                        LogMessage($"Connected to {endpoint.Name} successfully");
+                        LogMessage($"Connecting to endpoint {endpoint.Name}...");
+                        await endpoint.ConnectAsync(); // This will use parent server if available
+                        LogMessage($"Connected to endpoint {endpoint.Name} successfully");
                     }
                     catch (Exception ex)
                     {
-                        LogMessage($"Failed to connect to {endpoint.Name}: {ex.Message}");
+                        LogMessage($"Failed to connect to endpoint {endpoint.Name}: {ex.Message}");
                     }
                 }
             }
-
-            btnConnect.Enabled = true;
         }
 
         private void btnDisconnect_Click(object sender, EventArgs e)
         {
-            if (selectedEndpoints.Count == 0)
-                return;
-
-            foreach (var endpoint in selectedEndpoints.ToList().Where(ep => ep.IsConnected))
+            // Disconnect selected servers
+            foreach (var server in selectedServers.ToList().Where(s => s.IsConnected))
             {
                 try
                 {
-                    LogMessage($"Disconnecting from {endpoint.Name}...");
-                    manager.DisconnectEndpoint(endpoint);
-                    LogMessage($"Disconnected from {endpoint.Name}");
+                    LogMessage($"Disconnecting from server {server.Name}...");
+                    manager.DisconnectServer(server);
+                    LogMessage($"Disconnected from server {server.Name}");
                 }
                 catch (Exception ex)
                 {
-                    LogMessage($"Error disconnecting from {endpoint.Name}: {ex.Message}");
+                    LogMessage($"Error disconnecting from server {server.Name}: {ex.Message}");
+                }
+            }
+
+            // Disconnect selected endpoints
+            foreach (var endpoint in selectedEndpoints.ToList().Where(x => x.IsConnected))
+            {
+                try
+                {
+                    LogMessage($"Disconnecting from endpoint {endpoint.Name}...");
+                    endpoint.Disconnect();
+                    LogMessage($"Disconnected from endpoint {endpoint.Name}");
+                }
+                catch (Exception ex)
+                {
+                    LogMessage($"Error disconnecting from endpoint {endpoint.Name}: {ex.Message}");
                 }
             }
         }
 
         private async void btnRestart_Click(object sender, EventArgs e)
         {
-            if (selectedEndpoints.Count == 0)
-                return;
-
-            // Restart selected endpoints
-            btnRestart.Enabled = false;
-
-            foreach (var endpoint in selectedEndpoints.ToList().Where(ep => ep.IsConnected))
+            if (selectedServers.Count > 0)
             {
-                try
-                {
-                    LogMessage($"Restarting {endpoint.Name}...");
-                    await manager.RestartEndpointAsync(endpoint);
-                    LogMessage($"Restart command sent to {endpoint.Name}");
-                }
-                catch (Exception ex)
-                {
-                    LogMessage($"Failed to restart {endpoint.Name}: {ex.Message}");
-                }
-            }
+                btnRestart.Enabled = false;
 
-            btnRestart.Enabled = true;
+                foreach (var server in selectedServers.ToList().Where(s => s.IsConnected))
+                {
+                    try
+                    {
+                        LogMessage($"Restarting server {server.Name}...");
+                        await manager.RestartServerAsync(server);
+                        LogMessage($"Restart command sent to server {server.Name}");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogMessage($"Failed to restart server {server.Name}: {ex.Message}");
+                    }
+                }
+
+                btnRestart.Enabled = true;
+            }
+            else if (selectedEndpoints.Count > 0)
+            {
+                btnRestart.Enabled = false;
+
+                foreach (var endpoint in selectedEndpoints.ToList())
+                {
+                    try
+                    {
+                        LogMessage($"Restarting endpoint {endpoint.Name}...");
+                        var command = new { Command = "RESTART" };
+                        await endpoint.SendCommandAsync(JsonSerializer.Serialize(command));
+                        LogMessage($"Restart command sent to endpoint {endpoint.Name}");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogMessage($"Failed to restart endpoint {endpoint.Name}: {ex.Message}");
+                    }
+                }
+
+                btnRestart.Enabled = true;
+            }
         }
 
         private async void btnShutdown_Click(object sender, EventArgs e)
         {
-            if (selectedEndpoints.Count == 0)
-                return;
+            string nodeType = selectedServers.Count > 0 ? "servers" : "endpoints";
+            int nodeCount = selectedServers.Count > 0 ? selectedServers.Count : selectedEndpoints.Count;
 
             // Confirm shutdown
             DialogResult result = MessageBox.Show(
-                $"Are you sure you want to shut down {selectedEndpoints.Count} compute endpoints?",
+                $"Are you sure you want to shut down {nodeCount} {nodeType}?",
                 "Confirm Shutdown",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Warning);
@@ -824,20 +1483,39 @@ namespace CTS
             if (result != DialogResult.Yes)
                 return;
 
-            // Shutdown selected endpoints
             btnShutdown.Enabled = false;
 
-            foreach (var endpoint in selectedEndpoints.ToList().Where(ep => ep.IsConnected))
+            if (selectedServers.Count > 0)
             {
-                try
+                foreach (var server in selectedServers.ToList().Where(s => s.IsConnected))
                 {
-                    LogMessage($"Shutting down {endpoint.Name}...");
-                    await manager.ShutdownEndpointAsync(endpoint);
-                    LogMessage($"Shutdown command sent to {endpoint.Name}");
+                    try
+                    {
+                        LogMessage($"Shutting down server {server.Name}...");
+                        await manager.ShutdownServerAsync(server);
+                        LogMessage($"Shutdown command sent to server {server.Name}");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogMessage($"Failed to shut down server {server.Name}: {ex.Message}");
+                    }
                 }
-                catch (Exception ex)
+            }
+            else if (selectedEndpoints.Count > 0)
+            {
+                foreach (var endpoint in selectedEndpoints.ToList())
                 {
-                    LogMessage($"Failed to shut down {endpoint.Name}: {ex.Message}");
+                    try
+                    {
+                        LogMessage($"Shutting down endpoint {endpoint.Name}...");
+                        var command = new { Command = "SHUTDOWN" };
+                        await endpoint.SendCommandAsync(JsonSerializer.Serialize(command));
+                        LogMessage($"Shutdown command sent to endpoint {endpoint.Name}");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogMessage($"Failed to shut down endpoint {endpoint.Name}: {ex.Message}");
+                    }
                 }
             }
 
@@ -846,31 +1524,43 @@ namespace CTS
 
         private async void btnRunDiagnostics_Click(object sender, EventArgs e)
         {
-            if (selectedEndpoints.Count == 0)
-                return;
-
-            // Run diagnostics on selected endpoints
             btnRunDiagnostics.Enabled = false;
 
-            foreach (var endpoint in selectedEndpoints.ToList().Where(ep => ep.IsConnected))
+            if (selectedServers.Count > 0)
             {
-                try
+                foreach (var server in selectedServers.ToList().Where(s => s.IsConnected))
                 {
-                    LogMessage($"Running diagnostics on {endpoint.Name}...");
-                    endpoint.SetBusy(true);
-
-                    string diagnosticResult = await manager.RunDiagnosticsAsync(endpoint);
-
-                    LogMessage($"Diagnostics for {endpoint.Name}:");
-                    LogMessage(diagnosticResult);
+                    try
+                    {
+                        LogMessage($"Running diagnostics on server {server.Name}...");
+                        string diagnosticResult = await manager.RunServerDiagnosticsAsync(server);
+                        LogMessage($"Diagnostics for server {server.Name}:");
+                        LogMessage(diagnosticResult);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogMessage($"Failed to run diagnostics on server {server.Name}: {ex.Message}");
+                    }
                 }
-                catch (Exception ex)
+            }
+            else if (selectedEndpoints.Count > 0)
+            {
+                foreach (var endpoint in selectedEndpoints.ToList())
                 {
-                    LogMessage($"Failed to run diagnostics on {endpoint.Name}: {ex.Message}");
-                }
-                finally
-                {
-                    endpoint.SetBusy(false);
+                    try
+                    {
+                        LogMessage($"Running diagnostics on endpoint {endpoint.Name}...");
+                        endpoint.SetBusy(true);
+                        string diagnosticResult = await endpoint.RunDiagnosticsAsync();
+                        LogMessage($"Diagnostics for endpoint {endpoint.Name}:");
+                        LogMessage(diagnosticResult);
+                        endpoint.SetBusy(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        endpoint.SetBusy(false);
+                        LogMessage($"Failed to run diagnostics on endpoint {endpoint.Name}: {ex.Message}");
+                    }
                 }
             }
 
@@ -879,17 +1569,17 @@ namespace CTS
 
         private void btnAddManually_Click(object sender, EventArgs e)
         {
-            // Show dialog to add endpoint manually
-            using (var dialog = new AddEndpointDialog())
+            // Show dialog to add server manually
+            using (var dialog = new AddServerDialog())
             {
                 if (dialog.ShowDialog() == DialogResult.OK)
                 {
-                    string name = dialog.EndpointName;
-                    string ip = dialog.EndpointIP;
-                    int port = dialog.EndpointPort;
+                    string name = dialog.ServerName;
+                    string ip = dialog.ServerIP;
+                    int port = dialog.ServerPort;
 
-                    manager.AddEndpointManually(name, ip, port);
-                    LogMessage($"Manually added endpoint: {name} ({ip}:{port})");
+                    manager.AddServerManually(name, ip, port);
+                    LogMessage($"Manually added server: {name} ({ip}:{port})");
                 }
             }
         }
@@ -900,18 +1590,18 @@ namespace CTS
             {
                 dialog.Filter = "JSON Files (*.json)|*.json|All Files (*.*)|*.*";
                 dialog.DefaultExt = "json";
-                dialog.Title = "Save Compute Endpoints";
+                dialog.Title = "Save Compute Servers";
 
                 if (dialog.ShowDialog() == DialogResult.OK)
                 {
                     try
                     {
-                        manager.SaveEndpoints(dialog.FileName);
-                        LogMessage($"Endpoints saved to {dialog.FileName}");
+                        manager.SaveServers(dialog.FileName);
+                        LogMessage($"Servers saved to {dialog.FileName}");
                     }
                     catch (Exception ex)
                     {
-                        LogMessage($"Error saving endpoints: {ex.Message}");
+                        LogMessage($"Error saving servers: {ex.Message}");
                     }
                 }
             }
@@ -923,19 +1613,54 @@ namespace CTS
             {
                 dialog.Filter = "JSON Files (*.json)|*.json|All Files (*.*)|*.*";
                 dialog.DefaultExt = "json";
-                dialog.Title = "Load Compute Endpoints";
+                dialog.Title = "Load Compute Servers";
 
                 if (dialog.ShowDialog() == DialogResult.OK)
                 {
                     try
                     {
-                        manager.LoadEndpoints(dialog.FileName);
-                        LogMessage($"Endpoints loaded from {dialog.FileName}");
+                        manager.LoadServers(dialog.FileName);
+                        LogMessage($"Servers loaded from {dialog.FileName}");
                     }
                     catch (Exception ex)
                     {
-                        LogMessage($"Error loading endpoints: {ex.Message}");
+                        LogMessage($"Error loading servers: {ex.Message}");
                     }
+                }
+            }
+        }
+
+        private async void btnLaunchSimulation_Click(object sender, EventArgs e)
+        {
+            if (selectedServers.Count == 0)
+                return;
+
+            using (var dialog = new SimulationParametersDialog())
+            {
+                if (dialog.ShowDialog() == DialogResult.OK)
+                {
+                    var parameters = dialog.Parameters;
+
+                    btnLaunchSimulation.Enabled = false;
+                    LogMessage($"Launching simulation '{parameters.SimulationName}' on selected servers...");
+
+                    foreach (var server in selectedServers.Where(s => s.IsConnected))
+                    {
+                        try
+                        {
+                            bool success = await manager.LaunchSimulationAsync(server, parameters);
+                            if (success)
+                                LogMessage($"Simulation launched successfully on {server.Name}");
+                            else
+                                LogMessage($"Failed to launch simulation on {server.Name}");
+                        }
+                        catch (Exception ex)
+                        {
+                            LogMessage($"Error launching simulation on {server.Name}: {ex.Message}");
+                        }
+                    }
+
+                    btnLaunchSimulation.Enabled = true;
                 }
             }
         }
@@ -960,12 +1685,12 @@ namespace CTS
             refreshTimer.Stop();
             manager.StopDiscovery();
 
-            // Disconnect all endpoints
-            foreach (var endpoint in manager.Endpoints.Where(ep => ep.IsConnected))
+            // Disconnect all servers
+            foreach (var server in manager.Servers.Where(s => s.IsConnected))
             {
                 try
                 {
-                    manager.DisconnectEndpoint(endpoint);
+                    manager.DisconnectServer(server);
                 }
                 catch
                 {
@@ -975,213 +1700,435 @@ namespace CTS
 
             base.OnFormClosing(e);
         }
+    }
 
-        // Custom control to display a compute endpoint
-        private class EndpointControl : Panel
+    /// <summary>
+    /// Panel that draws connection lines between server and endpoint controls
+    /// </summary>
+    public class ConnectionsPanel : Panel
+    {
+        protected override void OnPaint(PaintEventArgs e)
         {
-            public ComputeEndpoint Endpoint { get; }
-            public bool IsSelected { get; set; }
+            base.OnPaint(e);
 
-            private Label lblName;
-            private Label lblStatus;
-            private Label lblIP;
-            private Label lblGPU;
-            private PictureBox statusIcon;
+            // Get all server and endpoint controls
+            var childControls = Controls.Count > 0 ? Controls[0].Controls : null;
+            if (childControls == null) return;
 
-            public event EventHandler Selected;
-
-            public EndpointControl(ComputeEndpoint endpoint)
+            // Draw connections between servers and endpoints
+            using (var pen = new Pen(Color.FromArgb(80, 80, 80), 1))
             {
-                Endpoint = endpoint;
+                pen.DashStyle = System.Drawing.Drawing2D.DashStyle.Dot;
 
-                // Set up visual appearance
-                this.Size = new Size(150, 120);
-                this.Margin = new Padding(10);
-                this.BackColor = Color.FromArgb(40, 40, 40);
-                this.BorderStyle = BorderStyle.FixedSingle;
-
-                // Add controls
-                statusIcon = new PictureBox
+                foreach (Control control in childControls)
                 {
-                    Size = new Size(16, 16),
-                    Location = new Point(5, 5),
-                    BackColor = Color.Transparent
-                };
-
-                // Draw circle for status icon
-                Bitmap iconBitmap = new Bitmap(16, 16);
-                using (Graphics g = Graphics.FromImage(iconBitmap))
-                {
-                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                    g.Clear(Color.Transparent);
-                    using (SolidBrush brush = new SolidBrush(Color.Gray))
+                    if (control is EndpointControl epControl && epControl.Endpoint.ParentServer != null)
                     {
-                        g.FillEllipse(brush, 0, 0, 16, 16);
+                        foreach (Control serverControl in childControls)
+                        {
+                            if (serverControl is ServerNodeControl srvControl &&
+                                srvControl.Server == epControl.Endpoint.ParentServer)
+                            {
+                                // Calculate positions for line drawing
+                                Point serverCenter = new Point(
+                                    serverControl.Left + serverControl.Width / 2,
+                                    serverControl.Top + serverControl.Height / 2);
+
+                                Point endpointCenter = new Point(
+                                    control.Left + control.Width / 2,
+                                    control.Top + control.Height / 2);
+
+                                // Draw connection line
+                                e.Graphics.DrawLine(pen, serverCenter, endpointCenter);
+
+                                // Draw direction arrow
+                                DrawArrow(e.Graphics, pen, serverCenter, endpointCenter);
+
+                                break;
+                            }
+                        }
                     }
-                }
-                statusIcon.Image = iconBitmap;
-
-                lblName = new Label
-                {
-                    Text = endpoint.Name,
-                    Location = new Point(25, 5),
-                    AutoSize = false,
-                    Size = new Size(120, 20),
-                    TextAlign = ContentAlignment.MiddleLeft,
-                    Font = new Font("Segoe UI", 9, FontStyle.Bold),
-                    ForeColor = Color.White
-                };
-
-                lblStatus = new Label
-                {
-                    Text = "Disconnected",
-                    Location = new Point(5, 30),
-                    AutoSize = false,
-                    Size = new Size(140, 20),
-                    TextAlign = ContentAlignment.MiddleCenter,
-                    ForeColor = Color.Gray
-                };
-
-                lblIP = new Label
-                {
-                    Text = $"{endpoint.IP}:{endpoint.Port}",
-                    Location = new Point(5, 55),
-                    AutoSize = false,
-                    Size = new Size(140, 20),
-                    TextAlign = ContentAlignment.MiddleCenter,
-                    ForeColor = Color.Silver
-                };
-
-                lblGPU = new Label
-                {
-                    Text = endpoint.HasGPU ? "GPU: Yes" : "GPU: No",
-                    Location = new Point(5, 80),
-                    AutoSize = false,
-                    Size = new Size(140, 20),
-                    TextAlign = ContentAlignment.MiddleCenter,
-                    ForeColor = endpoint.HasGPU ? Color.LightGreen : Color.Gray
-                };
-
-                this.Controls.AddRange(new Control[] { statusIcon, lblName, lblStatus, lblIP, lblGPU });
-
-                // Add click handler
-                this.Click += EndpointControl_Click;
-
-                // Update display
-                UpdateDisplay();
-            }
-
-            public void UpdateDisplay()
-            {
-                // Update all display elements based on endpoint state
-                lblName.Text = Endpoint.Name;
-                lblIP.Text = $"{Endpoint.IP}:{Endpoint.Port}";
-                lblGPU.Text = Endpoint.HasGPU ? "GPU: Yes" : "GPU: No";
-                lblGPU.ForeColor = Endpoint.HasGPU ? Color.LightGreen : Color.Gray;
-
-                // Update the status icon
-                UpdateStatusIcon();
-
-                // Update status and background color
-                if (!Endpoint.IsConnected)
-                {
-                    // Check if it's recently seen via beacon
-                    if (DateTime.Now - Endpoint.LastSeen < TimeSpan.FromSeconds(10))
-                    {
-                        lblStatus.Text = "Available";
-                        lblStatus.ForeColor = Color.Gray;
-                        this.BackColor = IsSelected ? Color.FromArgb(60, 60, 60) : Color.FromArgb(40, 40, 40);
-                    }
-                    else
-                    {
-                        lblStatus.Text = "Offline";
-                        lblStatus.ForeColor = Color.Gray;
-                        this.BackColor = IsSelected ? Color.FromArgb(50, 50, 50) : Color.Black;
-                    }
-                }
-                else if (Endpoint.IsBusy)
-                {
-                    lblStatus.Text = "Busy";
-                    lblStatus.ForeColor = Color.Yellow;
-                    this.BackColor = IsSelected ? Color.FromArgb(60, 60, 30) : Color.FromArgb(40, 40, 0);
-                }
-                else
-                {
-                    lblStatus.Text = "Connected";
-                    lblStatus.ForeColor = Color.LightGreen;
-                    this.BackColor = IsSelected ? Color.FromArgb(30, 60, 30) : Color.FromArgb(0, 40, 0);
                 }
             }
+        }
 
-            private void UpdateStatusIcon()
+        private void DrawArrow(Graphics g, Pen pen, Point start, Point end)
+        {
+            const float arrowSize = 8.0f;
+
+            // Calculate arrow direction
+            float dx = end.X - start.X;
+            float dy = end.Y - start.Y;
+            float length = (float)Math.Sqrt(dx * dx + dy * dy);
+
+            if (length < 1) return; // Avoid division by zero
+
+            dx /= length;
+            dy /= length;
+
+            // Calculate arrow points
+            Point arrowPoint = new Point(
+                (int)(end.X - dx * arrowSize * 2),
+                (int)(end.Y - dy * arrowSize * 2));
+
+            PointF pt1 = new PointF(
+                arrowPoint.X + arrowSize * dy,
+                arrowPoint.Y - arrowSize * dx);
+
+            PointF pt2 = new PointF(
+                arrowPoint.X - arrowSize * dy,
+                arrowPoint.Y + arrowSize * dx);
+
+            // Draw arrow
+            using (var arrowPen = new Pen(Color.FromArgb(120, 120, 120), 1))
             {
-                // Determine the color based on endpoint state
-                Color statusColor;
-
-                if (!Endpoint.IsConnected)
-                {
-                    // Check if it's recently seen via beacon
-                    if (DateTime.Now - Endpoint.LastSeen < TimeSpan.FromSeconds(10))
-                    {
-                        statusColor = Color.Gray; // Available but not connected
-                    }
-                    else
-                    {
-                        statusColor = Color.Black; // Offline
-                    }
-                }
-                else if (Endpoint.IsBusy)
-                {
-                    statusColor = Color.Yellow; // Busy
-                }
-                else
-                {
-                    statusColor = Color.Green; // Connected and ready
-                }
-
-                // Create a new status icon
-                Bitmap iconBitmap = new Bitmap(16, 16);
-                using (Graphics g = Graphics.FromImage(iconBitmap))
-                {
-                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                    g.Clear(Color.Transparent);
-                    using (SolidBrush brush = new SolidBrush(statusColor))
-                    {
-                        g.FillEllipse(brush, 0, 0, 16, 16);
-                    }
-                }
-
-                // Replace the existing image
-                var oldImage = statusIcon.Image;
-                statusIcon.Image = iconBitmap;
-                oldImage?.Dispose();
-            }
-
-            private void EndpointControl_Click(object sender, EventArgs eventArgs)
-            {
-                IsSelected = !IsSelected;
-                UpdateDisplay();
-                Selected?.Invoke(this, EventArgs.Empty);
+                g.DrawLine(arrowPen, end, pt1);
+                g.DrawLine(arrowPen, end, pt2);
             }
         }
     }
 
     /// <summary>
-    /// Dialog for manually adding a compute endpoint
+    /// Control for displaying a server node in the topology
     /// </summary>
-    public class AddEndpointDialog : KryptonForm
+    public class ServerNodeControl : Panel
+    {
+        public ComputeServer Server { get; }
+        public bool IsSelected { get; set; }
+
+        private Label lblName;
+        private Label lblStatus;
+        private Label lblEndpoints;
+        private PictureBox statusIcon;
+
+        public event EventHandler Selected;
+        public event EventHandler DoubleClicked;
+
+        public ServerNodeControl(ComputeServer server)
+        {
+            Server = server;
+
+            // Set up visual appearance
+            this.Size = new Size(180, 80);
+            this.Margin = new Padding(10);
+            this.BackColor = Color.FromArgb(40, 40, 40);
+            this.BorderStyle = BorderStyle.FixedSingle;
+
+            // Add controls
+            statusIcon = new PictureBox
+            {
+                Size = new Size(16, 16),
+                Location = new Point(5, 5),
+                BackColor = Color.Transparent
+            };
+
+            lblName = new Label
+            {
+                Text = server.Name,
+                Location = new Point(25, 5),
+                AutoSize = false,
+                Size = new Size(150, 20),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                ForeColor = Color.White
+            };
+
+            lblStatus = new Label
+            {
+                Text = "Disconnected",
+                Location = new Point(5, 30),
+                AutoSize = false,
+                Size = new Size(170, 20),
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = Color.Gray
+            };
+
+            lblEndpoints = new Label
+            {
+                Text = "Endpoints: 0",
+                Location = new Point(5, 55),
+                AutoSize = false,
+                Size = new Size(170, 20),
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = Color.Silver
+            };
+
+            this.Controls.AddRange(new Control[] { statusIcon, lblName, lblStatus, lblEndpoints });
+
+            // Add click and double-click handlers
+            this.Click += ServerNodeControl_Click;
+            this.DoubleClick += ServerNodeControl_DoubleClick;
+
+            // Forward events to child controls
+            foreach (Control child in this.Controls)
+            {
+                child.Click += (s, e) => this.OnClick(e);
+                child.DoubleClick += (s, e) => this.OnDoubleClick(e);
+            }
+
+            // Update display
+            UpdateDisplay();
+        }
+
+        public void UpdateDisplay()
+        {
+            lblName.Text = Server.Name;
+            lblEndpoints.Text = $"Endpoints: {Server.ConnectedEndpoints.Count}";
+
+            if (Server.IsConnected)
+            {
+                lblStatus.Text = "Connected";
+                lblStatus.ForeColor = Color.LightGreen;
+                this.BackColor = IsSelected ? Color.FromArgb(10, 70, 10) : Color.FromArgb(0, 40, 0);
+            }
+            else if (DateTime.Now - Server.LastSeen < TimeSpan.FromSeconds(10))
+            {
+                lblStatus.Text = "Available";
+                lblStatus.ForeColor = Color.Gray;
+                this.BackColor = IsSelected ? Color.FromArgb(60, 60, 60) : Color.FromArgb(40, 40, 40);
+            }
+            else
+            {
+                lblStatus.Text = "Offline";
+                lblStatus.ForeColor = Color.Gray;
+                this.BackColor = IsSelected ? Color.FromArgb(70, 30, 30) : Color.FromArgb(50, 20, 20);
+            }
+
+            // Update status icon
+            UpdateStatusIcon();
+        }
+
+        private void UpdateStatusIcon()
+        {
+            // Determine color based on status
+            Color statusColor = Server.IsConnected ? Color.Green :
+                (DateTime.Now - Server.LastSeen < TimeSpan.FromSeconds(10)) ? Color.Gray : Color.Red;
+
+            Bitmap iconBitmap = new Bitmap(16, 16);
+            using (Graphics g = Graphics.FromImage(iconBitmap))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.Clear(Color.Transparent);
+                using (SolidBrush brush = new SolidBrush(statusColor))
+                {
+                    g.FillEllipse(brush, 0, 0, 16, 16);
+                }
+            }
+
+            // Replace the existing image
+            var oldImage = statusIcon.Image;
+            statusIcon.Image = iconBitmap;
+            oldImage?.Dispose();
+        }
+
+        private void ServerNodeControl_Click(object sender, EventArgs e)
+        {
+            IsSelected = !IsSelected;
+            UpdateDisplay();
+            Selected?.Invoke(this, EventArgs.Empty);
+        }
+
+        private void ServerNodeControl_DoubleClick(object sender, EventArgs e)
+        {
+            DoubleClicked?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    /// <summary>
+    /// Control for displaying an endpoint in the topology
+    /// </summary>
+    public class EndpointControl : Panel
+    {
+        public ComputeEndpoint Endpoint { get; }
+        public bool IsSelected { get; set; }
+
+        private Label lblName;
+        private Label lblStatus;
+        private Label lblIP;
+        private Label lblGPU;
+        private PictureBox statusIcon;
+
+        public event EventHandler Selected;
+
+        public EndpointControl(ComputeEndpoint endpoint)
+        {
+            Endpoint = endpoint;
+
+            // Set up visual appearance
+            this.Size = new Size(150, 120);
+            this.Margin = new Padding(10);
+            this.BackColor = Color.FromArgb(40, 40, 40);
+            this.BorderStyle = BorderStyle.FixedSingle;
+
+            // Add controls
+            statusIcon = new PictureBox
+            {
+                Size = new Size(16, 16),
+                Location = new Point(5, 5),
+                BackColor = Color.Transparent
+            };
+
+            // Draw circle for status icon
+            Bitmap iconBitmap = new Bitmap(16, 16);
+            using (Graphics g = Graphics.FromImage(iconBitmap))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.Clear(Color.Transparent);
+                using (SolidBrush brush = new SolidBrush(Color.Gray))
+                {
+                    g.FillEllipse(brush, 0, 0, 16, 16);
+                }
+            }
+            statusIcon.Image = iconBitmap;
+
+            lblName = new Label
+            {
+                Text = endpoint.Name,
+                Location = new Point(25, 5),
+                AutoSize = false,
+                Size = new Size(120, 20),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                ForeColor = Color.White
+            };
+
+            lblStatus = new Label
+            {
+                Text = "Disconnected",
+                Location = new Point(5, 30),
+                AutoSize = false,
+                Size = new Size(140, 20),
+                TextAlign = ContentAlignment.MiddleCenter,
+                ForeColor = Color.Gray
+            };
+
+            lblIP = new Label
+            {
+                Text = $"{endpoint.IP}:{endpoint.Port}",
+                Location = new Point(5, 55),
+                AutoSize = false,
+                Size = new Size(140, 20),
+                TextAlign = ContentAlignment.MiddleCenter,
+                ForeColor = Color.Silver
+            };
+
+            lblGPU = new Label
+            {
+                Text = endpoint.HasGPU ? "GPU: Yes" : "GPU: No",
+                Location = new Point(5, 80),
+                AutoSize = false,
+                Size = new Size(140, 20),
+                TextAlign = ContentAlignment.MiddleCenter,
+                ForeColor = endpoint.HasGPU ? Color.LightGreen : Color.Gray
+            };
+
+            this.Controls.AddRange(new Control[] { statusIcon, lblName, lblStatus, lblIP, lblGPU });
+
+            // Add click handler
+            this.Click += EndpointControl_Click;
+
+            // Forward events to child controls
+            foreach (Control child in this.Controls)
+            {
+                child.Click += (s, e) => this.OnClick(e);
+            }
+
+            // Update display
+            UpdateDisplay();
+        }
+
+        public void UpdateDisplay()
+        {
+            // Update all display elements based on endpoint state
+            lblName.Text = Endpoint.Name;
+            lblIP.Text = $"{Endpoint.IP}:{Endpoint.Port}";
+            lblGPU.Text = Endpoint.HasGPU ? "GPU: Yes" : "GPU: No";
+            lblGPU.ForeColor = Endpoint.HasGPU ? Color.LightGreen : Color.Gray;
+
+            // Update the status icon
+            UpdateStatusIcon();
+
+            // Update status and background color
+            if (!Endpoint.IsConnected)
+            {
+                lblStatus.Text = Endpoint.Status;
+                lblStatus.ForeColor = Color.Gray;
+                this.BackColor = IsSelected ? Color.FromArgb(60, 60, 60) : Color.FromArgb(40, 40, 40);
+            }
+            else if (Endpoint.IsBusy)
+            {
+                lblStatus.Text = "Busy";
+                lblStatus.ForeColor = Color.Yellow;
+                this.BackColor = IsSelected ? Color.FromArgb(60, 60, 30) : Color.FromArgb(40, 40, 0);
+            }
+            else
+            {
+                lblStatus.Text = "Connected";
+                lblStatus.ForeColor = Color.LightGreen;
+                this.BackColor = IsSelected ? Color.FromArgb(30, 60, 30) : Color.FromArgb(0, 40, 0);
+            }
+        }
+
+        private void UpdateStatusIcon()
+        {
+            // Determine the color based on endpoint state
+            Color statusColor;
+
+            if (!Endpoint.IsConnected)
+            {
+                statusColor = Color.Gray; // Available but not connected
+            }
+            else if (Endpoint.IsBusy)
+            {
+                statusColor = Color.Yellow; // Busy
+            }
+            else
+            {
+                statusColor = Color.Green; // Connected and ready
+            }
+
+            // Create a new status icon
+            Bitmap iconBitmap = new Bitmap(16, 16);
+            using (Graphics g = Graphics.FromImage(iconBitmap))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.Clear(Color.Transparent);
+                using (SolidBrush brush = new SolidBrush(statusColor))
+                {
+                    g.FillEllipse(brush, 0, 0, 16, 16);
+                }
+            }
+
+            // Replace the existing image
+            var oldImage = statusIcon.Image;
+            statusIcon.Image = iconBitmap;
+            oldImage?.Dispose();
+        }
+
+        private void EndpointControl_Click(object sender, EventArgs eventArgs)
+        {
+            IsSelected = !IsSelected;
+            UpdateDisplay();
+            Selected?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    /// <summary>
+    /// Dialog for manually adding a compute server
+    /// </summary>
+    public class AddServerDialog : KryptonForm
     {
         private KryptonTextBox txtName;
         private KryptonTextBox txtIP;
         private KryptonNumericUpDown numPort;
 
-        public string EndpointName => txtName.Text;
-        public string EndpointIP => txtIP.Text;
-        public int EndpointPort => (int)numPort.Value;
+        public string ServerName => txtName.Text;
+        public string ServerIP => txtIP.Text;
+        public int ServerPort => (int)numPort.Value;
 
-        public AddEndpointDialog()
+        public AddServerDialog()
         {
-            this.Text = "Add Compute Endpoint";
+            this.Text = "Add Compute Server";
             this.Size = new Size(350, 200);
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
@@ -1203,7 +2150,7 @@ namespace CTS
                 Width = 180,
                 Minimum = 1,
                 Maximum = 65535,
-                Value = 7000  // Default port from Program.cs
+                Value = 7000  // Default port for client connection
             };
 
             KryptonButton btnOK = new KryptonButton
@@ -1240,7 +2187,7 @@ namespace CTS
             {
                 if (string.IsNullOrWhiteSpace(txtName.Text))
                 {
-                    MessageBox.Show("Please enter a name for the endpoint.", "Validation Error",
+                    MessageBox.Show("Please enter a name for the server.", "Validation Error",
                                   MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     this.DialogResult = DialogResult.None;
                     return;
@@ -1263,6 +2210,123 @@ namespace CTS
                     return;
                 }
             };
+        }
+    }
+
+    /// <summary>
+    /// Dialog for setting simulation parameters
+    /// </summary>
+    public class SimulationParametersDialog : KryptonForm
+    {
+        private KryptonTextBox txtName;
+        private KryptonTextBox txtDataPath;
+        private KryptonNumericUpDown numIterations;
+        private KryptonCheckBox chkUseGPU;
+        private KryptonButton btnBrowse;
+
+        public SimulationParameters Parameters { get; private set; }
+
+        public SimulationParametersDialog()
+        {
+            this.Text = "Simulation Parameters";
+            this.Size = new Size(450, 280);
+            this.FormBorderStyle = FormBorderStyle.FixedDialog;
+            this.MaximizeBox = false;
+            this.MinimizeBox = false;
+            this.StartPosition = FormStartPosition.CenterParent;
+            this.PaletteMode = PaletteMode.Office2010Black;
+
+            // Create controls
+            KryptonLabel lblName = new KryptonLabel { Text = "Simulation Name:", Location = new Point(20, 20), AutoSize = true };
+            txtName = new KryptonTextBox { Location = new Point(150, 17), Width = 250 };
+
+            KryptonLabel lblDataPath = new KryptonLabel { Text = "Data Path:", Location = new Point(20, 50), AutoSize = true };
+            txtDataPath = new KryptonTextBox { Location = new Point(150, 47), Width = 200 };
+
+            btnBrowse = new KryptonButton { Text = "...", Location = new Point(360, 47), Width = 40 };
+            btnBrowse.Click += (s, e) => BrowseForDataFile();
+
+            KryptonLabel lblIterations = new KryptonLabel { Text = "Iterations:", Location = new Point(20, 80), AutoSize = true };
+            numIterations = new KryptonNumericUpDown
+            {
+                Location = new Point(150, 77),
+                Width = 250,
+                Minimum = 1,
+                Maximum = 10000,
+                Value = 100
+            };
+
+            chkUseGPU = new KryptonCheckBox
+            {
+                Text = "Use GPU acceleration if available",
+                Location = new Point(150, 110),
+                Checked = true
+            };
+
+            KryptonButton btnOK = new KryptonButton
+            {
+                Text = "Start Simulation",
+                DialogResult = DialogResult.OK,
+                Location = new Point(150, 170),
+                Width = 120
+            };
+
+            KryptonButton btnCancel = new KryptonButton
+            {
+                Text = "Cancel",
+                DialogResult = DialogResult.Cancel,
+                Location = new Point(280, 170),
+                Width = 80
+            };
+
+            // Add controls to form
+            this.Controls.AddRange(new Control[]
+            {
+                lblName, txtName,
+                lblDataPath, txtDataPath, btnBrowse,
+                lblIterations, numIterations,
+                chkUseGPU,
+                btnOK, btnCancel
+            });
+
+            // Set accept and cancel buttons
+            this.AcceptButton = btnOK;
+            this.CancelButton = btnCancel;
+
+            // Add validation handler
+            btnOK.Click += (s, e) =>
+            {
+                if (string.IsNullOrWhiteSpace(txtName.Text))
+                {
+                    MessageBox.Show("Please enter a name for the simulation.", "Validation Error",
+                                  MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    this.DialogResult = DialogResult.None;
+                    return;
+                }
+
+                // Create simulation parameters
+                Parameters = new SimulationParameters
+                {
+                    SimulationName = txtName.Text,
+                    DataPath = txtDataPath.Text,
+                    Iterations = (int)numIterations.Value,
+                    UseGPU = chkUseGPU.Checked
+                };
+            };
+        }
+
+        private void BrowseForDataFile()
+        {
+            using (OpenFileDialog dialog = new OpenFileDialog())
+            {
+                dialog.Filter = "Data Files|*.csv;*.dat;*.json;*.xml|All Files|*.*";
+                dialog.Title = "Select Data File";
+
+                if (dialog.ShowDialog() == DialogResult.OK)
+                {
+                    txtDataPath.Text = dialog.FileName;
+                }
+            }
         }
     }
 }

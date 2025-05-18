@@ -7,7 +7,7 @@ namespace ParallelComputingEndpoint
 {
     public class ServerScanPanel : Dialog
     {
-        private readonly NetworkService _networkService;
+        private readonly EndpointNetworkService _networkService;
         private readonly LogPanel _logPanel;
         private readonly ListView _serversListView;
         private readonly Label _statusLabel;
@@ -19,7 +19,7 @@ namespace ParallelComputingEndpoint
         private List<ServerInfo> _discoveredServers = new List<ServerInfo>();
         private bool _isScanning = false;
 
-        public ServerScanPanel(NetworkService networkService, LogPanel logPanel)
+        public ServerScanPanel(EndpointNetworkService networkService, LogPanel logPanel)
             : base("Connect to Server", 70, 30) // Made even taller
         {
             _networkService = networkService;

@@ -16,8 +16,8 @@ namespace ParallelComputingServer
             // Initialize services
             var config = new Config.ServerConfig();
             var computeService = new Services.ComputeService();
-            var networkService = new Services.NetworkService(config, computeService);
             var endpointService = new Services.EndpointService(config);
+            var networkService = new Services.NetworkService(config, computeService, endpointService);
             var uiManager = new UI.UIManager(config, networkService, computeService, endpointService);
 
             // Initialize ILGPU

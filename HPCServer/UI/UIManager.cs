@@ -21,6 +21,7 @@ namespace ParallelComputingServer.UI
         private DateTime _lastKeepAliveTime = DateTime.MinValue;
         private ColorScheme _beaconColorScheme;
         private ColorScheme _keepAliveColorScheme;
+        private LogPanel _logPanel; // New log panel
 
         public UIManager(
             ServerConfig config,
@@ -59,13 +60,14 @@ namespace ParallelComputingServer.UI
             };
             top.Add(win);
 
-            // Create status bar with menu options
+            // Create status bar with menu options (add F6 for logs)
             var statusBar = new StatusBar(new StatusItem[] {
                 new StatusItem(Key.F1, "~F1~ Help", ShowHelp),
                 new StatusItem(Key.F2, "~F2~ Settings", ShowSettings),
                 new StatusItem(Key.F3, "~F3~ Clients", ShowClients),
                 new StatusItem(Key.F4, "~F4~ Endpoints", ShowEndpoints),
                 new StatusItem(Key.F5, "~F5~ About", ShowAbout),
+                new StatusItem(Key.F6, "~F6~ Logs", ShowLogs), // New logs menu item
                 new StatusItem(Key.F10, "~F10~ Quit", () => Application.RequestStop())
             });
             top.Add(statusBar);
@@ -79,6 +81,13 @@ namespace ParallelComputingServer.UI
                 Height = Dim.Fill() - 1 // Leave space for status bar
             };
             win.Add(statusPanel);
+
+            // Initialize the log panel (hidden initially)
+            _logPanel = new LogPanel();
+            TuiLogger.Initialize(_logPanel);
+
+            // Log startup message
+            TuiLogger.Log("Server UI initialized");
 
             // Add indicators to the status bar area
             // First create color schemes
@@ -117,11 +126,13 @@ namespace ParallelComputingServer.UI
             top.Add(_keepAliveIndicator);
 
             // Create a timer to update the UI periodically
-            Application.MainLoop.AddTimeout(TimeSpan.FromSeconds(1), (_) =>
+            Application.MainLoop.AddTimeout(TimeSpan.FromMilliseconds(2000), (_) =>
             {
-                // Update the indicators
+                
+               
                 UpdateActivityIndicators();
-                return true; // Return true to keep the timer running
+                
+                return true;
             });
         }
 
@@ -152,6 +163,73 @@ namespace ParallelComputingServer.UI
             _keepAliveIndicator.SetNeedsDisplay();
         }
 
+        // New method to show the logs panel
+        private void ShowLogs()
+        {
+            try
+            {
+                // Create a dialog with specific dimensions
+                var dialog = new Dialog("Server Logs", 80, 25);
+
+                // Create a help label for keyboard shortcuts
+                var helpLabel = new Label("Press A to toggle auto-scroll, C to clear logs")
+                {
+                    X = 1,
+                    Y = 0,
+                    Width = Dim.Fill() - 2
+                };
+                dialog.Add(helpLabel);
+
+                // Make sure _logPanel is initialized before using it
+                if (_logPanel == null)
+                {
+                    _logPanel = new LogPanel();
+                    TuiLogger.Initialize(_logPanel);
+                    TuiLogger.Log("Log panel initialized");
+                }
+
+                // Create a container view to hold the log panel
+                var container = new FrameView()
+                {
+                    X = 0,
+                    Y = 1,
+                    Width = Dim.Fill(),
+                    Height = Dim.Fill() - 3,
+                    CanFocus = true
+                };
+                dialog.Add(container);
+
+                // Set the log panel dimensions
+                _logPanel.X = 0;
+                _logPanel.Y = 0;
+                _logPanel.Width = Dim.Fill();
+                _logPanel.Height = Dim.Fill();
+                _logPanel.CanFocus = true;
+
+                // Add the log panel to the container
+                container.Add(_logPanel);
+
+                // Create a close button
+                var closeButton = new Button("Close")
+                {
+                    X = Pos.Center(),
+                    Y = Pos.AnchorEnd(1)
+                };
+                closeButton.Clicked += () => Application.RequestStop();
+                dialog.Add(closeButton);
+
+                // Set the initial focus to the log panel
+                container.SetFocus();
+
+                // Show the dialog
+                Application.Run(dialog);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error showing logs: {ex.Message}");
+                Console.WriteLine(ex.StackTrace);
+            }
+        }
         private void ShowHelp()
         {
             var dialog = new Dialog("Help", 60, 25); // Increased height
@@ -168,6 +246,7 @@ namespace ParallelComputingServer.UI
                       "F3: View connected clients\n" +
                       "F4: View connected computing endpoints\n" +
                       "F5: Show about information\n" +
+                      "F6: View server logs\n" + // Added logs option
                       "F10: Exit the application\n\n" +
                       "This server manages a network of compute nodes that can\n" +
                       "perform parallel computations using ILGPU.\n\n" +

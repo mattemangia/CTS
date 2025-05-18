@@ -11,8 +11,8 @@ namespace ParallelComputingEndpoint
     {
         private static readonly CancellationTokenSource _cancellationTokenSource = new();
         private static EndpointConfig _config;
-        private static NetworkService _networkService;
-        private static ComputeService _computeService;
+        private static EndpointNetworkService _networkService;
+        private static EndpointComputeService _computeService;
         private static UIManager _uiManager;
 
         static async Task Main(string[] args)
@@ -23,8 +23,8 @@ namespace ParallelComputingEndpoint
             _config = LoadConfig();
 
             // Initialize services
-            _computeService = new ComputeService();
-            _networkService = new NetworkService(_config, _computeService);
+            _computeService = new EndpointComputeService();
+            _networkService = new EndpointNetworkService(_config, _computeService);
             _uiManager = new UIManager(_config, _networkService, _computeService);
 
             // Initialize hardware

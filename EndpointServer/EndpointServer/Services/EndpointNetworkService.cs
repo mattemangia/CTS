@@ -9,10 +9,10 @@ using System.Threading.Tasks;
 
 namespace ParallelComputingEndpoint
 {
-    public class NetworkService
+    public class EndpointNetworkService
     {
         private readonly EndpointConfig _config;
-        private readonly ComputeService _computeService;
+        private readonly EndpointComputeService _computeService;
         private TcpClient _serverConnection;
         private bool _isConnected = false;
         private string _currentTaskId;
@@ -22,7 +22,7 @@ namespace ParallelComputingEndpoint
         public event EventHandler<bool> ConnectionStatusChanged;
         public event EventHandler<string> MessageReceived;
 
-        public NetworkService(EndpointConfig config, ComputeService computeService)
+        public EndpointNetworkService(EndpointConfig config, EndpointComputeService computeService)
         {
             _config = config;
             _computeService = computeService;
@@ -271,31 +271,44 @@ namespace ParallelComputingEndpoint
                             await SendPongAsync();
                             break;
 
-                        case "EXECUTE_TASK":
-                            if (msgObj.TryGetProperty("TaskId", out JsonElement taskIdElement))
-                            {
-                                string taskId = taskIdElement.GetString();
-                                _currentTaskId = taskId;
+                        case "RESTART":
+                            // Send acknowledgment first
+                            await SendAcknowledgmentAsync("Restart command received");
+                            MessageReceived?.Invoke(this, "Restart command received from server. Restarting...");
 
-                                // In a real implementation, we would execute the task
-                                MessageReceived?.Invoke(this, $"Received task: {taskId}");
-
-                                // Simulate task execution
-                                await Task.Delay(3000);
-
-                                // Send completion message
-                                await SendTaskCompletionAsync(taskId);
-                            }
+                            // Schedule restart after a short delay to allow response to be sent
+                            Task.Run(async () => {
+                                await Task.Delay(500);
+                                RestartEndpoint();
+                            });
                             break;
 
-                        case "STOP_TASK":
-                            // In a real implementation, we would stop the current task
-                            _currentTaskId = null;
-                            MessageReceived?.Invoke(this, "Task stopped by server.");
+                        case "SHUTDOWN":
+                            // Send acknowledgment first
+                            await SendAcknowledgmentAsync("Shutdown command received");
+                            MessageReceived?.Invoke(this, "Shutdown command received from server. Shutting down...");
+
+                            // Schedule shutdown after a short delay to allow response to be sent
+                            Task.Run(async () => {
+                                await Task.Delay(500);
+                                ShutdownEndpoint();
+                            });
+                            break;
+
+                        case "DIAGNOSTICS":
+                            // Run diagnostics and send results back
+                            MessageReceived?.Invoke(this, "Running diagnostics requested by server...");
+                            string diagnosticsResult = _computeService.RunBenchmark();
+                            await SendDiagnosticsResultAsync(diagnosticsResult);
+                            break;
+
+                        case "EXECUTE_TASK":
+                            
                             break;
 
                         default:
                             MessageReceived?.Invoke(this, $"Received unknown command: {command}");
+                            await SendErrorResponseAsync($"Unknown command: {command}");
                             break;
                     }
                 }
@@ -304,9 +317,157 @@ namespace ParallelComputingEndpoint
             {
                 Console.WriteLine($"Error processing server message: {ex.Message}");
                 MessageReceived?.Invoke(this, $"Error processing message: {ex.Message}");
+                await SendErrorResponseAsync($"Error processing message: {ex.Message}");
+            }
+        }
+        private async Task SendAcknowledgmentAsync(string message)
+        {
+            try
+            {
+                if (_isConnected && _serverConnection.Connected)
+                {
+                    var ackMessage = new
+                    {
+                        Status = "OK",
+                        Message = message
+                    };
+
+                    var json = JsonSerializer.Serialize(ackMessage);
+                    var bytes = Encoding.UTF8.GetBytes(json);
+
+                    var stream = _serverConnection.GetStream();
+                    await stream.WriteAsync(bytes, 0, bytes.Length);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error sending acknowledgment: {ex.Message}");
+            }
+        }
+        private async Task SendDiagnosticsResultAsync(string diagnosticsResult)
+        {
+            try
+            {
+                if (_isConnected && _serverConnection.Connected)
+                {
+                    var resultMessage = new
+                    {
+                        Status = "OK",
+                        Message = "Diagnostics completed",
+                        DiagnosticsResult = diagnosticsResult
+                    };
+
+                    var json = JsonSerializer.Serialize(resultMessage);
+                    var bytes = Encoding.UTF8.GetBytes(json);
+
+                    var stream = _serverConnection.GetStream();
+                    await stream.WriteAsync(bytes, 0, bytes.Length);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error sending diagnostics result: {ex.Message}");
             }
         }
 
+        private async Task SendErrorResponseAsync(string errorMessage)
+        {
+            try
+            {
+                if (_isConnected && _serverConnection.Connected)
+                {
+                    var errorResponse = new
+                    {
+                        Status = "Error",
+                        Message = errorMessage
+                    };
+
+                    var json = JsonSerializer.Serialize(errorResponse);
+                    var bytes = Encoding.UTF8.GetBytes(json);
+
+                    var stream = _serverConnection.GetStream();
+                    await stream.WriteAsync(bytes, 0, bytes.Length);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error sending error response: {ex.Message}");
+            }
+        }
+        private void RestartEndpoint()
+        {
+            Console.WriteLine("Endpoint restart initiated...");
+
+            try
+            {
+                // Create a restart script based on the platform
+                if (OperatingSystem.IsWindows())
+                {
+                    // Windows batch script
+                    string scriptPath = Path.Combine(Path.GetTempPath(), "restart_endpoint.bat");
+                    string batch = $@"@echo off
+timeout /t 2 /nobreak > nul
+start """" ""{System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName}""
+exit";
+                    File.WriteAllText(scriptPath, batch);
+
+                    var startInfo = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "cmd.exe",
+                        Arguments = $"/c {scriptPath}",
+                        CreateNoWindow = true,
+                        UseShellExecute = true
+                    };
+                    System.Diagnostics.Process.Start(startInfo);
+                }
+                else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+                {
+                    // Linux/macOS shell script
+                    string scriptPath = Path.Combine(Path.GetTempPath(), "restart_endpoint.sh");
+                    string shell = $@"#!/bin/bash
+sleep 2
+nohup ""{System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName}"" > /dev/null 2>&1 &
+exit";
+                    File.WriteAllText(scriptPath, shell);
+
+                    // Make script executable
+                    var chmodInfo = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "chmod",
+                        Arguments = $"+x {scriptPath}",
+                        CreateNoWindow = true,
+                        UseShellExecute = false
+                    };
+                    System.Diagnostics.Process.Start(chmodInfo)?.WaitForExit();
+
+                    var startInfo = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "/bin/bash",
+                        Arguments = scriptPath,
+                        CreateNoWindow = true,
+                        UseShellExecute = true
+                    };
+                    System.Diagnostics.Process.Start(startInfo);
+                }
+                else
+                {
+                    Console.WriteLine("Restart not supported on this platform.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error creating restart script: {ex.Message}");
+            }
+
+            // Exit the application
+            Environment.Exit(42); // Special code for restart
+        }
+
+        private void ShutdownEndpoint()
+        {
+            Console.WriteLine("Endpoint shutdown initiated...");
+            Environment.Exit(0);
+        }
         private async Task SendPongAsync()
         {
             try

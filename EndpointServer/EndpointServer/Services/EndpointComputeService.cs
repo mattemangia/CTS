@@ -7,7 +7,7 @@ using ILGPU.Runtime.CPU;
 
 namespace ParallelComputingEndpoint
 {
-    public class ComputeService : IDisposable
+    public class EndpointComputeService : IDisposable
     {
         private Context _ilgpuContext;
         private Accelerator _accelerator;

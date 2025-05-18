@@ -8,8 +8,8 @@ namespace ParallelComputingEndpoint
     public class UIManager
     {
         private readonly EndpointConfig _config;
-        private readonly NetworkService _networkService;
-        private readonly ComputeService _computeService;
+        private readonly EndpointNetworkService _networkService;
+        private readonly EndpointComputeService _computeService;
 
         private StatusPanel _statusPanel;
         private LogPanel _logPanel;
@@ -19,8 +19,8 @@ namespace ParallelComputingEndpoint
 
         public UIManager(
             EndpointConfig config,
-            NetworkService networkService,
-            ComputeService computeService)
+            EndpointNetworkService networkService,
+            EndpointComputeService computeService)
         {
             _config = config;
             _networkService = networkService;

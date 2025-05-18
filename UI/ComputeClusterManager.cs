@@ -36,7 +36,21 @@ namespace CTS
 
         public event EventHandler<bool> ConnectionStatusChanged;
         public event EventHandler EndpointsUpdated;
-
+        private List<ComputeServer> servers = new List<ComputeServer>();
+        private UdpClient beaconListener;
+        private CancellationTokenSource cts = new CancellationTokenSource();
+        private int beaconPort = 7001;
+        private Timer keepAliveTimer;
+        private const int KeepAliveInterval = 5000; // 5 seconds
+        private bool isRefreshing = false; // Flag to prevent UI refresh during operations
+        private bool isReconnecting = false;
+        private int reconnectAttempts = 0;
+        private const int MaxReconnectAttempts = 3;
+        public event EventHandler<ComputeServer> ServerDiscovered;
+        public event EventHandler<ComputeServer> ServerStatusChanged;
+        public event EventHandler<ComputeServer> ServerRemoved;
+        public event EventHandler<ComputeEndpoint> EndpointStatusChanged;
+        public List<ComputeServer> Servers => servers.ToList();
         public ComputeServer(string name, string ip, int port)
         {
             Name = name;
@@ -110,6 +124,15 @@ namespace CTS
                     return Encoding.UTF8.GetString(responseBuffer, 0, bytesRead);
                 }
             }
+            catch (IOException ex)
+            {
+                Logger.Log($"[ComputeServer] IO Error communicating with {Name}: {ex.Message}");
+
+                // Mark as disconnected but don't try to reconnect here
+                Disconnect();
+
+                throw;
+            }
             catch (Exception ex)
             {
                 Logger.Log($"[ComputeServer] Error sending command to {Name}: {ex.Message}");
@@ -140,41 +163,8 @@ namespace CTS
                     {
                         if (responseObj.TryGetProperty("Endpoints", out JsonElement endpointsElement))
                         {
-                            // Parse the endpoints array
-                            var endpoints = new List<ComputeEndpoint>();
-
-                            foreach (JsonElement endpointElement in endpointsElement.EnumerateArray())
-                            {
-                                try
-                                {
-                                    var endpoint = new ComputeEndpoint(
-                                        endpointElement.GetProperty("Name").GetString(),
-                                        endpointElement.GetProperty("EndpointIP").GetString(),
-                                        endpointElement.GetProperty("EndpointPort").GetInt32()
-                                    );
-
-                                    // Set additional properties
-                                    endpoint.ConnectedAt = endpointElement.TryGetProperty("ConnectedAt", out var connectedAtElem) ?
-                                        connectedAtElem.GetDateTime() : DateTime.Now;
-                                    endpoint.HasGPU = endpointElement.TryGetProperty("GpuEnabled", out var gpuElem) ?
-                                        gpuElem.GetBoolean() : false;
-                                    endpoint.Status = endpointElement.TryGetProperty("Status", out var statusElem) ?
-                                        statusElem.GetString() : "Available";
-                                    endpoint.CpuLoad = endpointElement.TryGetProperty("CpuLoadPercent", out var cpuLoadElem) ?
-                                        cpuLoadElem.GetDouble() : 0;
-
-                                    endpoint.ParentServer = this;
-                                    endpoints.Add(endpoint);
-                                }
-                                catch (Exception ex)
-                                {
-                                    Logger.Log($"[ComputeServer] Error parsing endpoint info: {ex.Message}");
-                                }
-                            }
-
-                            // Update the list
-                            ConnectedEndpoints = endpoints;
-                            EndpointsUpdated?.Invoke(this, EventArgs.Empty);
+                            // Process endpoints with state preservation
+                            UpdateEndpointsFromResponse(endpointsElement);
                         }
                     }
                     else
@@ -194,7 +184,82 @@ namespace CTS
                 Logger.Log($"[ComputeServer] Error refreshing endpoints: {ex.Message}");
             }
         }
+        private void UpdateEndpointsFromResponse(JsonElement endpointsElement)
+        {
+            var newEndpoints = new List<ComputeEndpoint>();
 
+            foreach (JsonElement endpointElement in endpointsElement.EnumerateArray())
+            {
+                try
+                {
+                    string name = endpointElement.GetProperty("Name").GetString();
+                    string ip = endpointElement.GetProperty("EndpointIP").GetString();
+                    int port = endpointElement.GetProperty("EndpointPort").GetInt32();
+
+                    // Look for existing endpoint with the same name or IP
+                    var existingEndpoint = ConnectedEndpoints.FirstOrDefault(e =>
+                        e.Name == name || (e.IP == ip && e.Port == port));
+
+                    ComputeEndpoint endpoint;
+
+                    if (existingEndpoint != null)
+                    {
+                        // Keep the existing endpoint to preserve its connection state
+                        endpoint = existingEndpoint;
+
+                        // Update properties that might have changed
+                        endpoint.Name = name;
+                        endpoint.IP = ip;
+                        endpoint.Port = port;
+                    }
+                    else
+                    {
+                        // Create new endpoint
+                        endpoint = new ComputeEndpoint(name, ip, port);
+                        endpoint.ParentServer = this;
+                    }
+
+                    // Update non-connection state properties
+                    if (endpointElement.TryGetProperty("ConnectedAt", out var connectedAtElem))
+                        endpoint.ConnectedAt = connectedAtElem.GetDateTime();
+
+                    if (endpointElement.TryGetProperty("GpuEnabled", out var gpuElem))
+                        endpoint.HasGPU = gpuElem.GetBoolean();
+
+                    if (endpointElement.TryGetProperty("Status", out var statusElem))
+                        endpoint.Status = statusElem.GetString();
+
+                    if (endpointElement.TryGetProperty("CpuLoadPercent", out var cpuLoadElem))
+                        endpoint.CpuLoad = cpuLoadElem.GetDouble();
+
+                    newEndpoints.Add(endpoint);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[ComputeServer] Error parsing endpoint info: {ex.Message}");
+                }
+            }
+
+            // Replace list but preserve existing endpoints
+            var updatedList = newEndpoints.ToList();
+
+            // Find endpoints that disappeared and preserve them if they're connected
+            foreach (var existingEndpoint in ConnectedEndpoints)
+            {
+                if (!newEndpoints.Any(e => e.Name == existingEndpoint.Name) && existingEndpoint.IsConnected)
+                {
+                    // This endpoint is connected but no longer reported by server
+                    // Keep it for now to maintain connection
+                    Logger.Log($"[ComputeServer] Endpoint {existingEndpoint.Name} connected but not in server list");
+                    updatedList.Add(existingEndpoint);
+                }
+            }
+
+            ConnectedEndpoints = updatedList;
+            EndpointsUpdated?.Invoke(this, EventArgs.Empty);
+        }
+        
+        
         // Fallback method if LIST_ENDPOINTS is not implemented on the server
         private async Task RefreshEndpointsFallbackAsync()
         {
@@ -334,7 +399,9 @@ namespace CTS
             Port = port;
             ConnectedAt = DateTime.Now;
         }
-
+        private bool isReconnecting = false;
+        private int reconnectAttempts = 0;
+        private const int MaxReconnectAttempts = 3;
         /// <summary>
         /// Connect directly to the endpoint (legacy mode)
         /// </summary>
@@ -342,15 +409,17 @@ namespace CTS
         {
             try
             {
-                // If there's a parent server and it's connected, use it
+                // If there's a parent server and it's connected, use it instead of direct connection
                 if (ParentServer != null && ParentServer.IsConnected)
                 {
+                    Logger.Log($"[ComputeEndpoint] Connecting to {Name} through parent server");
                     IsConnected = true;
                     ConnectionStatusChanged?.Invoke(this, true);
                     return;
                 }
 
-                // Otherwise fall back to direct connection (legacy mode)
+                // Otherwise try direct connection (legacy mode)
+                Logger.Log($"[ComputeEndpoint] Connecting directly to {Name} at {IP}:{Port}");
                 Connection = new TcpClient();
                 await Connection.ConnectAsync(IP, Port);
                 Stream = Connection.GetStream();
@@ -365,7 +434,6 @@ namespace CTS
                 throw;
             }
         }
-
         /// <summary>
         /// Disconnect from the endpoint
         /// </summary>
@@ -397,17 +465,20 @@ namespace CTS
         /// </summary>
         public async Task<string> SendCommandAsync(string command)
         {
-            // If we have a parent server, use it instead of direct connection
+            // If we have a parent server, ALWAYS use it instead of direct connection
             if (ParentServer != null && ParentServer.IsConnected)
             {
+                Logger.Log($"[ComputeEndpoint] Sending command to {Name} via parent server");
                 return await SendCommandViaServerAsync(command);
             }
 
+            // Only use direct connection if no parent server is available
             if (!IsConnected)
                 throw new InvalidOperationException("Endpoint is not connected");
 
             try
             {
+                Logger.Log($"[ComputeEndpoint] Sending command directly to {Name}");
                 byte[] commandBytes = Encoding.UTF8.GetBytes(command);
                 await Stream.WriteAsync(commandBytes, 0, commandBytes.Length);
 
@@ -426,13 +497,79 @@ namespace CTS
                 throw;
             }
         }
+        private async Task AttemptReconnectAsync()
+        {
+            if (isReconnecting) return;
 
+            try
+            {
+                isReconnecting = true;
+                reconnectAttempts = 0;
+
+                while (reconnectAttempts < MaxReconnectAttempts && !IsConnected)
+                {
+                    reconnectAttempts++;
+                    Logger.Log($"[ComputeEndpoint] Attempting to reconnect to {Name} (attempt {reconnectAttempts}/{MaxReconnectAttempts})");
+
+                    try
+                    {
+                        // Clean up previous connection resources
+                        Stream?.Dispose();
+                        Connection?.Dispose();
+
+                        // Try reconnecting through parent server first
+                        if (ParentServer != null && ParentServer.IsConnected)
+                        {
+                            IsConnected = true;
+                            ConnectionStatusChanged?.Invoke(this, true);
+                            Logger.Log($"[ComputeEndpoint] Successfully reconnected to {Name} via parent server");
+                            return;
+                        }
+
+                        // Otherwise try direct connection
+                        Connection = new TcpClient();
+                        var connectTask = Connection.ConnectAsync(IP, Port);
+                        var timeoutTask = Task.Delay(5000); // 5 second timeout
+
+                        await Task.WhenAny(connectTask, timeoutTask);
+
+                        if (connectTask.IsCompleted && Connection.Connected)
+                        {
+                            Stream = Connection.GetStream();
+                            IsConnected = true;
+                            ConnectionStatusChanged?.Invoke(this, true);
+                            Logger.Log($"[ComputeEndpoint] Successfully reconnected to {Name}");
+                            return;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[ComputeEndpoint] Reconnection attempt {reconnectAttempts} to {Name} failed: {ex.Message}");
+                    }
+
+                    // Wait before next attempt
+                    await Task.Delay(2000 * reconnectAttempts); // Increasing backoff
+                }
+
+                if (!IsConnected)
+                {
+                    Logger.Log($"[ComputeEndpoint] Failed to reconnect to {Name} after {MaxReconnectAttempts} attempts");
+                }
+            }
+            finally
+            {
+                isReconnecting = false;
+            }
+        }
         /// <summary>
         /// Send command to the endpoint through the parent server
         /// </summary>
         public async Task<string> SendCommandViaServerAsync(string command)
         {
-            if (ParentServer == null || !ParentServer.IsConnected)
+            if (ParentServer == null)
+                throw new InvalidOperationException("Parent server is not assigned");
+
+            if (!ParentServer.IsConnected)
                 throw new InvalidOperationException("Parent server is not connected");
 
             try
@@ -447,6 +584,7 @@ namespace CTS
                     ForwardedCommand = command
                 };
 
+                // Send the forward command to the parent server
                 return await ParentServer.SendCommandAsync(JsonSerializer.Serialize(forwardCommand));
             }
             catch (Exception ex)
@@ -455,7 +593,6 @@ namespace CTS
                 throw;
             }
         }
-
         /// <summary>
         /// Set the busy state of the endpoint
         /// </summary>
@@ -472,16 +609,24 @@ namespace CTS
             try
             {
                 var command = new { Command = "DIAGNOSTICS" };
+                string commandJson = JsonSerializer.Serialize(command);
 
-                // If we have a parent server, use it
+                // If we have a parent server, ALWAYS use it rather than trying direct connection
                 if (ParentServer != null && ParentServer.IsConnected)
                 {
-                    return await SendCommandViaServerAsync(JsonSerializer.Serialize(command));
+                    Logger.Log($"[ComputeEndpoint] Running diagnostics via parent server for {Name}");
+                    return await SendCommandViaServerAsync(commandJson);
                 }
                 else
                 {
-                    // Otherwise use direct connection
-                    return await SendCommandAsync(JsonSerializer.Serialize(command));
+                    // Only use direct connection if no parent server is available
+                    if (!IsConnected)
+                    {
+                        return "Error running diagnostics: Endpoint is not connected";
+                    }
+
+                    Logger.Log($"[ComputeEndpoint] Running diagnostics via direct connection for {Name}");
+                    return await SendCommandAsync(commandJson);
                 }
             }
             catch (Exception ex)
@@ -502,14 +647,15 @@ namespace CTS
         private int beaconPort = 7001;
         private Timer keepAliveTimer;
         private const int KeepAliveInterval = 5000; // 5 seconds
-
+        private bool isRefreshing = false; // 5 seconds
+        private TimeSpan serverTimeoutThreshold = TimeSpan.FromSeconds(30);
         public event EventHandler<ComputeServer> ServerDiscovered;
         public event EventHandler<ComputeServer> ServerStatusChanged;
         public event EventHandler<ComputeServer> ServerRemoved;
         public event EventHandler<ComputeEndpoint> EndpointStatusChanged;
 
         public List<ComputeServer> Servers => servers.ToList(); // Return a copy
-
+        public bool IsRefreshing => isRefreshing;
         public ComputeClusterManager()
         {
             keepAliveTimer = new Timer(KeepAliveTimerCallback, null, KeepAliveInterval, KeepAliveInterval);
@@ -579,7 +725,6 @@ namespace CTS
                 Logger.Log("[ComputeClusterManager] Server discovery service stopped");
             }
         }
-
         public void StopDiscovery()
         {
             Logger.Log("[ComputeClusterManager] Stopping discovery service");
@@ -626,72 +771,207 @@ namespace CTS
                 Logger.Log($"[ComputeClusterManager] Error processing beacon message: {ex.Message}");
             }
         }
-
         private void KeepAliveTimerCallback(object state)
         {
-            // Check for servers that haven't been seen in a while
-            var now = DateTime.Now;
-            var timeoutThreshold = TimeSpan.FromSeconds(15);
+            // Skip refresh if already in progress
+            if (isRefreshing) return;
 
-            for (int i = servers.Count - 1; i >= 0; i--)
+            try
             {
-                var server = servers[i];
-                if (now - server.LastSeen > timeoutThreshold)
+                isRefreshing = true;
+
+                // Check for servers that haven't been seen in a while
+                var now = DateTime.Now;
+
+                for (int i = servers.Count - 1; i >= 0; i--)
                 {
-                    // Server timed out
-                    Logger.Log($"[ComputeClusterManager] Server timed out: {server.Name} ({server.IP}:{server.Port})");
-                    server.Disconnect();
-                    servers.RemoveAt(i);
-                    ServerRemoved?.Invoke(this, server);
+                    var server = servers[i];
+                    if (now - server.LastSeen > serverTimeoutThreshold)
+                    {
+                        // Server timed out
+                        Logger.Log($"[ComputeClusterManager] Server timed out: {server.Name} ({server.IP}:{server.Port})");
+                        server.Disconnect();
+                        servers.RemoveAt(i);
+                        ServerRemoved?.Invoke(this, server);
+                    }
+                }
+
+                // Send keep-alive to connected servers and refresh endpoint information
+                foreach (var server in servers.Where(s => s.IsConnected))
+                {
+                    try
+                    {
+                        // Use a separate task to avoid blocking the timer
+                        Task.Run(async () =>
+                        {
+                            try
+                            {
+                                // Send a simple ping command
+                                var command = new { Command = "PING" };
+                                string response = await server.SendCommandAsync(JsonSerializer.Serialize(command));
+
+                                // Check if response is valid
+                                try
+                                {
+                                    var responseObj = JsonSerializer.Deserialize<JsonElement>(response);
+                                    if (responseObj.TryGetProperty("Status", out JsonElement statusElement) &&
+                                        statusElement.GetString() == "OK")
+                                    {
+                                        // Update last seen time
+                                        server.LastSeen = DateTime.Now;
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    Logger.Log($"[ComputeClusterManager] Error parsing ping response from {server.Name}: {ex.Message}");
+                                }
+
+                                // Refresh endpoint list (less frequently)
+                                if (DateTime.Now.Second % 10 == 0) // Every 10 seconds
+                                {
+                                    await server.RefreshEndpointsAsync();
+                                }
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                // Timeout occurred, but don't disconnect yet
+                                Logger.Log($"[ComputeClusterManager] Keep-alive timeout for {server.Name}");
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Log($"[ComputeClusterManager] Error in keep-alive for {server.Name}: {ex.Message}");
+
+                                // Set server as disconnected but don't remove it yet
+                                if (server.IsConnected)
+                                {
+                                    server.Disconnect();
+                                    ServerStatusChanged?.Invoke(this, server);
+                                }
+                            }
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[ComputeClusterManager] Error scheduling keep-alive for {server.Name}: {ex.Message}");
+                        server.Disconnect();
+                        ServerStatusChanged?.Invoke(this, server);
+                    }
                 }
             }
-
-            // Send keep-alive to connected servers and refresh endpoint information
-            foreach (var server in servers.Where(s => s.IsConnected))
+            finally
             {
-                try
+                isRefreshing = false;
+            }
+        }
+        public async Task ConnectToServerAsync(ComputeServer server)
+        {
+            isRefreshing = true; // Prevent UI refresh during connection
+            try
+            {
+                // Connect to the server first
+                await server.ConnectAsync();
+                ServerStatusChanged?.Invoke(this, server);
+
+                // After connecting to server, wait for endpoints to be populated
+                await server.RefreshEndpointsAsync();
+
+                // Automatically connect to all endpoints of the server
+                if (server.ConnectedEndpoints.Count > 0)
                 {
-                    // Use a separate task to avoid blocking the timer
-                    Task.Run(async () =>
+                    Logger.Log($"[ComputeClusterManager] Connecting to {server.ConnectedEndpoints.Count} endpoints on {server.Name}...");
+
+                    // Connect to endpoints one by one with short delays to avoid overwhelming the server
+                    foreach (var endpoint in server.ConnectedEndpoints)
                     {
                         try
                         {
-                            // Send a simple ping command
-                            var command = new { Command = "PING" };
-                            await server.SendCommandAsync(JsonSerializer.Serialize(command));
-
-                            // Refresh endpoint list every time
-                            await server.RefreshEndpointsAsync();
+                            Logger.Log($"[ComputeClusterManager] Automatically connecting to endpoint {endpoint.Name}...");
+                            endpoint.ParentServer = server; // Ensure parent server is set
+                            await endpoint.ConnectAsync();
+                            EndpointStatusChanged?.Invoke(this, endpoint);
+                            await Task.Delay(300); // Small delay between endpoint connections
                         }
                         catch (Exception ex)
                         {
-                            Logger.Log($"[ComputeClusterManager] Error in keep-alive for {server.Name}: {ex.Message}");
-                            server.Disconnect();
-                            ServerStatusChanged?.Invoke(this, server);
+                            Logger.Log($"[ComputeClusterManager] Error connecting to endpoint {endpoint.Name}: {ex.Message}");
                         }
-                    });
-                }
-                catch (Exception ex)
-                {
-                    Logger.Log($"[ComputeClusterManager] Error scheduling keep-alive for {server.Name}: {ex.Message}");
-                    server.Disconnect();
-                    ServerStatusChanged?.Invoke(this, server);
+                    }
                 }
             }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ComputeClusterManager] Error connecting to server {server.Name}: {ex.Message}");
+            }
+            finally
+            {
+                isRefreshing = false;
+            }
         }
-
-        public async Task ConnectToServerAsync(ComputeServer server)
-        {
-            await server.ConnectAsync();
-            ServerStatusChanged?.Invoke(this, server);
-        }
-
         public void DisconnectServer(ComputeServer server)
         {
-            server.Disconnect();
-            ServerStatusChanged?.Invoke(this, server);
-        }
+            isRefreshing = true; // Prevent UI refresh during disconnection
+            try
+            {
+                // Disconnect all endpoints first
+                foreach (var endpoint in server.ConnectedEndpoints.ToList())
+                {
+                    try
+                    {
+                        endpoint.Disconnect();
+                        EndpointStatusChanged?.Invoke(this, endpoint);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[ComputeClusterManager] Error disconnecting endpoint {endpoint.Name}: {ex.Message}");
+                    }
+                }
 
+                // Then disconnect the server
+                server.Disconnect();
+                ServerStatusChanged?.Invoke(this, server);
+            }
+            finally
+            {
+                isRefreshing = false;
+            }
+        }
+        public async Task ConnectToEndpointAsync(ComputeEndpoint endpoint)
+        {
+            isRefreshing = true; // Prevent UI refresh during connection
+            try
+            {
+                // If parent server is not connected, connect to it first
+                if (endpoint.ParentServer != null && !endpoint.ParentServer.IsConnected)
+                {
+                    await ConnectToServerAsync(endpoint.ParentServer);
+                }
+
+                // Now connect to the endpoint
+                await endpoint.ConnectAsync();
+                EndpointStatusChanged?.Invoke(this, endpoint);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ComputeClusterManager] Error connecting to endpoint {endpoint.Name}: {ex.Message}");
+            }
+            finally
+            {
+                isRefreshing = false;
+            }
+        }
+        public void DisconnectEndpoint(ComputeEndpoint endpoint)
+        {
+            isRefreshing = true; // Prevent UI refresh during disconnection
+            try
+            {
+                endpoint.Disconnect();
+                EndpointStatusChanged?.Invoke(this, endpoint);
+            }
+            finally
+            {
+                isRefreshing = false;
+            }
+        }
         public async Task RestartServerAsync(ComputeServer server)
         {
             if (!server.IsConnected)
@@ -704,6 +984,26 @@ namespace CTS
             // The server will disconnect and reconnect, but we'll monitor it via beacon
             server.Disconnect();
             ServerStatusChanged?.Invoke(this, server);
+        }
+        public async Task RestartEndpointAsync(ComputeEndpoint endpoint)
+        {
+            if (!endpoint.IsConnected)
+                await endpoint.ConnectAsync();
+
+            try
+            {
+                // Send restart command
+                var command = new { Command = "RESTART" };
+                await endpoint.SendCommandAsync(JsonSerializer.Serialize(command));
+
+                // The endpoint will disconnect and reconnect
+                endpoint.Disconnect();
+                EndpointStatusChanged?.Invoke(this, endpoint);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ComputeClusterManager] Error restarting endpoint {endpoint.Name}: {ex.Message}");
+            }
         }
 
         public async Task ShutdownServerAsync(ComputeServer server)
@@ -719,7 +1019,26 @@ namespace CTS
             server.Disconnect();
             ServerStatusChanged?.Invoke(this, server);
         }
+        public async Task ShutdownEndpointAsync(ComputeEndpoint endpoint)
+        {
+            if (!endpoint.IsConnected)
+                await endpoint.ConnectAsync();
 
+            try
+            {
+                // Send shutdown command
+                var command = new { Command = "SHUTDOWN" };
+                await endpoint.SendCommandAsync(JsonSerializer.Serialize(command));
+
+                // The endpoint will shut down
+                endpoint.Disconnect();
+                EndpointStatusChanged?.Invoke(this, endpoint);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ComputeClusterManager] Error shutting down endpoint {endpoint.Name}: {ex.Message}");
+            }
+        }
         public async Task<string> RunServerDiagnosticsAsync(ComputeServer server)
         {
             if (!server.IsConnected)
@@ -744,19 +1063,66 @@ namespace CTS
 
         public async Task<string> RunEndpointDiagnosticsAsync(ComputeEndpoint endpoint)
         {
-            if (endpoint.ParentServer == null || !endpoint.ParentServer.IsConnected)
-                throw new InvalidOperationException("Parent server is not connected");
-
             try
             {
-                return await endpoint.RunDiagnosticsAsync();
+                // Set busy state
+                endpoint.SetBusy(true);
+                EndpointStatusChanged?.Invoke(this, endpoint);
+
+                Logger.Log($"[ComputeClusterManager] Running diagnostics on endpoint {endpoint.Name}...");
+
+                // Make sure we have a parent server connection
+                if (endpoint.ParentServer == null || !endpoint.ParentServer.IsConnected)
+                {
+                    Logger.Log($"[ComputeClusterManager] Parent server is not connected for endpoint {endpoint.Name}");
+                    return "Error running diagnostics: Parent server is not connected";
+                }
+
+                // Use the server to run diagnostics on the endpoint
+                var diagnosticsCommand = new
+                {
+                    Command = "ENDPOINT_DIAGNOSTICS",
+                    EndpointName = endpoint.Name,
+                    EndpointIP = endpoint.IP,
+                    EndpointPort = endpoint.Port
+                };
+
+                // Send command to the server and await response
+                string responseJson = await endpoint.ParentServer.SendCommandAsync(
+                    JsonSerializer.Serialize(diagnosticsCommand));
+
+                // Parse the response
+                try
+                {
+                    var responseObj = JsonSerializer.Deserialize<JsonElement>(responseJson);
+
+                    // If we have a DiagnosticsResult field, return it
+                    if (responseObj.TryGetProperty("DiagnosticsResult", out var resultElement))
+                    {
+                        string diagnosticsResult = resultElement.GetString();
+                        return diagnosticsResult;
+                    }
+
+                    // Otherwise, return the full response
+                    return responseJson;
+                }
+                catch
+                {
+                    // If parsing fails, just return the raw response
+                    return responseJson;
+                }
             }
             catch (Exception ex)
             {
+                Logger.Log($"[ComputeClusterManager] Error running diagnostics on endpoint {endpoint.Name}: {ex.Message}");
                 return $"Error running diagnostics: {ex.Message}";
             }
+            finally
+            {
+                endpoint.SetBusy(false);
+                EndpointStatusChanged?.Invoke(this, endpoint);
+            }
         }
-
         public async Task<bool> LaunchSimulationAsync(ComputeServer server, SimulationParameters parameters)
         {
             if (!server.IsConnected)
@@ -1090,9 +1456,15 @@ namespace CTS
             };
             return button;
         }
-
         private void RefreshTimer_Tick(object sender, EventArgs e)
         {
+            // Skip refresh if connect/disconnect operations are in progress
+            if (manager.IsRefreshing) return;
+
+            // Keep track of the currently selected nodes
+            var selectedServerIds = selectedServers.Select(s => s.IP + ":" + s.Port).ToList();
+            var selectedEndpointIds = selectedEndpoints.Select(x => x.Name).ToList();
+
             // Update the node controls
             foreach (var kvp in serverControls)
             {
@@ -1110,7 +1482,6 @@ namespace CTS
             // Refresh the panel to update connection lines
             topologyPanel.Parent.Refresh();
         }
-
         private void UpdateButtonStates()
         {
             bool hasServerSelected = selectedServers.Count > 0;
@@ -1350,46 +1721,55 @@ namespace CTS
                 UpdateButtonStates();
             }
         }
-
         private async void btnConnect_Click(object sender, EventArgs e)
         {
-            // Connect to selected servers
-            foreach (var server in selectedServers.ToList())
+            // Disable button during connection to prevent multiple clicks
+            btnConnect.Enabled = false;
+
+            try
             {
-                if (!server.IsConnected)
+                // Connect to selected servers
+                foreach (var server in selectedServers.ToList())
                 {
-                    try
+                    if (!server.IsConnected)
                     {
-                        LogMessage($"Connecting to server {server.Name}...");
-                        await manager.ConnectToServerAsync(server);
-                        LogMessage($"Connected to server {server.Name} successfully");
+                        try
+                        {
+                            LogMessage($"Connecting to server {server.Name}...");
+                            await manager.ConnectToServerAsync(server);
+                            LogMessage($"Connected to server {server.Name} successfully");
+                        }
+                        catch (Exception ex)
+                        {
+                            LogMessage($"Failed to connect to server {server.Name}: {ex.Message}");
+                        }
                     }
-                    catch (Exception ex)
+                }
+
+                // Connect to selected endpoints
+                foreach (var endpoint in selectedEndpoints.ToList())
+                {
+                    if (!endpoint.IsConnected)
                     {
-                        LogMessage($"Failed to connect to server {server.Name}: {ex.Message}");
+                        try
+                        {
+                            LogMessage($"Connecting to endpoint {endpoint.Name}...");
+                            await manager.ConnectToEndpointAsync(endpoint);
+                            LogMessage($"Connected to endpoint {endpoint.Name} successfully");
+                        }
+                        catch (Exception ex)
+                        {
+                            LogMessage($"Failed to connect to endpoint {endpoint.Name}: {ex.Message}");
+                        }
                     }
                 }
             }
-
-            // Connect to selected endpoints
-            foreach (var endpoint in selectedEndpoints.ToList())
+            finally
             {
-                if (!endpoint.IsConnected)
-                {
-                    try
-                    {
-                        LogMessage($"Connecting to endpoint {endpoint.Name}...");
-                        await endpoint.ConnectAsync(); // This will use parent server if available
-                        LogMessage($"Connected to endpoint {endpoint.Name} successfully");
-                    }
-                    catch (Exception ex)
-                    {
-                        LogMessage($"Failed to connect to endpoint {endpoint.Name}: {ex.Message}");
-                    }
-                }
+                btnConnect.Enabled = true;
+                UpdateButtonStates();
             }
         }
-
         private void btnDisconnect_Click(object sender, EventArgs e)
         {
             // Disconnect selected servers
@@ -1550,15 +1930,13 @@ namespace CTS
                     try
                     {
                         LogMessage($"Running diagnostics on endpoint {endpoint.Name}...");
-                        endpoint.SetBusy(true);
-                        string diagnosticResult = await endpoint.RunDiagnosticsAsync();
+                        // Use the manager's method to run diagnostics on endpoints
+                        string diagnosticResult = await manager.RunEndpointDiagnosticsAsync(endpoint);
                         LogMessage($"Diagnostics for endpoint {endpoint.Name}:");
                         LogMessage(diagnosticResult);
-                        endpoint.SetBusy(false);
                     }
                     catch (Exception ex)
                     {
-                        endpoint.SetBusy(false);
                         LogMessage($"Failed to run diagnostics on endpoint {endpoint.Name}: {ex.Message}");
                     }
                 }
@@ -1566,7 +1944,6 @@ namespace CTS
 
             btnRunDiagnostics.Enabled = true;
         }
-
         private void btnAddManually_Click(object sender, EventArgs e)
         {
             // Show dialog to add server manually

@@ -7,8 +7,8 @@ namespace ParallelComputingEndpoint
     public class StatusPanel : FrameView
     {
         private readonly EndpointConfig _config;
-        private readonly NetworkService _networkService;
-        private readonly ComputeService _computeService;
+        private readonly EndpointNetworkService _networkService;
+        private readonly EndpointComputeService _computeService;
         private readonly TableView _tableView;
         private readonly DataTable _dataTable;
         private readonly Label _cpuLoadLabel;
@@ -16,8 +16,8 @@ namespace ParallelComputingEndpoint
 
         public StatusPanel(
             EndpointConfig config,
-            NetworkService networkService,
-            ComputeService computeService) : base("Status")
+            EndpointNetworkService networkService,
+            EndpointComputeService computeService) : base("Status")
         {
             _config = config;
             _networkService = networkService;

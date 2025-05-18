@@ -31,7 +31,7 @@ namespace ParallelComputingServer.Services
             var listener = new TcpListener(IPAddress.Any, _config.EndpointPort);
             listener.Start();
 
-            Console.WriteLine($"Endpoint service listening on port {_config.EndpointPort}...");
+            //Console.WriteLine($"Endpoint service listening on port {_config.EndpointPort}...");
 
             try
             {
@@ -58,14 +58,14 @@ namespace ParallelComputingServer.Services
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Endpoint service error: {ex.Message}");
+                //Console.WriteLine($"Endpoint service error: {ex.Message}");
             }
             finally
             {
                 listener.Stop();
             }
 
-            Console.WriteLine("Endpoint service stopped.");
+            //Console.WriteLine("Endpoint service stopped.");
         }
 
         private async Task HandleEndpointAsync(TcpClient client, CancellationToken cancellationToken)
@@ -75,7 +75,7 @@ namespace ParallelComputingServer.Services
                 // Get endpoint connection info
                 var endpoint = (IPEndPoint)client.Client.RemoteEndPoint;
 
-                Console.WriteLine($"Endpoint connected from: {endpoint.Address}:{endpoint.Port}, waiting for registration...");
+                //Console.WriteLine($"Endpoint connected from: {endpoint.Address}:{endpoint.Port}, waiting for registration...");
 
                 // Wait for initial registration message
                 using var stream = client.GetStream();
@@ -91,7 +91,7 @@ namespace ParallelComputingServer.Services
                 try
                 {
                     // Log the incoming message for debugging
-                    Console.WriteLine($"Received endpoint registration: {message}");
+                    //Console.WriteLine($"Received endpoint registration: {message}");
 
                     // Try to parse registration message
                     var registrationObj = JsonSerializer.Deserialize<JsonElement>(message);
@@ -130,13 +130,13 @@ namespace ParallelComputingServer.Services
                         {
                             // Use the listening port provided by the endpoint
                             endpointInfo.EndpointPort = listeningPortElement.GetInt32();
-                            Console.WriteLine($"Registered endpoint {endpointInfo.Name} listening port: {endpointInfo.EndpointPort}");
+                            //Console.WriteLine($"Registered endpoint {endpointInfo.Name} listening port: {endpointInfo.EndpointPort}");
                         }
                         else
                         {
                             // Fallback to the source port if no listening port is provided (for backward compatibility)
                             endpointInfo.EndpointPort = endpoint.Port;
-                            Console.WriteLine($"Warning: Endpoint {endpointInfo.Name} did not provide a listening port, using source port: {endpointInfo.EndpointPort}");
+                            //Console.WriteLine($"Warning: Endpoint {endpointInfo.Name} did not provide a listening port, using source port: {endpointInfo.EndpointPort}");
                         }
 
                         // Send registration confirmation
@@ -155,12 +155,12 @@ namespace ParallelComputingServer.Services
                         _connectedEndpoints.Add(endpointInfo);
                         EndpointsUpdated?.Invoke(this, EventArgs.Empty);
 
-                        Console.WriteLine($"Endpoint registered: {endpointInfo.Name} ({endpointInfo.EndpointIP})");
+                        //Console.WriteLine($"Endpoint registered: {endpointInfo.Name} ({endpointInfo.EndpointIP})");
                     }
                     else
                     {
                         // Invalid registration
-                        Console.WriteLine($"Invalid registration message received: {message}");
+                        //Console.WriteLine($"Invalid registration message received: {message}");
                         var errorResponse = "{\"Status\":\"Error\",\"Message\":\"Invalid registration message. Expected REGISTER command.\"}";
                         var errorBytes = Encoding.UTF8.GetBytes(errorResponse);
                         await stream.WriteAsync(errorBytes, cancellationToken);
@@ -169,7 +169,7 @@ namespace ParallelComputingServer.Services
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Error processing endpoint registration: {ex.Message}");
+                    //Console.WriteLine($"Error processing endpoint registration: {ex.Message}");
                     var errorResponse = $"{{\"Status\":\"Error\",\"Message\":\"{ex.Message}\"}}";
                     var errorBytes = Encoding.UTF8.GetBytes(errorResponse);
                     await stream.WriteAsync(errorBytes, cancellationToken);
@@ -185,7 +185,7 @@ namespace ParallelComputingServer.Services
                         if (bytesRead == 0) break; // Endpoint disconnected
 
                         message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                        Console.WriteLine($"Received message from endpoint: {message}");
+                        //Console.WriteLine($"Received message from endpoint: {message}");
 
                         // Check if this is a status update
                         if (message.Contains("\"Command\":\"STATUS_UPDATE\""))
@@ -226,12 +226,12 @@ namespace ParallelComputingServer.Services
                 {
                     _connectedEndpoints.Remove(endpointInfo);
                     EndpointsUpdated?.Invoke(this, EventArgs.Empty);
-                    Console.WriteLine($"Endpoint disconnected: {endpointInfo.Name} ({endpointInfo.EndpointIP})");
+                    //Console.WriteLine($"Endpoint disconnected: {endpointInfo.Name} ({endpointInfo.EndpointIP})");
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error handling endpoint: {ex.Message}");
+                //Console.WriteLine($"Error handling endpoint: {ex.Message}");
             }
             finally
             {
@@ -249,7 +249,7 @@ namespace ParallelComputingServer.Services
                     return "{\"Status\":\"Error\",\"Message\":\"Endpoint not found\"}";
                 }
 
-                Console.WriteLine($"Connecting to endpoint at {endpoint.EndpointIP}:{endpoint.EndpointPort}");
+                //Console.WriteLine($"Connecting to endpoint at {endpoint.EndpointIP}:{endpoint.EndpointPort}");
                 using var client = new TcpClient();
 
                 // Connect with timeout
@@ -260,18 +260,18 @@ namespace ParallelComputingServer.Services
 
                 if (timeoutTask.IsCompleted)
                 {
-                    Console.WriteLine($"Connection to endpoint {endpoint.Name} timed out");
+                    //Console.WriteLine($"Connection to endpoint {endpoint.Name} timed out");
                     return "{\"Status\":\"Error\",\"Message\":\"Connection to endpoint timed out\"}";
                 }
 
                 if (!client.Connected)
                 {
-                    Console.WriteLine($"Failed to connect to endpoint {endpoint.Name}");
+                    //Console.WriteLine($"Failed to connect to endpoint {endpoint.Name}");
                     return "{\"Status\":\"Error\",\"Message\":\"Failed to connect to endpoint\"}";
                 }
 
                 // Connected successfully
-                Console.WriteLine($"Connected to endpoint {endpoint.Name}, sending {commandType} command");
+                //Console.WriteLine($"Connected to endpoint {endpoint.Name}, sending {commandType} command");
                 using NetworkStream stream = client.GetStream();
                 var command = new { Command = commandType };
                 string commandJson = JsonSerializer.Serialize(command);
@@ -279,7 +279,7 @@ namespace ParallelComputingServer.Services
                 await stream.WriteAsync(commandBytes, 0, commandBytes.Length);
 
                 // Read response with timeout
-                Console.WriteLine($"Waiting for response from endpoint {endpoint.Name}");
+                //Console.WriteLine($"Waiting for response from endpoint {endpoint.Name}");
                 var buffer = new byte[8192];
                 var readTask = stream.ReadAsync(buffer, 0, buffer.Length);
                 timeoutTask = Task.Delay(5000);
@@ -288,7 +288,7 @@ namespace ParallelComputingServer.Services
 
                 if (timeoutTask.IsCompleted)
                 {
-                    Console.WriteLine($"Reading response from endpoint {endpoint.Name} timed out");
+                    //Console.WriteLine($"Reading response from endpoint {endpoint.Name} timed out");
                     // For actions like RESTART/SHUTDOWN, timeout might be expected
                     return "{\"Status\":\"OK\",\"Message\":\"Command sent to endpoint (no response received)\"}";
                 }
@@ -296,13 +296,13 @@ namespace ParallelComputingServer.Services
                 // Got response
                 int bytesRead = await readTask;
                 string response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                Console.WriteLine($"Received {bytesRead} bytes response from endpoint {endpoint.Name}");
+                //Console.WriteLine($"Received {bytesRead} bytes response from endpoint {endpoint.Name}");
 
                 return response;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error sending {commandType} command to endpoint {endpoint.Name}: {ex.Message}");
+                //Console.WriteLine($"Error sending {commandType} command to endpoint {endpoint.Name}: {ex.Message}");
                 return $"{{\"Status\":\"Error\",\"Message\":\"Error sending {commandType} command to endpoint: {ex.Message}\"}}";
             }
         }
@@ -337,7 +337,7 @@ namespace ParallelComputingServer.Services
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error updating endpoint status: {ex.Message}");
+                //Console.WriteLine($"Error updating endpoint status: {ex.Message}");
             }
         }
 
@@ -366,7 +366,7 @@ namespace ParallelComputingServer.Services
                             if (commandObj.TryGetProperty("TaskId", out JsonElement taskIdElement))
                             {
                                 string taskId = taskIdElement.GetString();
-                                Console.WriteLine($"Task {taskId} completed by endpoint {endpointInfo.Name}");
+                                //Console.WriteLine($"Task {taskId} completed by endpoint {endpointInfo.Name}");
                                 return "{\"Status\":\"OK\",\"Message\":\"Task result received\"}";
                             }
                             return "{\"Status\":\"Error\",\"Message\":\"Missing task ID\"}";
@@ -380,7 +380,7 @@ namespace ParallelComputingServer.Services
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error processing endpoint message: {ex.Message}");
+                //Console.WriteLine($"Error processing endpoint message: {ex.Message}");
                 return $"{{\"Status\":\"Error\",\"Message\":\"{ex.Message}\"}}";
             }
         }

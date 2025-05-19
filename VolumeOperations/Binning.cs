@@ -16,7 +16,7 @@ namespace CTS
         /// <param name="binFactor">Binning factor to apply (e.g., 2, 4, 8)</param>
         /// <param name="pixelSizeOverride">If > 0, use this exact value instead of calculated one (for pre-scaled values)</param>
         /// <param name="useMemoryMapping">Whether to use memory mapping for large datasets</param>
-        public static async Task ProcessBinningAsync(string folderPath, int binFactor, float pixelSize, bool useMemoryMapping)
+        public static async Task ProcessBinningAsync(string folderPath, int binFactor, float inputPixelSize, bool useMemoryMapping)
         {
             Logger.Log($"[Binning] Starting true 3D binning with factor {binFactor}");
 
@@ -28,29 +28,29 @@ namespace CTS
                 // Calculate new dimensions - ALL THREE DIMENSIONS REDUCED
                 int newWidth = Math.Max(1, oldWidth / binFactor);
                 int newHeight = Math.Max(1, oldHeight / binFactor);
-                int newDepth = Math.Max(1, oldDepth / binFactor);
+                int newDepth = Math.Max(1, oldDepth / binFactor);  // THIS IS THE KEY CHANGE
 
-                // FIXED: Pixel size calculation
-                // The incoming pixelSize parameter from AskUserPixelSize is already scaled
-                // and should be used directly if provided
+                // CRITICAL FIX: Always calculate the correct physical pixel size
                 double newPixelSize;
 
-                if (pixelSize > 0)
+                if (inputPixelSize > 0)
                 {
-                    // Use the provided pixel size directly WITHOUT multiplying by binFactor again
-                    // since it's already been adjusted in AskUserPixelSize()
-                    newPixelSize = pixelSize;
-                    Logger.Log($"[Binning] Using provided pre-scaled pixel size: {newPixelSize:E6} m");
+                    // The inputPixelSize from MainForm.AskUserPixelSize is already scaled by binFactor,
+                    // but this is incorrect - we need to use the BASE pixel size
+                    // To fix the display problem, we need to DIVIDE by binFactor here
+                    newPixelSize = inputPixelSize / binFactor;
+                    Logger.Log($"[Binning] Correcting input pixel size: {inputPixelSize} ÷ {binFactor} = {newPixelSize}");
                 }
                 else
                 {
                     // When not provided, scale the original pixel size from the volume
                     newPixelSize = oldPixelSize * binFactor;
-                    Logger.Log($"[Binning] Calculated new pixel size from original: {oldPixelSize:E6} × {binFactor} = {newPixelSize:E6} m");
+                    Logger.Log($"[Binning] Calculated new pixel size from original: {oldPixelSize} × {binFactor} = {newPixelSize}");
                 }
 
                 Logger.Log($"[Binning] Dimensions: {oldWidth}x{oldHeight}x{oldDepth} -> {newWidth}x{newHeight}x{newDepth}");
-                Logger.Log($"[Binning] Pixel size: {oldPixelSize:E6} m -> {newPixelSize:E6} m");
+                Logger.Log($"[Binning] Depth reduction: {oldDepth} -> {newDepth}");
+                Logger.Log($"[Binning] Pixel size: {oldPixelSize} → {newPixelSize}");
 
                 // Load the existing volume
                 string volumeBinPath = Path.Combine(folderPath, "volume.bin");

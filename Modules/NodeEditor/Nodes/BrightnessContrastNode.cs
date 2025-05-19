@@ -23,13 +23,6 @@ namespace CTS.Modules.NodeEditor.Nodes
         private NumericUpDown blackPointNumeric;
         private NumericUpDown whitePointNumeric;
 
-        // Node input/output data
-        private IGrayscaleVolumeData inputVolumeData;
-        private IGrayscaleVolumeData outputVolumeData;
-
-        // Public property to expose output data to other nodes
-        public IGrayscaleVolumeData VolumeData => outputVolumeData;
-
         public BrightnessContrastNode(Point position) : base(position)
         {
             Color = Color.FromArgb(100, 150, 255); // Blue theme for processing nodes
@@ -40,6 +33,7 @@ namespace CTS.Modules.NodeEditor.Nodes
             AddInputPin("Volume", Color.LightBlue);
             AddOutputPin("Volume", Color.LightBlue);
         }
+
         public override Dictionary<string, string> GetNodeParameters()
         {
             var parameters = new Dictionary<string, string>
@@ -51,6 +45,7 @@ namespace CTS.Modules.NodeEditor.Nodes
             };
             return parameters;
         }
+
         public override Control CreatePropertyPanel()
         {
             var panel = new Panel
@@ -173,20 +168,7 @@ namespace CTS.Modules.NodeEditor.Nodes
                 }
             };
 
-            // Update data from inputs
-            var updateButton = new Button
-            {
-                Text = "Update Input",
-                Dock = DockStyle.Top,
-                Height = 30,
-                Margin = new Padding(5, 5, 5, 0),
-                BackColor = Color.FromArgb(60, 60, 60),
-                ForeColor = Color.White
-            };
-            updateButton.Click += (s, e) => {
-                GetInputData();
-            };
-
+            // Process button for manual testing
             var processButton = new Button
             {
                 Text = "Process Dataset",
@@ -201,7 +183,6 @@ namespace CTS.Modules.NodeEditor.Nodes
 
             // Add controls to panel (in reverse order because of DockStyle.Top)
             panel.Controls.Add(processButton);
-            panel.Controls.Add(updateButton);
             panel.Controls.Add(whitePointNumeric);
             panel.Controls.Add(whitePointLabel);
             panel.Controls.Add(blackPointNumeric);
@@ -215,189 +196,45 @@ namespace CTS.Modules.NodeEditor.Nodes
             return panel;
         }
 
-        // Method to get data from input pins
-        private void GetInputData()
-        {
-            // Clear existing input data
-            inputVolumeData = null;
-
-            // Get connected nodes
-            var connectedNodes = GetConnectedInputNodes();
-
-            // Process each connected node based on pin name
-            foreach (var connection in connectedNodes)
-            {
-                if (connection.Key == "Volume")
-                {
-                    var node = connection.Value;
-
-                    // Try to get volume data from the connected node through reflection
-                    Type nodeType = node.GetType();
-
-                    // First check for direct VolumeData property
-                    var volumeDataProperty = nodeType.GetProperty("VolumeData");
-                    if (volumeDataProperty != null)
-                    {
-                        inputVolumeData = volumeDataProperty.GetValue(node) as IGrayscaleVolumeData;
-                    }
-
-                    // If not found, try common alternatives
-                    if (inputVolumeData == null)
-                    {
-                        // Try other common property names
-                        string[] possiblePropertyNames = { "Volume", "GrayscaleData", "Data" };
-                        foreach (var propName in possiblePropertyNames)
-                        {
-                            var property = nodeType.GetProperty(propName);
-                            if (property != null)
-                            {
-                                inputVolumeData = property.GetValue(node) as IGrayscaleVolumeData;
-                                if (inputVolumeData != null)
-                                    break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (inputVolumeData != null)
-            {
-                MessageBox.Show("Successfully retrieved input volume data!",
-                    "Input Updated", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            else
-            {
-                MessageBox.Show("No valid input volume data found! Make sure a node providing volume data is connected to the Volume input.",
-                    "Input Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }
-        }
-
-        // Helper method to get nodes connected to input pins
-        private Dictionary<string, BaseNode> GetConnectedInputNodes()
-        {
-            var result = new Dictionary<string, BaseNode>();
-
-            // Get the node editor instance
-            var nodeEditor = FindNodeEditorForm();
-            if (nodeEditor == null) return result;
-
-            // Get connections list through reflection
-            var connectionsField = nodeEditor.GetType().GetField("connections",
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-
-            if (connectionsField == null) return result;
-
-            var connections = connectionsField.GetValue(nodeEditor) as List<NodeConnection>;
-            if (connections == null) return result;
-
-            // Find connections to this node's input pins
-            foreach (var input in this.inputs)
-            {
-                foreach (var conn in connections)
-                {
-                    if (conn.To == input)
-                    {
-                        // Found a connection to this input
-                        result[input.Name] = conn.From.Node;
-                        break;
-                    }
-                }
-            }
-
-            return result;
-        }
-
-        private Control FindNodeEditorForm()
-        {
-            // Look for the parent NodeEditorForm
-            Control parent = this.GetPropertyPanel()?.Parent;
-            while (parent != null && parent.GetType().Name != "NodeEditorForm")
-            {
-                parent = parent.Parent;
-            }
-            return parent;
-        }
-
-        // Helper method to get the property panel for this node
-        private Control GetPropertyPanel()
-        {
-            // Find the property panel for this node in the NodeEditorForm
-            var nodeEditor = FindNodeEditorForm();
-            if (nodeEditor == null) return null;
-
-            // Get propertiesPanel through reflection
-            var propertiesPanelField = nodeEditor.GetType().GetField("propertiesPanel",
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-
-            if (propertiesPanelField == null) return null;
-
-            return propertiesPanelField.GetValue(nodeEditor) as Control;
-        }
-
-        public override async void Execute()
+        public override void Execute()
         {
             try
             {
-                // Make sure we have input data
-                if (inputVolumeData == null)
-                {
-                    GetInputData();
-                }
+                // Get the input volume data using the standard BaseNode.GetInputData method
+                var inputVolumeData = GetInputData("Volume") as IGrayscaleVolumeData;
 
                 if (inputVolumeData == null)
                 {
-                    MessageBox.Show("No volume data available to process. Please connect a node providing volume data.",
-                        "Process Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    Logger.Log("[BrightnessContrastNode] No volume data available to process.");
                     return;
                 }
 
-                // Show progress dialog
-                using (var progress = new ProgressFormWithProgress("Applying brightness and contrast adjustments..."))
-                {
-                    progress.Show();
+                // Process the dataset with current adjustment settings
+                var outputVolumeData = ProcessVolume(
+                    inputVolumeData,
+                    Brightness,
+                    Contrast,
+                    BlackPoint,
+                    WhitePoint);
 
-                    // Use the progress form directly as IProgress<int>
-                    try
-                    {
-                        // Process the dataset with current adjustment settings
-                        outputVolumeData = await Task.Run(() =>
-                            ProcessVolumeHeadless(
-                                inputVolumeData,
-                                Brightness,
-                                Contrast,
-                                BlackPoint,
-                                WhitePoint,
-                                progress)); // Pass progress directly as IProgress<int>
+                // Set the output data using the proper BaseNode.SetOutputData method
+                SetOutputData("Volume", outputVolumeData);
 
-                        MessageBox.Show("Dataset processed successfully with brightness/contrast adjustments.",
-                            "Process Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    }
-                    catch (Exception ex)
-                    {
-                        MessageBox.Show($"Failed to process dataset: {ex.Message}",
-                            "Process Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    }
-                    finally
-                    {
-                        progress.Close();
-                    }
-                }
+                Logger.Log("[BrightnessContrastNode] Dataset processed successfully.");
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error preparing to process dataset: {ex.Message}",
-                    "Process Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Logger.Log($"[BrightnessContrastNode] Error processing dataset: {ex.Message}");
             }
         }
 
         // Process a volume with brightness/contrast adjustments
-        private ChunkedVolume ProcessVolumeHeadless(
+        private ChunkedVolume ProcessVolume(
             IGrayscaleVolumeData inputVolume,
             int brightness,
             int contrast,
             byte blackPoint,
-            byte whitePoint,
-            IProgress<int> progress = null)
+            byte whitePoint)
         {
             // Create a new volume to hold the adjusted data
             int width = inputVolume.Width;
@@ -429,9 +266,6 @@ namespace CTS.Modules.NodeEditor.Nodes
                         newVolume[x, y, z] = (byte)Math.Max(0, Math.Min(255, adjustedValue));
                     }
                 }
-
-                // Report progress if requested
-                progress?.Report((z + 1) * 100 / depth);
             }
 
             Logger.Log($"[BrightnessContrastNode] Processed volume with brightness={brightness}, contrast={contrast}, blackPoint={blackPoint}, whitePoint={whitePoint}");

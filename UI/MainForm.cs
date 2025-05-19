@@ -36,6 +36,8 @@ namespace CTS
         public int SelectedBinningFactor { get; set; } = 1;
         private OrthogonalViewPanel orthogonalView;
         Panel infoPanel;
+        private ComputeClusterManager clusterManager;
+        public List<ComputeServer> ComputeServers { get; private set; } = new List<ComputeServer>();
         public string CurrentPath { get; private set; } = "";
         private bool useMemoryMapping = true;
         private VerticalToolbar verticalToolbar;
@@ -248,7 +250,8 @@ namespace CTS
                 this.DoubleBuffered = true;
                 var km = new KryptonManager();
                 km.GlobalPaletteMode = PaletteMode.Office2010BlackDarkMode;
-
+                ComputeEndpoints = new List<ComputeEndpoint>();
+                ComputeServers = new List<ComputeServer>();
                 // Create and configure the main layout
                 SetupMainLayout();
                 this.Controls.Add(mainLayout);
@@ -5169,6 +5172,85 @@ namespace CTS
         }
         #endregion
         #region NodeEditor
+        public void SetClusterManager(ComputeClusterManager manager)
+        {
+            clusterManager = manager;
+            Logger.Log($"[MainForm] Received ComputeClusterManager reference");
+
+            // Register for server updates
+            if (clusterManager != null)
+            {
+                clusterManager.ServerDiscovered += ClusterManager_ServerDiscovered;
+                clusterManager.ServerStatusChanged += ClusterManager_ServerStatusChanged;
+                clusterManager.ServerRemoved += ClusterManager_ServerRemoved;
+
+                // Initialize the compute lists from current servers
+                UpdateComputeServersFromManager(clusterManager.Servers);
+
+                Logger.Log($"[MainForm] Registered for cluster manager events");
+            }
+        }
+        private void ClusterManager_ServerDiscovered(object sender, ComputeServer server)
+        {
+            UpdateComputeServersFromManager(clusterManager.Servers);
+            NotifyNodeEditorOfClusterChanges(); // Call here after updating
+        }
+
+        private void ClusterManager_ServerStatusChanged(object sender, ComputeServer server)
+        {
+            UpdateComputeServersFromManager(clusterManager.Servers);
+            NotifyNodeEditorOfClusterChanges(); // Call here after updating
+        }
+
+        private void ClusterManager_ServerRemoved(object sender, ComputeServer server)
+        {
+            UpdateComputeServersFromManager(clusterManager.Servers);
+            NotifyNodeEditorOfClusterChanges(); // Call here after updating
+        }
+        public void UpdateComputeServersFromManager(List<ComputeServer> servers)
+        {
+            // Make a copy of the servers list to prevent threading issues
+            ComputeServers = servers?.ToList() ?? new List<ComputeServer>();
+
+            // Also update ComputeEndpoints list by collecting all connected endpoints
+            List<ComputeEndpoint> allEndpoints = new List<ComputeEndpoint>();
+            foreach (var server in ComputeServers)
+            {
+                if (server.IsConnected && server.ConnectedEndpoints != null)
+                {
+                    allEndpoints.AddRange(server.ConnectedEndpoints);
+                }
+            }
+            ComputeEndpoints = allEndpoints;
+
+            //Logger.Log($"[MainForm] Updated compute resources: {ComputeServers.Count} servers, {ComputeEndpoints.Count} endpoints");
+
+            // Notify NodeEditor of the changes
+            NotifyNodeEditorOfClusterChanges();
+        }
+        public void NotifyNodeEditorOfClusterChanges()
+        {
+            if (NodeEditorForm.Instance != null)
+            {
+                try
+                {
+                    if (NodeEditorForm.Instance.InvokeRequired)
+                    {
+                        NodeEditorForm.Instance.BeginInvoke(new Action(() => {
+                            NodeEditorForm.Instance.ForceRefreshClusterEndpoints();
+                        }));
+                    }
+                    else
+                    {
+                        NodeEditorForm.Instance.ForceRefreshClusterEndpoints();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[MainForm] Error notifying NodeEditor: {ex.Message}");
+                }
+            }
+        }
         public void OpenNodeEditor()
         {
             Logger.Log("[MainForm] Opening Node Editor");
@@ -5233,7 +5315,7 @@ namespace CTS
 
                 // Show the node editor
                 nodeEditor.Show();
-
+                NotifyNodeEditorOfClusterChanges();
                 Logger.Log("[MainForm] Node Editor opened successfully");
             }
             catch (Exception ex)

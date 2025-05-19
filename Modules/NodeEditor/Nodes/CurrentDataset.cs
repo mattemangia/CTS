@@ -101,7 +101,9 @@ namespace CTS.Modules.NodeEditor.Nodes
 
             return panel;
         }
-        public object GetOutputData(string pinName)
+
+        // Override the GetOutputData method with this implementation
+        public override object GetOutputData(string pinName)
         {
             switch (pinName)
             {
@@ -112,9 +114,10 @@ namespace CTS.Modules.NodeEditor.Nodes
                 case "PixelSize":
                     return PixelSize;
                 default:
-                    return null;
+                    return base.GetOutputData(pinName);
             }
         }
+
         public override Dictionary<string, string> GetNodeParameters()
         {
             var parameters = new Dictionary<string, string>();
@@ -130,6 +133,7 @@ namespace CTS.Modules.NodeEditor.Nodes
 
             return parameters;
         }
+
         private bool IsDatasetLoaded()
         {
             return mainForm != null && mainForm.volumeData != null;
@@ -172,17 +176,19 @@ namespace CTS.Modules.NodeEditor.Nodes
             // Check if the node is connected to MainForm and has data
             if (!IsDatasetLoaded())
             {
-                MessageBox.Show("No dataset is currently loaded in the main application.",
-                    "Execution Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Logger.Log("[CurrentDatasetNode] No dataset is currently loaded in the main application.");
                 return;
             }
 
-            // This node serves as a data source, so no actual processing is done
-            // It just makes the MainForm's dataset available to other nodes
+            // Store data in the output data dictionary so other nodes can access it
 
-            // We could potentially implement callbacks or events to update when MainForm's dataset changes
+            SetOutputData("Volume", VolumeData);
+            SetOutputData("Labels", LabelData);
+            SetOutputData("PixelSize", PixelSize);
+
             UpdateDatasetInfo();
+
+            Logger.Log("[CurrentDatasetNode] Successfully provided dataset reference");
         }
     }
-
 }

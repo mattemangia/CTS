@@ -1,4 +1,5 @@
-﻿using System;
+﻿
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
@@ -50,17 +51,20 @@ namespace CTS.NodeEditor
         {
             // To be implemented in derived classes
         }
+
         public void SetOutputData(string pinName, object data)
         {
             outputData[pinName] = data;
         }
 
-        public object GetOutputData(string pinName)
+        // Add a public GetOutputData method to BaseNode that can be used by all nodes
+        public virtual object GetOutputData(string pinName)
         {
             if (outputData.ContainsKey(pinName))
                 return outputData[pinName];
             return null;
         }
+
         public object GetInputData(string pinName)
         {
             // Find the input pin with the given name
@@ -76,8 +80,23 @@ namespace CTS.NodeEditor
             // Get data from the first connected output pin
             // Note: Multiple connections to one input are possible, but we'll use the first one by default
             var connection = incomingConnections.First();
-            return connection.From.Node.GetOutputData(connection.From.Name);
+
+            // Get the output data from the source node
+            var result = connection.From.Node.GetOutputData(connection.From.Name);
+
+            // Log retrieval for debugging
+            if (result != null)
+            {
+                Logger.Log($"[BaseNode] Got {result.GetType().Name} from {connection.From.Node.GetType().Name}.{connection.From.Name}");
+            }
+            else
+            {
+                Logger.Log($"[BaseNode] Warning: Null data from {connection.From.Node.GetType().Name}.{connection.From.Name}");
+            }
+
+            return result;
         }
+
         protected NodePin AddInputPin(string name, Color color)
         {
             var pin = new NodePin(this, false, name, color);
@@ -85,6 +104,7 @@ namespace CTS.NodeEditor
             inputs.Add(pin);
             return pin;
         }
+
         private IEnumerable<NodeConnection> GetIncomingConnections(NodePin pin)
         {
             // Use NodeEditorForm.Instance instead of NodeEditor.Instance
@@ -92,6 +112,7 @@ namespace CTS.NodeEditor
                 return NodeEditorForm.Instance.Connections.Where(c => c.To == pin);
             return Enumerable.Empty<NodeConnection>();
         }
+
         protected NodePin AddOutputPin(string name, Color color)
         {
             var pin = new NodePin(this, true, name, color);

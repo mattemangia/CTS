@@ -182,7 +182,7 @@ namespace CTS.NodeEditor
                 this.MaximizeBox = false;
                 this.MinimizeBox = false;
                 this.StartPosition = FormStartPosition.CenterParent;
-
+                this.BackColor = Color.DarkGray;
                 var panel = new Panel
                 {
                     Dock = DockStyle.Fill,
@@ -194,7 +194,8 @@ namespace CTS.NodeEditor
                     Text = "Use Compute Cluster for Node Execution",
                     Checked = UseCluster,
                     Location = new Point(20, 20),
-                    AutoSize = true
+                    AutoSize = true,
+                    ForeColor = Color.White,
                 };
 
                 var label = new Label
@@ -202,7 +203,8 @@ namespace CTS.NodeEditor
                     Text = "When enabled, node processing tasks will be distributed across available compute endpoints in the cluster.",
                     Location = new Point(40, 50),
                     Size = new Size(300, 40),
-                    AutoSize = false
+                    AutoSize = false,
+                    ForeColor=Color.White,
                 };
 
                 var btnOK = new KryptonButton
@@ -210,7 +212,8 @@ namespace CTS.NodeEditor
                     Text = "OK",
                     DialogResult = DialogResult.OK,
                     Location = new Point(120, 110),
-                    Width = 80
+                    Width = 80,
+                    ForeColor= Color.White,
                 };
 
                 var btnCancel = new KryptonButton
@@ -218,7 +221,8 @@ namespace CTS.NodeEditor
                     Text = "Cancel",
                     DialogResult = DialogResult.Cancel,
                     Location = new Point(210, 110),
-                    Width = 80
+                    Width = 80,
+                    ForeColor=Color.White,
                 };
 
                 btnOK.Click += (s, e) =>
@@ -254,13 +258,15 @@ namespace CTS.NodeEditor
                 this.MaximizeBox = false;
                 this.MinimizeBox = false;
                 this.StartPosition = FormStartPosition.CenterParent;
+                this.ForeColor = Color.DarkGray;
 
                 lblStatus = new Label
                 {
                     Text = "Executing graph on compute cluster...",
                     Dock = DockStyle.Top,
                     Height = 30,
-                    TextAlign = ContentAlignment.MiddleCenter
+                    TextAlign = ContentAlignment.MiddleCenter,
+                    ForeColor= Color.White,
                 };
 
                 progressBar = new ProgressBar
@@ -383,6 +389,18 @@ namespace CTS.NodeEditor
             SetupNodeTypes();
             SetupKeyboardHandling();
 
+            // Add a timer to periodically refresh the cluster endpoints list
+            System.Windows.Forms.Timer refreshTimer = new System.Windows.Forms.Timer();
+            refreshTimer.Interval = 5000; // 5 seconds
+            refreshTimer.Tick += (s, e) => RefreshClusterEndpoints();
+            refreshTimer.Start();
+            this.VisibleChanged += (s, e) => {
+                if (this.Visible)
+                {
+                    Logger.Log("[NodeEditor] Form became visible, refreshing cluster endpoints");
+                    RefreshClusterEndpoints();
+                }
+            };
             // Initialize buffer only after components are fully created and sized
             this.HandleCreated += (s, e) => {
                 try
@@ -425,7 +443,11 @@ namespace CTS.NodeEditor
                 }
             };
         }
-
+        public void ForceRefreshClusterEndpoints()
+        {
+            //Logger.Log("[NodeEditor] Force refreshing cluster endpoints");
+            RefreshClusterEndpoints();
+        }
         private bool isUpdatingUI = false;
 
         private void InitializeComponent()
@@ -698,11 +720,25 @@ namespace CTS.NodeEditor
                     return;
 
                 isUpdatingUI = true;
+                isEventHandlerActive = true;
 
                 // Update the useCluster flag only if the checkbox still exists and isn't disposed
                 if (chkUseCluster != null && !chkUseCluster.IsDisposed && chkUseCluster.IsHandleCreated)
                 {
                     useCluster = chkUseCluster.Checked;
+
+                    // Log whether servers are available
+                    if (mainForm != null && mainForm.ComputeServers != null)
+                    {
+                        Logger.Log($"[NodeEditor] Checkbox changed. useCluster={useCluster}, Servers available: {mainForm.ComputeServers.Count}");
+                    }
+                    else
+                    {
+                        Logger.Log($"[NodeEditor] Checkbox changed. useCluster={useCluster}, No servers available or mainForm is null");
+                    }
+
+                    // Force a refresh of the servers list
+                    RefreshClusterEndpoints();
 
                     // Update UI based on the new state
                     UpdateClusterStatus();
@@ -716,6 +752,7 @@ namespace CTS.NodeEditor
             finally
             {
                 isUpdatingUI = false;
+                isEventHandlerActive = false;
             }
         }
         private bool isEventHandlerActive = false;
@@ -747,31 +784,98 @@ namespace CTS.NodeEditor
                     return;
                 }
 
+                // Save selected item to restore it later if possible
+                object selectedItem = cmbEndpoints.SelectedItem;
+                string selectedText = selectedItem?.ToString() ?? string.Empty;
+
+                // Clear dropdown
                 cmbEndpoints.Items.Clear();
 
-                if (mainForm != null && mainForm.ComputeEndpoints != null && mainForm.ComputeEndpoints.Count > 0)
+                // Log the current state
+                if (mainForm != null)
                 {
-                    foreach (var endpoint in mainForm.ComputeEndpoints)
+                    //Logger.Log($"[NodeEditor] Refreshing endpoints list. MainForm has {mainForm.ComputeServers?.Count ?? 0} servers and {mainForm.ComputeEndpoints?.Count ?? 0} endpoints");
+
+                    // Also log detail about each server for debugging
+                    if (mainForm.ComputeServers != null)
                     {
-                        string gpuInfo = endpoint.HasGPU ? " (GPU)" : "";
-                        string displayText = $"{endpoint.Name} - {endpoint.IP}:{endpoint.Port}{gpuInfo}";
-                        cmbEndpoints.Items.Add(displayText);
+                        foreach (var server in mainForm.ComputeServers)
+                        {
+                            Logger.Log($"[NodeEditor] Server {server.Name} - Connected: {server.IsConnected}, Endpoints: {server.ConnectedEndpoints?.Count ?? 0}");
+                        }
                     }
-
-                    if (cmbEndpoints.Items.Count > 0)
-                        cmbEndpoints.SelectedIndex = 0;
-
-                    if (chkUseCluster != null && !chkUseCluster.IsDisposed && chkUseCluster.IsHandleCreated)
-                        chkUseCluster.Enabled = true;
                 }
                 else
                 {
-                    cmbEndpoints.Items.Add("No endpoints available");
+                    Logger.Log("[NodeEditor] Refreshing endpoints list. MainForm is null");
+                    return;
+                }
+
+                // Check for servers
+                if (mainForm != null && mainForm.ComputeServers != null && mainForm.ComputeServers.Count > 0)
+                {
+                    Logger.Log($"[NodeEditor] Found {mainForm.ComputeServers.Count} compute servers to display");
+
+                    int connectedServerCount = 0;
+                    foreach (var server in mainForm.ComputeServers)
+                    {
+                        if (server.IsConnected)
+                        {
+                            connectedServerCount++;
+                            string gpuInfo = server.HasGPU ? " (GPU)" : "";
+                            string displayText = $"{server.Name} - {server.IP}:{server.Port}{gpuInfo}";
+
+                            Logger.Log($"[NodeEditor] Adding server to dropdown: {displayText}");
+
+                            // Create a server item for the dropdown
+                            var item = new ClusterServerItem(server, displayText);
+                            cmbEndpoints.Items.Add(item);
+                        }
+                    }
+
+                    // Restore previous selection if possible, otherwise select first item
+                    if (cmbEndpoints.Items.Count > 0)
+                    {
+                        bool selectionRestored = false;
+
+                        if (!string.IsNullOrEmpty(selectedText))
+                        {
+                            for (int i = 0; i < cmbEndpoints.Items.Count; i++)
+                            {
+                                if (cmbEndpoints.Items[i].ToString() == selectedText)
+                                {
+                                    cmbEndpoints.SelectedIndex = i;
+                                    selectionRestored = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (!selectionRestored)
+                        {
+                            cmbEndpoints.SelectedIndex = 0;
+                            Logger.Log($"[NodeEditor] Set dropdown selected index to 0");
+                        }
+                    }
+                    else
+                    {
+                        //Logger.Log("[NodeEditor] No connected servers found, adding placeholder text");
+                        cmbEndpoints.Items.Add("No connected servers");
+                        cmbEndpoints.SelectedIndex = 0;
+                    }
+
+                    if (chkUseCluster != null && !chkUseCluster.IsDisposed && chkUseCluster.IsHandleCreated)
+                        chkUseCluster.Enabled = connectedServerCount > 0;
+                }
+                else
+                {
+                    //Logger.Log($"[NodeEditor] No compute servers available, adding placeholder text");
+                    cmbEndpoints.Items.Add("No servers available");
                     cmbEndpoints.SelectedIndex = 0;
 
-                    // Even with no endpoints, allow the checkbox to be clicked
+                    // Even with no servers, allow the checkbox to be clicked
                     if (chkUseCluster != null && !chkUseCluster.IsDisposed && chkUseCluster.IsHandleCreated)
-                        chkUseCluster.Enabled = true;
+                        chkUseCluster.Enabled = false;
 
                     // Only update the checked state if we're not in an event handler already
                     if (!isEventHandlerActive && chkUseCluster != null && !chkUseCluster.IsDisposed && chkUseCluster.IsHandleCreated)
@@ -785,7 +889,7 @@ namespace CTS.NodeEditor
             catch (Exception ex)
             {
                 // Log the error but prevent application crash
-                Logger.Log($"[NodeEditor] Error refreshing endpoints: {ex.Message}");
+                Logger.Log($"[NodeEditor] Error refreshing servers: {ex.Message}");
             }
             finally
             {
@@ -800,22 +904,22 @@ namespace CTS.NodeEditor
                 if (lblClusterStatus == null || lblClusterStatus.IsDisposed || !lblClusterStatus.IsHandleCreated)
                     return;
 
-                // Safe access to endpoints list
-                var endpoints = mainForm?.ComputeEndpoints;
-                int endpointCount = endpoints?.Count ?? 0;
-                int availableEndpoints = 0;
+                // Safe access to servers list
+                var servers = mainForm?.ComputeServers;
+                int serverCount = servers?.Count ?? 0;
+                int availableServers = 0;
 
-                if (endpoints != null)
+                if (servers != null)
                 {
-                    // Only count endpoints that are actually connected
-                    foreach (var endpoint in endpoints)
+                    // Only count servers that are actually connected
+                    foreach (var server in servers)
                     {
-                        if (endpoint != null && endpoint.IsConnected && !endpoint.IsBusy)
-                            availableEndpoints++;
+                        if (server != null && server.IsConnected && !server.IsBusy)
+                            availableServers++;
                     }
                 }
 
-                if (useCluster && endpoints != null && endpointCount > 0)
+                if (useCluster && servers != null && serverCount > 0)
                 {
                     // Update safely with null checks
                     if (lblClusterStatus != null && !lblClusterStatus.IsDisposed && lblClusterStatus.IsHandleCreated)
@@ -825,13 +929,13 @@ namespace CTS.NodeEditor
                             if (lblClusterStatus.InvokeRequired)
                             {
                                 lblClusterStatus.BeginInvoke(new Action(() => {
-                                    lblClusterStatus.Text = $"Cluster: {availableEndpoints}/{endpointCount} endpoints";
+                                    lblClusterStatus.Text = $"Cluster: {availableServers}/{serverCount} servers";
                                     lblClusterStatus.ForeColor = Color.LightGreen;
                                 }));
                             }
                             else
                             {
-                                lblClusterStatus.Text = $"Cluster: {availableEndpoints}/{endpointCount} endpoints";
+                                lblClusterStatus.Text = $"Cluster: {availableServers}/{serverCount} servers";
                                 lblClusterStatus.ForeColor = Color.LightGreen;
                             }
                         }
@@ -869,13 +973,13 @@ namespace CTS.NodeEditor
                             if (lblClusterStatus.InvokeRequired)
                             {
                                 lblClusterStatus.BeginInvoke(new Action(() => {
-                                    lblClusterStatus.Text = "No endpoints available";
+                                    lblClusterStatus.Text = "No servers available";
                                     lblClusterStatus.ForeColor = Color.Orange;
                                 }));
                             }
                             else
                             {
-                                lblClusterStatus.Text = "No endpoints available";
+                                lblClusterStatus.Text = "No servers available";
                                 lblClusterStatus.ForeColor = Color.Orange;
                             }
                         }
@@ -2740,17 +2844,67 @@ namespace CTS.NodeEditor
         // Helper method to find an available endpoint
         private ComputeEndpoint FindAvailableEndpoint()
         {
-            if (mainForm.ComputeEndpoints == null || mainForm.ComputeEndpoints.Count == 0)
+            if (mainForm == null || mainForm.ComputeServers == null || mainForm.ComputeServers.Count == 0)
+            {
+                Logger.Log("[NodeEditor] No compute servers available");
                 return null;
+            }
 
-            var selected = cmbEndpoints.SelectedItem as ClusterEndpointItem;
-            if (selected != null && selected.Endpoint.IsConnected && !selected.Endpoint.IsBusy)
-                return selected.Endpoint;
+            try
+            {
+                var selectedItem = cmbEndpoints.SelectedItem;
 
-            // If no specific endpoint is selected or it's not available, find any available one
-            return mainForm.ComputeEndpoints.FirstOrDefault(e => e.IsConnected && !e.IsBusy);
+                // Handle the case where the selected item is a string (e.g., "No servers available")
+                if (selectedItem is string)
+                {
+                    Logger.Log("[NodeEditor] Selected item is a string, not a server item");
+                    return null;
+                }
+
+                // Handle the case where the selected item is a ClusterServerItem
+                var serverItem = selectedItem as ClusterServerItem;
+                if (serverItem != null && serverItem.Server != null && serverItem.Server.IsConnected)
+                {
+                    Logger.Log($"[NodeEditor] Using selected server: {serverItem.Server.Name}");
+
+                    // Find an available endpoint from this server
+                    if (serverItem.Server.ConnectedEndpoints != null && serverItem.Server.ConnectedEndpoints.Count > 0)
+                    {
+                        var endpoint = serverItem.Server.ConnectedEndpoints.FirstOrDefault(e => e.IsConnected && !e.IsBusy);
+                        if (endpoint != null)
+                        {
+                            Logger.Log($"[NodeEditor] Using endpoint {endpoint.Name} from server {serverItem.Server.Name}");
+                            return endpoint;
+                        }
+                    }
+
+                    // If no endpoints are available on this specific server, return null
+                    Logger.Log($"[NodeEditor] No available endpoints on server {serverItem.Server.Name}");
+                    return null;
+                }
+
+                // Otherwise find any available server with endpoints
+                foreach (var server in mainForm.ComputeServers.Where(s => s.IsConnected))
+                {
+                    if (server.ConnectedEndpoints != null && server.ConnectedEndpoints.Count > 0)
+                    {
+                        var endpoint = server.ConnectedEndpoints.FirstOrDefault(e => e.IsConnected && !e.IsBusy);
+                        if (endpoint != null)
+                        {
+                            Logger.Log($"[NodeEditor] Found available endpoint {endpoint.Name} on server {server.Name}");
+                            return endpoint;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[NodeEditor] Error finding available endpoint: {ex.Message}");
+            }
+
+            Logger.Log("[NodeEditor] No available endpoint found");
+            return null;
         }
-
         private void ClearNodeOutputs(BaseNode node)
         {
             // Use reflection to clear the outputData dictionary for all nodes
@@ -2950,6 +3104,38 @@ namespace CTS.NodeEditor
                 }
             }
             base.Dispose(disposing);
+        }
+    }
+    public class ClusterEndpointItem
+    {
+        public ComputeEndpoint Endpoint { get; }
+        public string DisplayText { get; }
+
+        public ClusterEndpointItem(ComputeEndpoint endpoint, string displayText)
+        {
+            Endpoint = endpoint;
+            DisplayText = displayText;
+        }
+
+        public override string ToString()
+        {
+            return DisplayText;
+        }
+    }
+    public class ClusterServerItem
+    {
+        public ComputeServer Server { get; }
+        public string DisplayText { get; }
+
+        public ClusterServerItem(ComputeServer server, string displayText)
+        {
+            Server = server;
+            DisplayText = displayText;
+        }
+
+        public override string ToString()
+        {
+            return DisplayText;
         }
     }
 

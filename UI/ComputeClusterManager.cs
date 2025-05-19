@@ -189,6 +189,7 @@ namespace CTS
                 Logger.Log($"[ComputeServer] Error refreshing endpoints: {ex.Message}");
             }
         }
+
         private void UpdateEndpointsFromResponse(JsonElement endpointsElement)
         {
             var newEndpoints = new List<ComputeEndpoint>();
@@ -694,14 +695,36 @@ namespace CTS
         public event EventHandler<ComputeServer> ServerStatusChanged;
         public event EventHandler<ComputeServer> ServerRemoved;
         public event EventHandler<ComputeEndpoint> EndpointStatusChanged;
-
+        private MainForm mainForm;
         public List<ComputeServer> Servers => servers.ToList(); // Return a copy
         public bool IsRefreshing => isRefreshing;
-        public ComputeClusterManager()
+        public ComputeClusterManager(MainForm mainForm0)
         {
+            mainForm = mainForm0;
             keepAliveTimer = new Timer(KeepAliveTimerCallback, null, KeepAliveInterval, KeepAliveInterval);
         }
-
+        private void UpdateMainFormComputeResources()
+        {
+            if (mainForm != null)
+            {
+                try
+                {
+                    // Need to use BeginInvoke if this might be called from a background thread
+                    if (mainForm.InvokeRequired)
+                    {
+                        mainForm.BeginInvoke(new Action(() => mainForm.UpdateComputeServersFromManager(Servers)));
+                    }
+                    else
+                    {
+                        mainForm.UpdateComputeServersFromManager(Servers);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[ComputeClusterManager] Error updating MainForm: {ex.Message}");
+                }
+            }
+        }
         public async Task StartDiscoveryAsync()
         {
             try
@@ -839,6 +862,14 @@ namespace CTS
                         // Queue for removal to avoid modifying collection during enumeration
                         serversToRemove.Add(server);
                     }
+                    else
+                    {
+                        // Update last seen time for connected servers
+                        if (server.IsConnected)
+                        {
+                            server.LastSeen = now;
+                        }
+                    }
                 }
 
                 // Now safely remove the servers and trigger events
@@ -853,6 +884,26 @@ namespace CTS
                     {
                         // This might happen if a subscriber is disposed
                         Logger.Log($"[ComputeClusterManager] Error in ServerRemoved event: {ex.Message}");
+                    }
+                }
+
+                // Update MainForm with current server list
+                if (mainForm != null)
+                {
+                    try
+                    {
+                        if (mainForm.InvokeRequired)
+                        {
+                            mainForm.BeginInvoke(new Action(() => mainForm.UpdateComputeServersFromManager(servers)));
+                        }
+                        else
+                        {
+                            mainForm.UpdateComputeServersFromManager(servers);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[ComputeClusterManager] Error updating MainForm: {ex.Message}");
                     }
                 }
 
@@ -879,60 +930,70 @@ namespace CTS
                                     {
                                         // Update last seen time
                                         server.LastSeen = DateTime.Now;
+
+                                        // Update MainForm again after successful ping
+                                        if (mainForm != null)
+                                        {
+                                            try
+                                            {
+                                                if (mainForm.InvokeRequired)
+                                                {
+                                                    mainForm.BeginInvoke(new Action(() => mainForm.UpdateComputeServersFromManager(servers)));
+                                                }
+                                                else
+                                                {
+                                                    mainForm.UpdateComputeServersFromManager(servers);
+                                                }
+                                            }
+                                            catch { }
+                                        }
                                     }
                                 }
                                 catch (Exception ex)
                                 {
                                     Logger.Log($"[ComputeClusterManager] Error parsing ping response from {server.Name}: {ex.Message}");
-                                    // Mark server as disconnected since we couldn't parse its response
-                                    server.Disconnect();
-                                    try
-                                    {
-                                        ServerStatusChanged?.Invoke(this, server);
-                                    }
-                                    catch { }
+                                    // Keep server connected though - don't disconnect on parsing errors
                                 }
 
                                 // Refresh endpoint list (less frequently)
                                 if (DateTime.Now.Second % 10 == 0) // Every 10 seconds
                                 {
                                     await server.RefreshEndpointsAsync();
+
+                                    // Update MainForm again after endpoint refresh
+                                    if (mainForm != null)
+                                    {
+                                        try
+                                        {
+                                            if (mainForm.InvokeRequired)
+                                            {
+                                                mainForm.BeginInvoke(new Action(() => mainForm.UpdateComputeServersFromManager(servers)));
+                                            }
+                                            else
+                                            {
+                                                mainForm.UpdateComputeServersFromManager(servers);
+                                            }
+                                        }
+                                        catch { }
+                                    }
                                 }
                             }
                             catch (OperationCanceledException)
                             {
                                 // Timeout occurred
                                 Logger.Log($"[ComputeClusterManager] Keep-alive timeout for {server.Name}");
-                                server.Disconnect();
-                                try
-                                {
-                                    ServerStatusChanged?.Invoke(this, server);
-                                }
-                                catch { }
+                                // Don't disconnect on timeout - be more lenient
                             }
                             catch (Exception ex)
                             {
                                 Logger.Log($"[ComputeClusterManager] Error in keep-alive for {server.Name}: {ex.Message}");
-
-                                // Set server as disconnected
-                                server.Disconnect();
-                                try
-                                {
-                                    ServerStatusChanged?.Invoke(this, server);
-                                }
-                                catch { }
+                                // Don't disconnect on general errors - be more lenient
                             }
                         });
                     }
                     catch (Exception ex)
                     {
                         Logger.Log($"[ComputeClusterManager] Error scheduling keep-alive for {server.Name}: {ex.Message}");
-                        server.Disconnect();
-                        try
-                        {
-                            ServerStatusChanged?.Invoke(this, server);
-                        }
-                        catch { }
                     }
                 }
             }
@@ -1357,13 +1418,13 @@ namespace CTS
     /// </summary>
     public class ComputeClusterForm : KryptonForm
     {
-        private ComputeClusterManager manager = new ComputeClusterManager();
+        
         private List<ComputeServer> selectedServers = new List<ComputeServer>();
         private List<ComputeEndpoint> selectedEndpoints = new List<ComputeEndpoint>();
         private Dictionary<ComputeServer, ServerNodeControl> serverControls = new Dictionary<ComputeServer, ServerNodeControl>();
         private Dictionary<ComputeEndpoint, EndpointControl> endpointControls = new Dictionary<ComputeEndpoint, EndpointControl>();
         private MainForm mainForm;
-
+        private ComputeClusterManager manager;
         // UI controls
         private FlowLayoutPanel topologyPanel;
         private KryptonRichTextBox outputTextBox;
@@ -1377,11 +1438,17 @@ namespace CTS
         private KryptonButton btnLoad;
         private KryptonButton btnLaunchSimulation;
         private System.Windows.Forms.Timer refreshTimer;
-
+        private TimeSpan serverTimeoutThreshold = TimeSpan.FromMinutes(5);
         public ComputeClusterForm(MainForm mainForm)
         {
             this.mainForm = mainForm;
             this.Icon = Properties.Resources.favicon;
+            // Create the manager with mainForm reference
+            manager = new ComputeClusterManager(mainForm);
+
+            // IMPORTANT: Share manager with MainForm
+            mainForm.SetClusterManager(manager);
+
             InitializeComponent();
 
             // Start discovery

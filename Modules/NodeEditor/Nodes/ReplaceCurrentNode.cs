@@ -3,22 +3,18 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace CTS.Modules.NodeEditor.Nodes
 {
     public class ReplaceCurrentNode : BaseNode
     {
-        private bool replaceVolume = true;
-        private bool replaceLabels = true;
-        private CheckBox replaceVolumeCheckbox;
-        private CheckBox replaceLabelsCheckbox;
+        private MainForm mainForm;
 
         public ReplaceCurrentNode(Point position) : base(position)
         {
-            Color = Color.FromArgb(255, 140, 120); // Red-orange for output nodes
+            Color = Color.FromArgb(255, 140, 120); // Red theme for output nodes
+            mainForm = Application.OpenForms.OfType<MainForm>().FirstOrDefault();
         }
 
         protected override void SetupPins()
@@ -44,52 +40,30 @@ namespace CTS.Modules.NodeEditor.Nodes
                 Font = new Font("Arial", 10, FontStyle.Bold)
             };
 
-            replaceVolumeCheckbox = new CheckBox
+            var descriptionLabel = new Label
             {
-                Text = "Replace Volume Data",
-                Checked = replaceVolume,
-                Dock = DockStyle.Top,
-                Height = 25,
-                ForeColor = Color.White
-            };
-            replaceVolumeCheckbox.CheckedChanged += (s, e) => replaceVolume = replaceVolumeCheckbox.Checked;
-
-            replaceLabelsCheckbox = new CheckBox
-            {
-                Text = "Replace Label Data",
-                Checked = replaceLabels,
-                Dock = DockStyle.Top,
-                Height = 25,
-                ForeColor = Color.White
-            };
-            replaceLabelsCheckbox.CheckedChanged += (s, e) => replaceLabels = replaceLabelsCheckbox.Checked;
-
-            var infoLabel = new Label
-            {
-                Text = "This node replaces the currently active dataset in the main application with the dataset from the input pins.",
+                Text = "Replaces the current dataset in the main viewer with the connected input dataset.",
                 Dock = DockStyle.Top,
                 Height = 40,
                 TextAlign = ContentAlignment.MiddleLeft,
-                ForeColor = Color.LightGray,
-                Font = new Font("Arial", 8)
+                ForeColor = Color.White,
+                AutoSize = false
             };
 
-            var replaceButton = new Button
+            var executeButton = new Button
             {
                 Text = "Replace Now",
                 Dock = DockStyle.Top,
                 Height = 35,
-                BackColor = Color.FromArgb(220, 80, 80),
+                Margin = new Padding(5, 10, 5, 0),
+                BackColor = Color.FromArgb(200, 80, 80),
                 ForeColor = Color.White,
                 Font = new Font("Arial", 9, FontStyle.Bold)
             };
-            replaceButton.Click += (s, e) => Execute();
+            executeButton.Click += (s, e) => Execute();
 
-            // Add controls to panel
-            panel.Controls.Add(replaceButton);
-            panel.Controls.Add(infoLabel);
-            panel.Controls.Add(replaceLabelsCheckbox);
-            panel.Controls.Add(replaceVolumeCheckbox);
+            panel.Controls.Add(executeButton);
+            panel.Controls.Add(descriptionLabel);
             panel.Controls.Add(titleLabel);
 
             return panel;
@@ -97,70 +71,67 @@ namespace CTS.Modules.NodeEditor.Nodes
 
         public override void Execute()
         {
+            if (mainForm == null)
+            {
+                Logger.Log("[ReplaceCurrentNode] ERROR: No MainForm reference");
+                return;
+            }
+
             try
             {
-                // Get the MainForm reference
-                var mainForm = Application.OpenForms.OfType<MainForm>().FirstOrDefault();
-                if (mainForm == null)
+                // Get the volume data from the connected node
+                var volumeData = GetInputData("Volume");
+                if (volumeData == null)
                 {
-                    MessageBox.Show("Cannot access the main form.",
-                        "Replace Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    Logger.Log("[ReplaceCurrentNode] Warning: No volume data provided");
                     return;
                 }
 
-                // Get the input data from connected nodes
-                // (In a real implementation, this would come from the input pins)
-                IGrayscaleVolumeData volumeData = mainForm.volumeData;
-                ILabelVolumeData labelData = mainForm.volumeLabels;
-
-                // Check if we're trying to replace with null data
-                if ((replaceVolume && volumeData == null) ||
-                    (replaceLabels && labelData == null))
+                // Make sure we have the right type
+                if (volumeData is IGrayscaleVolumeData grayscaleData)
                 {
-                    MessageBox.Show("No data available to replace the current dataset.",
-                        "Replace Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-
-                // Create confirmation dialog
-                var result = MessageBox.Show(
-                    "Are you sure you want to replace the current dataset? This cannot be undone.",
-                    "Confirm Replace", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
-
-                if (result == DialogResult.Yes)
-                {
-                    try
+                    // Check if it's the specific ChunkedVolume type we need
+                    if (grayscaleData is ChunkedVolume chunkedVolume)
                     {
-                        // Replace the data in MainForm
-                        if (replaceVolume && volumeData != null)
-                        {
-                            mainForm.volumeData = volumeData;
-                        }
+                        // Update the MainForm with the new volume data
+                        Logger.Log($"[ReplaceCurrentNode] Replacing current volume with {chunkedVolume.Width}x{chunkedVolume.Height}x{chunkedVolume.Depth} volume");
+                        mainForm.UpdateVolumeData(chunkedVolume);
 
-                        if (replaceLabels && labelData != null)
+                        // Also get label data if available
+                        var labelData = GetInputData("Labels") as ILabelVolumeData;
+                        if (labelData != null)
                         {
+                            // Update the label volume in MainForm
+                            if (mainForm.volumeLabels != null)
+                            {
+                                // Release the old labels file lock if it exists
+                                mainForm.volumeLabels.ReleaseFileLock();
+                                mainForm.volumeLabels.Dispose();
+                            }
+
+                            // Set the new label data
                             mainForm.volumeLabels = labelData;
+
+                            // Make sure the UI is updated to reflect all changes
+                            mainForm.OnDatasetChanged();
+
+                            Logger.Log("[ReplaceCurrentNode] Updated label data successfully");
                         }
-
-                        // Notify MainForm of changes
-                        mainForm.OnDatasetChanged();
-
-                        MessageBox.Show("Dataset replaced successfully!",
-                            "Replace Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     }
-                    catch (Exception ex)
+                    else
                     {
-                        MessageBox.Show($"Error replacing dataset: {ex.Message}",
-                            "Replace Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        Logger.Log($"[ReplaceCurrentNode] ERROR: Volume data is {grayscaleData.GetType().Name}, but ChunkedVolume expected");
                     }
+                }
+                else
+                {
+                    Logger.Log($"[ReplaceCurrentNode] ERROR: Invalid volume data type: {volumeData.GetType().Name}");
                 }
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error in Replace Current node: {ex.Message}",
-                    "Node Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Logger.Log($"[ReplaceCurrentNode] ERROR: Exception replacing dataset: {ex.Message}");
             }
         }
     }
-
 }

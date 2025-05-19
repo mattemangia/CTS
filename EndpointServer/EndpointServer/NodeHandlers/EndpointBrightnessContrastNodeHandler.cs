@@ -1,11 +1,13 @@
-﻿using System;
+﻿using ILGPU;
+using ILGPU.Runtime;
+using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using System.Numerics;
+using System.Threading.Tasks;
 
 namespace ParallelComputingEndpoint
 {
-    public class BrightnessContrastNodeHandler : BaseNodeHandler, IProgressTrackable
+    public class EndpointBrightnessContrastNodeHandler : BaseNodeHandler, IProgressTrackable
     {
         private Action<int> _progressCallback;
 
@@ -200,14 +202,68 @@ namespace ParallelComputingEndpoint
         }
 
         private void ProcessVolumeGpu(
-            byte[] inputData, byte[] outputData,
-            int width, int height, int depth,
-            int brightness, int contrast, byte blackPoint, byte whitePoint,
-            int startZ = 0)
+    byte[] inputData, byte[] outputData,
+    int width, int height, int depth,
+    int brightness, int contrast, byte blackPoint, byte whitePoint,
+    int startZ = 0)
         {
-            // Try to use ILGPU if available, otherwise fall back to CPU
-            // For now, just use CPU implementation
-            ProcessVolumeCpu(inputData, outputData, width, height, depth, brightness, contrast, blackPoint, whitePoint, startZ);
+            try
+            {
+                int totalVoxels = inputData.Length;
+                int reportInterval = Math.Max(1, totalVoxels / 100); // Report every 1%
+                using var ctx = Context.Create(builder => builder.Default().EnableAlgorithms());
+                using var accelerator = ctx.GetPreferredDevice(preferCPU: false).CreateAccelerator(ctx);
+
+                // Report we're starting GPU processing
+                _progressCallback?.Invoke(50);
+
+                // Create kernel
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<byte>, ArrayView<byte>, byte, byte, int, int>(
+                    (index, input, output, bPoint, wPoint, bright, cont) =>
+                    {
+                        byte value = input[index];
+
+                        // Map the value from [blackPoint, whitePoint] to [0, 255]
+                        float normalized = 0;
+                        if (wPoint > bPoint)
+                        {
+                            normalized = (value - bPoint) / (float)(wPoint - bPoint);
+                        }
+                        normalized = Math.Max(0, Math.Min(1, normalized));
+
+                        // Apply contrast (percentage)
+                        float contrasted = (normalized - 0.5f) * (cont / 100.0f) + 0.5f;
+                        contrasted = Math.Max(0, Math.Min(1, contrasted));
+
+                        // Apply brightness (offset)
+                        int result = (int)(contrasted * 255) + bright;
+                        output[index] = (byte)Math.Max(0, Math.Min(255, result));
+                    });
+
+                // Allocate device memory for input and output
+                using var inputBuffer = accelerator.Allocate1D<byte>(totalVoxels);
+                using var outputBuffer = accelerator.Allocate1D<byte>(totalVoxels);
+
+                // Copy input data to GPU
+                inputBuffer.CopyFromCPU(inputData);
+
+                // Execute kernel
+                kernel(totalVoxels, inputBuffer.View, outputBuffer.View, blackPoint, whitePoint, brightness, contrast);
+
+                // Wait for completion
+                accelerator.Synchronize();
+
+                // Copy result back to CPU
+                outputBuffer.CopyToCPU(outputData);
+
+                _progressCallback?.Invoke(80); // Signal GPU processing completed
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"GPU processing failed, falling back to CPU: {ex.Message}");
+                // Fall back to CPU implementation on error
+                ProcessVolumeCpu(inputData, outputData, width, height, depth, brightness, contrast, blackPoint, whitePoint, startZ);
+            }
         }
 
         // Algorithm from BrightnessContrastNode

@@ -24,7 +24,7 @@ namespace ParallelComputingEndpoint
         private void RegisterNodeHandlers()
         {
             // Register the available node handlers
-            _nodeHandlers.Add("BrightnessContrastNode", new BrightnessContrastNodeHandler());
+            _nodeHandlers.Add("BrightnessContrastNode", new EndpointBrightnessContrastNodeHandler());
             // _nodeHandlers.Add("ResampleVolumeNode", new ResampleVolumeNodeHandler());
             // _nodeHandlers.Add("ThresholdNode", new ThresholdNodeHandler());
             // _nodeHandlers.Add("ManualThresholdingNode", new ManualThresholdingNodeHandler());

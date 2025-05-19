@@ -101,7 +101,20 @@ namespace CTS.Modules.NodeEditor.Nodes
 
             return panel;
         }
-
+        public object GetOutputData(string pinName)
+        {
+            switch (pinName)
+            {
+                case "Volume":
+                    return VolumeData;
+                case "Labels":
+                    return LabelData;
+                case "PixelSize":
+                    return PixelSize;
+                default:
+                    return null;
+            }
+        }
         private bool IsDatasetLoaded()
         {
             return mainForm != null && mainForm.volumeData != null;

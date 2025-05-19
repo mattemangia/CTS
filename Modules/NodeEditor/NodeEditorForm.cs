@@ -2316,9 +2316,9 @@ namespace CTS.NodeEditor
                 // Set a tag on the node to indicate execution target
                 node.Tag = isServerAvailable ? "Remote" : "Local";
 
-                // Input and Output nodes are always handled locally, but their data gets transferred
-                if (nodeTypeName.EndsWith("DataNode") || nodeTypeName.EndsWith("DatasetNode") ||
-                    nodeTypeName.Contains("Export") || nodeTypeName.Contains("Save"))
+                // Only force local execution for export and save nodes
+                // Allow data source nodes to be processed remotely if available on server
+                if (nodeTypeName.Contains("Export") || nodeTypeName.Contains("Save"))
                 {
                     node.Tag = "Local";
                 }
@@ -2417,10 +2417,6 @@ namespace CTS.NodeEditor
         }
         private async Task<bool> ExecuteNodeRemotely(BaseNode node, ComputeEndpoint endpoint)
         {
-            MemoryStream memoryStream = null;
-            GZipStream compressionStream = null;
-            StreamWriter writer = null;
-
             try
             {
                 Logger.Log($"[NodeEditor] Executing {node.GetType().Name} remotely on {endpoint.Name}...");
@@ -2441,148 +2437,308 @@ namespace CTS.NodeEditor
                             binaryData[binaryKey] = binaryValue;
                             inputData[pin.Name] = $"binary_ref:{binaryKey}";
                         }
-                        else if (data is System.Drawing.Bitmap bitmap)
+                        else if (data is IGrayscaleVolumeData volumeData)
                         {
-                            // Special handling for bitmaps
+                            // Handle volume data by extracting raw bytes
                             string binaryKey = $"binary_{pin.Name}";
-                            using (MemoryStream ms = new MemoryStream())
+                            int width = volumeData.Width;
+                            int height = volumeData.Height;
+                            int depth = volumeData.Depth;
+                            byte[] volumeBytes = new byte[width * height * depth];
+
+                            // Add dimensions to metadata
+                            inputData["Width"] = width.ToString();
+                            inputData["Height"] = height.ToString();
+                            inputData["Depth"] = depth.ToString();
+
+                            // Extract data from volume
+                            for (int z = 0; z < depth; z++)
                             {
-                                bitmap.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
-                                binaryData[binaryKey] = ms.ToArray();
+                                for (int y = 0; y < height; y++)
+                                {
+                                    for (int x = 0; x < width; x++)
+                                    {
+                                        int index = (z * height + y) * width + x;
+                                        volumeBytes[index] = volumeData[x, y, z];
+                                    }
+                                }
                             }
-                            inputData[pin.Name] = $"bitmap_ref:{binaryKey}";
+
+                            binaryData[binaryKey] = volumeBytes;
+                            inputData[pin.Name] = $"volume_ref:{binaryKey}";
+                        }
+                        else if (data is ILabelVolumeData labelData)
+                        {
+                            // Handle label data similarly to volume data
+                            string binaryKey = $"binary_labels_{pin.Name}";
+                            int width = labelData.Width;
+                            int height = labelData.Height;
+                            int depth = labelData.Depth;
+                            byte[] labelBytes = new byte[width * height * depth];
+
+                            // Extract data from label volume
+                            for (int z = 0; z < depth; z++)
+                            {
+                                for (int y = 0; y < height; y++)
+                                {
+                                    for (int x = 0; x < width; x++)
+                                    {
+                                        int index = (z * height + y) * width + x;
+                                        labelBytes[index] = labelData[x, y, z];
+                                    }
+                                }
+                            }
+
+                            binaryData[binaryKey] = labelBytes;
+                            inputData[pin.Name] = $"labels_ref:{binaryKey}";
                         }
                         else
                         {
-                            // For simple types, store as JSON string
+                            // For other types, serialize as JSON or toString
                             try
                             {
-                                inputData[pin.Name] = JsonSerializer.Serialize(data);
+                                inputData[pin.Name] = System.Text.Json.JsonSerializer.Serialize(data);
                             }
                             catch
                             {
-                                // If serialization fails, use ToString()
                                 inputData[pin.Name] = data.ToString();
                             }
                         }
                     }
                 }
 
-                // Create a data package that includes metadata and binary data
-                var dataPackage = new Dictionary<string, object>();
-                dataPackage["metadata"] = inputData;
-                dataPackage["binary_keys"] = binaryData.Keys.ToList();
-
-                // Serialize the metadata
-                string jsonMetadata = JsonSerializer.Serialize(dataPackage["metadata"]);
-                string jsonBinaryKeys = JsonSerializer.Serialize(dataPackage["binary_keys"]);
-
-                // Compress everything together
-                memoryStream = new MemoryStream();
-                compressionStream = new GZipStream(memoryStream, CompressionMode.Compress);
-                writer = new StreamWriter(compressionStream);
-
-                // Write metadata size, metadata, binary keys size, binary keys
-                byte[] metadataBytes = Encoding.UTF8.GetBytes(jsonMetadata);
-                byte[] binaryKeysBytes = Encoding.UTF8.GetBytes(jsonBinaryKeys);
-
-                // Format: [metadata length][metadata json][binary keys length][binary keys json][binary data]
-                compressionStream.Write(BitConverter.GetBytes(metadataBytes.Length), 0, 4);
-                compressionStream.Write(metadataBytes, 0, metadataBytes.Length);
-                compressionStream.Write(BitConverter.GetBytes(binaryKeysBytes.Length), 0, 4);
-                compressionStream.Write(binaryKeysBytes, 0, binaryKeysBytes.Length);
-
-                // Write each binary block with its length prefix
-                foreach (var entry in binaryData)
+                // Add node-specific parameters
+                if (node is BrightnessContrastNode bcNode)
                 {
-                    byte[] keyBytes = Encoding.UTF8.GetBytes(entry.Key);
-                    byte[] valueBytes = entry.Value;
-
-                    compressionStream.Write(BitConverter.GetBytes(keyBytes.Length), 0, 4);
-                    compressionStream.Write(keyBytes, 0, keyBytes.Length);
-                    compressionStream.Write(BitConverter.GetBytes(valueBytes.Length), 0, 4);
-                    compressionStream.Write(valueBytes, 0, valueBytes.Length);
+                    // Add brightness/contrast parameters
+                    inputData["Brightness"] = bcNode.Brightness.ToString();
+                    inputData["Contrast"] = bcNode.Contrast.ToString();
+                    inputData["BlackPoint"] = bcNode.BlackPoint.ToString();
+                    inputData["WhitePoint"] = bcNode.WhitePoint.ToString();
                 }
 
-                // Close all the streams to ensure data is flushed
-                writer.Close();
-                compressionStream.Close();
+                // Compress everything using memory stream
+                byte[] compressedData;
+                using (var memoryStream = new MemoryStream())
+                using (var gzipStream = new GZipStream(memoryStream, CompressionMode.Compress))
+                {
+                    // Write metadata length and metadata
+                    byte[] metadataBytes = Encoding.UTF8.GetBytes(System.Text.Json.JsonSerializer.Serialize(inputData));
+                    gzipStream.Write(BitConverter.GetBytes(metadataBytes.Length), 0, 4);
+                    gzipStream.Write(metadataBytes, 0, metadataBytes.Length);
 
-                string compressedBase64Data = Convert.ToBase64String(memoryStream.ToArray());
+                    // Write binary keys length and keys
+                    var binaryKeys = binaryData.Keys.ToList();
+                    byte[] binaryKeysBytes = Encoding.UTF8.GetBytes(System.Text.Json.JsonSerializer.Serialize(binaryKeys));
+                    gzipStream.Write(BitConverter.GetBytes(binaryKeysBytes.Length), 0, 4);
+                    gzipStream.Write(binaryKeysBytes, 0, binaryKeysBytes.Length);
 
-                // Create command to execute node on server
-                var command = new Dictionary<string, string>();
-                command["Command"] = "EXECUTE_NODE";
-                command["NodeType"] = node.GetType().Name;
-                command["InputData"] = compressedBase64Data;
+                    // Write each binary data block
+                    foreach (var entry in binaryData)
+                    {
+                        // Write key
+                        byte[] keyBytes = Encoding.UTF8.GetBytes(entry.Key);
+                        gzipStream.Write(BitConverter.GetBytes(keyBytes.Length), 0, 4);
+                        gzipStream.Write(keyBytes, 0, keyBytes.Length);
 
-                string commandJson = JsonSerializer.Serialize(command);
+                        // Write value
+                        gzipStream.Write(BitConverter.GetBytes(entry.Value.Length), 0, 4);
+                        gzipStream.Write(entry.Value, 0, entry.Value.Length);
+                    }
+
+                    gzipStream.Flush();
+                    compressedData = memoryStream.ToArray();
+                }
+
+                // Create command to send to server
+                var command = new Dictionary<string, string>
+                {
+                    ["Command"] = "EXECUTE_NODE",
+                    ["NodeType"] = node.GetType().Name,
+                    ["InputData"] = Convert.ToBase64String(compressedData)
+                };
+
+                // Send to server
+                string commandJson = System.Text.Json.JsonSerializer.Serialize(command);
                 string resultJson = await endpoint.SendCommandAsync(commandJson);
 
                 // Parse the result
-                var result = JsonSerializer.Deserialize<JsonElement>(resultJson);
+                var result = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(resultJson);
 
-                if (result.TryGetProperty("Status", out JsonElement statusElement) &&
-                    statusElement.GetString() == "OK")
+                if (result.TryGetProperty("Status", out var statusElement) &&
+                    statusElement.GetString() == "OK" &&
+                    result.TryGetProperty("OutputData", out var outputDataElement))
                 {
-                    if (result.TryGetProperty("OutputData", out JsonElement outputDataElement))
+                    // Decompress the output data
+                    byte[] resultCompressed = Convert.FromBase64String(outputDataElement.GetString());
+
+                    Dictionary<string, string> outputData = new Dictionary<string, string>();
+                    Dictionary<string, byte[]> outputBinary = new Dictionary<string, byte[]>();
+
+                    using (var memStream = new MemoryStream(resultCompressed))
+                    using (var gzStream = new GZipStream(memStream, CompressionMode.Decompress))
                     {
-                        string base64Data = outputDataElement.GetString();
-                        byte[] compressedBytes = Convert.FromBase64String(base64Data);
+                        // Read metadata length
+                        byte[] lengthBuffer = new byte[4];
+                        gzStream.Read(lengthBuffer, 0, 4);
+                        int metadataLength = BitConverter.ToInt32(lengthBuffer, 0);
 
-                        // Decompress and deserialize the output data
-                        using (MemoryStream compressedStream = new MemoryStream(compressedBytes))
-                        using (GZipStream decompressStream = new GZipStream(compressedStream, CompressionMode.Decompress))
-                        using (StreamReader reader = new StreamReader(decompressStream))
+                        // Read metadata
+                        byte[] metadataBuffer = new byte[metadataLength];
+                        gzStream.Read(metadataBuffer, 0, metadataLength);
+                        string metadataJson = Encoding.UTF8.GetString(metadataBuffer);
+                        outputData = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(metadataJson);
+
+                        // Read binary keys
+                        gzStream.Read(lengthBuffer, 0, 4);
+                        int binaryKeysLength = BitConverter.ToInt32(lengthBuffer, 0);
+                        byte[] keysBuffer = new byte[binaryKeysLength];
+                        gzStream.Read(keysBuffer, 0, binaryKeysLength);
+                        string keysJson = Encoding.UTF8.GetString(keysBuffer);
+                        List<string> binaryKeys = System.Text.Json.JsonSerializer.Deserialize<List<string>>(keysJson);
+
+                        // Read binary data
+                        foreach (string key in binaryKeys)
                         {
-                            string json = reader.ReadToEnd();
-                            var outputData = JsonSerializer.Deserialize<Dictionary<string, string>>(json);
+                            // Read key name
+                            gzStream.Read(lengthBuffer, 0, 4);
+                            int keyLength = BitConverter.ToInt32(lengthBuffer, 0);
+                            byte[] keyBytes = new byte[keyLength];
+                            gzStream.Read(keyBytes, 0, keyLength);
+                            string binaryKey = Encoding.UTF8.GetString(keyBytes);
 
-                            // Apply the output data to the node
-                            foreach (var entry in outputData)
+                            // Read binary value
+                            gzStream.Read(lengthBuffer, 0, 4);
+                            int valueLength = BitConverter.ToInt32(lengthBuffer, 0);
+                            byte[] valueBytes = new byte[valueLength];
+                            gzStream.Read(valueBytes, 0, valueLength);
+
+                            outputBinary[binaryKey] = valueBytes;
+                        }
+                    }
+
+                    // Apply the results to the node's outputs
+                    foreach (var pin in node.GetAllPins().Where(p => p.IsOutput))
+                    {
+                        if (outputData.TryGetValue(pin.Name, out string value))
+                        {
+                            if (value.StartsWith("volume_ref:") || value.StartsWith("binary_ref:"))
                             {
-                                // Handle binary data references
-                                if (entry.Value.StartsWith("binary_ref:") || entry.Value.StartsWith("bitmap_ref:"))
+                                string binaryKey = value.Substring(value.IndexOf(':') + 1);
+                                if (outputBinary.TryGetValue(binaryKey, out byte[] binaryValue))
                                 {
-                                    // We would need to extract the binary data from the response
-                                    // For now, placeholder implementation
-                                    node.SetOutputData(entry.Key, "Binary data processed");
-                                }
-                                else
-                                {
-                                    try
+                                    if (pin.Name == "Volume" && outputData.TryGetValue("Width", out string widthStr) &&
+                                        outputData.TryGetValue("Height", out string heightStr) &&
+                                        outputData.TryGetValue("Depth", out string depthStr))
                                     {
-                                        // Try to deserialize as appropriate type
-                                        var deserializedValue = JsonSerializer.Deserialize<object>(entry.Value);
-                                        node.SetOutputData(entry.Key, deserializedValue);
+                                        try
+                                        {
+                                            int width = int.Parse(widthStr);
+                                            int height = int.Parse(heightStr);
+                                            int depth = int.Parse(depthStr);
+
+                                            var newVolume = new ChunkedVolume(width, height, depth, 64);
+
+                                            // Copy data to the new volume
+                                            for (int z = 0; z < depth; z++)
+                                            {
+                                                for (int y = 0; y < height; y++)
+                                                {
+                                                    for (int x = 0; x < width; x++)
+                                                    {
+                                                        int index = (z * height + y) * width + x;
+                                                        if (index < binaryValue.Length)
+                                                            newVolume[x, y, z] = binaryValue[index];
+                                                    }
+                                                }
+                                            }
+
+                                            // Set output data
+                                            node.SetOutputData(pin.Name, newVolume);
+                                            Logger.Log($"[NodeEditor] Successfully reconstructed volume data ({width}x{height}x{depth})");
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Logger.Log($"[NodeEditor] Error reconstructing volume data: {ex.Message}");
+                                        }
                                     }
-                                    catch
+                                    else
                                     {
-                                        // If deserialization fails, use the string as is
-                                        node.SetOutputData(entry.Key, entry.Value);
+                                        // For other binary data
+                                        node.SetOutputData(pin.Name, binaryValue);
                                     }
                                 }
                             }
+                            else if (value.StartsWith("labels_ref:"))
+                            {
+                                string binaryKey = value.Substring(value.IndexOf(':') + 1);
+                                if (outputBinary.TryGetValue(binaryKey, out byte[] binaryValue))
+                                {
+                                    // Create label volume if dimensions available
+                                    if (outputData.TryGetValue("Width", out string widthStr) &&
+                                        outputData.TryGetValue("Height", out string heightStr) &&
+                                        outputData.TryGetValue("Depth", out string depthStr))
+                                    {
+                                        try
+                                        {
+                                            int width = int.Parse(widthStr);
+                                            int height = int.Parse(heightStr);
+                                            int depth = int.Parse(depthStr);
 
-                            return true;
+                                            // Create with correct parameters including useMemoryMapping flag
+                                            var newLabels = new ChunkedLabelVolume(width, height, depth, 64, false);
+
+                                            // Copy data to the new labels
+                                            for (int z = 0; z < depth; z++)
+                                            {
+                                                for (int y = 0; y < height; y++)
+                                                {
+                                                    for (int x = 0; x < width; x++)
+                                                    {
+                                                        int index = (z * height + y) * width + x;
+                                                        if (index < binaryValue.Length)
+                                                            newLabels[x, y, z] = binaryValue[index];
+                                                    }
+                                                }
+                                            }
+
+                                            node.SetOutputData(pin.Name, newLabels);
+                                            Logger.Log($"[NodeEditor] Successfully reconstructed label data ({width}x{height}x{depth})");
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Logger.Log($"[NodeEditor] Error reconstructing label data: {ex.Message}");
+                                        }
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                // Handle regular values
+                                try
+                                {
+                                    var deserializedValue = System.Text.Json.JsonSerializer.Deserialize<object>(value);
+                                    node.SetOutputData(pin.Name, deserializedValue);
+                                }
+                                catch
+                                {
+                                    // If deserialization fails, use the string as is
+                                    node.SetOutputData(pin.Name, value);
+                                }
+                            }
                         }
                     }
+
+                    return true;
                 }
 
-                Logger.Log($"[NodeEditor] Error executing node remotely: {resultJson}");
+                // If we reach here, something went wrong
                 return false;
             }
             catch (Exception ex)
             {
                 Logger.Log($"[NodeEditor] Error executing node remotely: {ex.Message}");
                 return false;
-            }
-            finally
-            {
-                // Clean up resources
-                if (writer != null) writer.Dispose();
-                if (compressionStream != null) compressionStream.Dispose();
-                if (memoryStream != null) memoryStream.Dispose();
             }
         }
         // Helper method to find an available endpoint

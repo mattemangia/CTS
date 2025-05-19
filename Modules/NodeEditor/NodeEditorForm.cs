@@ -699,11 +699,14 @@ namespace CTS.NodeEditor
 
                 isUpdatingUI = true;
 
-                // Update the useCluster flag
-                useCluster = chkUseCluster.Checked;
+                // Update the useCluster flag only if the checkbox still exists and isn't disposed
+                if (chkUseCluster != null && !chkUseCluster.IsDisposed && chkUseCluster.IsHandleCreated)
+                {
+                    useCluster = chkUseCluster.Checked;
 
-                // Update UI based on the new state
-                UpdateClusterStatus();
+                    // Update UI based on the new state
+                    UpdateClusterStatus();
+                }
             }
             catch (Exception ex)
             {
@@ -727,8 +730,22 @@ namespace CTS.NodeEditor
 
                 isUpdatingUI = true;
 
-                if (cmbEndpoints == null)
+                if (cmbEndpoints == null || cmbEndpoints.IsDisposed || !cmbEndpoints.IsHandleCreated)
                     return;
+
+                // Ensure we're on the UI thread
+                if (cmbEndpoints.InvokeRequired)
+                {
+                    try
+                    {
+                        cmbEndpoints.BeginInvoke(new Action(() => RefreshClusterEndpoints()));
+                    }
+                    catch (Exception)
+                    {
+                        // Handle invocation errors silently
+                    }
+                    return;
+                }
 
                 cmbEndpoints.Items.Clear();
 
@@ -744,7 +761,7 @@ namespace CTS.NodeEditor
                     if (cmbEndpoints.Items.Count > 0)
                         cmbEndpoints.SelectedIndex = 0;
 
-                    if (chkUseCluster != null)
+                    if (chkUseCluster != null && !chkUseCluster.IsDisposed && chkUseCluster.IsHandleCreated)
                         chkUseCluster.Enabled = true;
                 }
                 else
@@ -753,14 +770,14 @@ namespace CTS.NodeEditor
                     cmbEndpoints.SelectedIndex = 0;
 
                     // Even with no endpoints, allow the checkbox to be clicked
-                    if (chkUseCluster != null)
+                    if (chkUseCluster != null && !chkUseCluster.IsDisposed && chkUseCluster.IsHandleCreated)
                         chkUseCluster.Enabled = true;
 
                     // Only update the checked state if we're not in an event handler already
-                    if (!isEventHandlerActive && chkUseCluster != null)
+                    if (!isEventHandlerActive && chkUseCluster != null && !chkUseCluster.IsDisposed && chkUseCluster.IsHandleCreated)
                         chkUseCluster.Checked = false;
 
-                    useCluster = chkUseCluster != null ? chkUseCluster.Checked : false;
+                    useCluster = chkUseCluster != null && !chkUseCluster.IsDisposed ? chkUseCluster.Checked : false;
                 }
 
                 UpdateClusterStatus();
@@ -775,13 +792,12 @@ namespace CTS.NodeEditor
                 isUpdatingUI = false;
             }
         }
-
         private void UpdateClusterStatus()
         {
             try
             {
-                // Check for null controls first
-                if (lblClusterStatus == null)
+                // Check for null or disposed controls
+                if (lblClusterStatus == null || lblClusterStatus.IsDisposed || !lblClusterStatus.IsHandleCreated)
                     return;
 
                 // Safe access to endpoints list
@@ -801,24 +817,136 @@ namespace CTS.NodeEditor
 
                 if (useCluster && endpoints != null && endpointCount > 0)
                 {
-                    lblClusterStatus.Text = $"Cluster: {availableEndpoints}/{endpointCount} endpoints";
-                    lblClusterStatus.ForeColor = Color.LightGreen;
-                    if (cmbEndpoints != null)
-                        cmbEndpoints.Enabled = true;
+                    // Update safely with null checks
+                    if (lblClusterStatus != null && !lblClusterStatus.IsDisposed && lblClusterStatus.IsHandleCreated)
+                    {
+                        try
+                        {
+                            if (lblClusterStatus.InvokeRequired)
+                            {
+                                lblClusterStatus.BeginInvoke(new Action(() => {
+                                    lblClusterStatus.Text = $"Cluster: {availableEndpoints}/{endpointCount} endpoints";
+                                    lblClusterStatus.ForeColor = Color.LightGreen;
+                                }));
+                            }
+                            else
+                            {
+                                lblClusterStatus.Text = $"Cluster: {availableEndpoints}/{endpointCount} endpoints";
+                                lblClusterStatus.ForeColor = Color.LightGreen;
+                            }
+                        }
+                        catch (Exception)
+                        {
+                            // Silently handle UI update errors
+                        }
+                    }
+
+                    if (cmbEndpoints != null && !cmbEndpoints.IsDisposed && cmbEndpoints.IsHandleCreated)
+                    {
+                        try
+                        {
+                            if (cmbEndpoints.InvokeRequired)
+                            {
+                                cmbEndpoints.BeginInvoke(new Action(() => cmbEndpoints.Enabled = true));
+                            }
+                            else
+                            {
+                                cmbEndpoints.Enabled = true;
+                            }
+                        }
+                        catch (Exception)
+                        {
+                            // Silently handle UI update errors
+                        }
+                    }
                 }
                 else if (useCluster)
                 {
-                    lblClusterStatus.Text = "No endpoints available";
-                    lblClusterStatus.ForeColor = Color.Orange;
-                    if (cmbEndpoints != null)
-                        cmbEndpoints.Enabled = false;
+                    if (lblClusterStatus != null && !lblClusterStatus.IsDisposed && lblClusterStatus.IsHandleCreated)
+                    {
+                        try
+                        {
+                            if (lblClusterStatus.InvokeRequired)
+                            {
+                                lblClusterStatus.BeginInvoke(new Action(() => {
+                                    lblClusterStatus.Text = "No endpoints available";
+                                    lblClusterStatus.ForeColor = Color.Orange;
+                                }));
+                            }
+                            else
+                            {
+                                lblClusterStatus.Text = "No endpoints available";
+                                lblClusterStatus.ForeColor = Color.Orange;
+                            }
+                        }
+                        catch (Exception)
+                        {
+                            // Silently handle UI update errors
+                        }
+                    }
+
+                    if (cmbEndpoints != null && !cmbEndpoints.IsDisposed && cmbEndpoints.IsHandleCreated)
+                    {
+                        try
+                        {
+                            if (cmbEndpoints.InvokeRequired)
+                            {
+                                cmbEndpoints.BeginInvoke(new Action(() => cmbEndpoints.Enabled = false));
+                            }
+                            else
+                            {
+                                cmbEndpoints.Enabled = false;
+                            }
+                        }
+                        catch (Exception)
+                        {
+                            // Silently handle UI update errors
+                        }
+                    }
                 }
                 else
                 {
-                    lblClusterStatus.Text = "Cluster disabled";
-                    lblClusterStatus.ForeColor = Color.Silver;
-                    if (cmbEndpoints != null)
-                        cmbEndpoints.Enabled = false;
+                    if (lblClusterStatus != null && !lblClusterStatus.IsDisposed && lblClusterStatus.IsHandleCreated)
+                    {
+                        try
+                        {
+                            if (lblClusterStatus.InvokeRequired)
+                            {
+                                lblClusterStatus.BeginInvoke(new Action(() => {
+                                    lblClusterStatus.Text = "Cluster disabled";
+                                    lblClusterStatus.ForeColor = Color.Silver;
+                                }));
+                            }
+                            else
+                            {
+                                lblClusterStatus.Text = "Cluster disabled";
+                                lblClusterStatus.ForeColor = Color.Silver;
+                            }
+                        }
+                        catch (Exception)
+                        {
+                            // Silently handle UI update errors
+                        }
+                    }
+
+                    if (cmbEndpoints != null && !cmbEndpoints.IsDisposed && cmbEndpoints.IsHandleCreated)
+                    {
+                        try
+                        {
+                            if (cmbEndpoints.InvokeRequired)
+                            {
+                                cmbEndpoints.BeginInvoke(new Action(() => cmbEndpoints.Enabled = false));
+                            }
+                            else
+                            {
+                                cmbEndpoints.Enabled = false;
+                            }
+                        }
+                        catch (Exception)
+                        {
+                            // Silently handle UI update errors
+                        }
+                    }
                 }
             }
             catch (Exception ex)
@@ -827,7 +955,6 @@ namespace CTS.NodeEditor
                 Logger.Log($"[NodeEditor] Error updating cluster status: {ex.Message}");
             }
         }
-
         private void SetupKeyboardHandling()
         {
             // Remove KeyPreview as it's not available on Panel

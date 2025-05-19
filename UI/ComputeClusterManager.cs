@@ -159,7 +159,7 @@ namespace CTS
                 try
                 {
                     // First log the actual response for debugging
-                    Logger.Log($"[ComputeServer] Endpoint list response: {response}");
+                    //Logger.Log($"[ComputeServer] Endpoint list response: {response}");
 
                     var responseObj = JsonSerializer.Deserialize<JsonElement>(response);
 
@@ -823,6 +823,7 @@ namespace CTS
 
                 // Check for servers that haven't been seen in a while
                 var now = DateTime.Now;
+                var serversToRemove = new List<ComputeServer>();
 
                 for (int i = servers.Count - 1; i >= 0; i--)
                 {
@@ -835,14 +836,28 @@ namespace CTS
                         // This will also disconnect all associated endpoints
                         server.Disconnect();
 
-                        // Remove from server list
-                        servers.RemoveAt(i);
+                        // Queue for removal to avoid modifying collection during enumeration
+                        serversToRemove.Add(server);
+                    }
+                }
+
+                // Now safely remove the servers and trigger events
+                foreach (var server in serversToRemove)
+                {
+                    servers.Remove(server);
+                    try
+                    {
                         ServerRemoved?.Invoke(this, server);
+                    }
+                    catch (Exception ex)
+                    {
+                        // This might happen if a subscriber is disposed
+                        Logger.Log($"[ComputeClusterManager] Error in ServerRemoved event: {ex.Message}");
                     }
                 }
 
                 // Send keep-alive to connected servers and refresh endpoint information
-                foreach (var server in servers.Where(s => s.IsConnected))
+                foreach (var server in servers.Where(s => s.IsConnected).ToList())
                 {
                     try
                     {
@@ -871,7 +886,11 @@ namespace CTS
                                     Logger.Log($"[ComputeClusterManager] Error parsing ping response from {server.Name}: {ex.Message}");
                                     // Mark server as disconnected since we couldn't parse its response
                                     server.Disconnect();
-                                    ServerStatusChanged?.Invoke(this, server);
+                                    try
+                                    {
+                                        ServerStatusChanged?.Invoke(this, server);
+                                    }
+                                    catch { }
                                 }
 
                                 // Refresh endpoint list (less frequently)
@@ -885,7 +904,11 @@ namespace CTS
                                 // Timeout occurred
                                 Logger.Log($"[ComputeClusterManager] Keep-alive timeout for {server.Name}");
                                 server.Disconnect();
-                                ServerStatusChanged?.Invoke(this, server);
+                                try
+                                {
+                                    ServerStatusChanged?.Invoke(this, server);
+                                }
+                                catch { }
                             }
                             catch (Exception ex)
                             {
@@ -893,7 +916,11 @@ namespace CTS
 
                                 // Set server as disconnected
                                 server.Disconnect();
-                                ServerStatusChanged?.Invoke(this, server);
+                                try
+                                {
+                                    ServerStatusChanged?.Invoke(this, server);
+                                }
+                                catch { }
                             }
                         });
                     }
@@ -901,9 +928,17 @@ namespace CTS
                     {
                         Logger.Log($"[ComputeClusterManager] Error scheduling keep-alive for {server.Name}: {ex.Message}");
                         server.Disconnect();
-                        ServerStatusChanged?.Invoke(this, server);
+                        try
+                        {
+                            ServerStatusChanged?.Invoke(this, server);
+                        }
+                        catch { }
                     }
                 }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ComputeClusterManager] Error in keep-alive timer: {ex.Message}");
             }
             finally
             {
@@ -1547,26 +1582,56 @@ namespace CTS
 
         private void Manager_ServerDiscovered(object sender, ComputeServer server)
         {
-            if (this.InvokeRequired)
+            try
             {
-                this.BeginInvoke(new Action(() => Manager_ServerDiscovered(sender, server)));
-                return;
+                if (this.IsDisposed || !this.IsHandleCreated)
+                {
+                    // Unsubscribe if we're disposed
+                    if (manager != null)
+                        manager.ServerDiscovered -= Manager_ServerDiscovered;
+                    return;
+                }
+
+                if (this.InvokeRequired)
+                {
+                    try
+                    {
+                        this.BeginInvoke(new Action(() => Manager_ServerDiscovered(sender, server)));
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // Form is disposed, unsubscribe from events
+                        if (manager != null)
+                            manager.ServerDiscovered -= Manager_ServerDiscovered;
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // Handle was destroyed
+                        if (manager != null)
+                            manager.ServerDiscovered -= Manager_ServerDiscovered;
+                    }
+                    return;
+                }
+
+                // Create a visual control for the server
+                var control = new ServerNodeControl(server);
+                control.Selected += ServerNodeControl_Selected;
+                control.DoubleClicked += ServerNodeControl_DoubleClicked;
+
+                serverControls[server] = control;
+                topologyPanel.Controls.Add(control);
+
+                LogMessage($"Discovered server: {server.Name} ({server.IP}:{server.Port})");
+
+                // Subscribe to the server's endpoints updated event
+                server.EndpointsUpdated += (s, e) => UpdateServerEndpoints(server);
             }
-
-            // Create a visual control for the server
-            var control = new ServerNodeControl(server);
-            control.Selected += ServerNodeControl_Selected;
-            control.DoubleClicked += ServerNodeControl_DoubleClicked;
-
-            serverControls[server] = control;
-            topologyPanel.Controls.Add(control);
-
-            LogMessage($"Discovered server: {server.Name} ({server.IP}:{server.Port})");
-
-            // Subscribe to the server's endpoints updated event
-            server.EndpointsUpdated += (s, e) => UpdateServerEndpoints(server);
+            catch (Exception ex)
+            {
+                // Log but don't crash
+                Logger.Log($"[ComputeClusterForm] Error in ServerDiscovered handler: {ex.Message}");
+            }
         }
-
         private void UpdateServerEndpoints(ComputeServer server)
         {
             if (this.InvokeRequired)
@@ -1608,65 +1673,156 @@ namespace CTS
 
         private void Manager_ServerStatusChanged(object sender, ComputeServer server)
         {
-            if (this.InvokeRequired)
+            try
             {
-                this.BeginInvoke(new Action(() => Manager_ServerStatusChanged(sender, server)));
-                return;
-            }
+                if (this.IsDisposed || !this.IsHandleCreated)
+                {
+                    // Unsubscribe if we're disposed
+                    if (manager != null)
+                        manager.ServerStatusChanged -= Manager_ServerStatusChanged;
+                    return;
+                }
 
-            if (serverControls.TryGetValue(server, out var control))
+                if (this.InvokeRequired)
+                {
+                    try
+                    {
+                        this.BeginInvoke(new Action(() => Manager_ServerStatusChanged(sender, server)));
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // Form is disposed, unsubscribe from events
+                        if (manager != null)
+                            manager.ServerStatusChanged -= Manager_ServerStatusChanged;
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // Handle was destroyed
+                        if (manager != null)
+                            manager.ServerStatusChanged -= Manager_ServerStatusChanged;
+                    }
+                    return;
+                }
+
+                if (serverControls.TryGetValue(server, out var control))
+                {
+                    control.UpdateDisplay();
+                }
+            }
+            catch (Exception ex)
             {
-                control.UpdateDisplay();
+                // Log but don't crash
+                Logger.Log($"[ComputeClusterForm] Error in ServerStatusChanged handler: {ex.Message}");
             }
         }
 
         private void Manager_ServerRemoved(object sender, ComputeServer server)
         {
-            if (this.InvokeRequired)
+            try
             {
-                this.BeginInvoke(new Action(() => Manager_ServerRemoved(sender, server)));
-                return;
-            }
+                if (this.IsDisposed || !this.IsHandleCreated)
+                {
+                    // Unsubscribe if we're disposed
+                    if (manager != null)
+                        manager.ServerRemoved -= Manager_ServerRemoved;
+                    return;
+                }
 
-            if (serverControls.TryGetValue(server, out var control))
+                if (this.InvokeRequired)
+                {
+                    try
+                    {
+                        this.BeginInvoke(new Action(() => Manager_ServerRemoved(sender, server)));
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // Form is disposed, unsubscribe from events
+                        if (manager != null)
+                            manager.ServerRemoved -= Manager_ServerRemoved;
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // Handle was destroyed
+                        if (manager != null)
+                            manager.ServerRemoved -= Manager_ServerRemoved;
+                    }
+                    return;
+                }
+
+                if (serverControls.TryGetValue(server, out var control))
+                {
+                    topologyPanel.Controls.Remove(control);
+                    serverControls.Remove(server);
+                    selectedServers.Remove(server);
+                    control.Dispose();
+                }
+
+                // Also remove all endpoints connected to this server
+                var endpointsToRemove = endpointControls.Keys
+                    .Where(e => e.ParentServer == server)
+                    .ToList();
+
+                foreach (var endpoint in endpointsToRemove)
+                {
+                    var epControl = endpointControls[endpoint];
+                    topologyPanel.Controls.Remove(epControl);
+                    endpointControls.Remove(endpoint);
+                    selectedEndpoints.Remove(endpoint);
+                    epControl.Dispose();
+                }
+
+                LogMessage($"Server removed: {server.Name} ({server.IP}:{server.Port})");
+            }
+            catch (Exception ex)
             {
-                topologyPanel.Controls.Remove(control);
-                serverControls.Remove(server);
-                selectedServers.Remove(server);
-                control.Dispose();
+                // Log but don't crash
+                Logger.Log($"[ComputeClusterForm] Error in ServerRemoved handler: {ex.Message}");
             }
-
-            // Also remove all endpoints connected to this server
-            var endpointsToRemove = endpointControls.Keys
-                .Where(e => e.ParentServer == server)
-                .ToList();
-
-            foreach (var endpoint in endpointsToRemove)
-            {
-                var epControl = endpointControls[endpoint];
-                topologyPanel.Controls.Remove(epControl);
-                endpointControls.Remove(endpoint);
-                selectedEndpoints.Remove(endpoint);
-                epControl.Dispose();
-            }
-
-            LogMessage($"Server removed: {server.Name} ({server.IP}:{server.Port})");
         }
-
         private void Manager_EndpointStatusChanged(object sender, ComputeEndpoint endpoint)
         {
-            if (this.InvokeRequired)
+            try
             {
-                this.BeginInvoke(new Action(() => Manager_EndpointStatusChanged(sender, endpoint)));
-                return;
-            }
+                if (this.IsDisposed || !this.IsHandleCreated)
+                {
+                    // Unsubscribe if we're disposed
+                    if (manager != null)
+                        manager.EndpointStatusChanged -= Manager_EndpointStatusChanged;
+                    return;
+                }
 
-            if (endpointControls.TryGetValue(endpoint, out var control))
+                if (this.InvokeRequired)
+                {
+                    try
+                    {
+                        this.BeginInvoke(new Action(() => Manager_EndpointStatusChanged(sender, endpoint)));
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // Form is disposed, unsubscribe from events
+                        if (manager != null)
+                            manager.EndpointStatusChanged -= Manager_EndpointStatusChanged;
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // Handle was destroyed
+                        if (manager != null)
+                            manager.EndpointStatusChanged -= Manager_EndpointStatusChanged;
+                    }
+                    return;
+                }
+
+                if (endpointControls.TryGetValue(endpoint, out var control))
+                {
+                    control.UpdateDisplay();
+                }
+            }
+            catch (Exception ex)
             {
-                control.UpdateDisplay();
+                // Log but don't crash
+                Logger.Log($"[ComputeClusterForm] Error in EndpointStatusChanged handler: {ex.Message}");
             }
         }
-
         private void ServerNodeControl_Selected(object sender, EventArgs args)
         {
             var control = sender as ServerNodeControl;
@@ -2091,36 +2247,83 @@ namespace CTS
 
         private void LogMessage(string message)
         {
-            if (outputTextBox.InvokeRequired)
+            try
             {
-                outputTextBox.BeginInvoke(new Action(() => LogMessage(message)));
-                return;
+                // Check if the control is disposed or invalid
+                if (outputTextBox == null || outputTextBox.IsDisposed || !outputTextBox.IsHandleCreated)
+                    return;
+
+                if (outputTextBox.InvokeRequired)
+                {
+                    try
+                    {
+                        outputTextBox.BeginInvoke(new Action(() => LogMessage(message)));
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // Control was disposed between our check and invoke
+                        return;
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // Handle was destroyed
+                        return;
+                    }
+                    return;
+                }
+
+                outputTextBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
+                // Scroll to end
+                outputTextBox.SelectionStart = outputTextBox.Text.Length;
+                outputTextBox.ScrollToCaret();
             }
-
-            outputTextBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
-            // Scroll to end
-            outputTextBox.SelectionStart = outputTextBox.Text.Length;
-            outputTextBox.ScrollToCaret();
+            catch (Exception)
+            {
+                // Silently ignore errors when logging - this prevents cascading exceptions
+            }
         }
-
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            // Unsubscribe from all events before anything else
+            if (manager != null)
+            {
+                manager.ServerDiscovered -= Manager_ServerDiscovered;
+                manager.ServerStatusChanged -= Manager_ServerStatusChanged;
+                manager.ServerRemoved -= Manager_ServerRemoved;
+                manager.EndpointStatusChanged -= Manager_EndpointStatusChanged;
+            }
+
             // Stop discovery and clean up
-            refreshTimer.Stop();
-            manager.StopDiscovery();
+            refreshTimer?.Stop();
+            refreshTimer?.Dispose();
+
+            // Try to stop discovery
+            try
+            {
+                manager?.StopDiscovery();
+            }
+            catch (Exception ex)
+            {
+                // Log but continue cleanup
+                Logger.Log($"[ComputeClusterForm] Error stopping discovery: {ex.Message}");
+            }
 
             // Disconnect all servers
-            foreach (var server in manager.Servers.Where(s => s.IsConnected))
+            foreach (var server in manager?.Servers?.Where(s => s.IsConnected) ?? Enumerable.Empty<ComputeServer>())
             {
                 try
                 {
                     manager.DisconnectServer(server);
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Ignore errors on shutdown
+                    // Log but continue cleanup
+                    Logger.Log($"[ComputeClusterForm] Error disconnecting server: {ex.Message}");
                 }
             }
+
+            // Make sure manager is still accessible to NodeEditor
+            // Don't set manager to null!
 
             base.OnFormClosing(e);
         }
@@ -2559,6 +2762,7 @@ namespace CTS
             this.MinimizeBox = false;
             this.StartPosition = FormStartPosition.CenterParent;
             this.PaletteMode = PaletteMode.Office2010Black;
+            this.BackColor = Color.DarkGray;
 
             // Create controls
             KryptonLabel lblName = new KryptonLabel { Text = "Name:", Location = new Point(20, 20), AutoSize = true };

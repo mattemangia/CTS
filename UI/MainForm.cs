@@ -1133,11 +1133,11 @@ namespace CTS
                 Text = "Enter Pixel Size and Binning",
                 Width = 350,
                 Height = 220,
-                StartPosition = FormStartPosition.CenterScreen, // Changed back to CenterScreen
+                StartPosition = FormStartPosition.CenterScreen,
                 FormBorderStyle = FormBorderStyle.FixedDialog,
                 MaximizeBox = false,
                 MinimizeBox = false,
-                ShowInTaskbar = false,  // Add this
+                ShowInTaskbar = false,
                 Icon = this.Icon
             })
             {
@@ -1148,7 +1148,7 @@ namespace CTS
                     Left = 170,
                     Top = 18,
                     Width = 80,
-                    DropDownStyle = ComboBoxStyle.DropDownList  // Add this to prevent editing
+                    DropDownStyle = ComboBoxStyle.DropDownList
                 };
                 cbUnits.Items.Add("µm");
                 cbUnits.Items.Add("mm");
@@ -1160,7 +1160,7 @@ namespace CTS
                     Left = 80,
                     Top = 58,
                     Width = 170,
-                    DropDownStyle = ComboBoxStyle.DropDownList  // Add this to prevent editing
+                    DropDownStyle = ComboBoxStyle.DropDownList
                 };
                 cbBinning.Items.Add("1 (disabled)");
                 cbBinning.Items.Add("2x2");
@@ -1178,7 +1178,7 @@ namespace CTS
                     DialogResult = DialogResult.OK
                 };
 
-                Button cancel = new Button()  // Add a cancel button
+                Button cancel = new Button()
                 {
                     Text = "Cancel",
                     Left = 220,
@@ -1193,15 +1193,12 @@ namespace CTS
                 form.Controls.Add(lblBinning);
                 form.Controls.Add(cbBinning);
                 form.Controls.Add(ok);
-                form.Controls.Add(cancel);  // Add cancel button
+                form.Controls.Add(cancel);
 
                 form.AcceptButton = ok;
-                form.CancelButton = cancel;  // Add cancel button as escape key handler
-
-                // Focus on the text box
+                form.CancelButton = cancel;
                 form.Shown += (s, e) => txtVal.Focus();
 
-                // Show dialog without owner to avoid potential deadlock
                 if (form.ShowDialog() == DialogResult.OK)
                 {
                     if (double.TryParse(txtVal.Text, out double val))
@@ -1221,19 +1218,18 @@ namespace CTS
                                 binFactor = parsedFactor;
                         }
 
-                        // Adjust the pixel size based on binning
-                        double adjustedPixelSize = val * binFactor;
+                        
+                        double basePixelSize = val;
 
                         // Store the binning factor for later processing
                         SelectedBinningFactor = binFactor;
 
-                        return adjustedPixelSize;
+                        return basePixelSize;
                     }
                 }
             }
             return null;
         }
-
         public void SaveBinary(string path)
         {
             if (volumeLabels == null)

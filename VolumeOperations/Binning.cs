@@ -16,7 +16,7 @@ namespace CTS
         /// <param name="binFactor">Binning factor to apply (e.g., 2, 4, 8)</param>
         /// <param name="pixelSizeOverride">If > 0, use this exact value instead of calculated one (for pre-scaled values)</param>
         /// <param name="useMemoryMapping">Whether to use memory mapping for large datasets</param>
-        public static async Task ProcessBinningAsync(string folderPath, int binFactor, float inputPixelSize, bool useMemoryMapping)
+        public static async Task ProcessBinningAsync(string folderPath, int binFactor, float basePixelSize, bool useMemoryMapping)
         {
             Logger.Log($"[Binning] Starting true 3D binning with factor {binFactor}");
 
@@ -28,18 +28,17 @@ namespace CTS
                 // Calculate new dimensions - ALL THREE DIMENSIONS REDUCED
                 int newWidth = Math.Max(1, oldWidth / binFactor);
                 int newHeight = Math.Max(1, oldHeight / binFactor);
-                int newDepth = Math.Max(1, oldDepth / binFactor);  // THIS IS THE KEY CHANGE
+                int newDepth = Math.Max(1, oldDepth / binFactor);
 
-                // CRITICAL FIX: Always calculate the correct physical pixel size
+                // FIXED: Pixel size calculation - properly handle binning factor
                 double newPixelSize;
 
-                if (inputPixelSize > 0)
+                if (basePixelSize > 0)
                 {
-                    // The inputPixelSize from MainForm.AskUserPixelSize is already scaled by binFactor,
-                    // but this is incorrect - we need to use the BASE pixel size
-                    // To fix the display problem, we need to DIVIDE by binFactor here
-                    newPixelSize = inputPixelSize / binFactor;
-                    Logger.Log($"[Binning] Correcting input pixel size: {inputPixelSize} ÷ {binFactor} = {newPixelSize}");
+                    // Apply binning factor to the base pixel size correctly here
+                    // This is where the scaling should happen - not in AskUserPixelSize
+                    newPixelSize = basePixelSize * binFactor;
+                    Logger.Log($"[Binning] Calculated new pixel size from input: {basePixelSize} × {binFactor} = {newPixelSize}");
                 }
                 else
                 {

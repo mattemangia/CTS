@@ -16,7 +16,7 @@ namespace CTS
         /// <param name="binFactor">Binning factor to apply (e.g., 2, 4, 8)</param>
         /// <param name="pixelSizeOverride">If > 0, use this exact value instead of calculated one (for pre-scaled values)</param>
         /// <param name="useMemoryMapping">Whether to use memory mapping for large datasets</param>
-        public static async Task ProcessBinningAsync(string folderPath, int binFactor, float pixelSizeOverride, bool useMemoryMapping)
+        public static async Task ProcessBinningAsync(string folderPath, int binFactor, float pixelSize, bool useMemoryMapping)
         {
             Logger.Log($"[Binning] Starting true 3D binning with factor {binFactor}");
 
@@ -28,28 +28,29 @@ namespace CTS
                 // Calculate new dimensions - ALL THREE DIMENSIONS REDUCED
                 int newWidth = Math.Max(1, oldWidth / binFactor);
                 int newHeight = Math.Max(1, oldHeight / binFactor);
-                int newDepth = Math.Max(1, oldDepth / binFactor);  // THIS IS THE KEY CHANGE
+                int newDepth = Math.Max(1, oldDepth / binFactor);
 
-                // Calculate new pixel size - with proper scaling
+                // FIXED: Pixel size calculation
+                // The incoming pixelSize parameter from AskUserPixelSize is already scaled
+                // and should be used directly if provided
                 double newPixelSize;
 
-                if (pixelSizeOverride > 0)
+                if (pixelSize > 0)
                 {
-                    // If a specific pixel size override is provided, use it directly
-                    // WARNING: The caller is responsible for ensuring this value is appropriate for binning
-                    newPixelSize = pixelSizeOverride;
-                    Logger.Log($"[Binning] Using override pixel size: {newPixelSize}");
+                    // Use the provided pixel size directly WITHOUT multiplying by binFactor again
+                    // since it's already been adjusted in AskUserPixelSize()
+                    newPixelSize = pixelSize;
+                    Logger.Log($"[Binning] Using provided pre-scaled pixel size: {newPixelSize:E6} m");
                 }
                 else
                 {
-                    // Otherwise scale the original pixel size by the binning factor
+                    // When not provided, scale the original pixel size from the volume
                     newPixelSize = oldPixelSize * binFactor;
-                    Logger.Log($"[Binning] Calculated new pixel size: {oldPixelSize} × {binFactor} = {newPixelSize}");
+                    Logger.Log($"[Binning] Calculated new pixel size from original: {oldPixelSize:E6} × {binFactor} = {newPixelSize:E6} m");
                 }
 
                 Logger.Log($"[Binning] Dimensions: {oldWidth}x{oldHeight}x{oldDepth} -> {newWidth}x{newHeight}x{newDepth}");
-                Logger.Log($"[Binning] Depth reduction: {oldDepth} -> {newDepth}");
-                Logger.Log($"[Binning] Pixel size: {oldPixelSize} -> {newPixelSize}");
+                Logger.Log($"[Binning] Pixel size: {oldPixelSize:E6} m -> {newPixelSize:E6} m");
 
                 // Load the existing volume
                 string volumeBinPath = Path.Combine(folderPath, "volume.bin");

@@ -10,6 +10,11 @@ namespace CTS.NodeEditor
     public abstract class BaseNode
     {
         private Dictionary<string, object> outputData = new Dictionary<string, object>();
+        public virtual Dictionary<string, string> GetNodeParameters()
+        {
+            // Default implementation returns an empty dictionary
+            return new Dictionary<string, string>();
+        }
         public Point Position { get; set; }
         public Size Size { get; set; }
         public Color Color { get; set; }

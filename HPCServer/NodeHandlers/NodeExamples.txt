@@ -1,0 +1,142 @@
+﻿public abstract class BaseNodeHandler : INodeHandler
+{
+    public abstract Task<Dictionary<string, string>> ProcessAsync(
+        Dictionary<string, string> inputData,
+        Dictionary<string, byte[]> binaryData,
+        ComputeService computeService);
+        
+    /// <summary>
+    /// Extract node-specific parameters from the input data.
+    /// </summary>
+    /// <param name="inputData">Dictionary containing all input parameters</param>
+    /// <returns>Dictionary containing only node-specific parameters</returns>
+    protected Dictionary<string, string> ExtractNodeParameters(Dictionary<string, string> inputData)
+    {
+        var parameters = new Dictionary<string, string>();
+        
+        // Filter out parameters that are not node-specific (binary references, etc.)
+        foreach (var kvp in inputData)
+        {
+            if (!kvp.Value.StartsWith("binary_ref:") && 
+                !kvp.Value.StartsWith("volume_ref:") && 
+                !kvp.Value.StartsWith("labels_ref:"))
+            {
+                parameters[kvp.Key] = kvp.Value;
+            }
+        }
+        
+        return parameters;
+    }
+    
+    /// <summary>
+    /// Log processing information
+    /// </summary>
+    protected void LogProcessing(string nodeType)
+    {
+        Console.WriteLine($"Processing {nodeType}...");
+    }
+}
+
+Handler
+
+public abstract class BaseNodeHandler : INodeHandler
+{
+    public abstract Task<Dictionary<string, string>> ProcessAsync(
+        Dictionary<string, string> inputData,
+        Dictionary<string, byte[]> binaryData,
+        ComputeService computeService);
+        
+    /// <summary>
+    /// Extract node-specific parameters from the input data.
+    /// </summary>
+    /// <param name="inputData">Dictionary containing all input parameters</param>
+    /// <returns>Dictionary containing only node-specific parameters</returns>
+    protected Dictionary<string, string> ExtractNodeParameters(Dictionary<string, string> inputData)
+    {
+        var parameters = new Dictionary<string, string>();
+        
+        // Filter out parameters that are not node-specific (binary references, etc.)
+        foreach (var kvp in inputData)
+        {
+            if (!kvp.Value.StartsWith("binary_ref:") && 
+                !kvp.Value.StartsWith("volume_ref:") && 
+                !kvp.Value.StartsWith("labels_ref:"))
+            {
+                parameters[kvp.Key] = kvp.Value;
+            }
+        }
+        
+        return parameters;
+    }
+    
+    /// <summary>
+    /// Log processing information
+    /// </summary>
+    protected void LogProcessing(string nodeType)
+    {
+        Console.WriteLine($"Processing {nodeType}...");
+    }
+}
+
+Example
+public class BrightnessContrastNodeHandler : BaseNodeHandler
+{
+    public override async Task<Dictionary<string, string>> ProcessAsync(
+        Dictionary<string, string> inputData,
+        Dictionary<string, byte[]> binaryData,
+        ComputeService computeService)
+    {
+        LogProcessing("BrightnessContrastNode");
+        
+        // Extract parameters using the base class method first
+        var parameters = ExtractNodeParameters(inputData);
+        
+        // Parse specific parameters needed for this node
+        int brightness = 0;
+        int contrast = 100;
+        byte blackPoint = 0;
+        byte whitePoint = 255;
+        
+        if (parameters.TryGetValue("Brightness", out string brightnessStr))
+            int.TryParse(brightnessStr, out brightness);
+            
+        if (parameters.TryGetValue("Contrast", out string contrastStr))
+            int.TryParse(contrastStr, out contrast);
+            
+        if (parameters.TryGetValue("BlackPoint", out string blackPointStr))
+            byte.TryParse(blackPointStr, out blackPoint);
+            
+        if (parameters.TryGetValue("WhitePoint", out string whitePointStr))
+            byte.TryParse(whitePointStr, out whitePoint);
+            
+        Console.WriteLine($"Processing brightness/contrast adjustment: brightness={brightness}, contrast={contrast}, blackPoint={blackPoint}, whitePoint={whitePoint}");
+        
+        // Get volume data
+        int width = 0, height = 0, depth = 0;
+        
+        if (parameters.TryGetValue("Width", out string widthStr))
+            int.TryParse(widthStr, out width);
+            
+        if (parameters.TryGetValue("Height", out string heightStr))
+            int.TryParse(heightStr, out height);
+            
+        if (parameters.TryGetValue("Depth", out string depthStr))
+            int.TryParse(depthStr, out depth);
+        
+        // [Rest of the implementation for processing the volume data]
+        
+        // Return results
+        var outputData = new Dictionary<string, string>();
+        outputData["Status"] = "Success";
+        
+        // Add parameters to output (preserve original values)
+        foreach (var param in parameters)
+        {
+            outputData[param.Key] = param.Value;
+        }
+        
+        return outputData;
+    }
+    
+    // [Rest of the implementation]
+}

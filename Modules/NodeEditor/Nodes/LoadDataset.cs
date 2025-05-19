@@ -60,7 +60,15 @@ namespace CTS.Modules.NodeEditor.Nodes
             AddOutputPin("Volume", Color.LightBlue);
             AddOutputPin("Labels", Color.LightCoral);
         }
-
+        public override Dictionary<string, string> GetNodeParameters()
+        {
+            var parameters = new Dictionary<string, string>
+            {
+                ["DatasetPath"] = _datasetPath,
+                ["PixelSize"] = _pixelSize.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            };
+            return parameters;
+        }
         private void InitializeTransferClient()
         {
             try

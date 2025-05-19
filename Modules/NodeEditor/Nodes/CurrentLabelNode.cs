@@ -28,7 +28,38 @@ namespace CTS.Modules.NodeEditor.Nodes
             AddOutputPin("Labels", Color.LightCoral);
             AddOutputPin("Materials", Color.Orange);
         }
+        public override Dictionary<string, string> GetNodeParameters()
+        {
+            var parameters = new Dictionary<string, string>();
 
+            // Add dimensions if label data is available
+            if (LabelData != null)
+            {
+                parameters["Width"] = LabelData.Width.ToString();
+                parameters["Height"] = LabelData.Height.ToString();
+                parameters["Depth"] = LabelData.Depth.ToString();
+            }
+
+            // Add material information
+            if (Materials != null && Materials.Count > 0)
+            {
+                parameters["MaterialCount"] = Materials.Count.ToString();
+
+                // Serialize basic material information
+                for (int i = 0; i < Materials.Count; i++)
+                {
+                    parameters[$"Material_{i}_ID"] = Materials[i].ID.ToString();
+                    parameters[$"Material_{i}_Name"] = Materials[i].Name;
+                    parameters[$"Material_{i}_IsExterior"] = Materials[i].IsExterior.ToString();
+
+                    // Serialize color as ARGB
+                    var color = Materials[i].Color;
+                    parameters[$"Material_{i}_Color"] = $"{color.A},{color.R},{color.G},{color.B}";
+                }
+            }
+
+            return parameters;
+        }
         public override Control CreatePropertyPanel()
         {
             var panel = new Panel

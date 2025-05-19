@@ -1,0 +1,112 @@
+﻿public abstract class BaseNode
+{
+    // Existing code...
+    
+    /// <summary>
+    /// Gets node-specific parameters for remote execution.
+    /// Each node type should override this to provide its specific parameters.
+    /// </summary>
+    /// <returns>Dictionary of parameter names and string values</returns>
+    public virtual Dictionary<string, string> GetNodeParameters()
+    {
+        // Default implementation returns an empty dictionary
+        return new Dictionary<string, string>();
+    }
+    
+    /// <summary>
+    /// Apply parameters that were received from the server or endpoint.
+    /// Used when receiving results back from remote execution.
+    /// </summary>
+    /// <param name="parameters">Dictionary of parameter names and values</param>
+    public virtual void ApplyParameters(Dictionary<string, string> parameters)
+    {
+        // Default implementation does nothing
+        // Node types should override to handle their specific parameters
+    }
+}
+
+Example
+
+public class BrightnessContrastNode : BaseNode
+{
+    // Existing code...
+    
+    public override Dictionary<string, string> GetNodeParameters()
+    {
+        var parameters = new Dictionary<string, string>
+        {
+            ["Brightness"] = Brightness.ToString(),
+            ["Contrast"] = Contrast.ToString(),
+            ["BlackPoint"] = BlackPoint.ToString(),
+            ["WhitePoint"] = WhitePoint.ToString()
+        };
+        return parameters;
+    }
+    
+    public override void ApplyParameters(Dictionary<string, string> parameters)
+    {
+        // Parse and apply parameters if they exist
+        if (parameters.TryGetValue("Brightness", out string brightnessStr) && 
+            int.TryParse(brightnessStr, out int brightness))
+        {
+            Brightness = brightness;
+        }
+        
+        if (parameters.TryGetValue("Contrast", out string contrastStr) && 
+            int.TryParse(contrastStr, out int contrast))
+        {
+            Contrast = contrast;
+        }
+        
+        if (parameters.TryGetValue("BlackPoint", out string blackPointStr) && 
+            byte.TryParse(blackPointStr, out byte blackPoint))
+        {
+            BlackPoint = blackPoint;
+        }
+        
+        if (parameters.TryGetValue("WhitePoint", out string whitePointStr) && 
+            byte.TryParse(whitePointStr, out byte whitePoint))
+        {
+            WhitePoint = whitePoint;
+        }
+    }
+}
+
+
+Node Editor example
+private async Task<bool> ExecuteNodeRemotely(BaseNode node, ComputeEndpoint endpoint)
+{
+    try
+    {
+        Logger.Log($"[NodeEditor] Executing {node.GetType().Name} remotely on {endpoint.Name}...");
+
+        // Collect input data for the node
+        Dictionary<string, string> inputData = new Dictionary<string, string>();
+        Dictionary<string, byte[]> binaryData = new Dictionary<string, byte[]>();
+
+        // Process input pins
+        foreach (var pin in node.GetAllPins().Where(p => !p.IsOutput))
+        {
+            var data = node.GetInputData(pin.Name);
+            if (data != null)
+            {
+                // Handle different data types (binary, volume, label data)
+                // [Existing code for handling different data types]
+            }
+        }
+
+        // Get node-specific parameters through the standardized method
+        var nodeParams = node.GetNodeParameters();
+        foreach (var param in nodeParams)
+        {
+            inputData[param.Key] = param.Value;
+        }
+
+        // [Rest of the method for sending to endpoint and processing results]
+    }
+    catch (Exception ex)
+    {
+        Logger.Log($"[NodeEditor] Error executing node remotely: {ex.Message}");
+        return false;
+    }
+}

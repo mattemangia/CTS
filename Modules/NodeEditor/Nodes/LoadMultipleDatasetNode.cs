@@ -24,7 +24,23 @@ namespace CTS.Modules.NodeEditor.Nodes
         private ListView datasetListView;
 
         public LoadMultipleDatasetNode(Point position) : base(position) { }
+        public override Dictionary<string, string> GetNodeParameters()
+        {
+            var parameters = new Dictionary<string, string>();
 
+            // Add dataset information
+            parameters["DatasetCount"] = Datasets.Count.ToString();
+            parameters["LoadLabelsOnly"] = LoadLabelsOnly.ToString();
+
+            // Add each dataset path and pixel size
+            for (int i = 0; i < Datasets.Count; i++)
+            {
+                parameters[$"Dataset_{i}_Path"] = Datasets[i].Path;
+                parameters[$"Dataset_{i}_PixelSize"] = Datasets[i].PixelSize.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            return parameters;
+        }
         protected override void SetupPins()
         {
             AddOutputPin("Volumes", Color.LightBlue);

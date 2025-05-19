@@ -27,7 +27,32 @@ namespace CTS.Modules.NodeEditor.Nodes
             // Initialize with a default Exterior material
             materials.Add(new Material("Exterior", Color.Transparent, 0, 0, 0) { IsExterior = true });
         }
+        public override Dictionary<string, string> GetNodeParameters()
+        {
+            var parameters = new Dictionary<string, string>();
 
+            // Add material information
+            if (materials != null && materials.Count > 0)
+            {
+                parameters["MaterialCount"] = materials.Count.ToString();
+
+                // Serialize basic material information
+                for (int i = 0; i < materials.Count; i++)
+                {
+                    parameters[$"Material_{i}_ID"] = materials[i].ID.ToString();
+                    parameters[$"Material_{i}_Name"] = materials[i].Name;
+                    parameters[$"Material_{i}_IsExterior"] = materials[i].IsExterior.ToString();
+                    parameters[$"Material_{i}_Min"] = materials[i].Min.ToString();
+                    parameters[$"Material_{i}_Max"] = materials[i].Max.ToString();
+
+                    // Serialize color as ARGB
+                    var color = materials[i].Color;
+                    parameters[$"Material_{i}_Color"] = $"{color.A},{color.R},{color.G},{color.B}";
+                }
+            }
+
+            return parameters;
+        }
         protected override void SetupPins()
         {
             AddInputPin("VolumeData", Color.LightBlue);

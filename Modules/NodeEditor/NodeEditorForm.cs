@@ -2507,16 +2507,12 @@ namespace CTS.NodeEditor
                     }
                 }
 
-                // Add node-specific parameters
-                if (node is BrightnessContrastNode bcNode)
+                // Get node-specific parameters through the standardized method
+                var nodeParams = node.GetNodeParameters();
+                foreach (var param in nodeParams)
                 {
-                    // Add brightness/contrast parameters
-                    inputData["Brightness"] = bcNode.Brightness.ToString();
-                    inputData["Contrast"] = bcNode.Contrast.ToString();
-                    inputData["BlackPoint"] = bcNode.BlackPoint.ToString();
-                    inputData["WhitePoint"] = bcNode.WhitePoint.ToString();
+                    inputData[param.Key] = param.Value;
                 }
-
                 // Compress everything using memory stream
                 byte[] compressedData;
                 using (var memoryStream = new MemoryStream())

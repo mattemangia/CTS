@@ -1,0 +1,163 @@
+﻿public abstract class BaseNodeHandler : INodeHandler
+{
+    public abstract Task<Dictionary<string, string>> ProcessAsync(
+        Dictionary<string, string> inputData,
+        Dictionary<string, byte[]> binaryData,
+        EndpointComputeService computeService);
+        
+    /// <summary>
+    /// Extract and parse node parameters with type conversion
+    /// </summary>
+    protected T GetParameter<T>(Dictionary<string, string> parameters, string name, T defaultValue)
+    {
+        if (!parameters.TryGetValue(name, out string strValue))
+            return defaultValue;
+            
+        try
+        {
+            // Handle different parameter types
+            if (typeof(T) == typeof(int) && int.TryParse(strValue, out int intValue))
+                return (T)(object)intValue;
+                
+            if (typeof(T) == typeof(double) && double.TryParse(strValue, out double doubleValue))
+                return (T)(object)doubleValue;
+                
+            if (typeof(T) == typeof(byte) && byte.TryParse(strValue, out byte byteValue))
+                return (T)(object)byteValue;
+                
+            if (typeof(T) == typeof(bool) && bool.TryParse(strValue, out bool boolValue))
+                return (T)(object)boolValue;
+                
+            // String and other types
+            if (typeof(T) == typeof(string))
+                return (T)(object)strValue;
+        }
+        catch
+        {
+            Console.WriteLine($"Failed to parse parameter {name}");
+        }
+        
+        return defaultValue;
+    }
+    
+    /// <summary>
+    /// Log processing information
+    /// </summary>
+    protected void LogProcessing(string nodeType)
+    {
+        Console.WriteLine($"Processing {nodeType}...");
+    }
+}
+
+Example Node Handler
+public class EndpointBrightnessContrastNodeHandler : BaseNodeHandler, IProgressTrackable
+{
+    private Action<int> _progressCallback;
+    
+    public void SetProgressCallback(Action<int> progressCallback)
+    {
+        _progressCallback = progressCallback;
+    }
+    
+    public override async Task<Dictionary<string, string>> ProcessAsync(
+        Dictionary<string, string> inputData,
+        Dictionary<string, byte[]> binaryData,
+        EndpointComputeService computeService)
+    {
+        // Extract parameters using the helper method
+        int brightness = GetParameter(inputData, "Brightness", 0);
+        int contrast = GetParameter(inputData, "Contrast", 100);
+        byte blackPoint = GetParameter(inputData, "BlackPoint", (byte)0);
+        byte whitePoint = GetParameter(inputData, "WhitePoint", (byte)255);
+        
+        // Get dimensions
+        int width = GetParameter(inputData, "Width", 0);
+        int height = GetParameter(inputData, "Height", 0);
+        int depth = GetParameter(inputData, "Depth", 0);
+        int chunkDim = GetParameter(inputData, "ChunkDim", 64);
+        
+        _progressCallback?.Invoke(10); // Signal start of processing
+        
+        // Get volume data
+        string volumeKey = null;
+        foreach (var entry in inputData)
+        {
+            if (entry.Value.StartsWith("binary_ref:") && entry.Key.Contains("Volume"))
+            {
+                volumeKey = entry.Value.Substring("binary_ref:".Length);
+                break;
+            }
+        }
+        
+        if (volumeKey != null && binaryData.TryGetValue(volumeKey, out byte[] volumeData))
+        {
+            // Process the volume
+            var result = await Task.Run(() => ProcessVolumeData(
+                volumeData, width, height, depth, chunkDim,
+                brightness, contrast, blackPoint, whitePoint,
+                computeService.GpuAvailable));
+                
+            // Create output data
+            var outputData = new Dictionary<string, string>();
+            outputData["Status"] = "Success";
+            
+            // Add binary reference to output
+            string outputKey = "processed_volume";
+            binaryData[outputKey] = result;
+            outputData["ProcessedVolume"] = $"binary_ref:{outputKey}";
+            
+            // Preserve all input parameters in the output
+            foreach (var key in inputData.Keys)
+            {
+                // Skip binary references from input
+                if (inputData[key].StartsWith("binary_ref:"))
+                    continue;
+                    
+                // Include all other metadata
+                outputData[key] = inputData[key];
+            }
+            
+            _progressCallback?.Invoke(100); // Signal completion
+            
+            return outputData;
+        }
+        else
+        {
+            var outputData = new Dictionary<string, string>();
+            outputData["Status"] = "Error";
+            outputData["Message"] = "Missing volume data";
+            return outputData;
+        }
+    }
+    
+    // [Implementations of volume processing methods]
+}
+
+private void RegisterNodeHandlers()
+{
+    // Register all node handlers
+    _nodeHandlers.Add("BrightnessContrastNode", new BrightnessContrastNodeHandler());
+    _nodeHandlers.Add("ResampleVolumeNode", new ResampleVolumeNodeHandler());
+    _nodeHandlers.Add("ThresholdNode", new ThresholdNodeHandler());
+    _nodeHandlers.Add("SegmentAnythingNode", new SegmentAnythingNodeHandler());
+    _nodeHandlers.Add("MicroSAMNode", new MicroSAMNodeHandler());
+    _nodeHandlers.Add("GroundingDINONode", new GroundingDINONodeHandler());
+    // Add more node handlers as they are implemented
+    
+    Console.WriteLine($"Registered {_nodeHandlers.Count} node handlers");
+    foreach (var handler in _nodeHandlers.Keys)
+    {
+        Console.WriteLine($"  - {handler}");
+    }
+}
+
+private void RegisterNodeHandlers()
+{
+    // Register the available node handlers
+    _nodeHandlers.Add("BrightnessContrastNode", new EndpointBrightnessContrastNodeHandler());
+    _nodeHandlers.Add("ResampleVolumeNode", new EndpointResampleVolumeNodeHandler());
+    _nodeHandlers.Add("ThresholdNode", new EndpointThresholdNodeHandler());
+    // Add more endpoint handlers as they are implemented
+    
+    Console.WriteLine($"Registered {_nodeHandlers.Count} node handlers on endpoint");
+}

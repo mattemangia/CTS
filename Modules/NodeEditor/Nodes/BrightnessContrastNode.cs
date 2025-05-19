@@ -40,7 +40,17 @@ namespace CTS.Modules.NodeEditor.Nodes
             AddInputPin("Volume", Color.LightBlue);
             AddOutputPin("Volume", Color.LightBlue);
         }
-
+        public override Dictionary<string, string> GetNodeParameters()
+        {
+            var parameters = new Dictionary<string, string>
+            {
+                ["Brightness"] = Brightness.ToString(),
+                ["Contrast"] = Contrast.ToString(),
+                ["BlackPoint"] = BlackPoint.ToString(),
+                ["WhitePoint"] = WhitePoint.ToString()
+            };
+            return parameters;
+        }
         public override Control CreatePropertyPanel()
         {
             var panel = new Panel

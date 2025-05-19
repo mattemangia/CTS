@@ -354,6 +354,7 @@
     <None Include="Resources\ILGPU.png" />
     <None Include="Resources\Krypton.png" />
     <None Include="Resources\61501509.png" />
+    <Content Include="Modules\NodeEditor\Nodes\NodeSkeleton.txt" />
     <Content Include="Resources\logo2.png" />
     <None Include="Resources\favicon.ico" />
     <None Include="Resources\logo.png" />

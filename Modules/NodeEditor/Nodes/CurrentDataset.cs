@@ -115,6 +115,21 @@ namespace CTS.Modules.NodeEditor.Nodes
                     return null;
             }
         }
+        public override Dictionary<string, string> GetNodeParameters()
+        {
+            var parameters = new Dictionary<string, string>();
+
+            // Add dimensions if dataset is available
+            if (IsDatasetLoaded())
+            {
+                parameters["Width"] = Width.ToString();
+                parameters["Height"] = Height.ToString();
+                parameters["Depth"] = Depth.ToString();
+                parameters["PixelSize"] = PixelSize.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            return parameters;
+        }
         private bool IsDatasetLoaded()
         {
             return mainForm != null && mainForm.volumeData != null;

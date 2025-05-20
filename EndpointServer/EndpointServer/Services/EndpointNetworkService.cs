@@ -21,7 +21,7 @@ namespace ParallelComputingEndpoint
         private string _currentTaskId;
         private CancellationTokenSource _listenerCts;
         private EndpointNodeProcessingService _nodeProcessingService;
-        private readonly LogPanel _logPanel;  // Aggiungere questo campo
+        private readonly LogPanel _logPanel;  
 
         public event EventHandler<List<ServerInfo>> ServersDiscovered;
         public event EventHandler<bool> ConnectionStatusChanged;

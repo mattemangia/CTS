@@ -152,7 +152,7 @@ namespace ParallelComputingEndpoint
             // Initialize log with a welcome message
             _logPanel.AddLog("Endpoint initialized. Use F3 to scan for and connect to a server.");
 
-            // FIX: Use UpdateNetworkService instead of direct assignment to properly handle event subscriptions
+            // Necessary FIX: Use UpdateNetworkService instead of direct assignment to properly handle event subscriptions
             if (_networkService == null)
             {
                 UpdateNetworkService(new EndpointNetworkService(_config, _computeService, _logPanel));

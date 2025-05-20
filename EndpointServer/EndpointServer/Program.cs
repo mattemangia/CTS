@@ -38,7 +38,7 @@ namespace ParallelComputingEndpoint
 
                 // Get LogPanel reference after UI init
                 Application.Init();
-                _uiManager.BuildUI(); // Assicurati che BuildUI sia public
+                _uiManager.BuildUI(); // BuildUI e' public
                 _logPanel = _uiManager.LogPanel;
 
                 // Create node processing service with LogPanel

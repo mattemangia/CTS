@@ -33,7 +33,7 @@ namespace ParallelComputingServer
                 var serverTask = networkService.StartServerAsync(cts.Token);
                 var endpointTask = endpointService.StartEndpointServiceAsync(cts.Token);
 
-                uiManager.Run();          // ← blocks until user quits
+                uiManager.Run();         
                 cts.Cancel();             // ask background services to stop
                 await Task.WhenAll(beaconTask, serverTask, endpointTask);
             }
@@ -42,7 +42,7 @@ namespace ParallelComputingServer
                 // guaranteed to run—even on Ctrl-C or unhandled exception
                 EmptyDirectory(datasetStoragePath);
                 computeService.Dispose();
-                datasetTransferService.Dispose();   // optional: if you add IDisposable (see below)
+                datasetTransferService.Dispose();  
             }
 
             Console.WriteLine("Server shutdown complete.");

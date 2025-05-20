@@ -65,7 +65,7 @@ namespace CTS
         }
         // 3d rotation
         private float rotationX = 30.0f;
-
+        private Button compareWith2DButton;
         private float rotationY = 30.0f;
         private float rotationZ = 0.0f;
         private float viewScale = 1.0f;
@@ -130,7 +130,6 @@ namespace CTS
                 Logger.Log($"[PoreNetworkModelingForm] Error loading model: {ex.Message}\n{ex.StackTrace}");
             }
         }
-
         private void InitializeComponent()
         {
             // Form setup with modern style
@@ -157,6 +156,8 @@ namespace CTS
             Bitmap networkIcon = PoreNetworkButtonIcons.CreateNetworkGenerationIcon(iconSize, primaryColor);
             Bitmap permeabilityIcon = PoreNetworkButtonIcons.CreatePermeabilityIcon(iconSize, primaryColor);
             Bitmap tortuosityIcon = PoreNetworkButtonIcons.CreateTortuosityIcon(iconSize, primaryColor);
+            Bitmap comparisonIcon = PoreNetworkButtonIcons.CreateTortuosityIcon(iconSize, primaryColor); // Reuse icon for now
+
             // FIRST ROW OF CONTROLS - Major functional groups
             // Material Selection Group
             GroupBox materialGroup = new GroupBox
@@ -290,7 +291,7 @@ namespace CTS
             {
                 Text = "Permeability",
                 Location = new Point(740, 10),
-                Size = new Size(250, 90), 
+                Size = new Size(250, 90),
                 BackColor = Color.Transparent
             };
 
@@ -298,7 +299,7 @@ namespace CTS
             {
                 Text = "Simulate Permeability",
                 Location = new Point(15, 25),
-                Width = 220, 
+                Width = 220,
                 Height = 32,
                 FlatStyle = FlatStyle.Flat,
                 BackColor = Color.FromArgb(225, 225, 225),
@@ -355,22 +356,6 @@ namespace CTS
             };
             settingsGroup.Controls.Add(useGpuCheckBox);
 
-            exportPermeabilityButton = new Button
-            {
-                Text = "Export Results",
-                Location = new Point(15, 55),
-                Width = 140,
-                Height = 32,
-                FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(225, 225, 225),
-                Enabled = false,
-                Image = permeabilityIcon,
-                ImageAlign = ContentAlignment.MiddleLeft,
-                TextImageRelation = TextImageRelation.ImageBeforeText,
-                Padding = new Padding(2, 0, 2, 0)
-            };
-            exportPermeabilityButton.Click += ExportPermeabilityResults;
-            settingsGroup.Controls.Add(exportPermeabilityButton);
             Button poreConnectivityButton = new Button
             {
                 Text = "Pore Connectivity",
@@ -386,6 +371,40 @@ namespace CTS
             };
             poreConnectivityButton.Click += OpenPoreConnectivityDialog;
             settingsGroup.Controls.Add(poreConnectivityButton);
+
+            exportPermeabilityButton = new Button
+            {
+                Text = "Export Data",
+                Location = new Point(15, 55),
+                Width = 115,
+                Height = 32,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(225, 225, 225),
+                Enabled = false,
+                Image = permeabilityIcon,
+                ImageAlign = ContentAlignment.MiddleLeft,
+                TextImageRelation = TextImageRelation.ImageBeforeText,
+                Padding = new Padding(2, 0, 2, 0)
+            };
+            exportPermeabilityButton.Click += ExportPermeabilityResults;
+            settingsGroup.Controls.Add(exportPermeabilityButton);
+
+            compareWith2DButton = new Button
+            {
+                Text = "2D-3D",
+                Location = new Point(135, 55),
+                Width = 105,
+                Height = 32,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(225, 225, 225),
+                Image = comparisonIcon,
+                ImageAlign = ContentAlignment.MiddleLeft,
+                TextImageRelation = TextImageRelation.ImageBeforeText,
+                Padding = new Padding(2, 0, 2, 0),
+                Enabled = false
+            };
+            compareWith2DButton.Click += OpenPoreNetwork2DComparison;
+            settingsGroup.Controls.Add(compareWith2DButton);
 
             ribbonPanel.Controls.Add(settingsGroup);
 
@@ -915,7 +934,32 @@ namespace CTS
                 networkIcon?.Dispose();
                 permeabilityIcon?.Dispose();
                 tortuosityIcon?.Dispose();
+                comparisonIcon?.Dispose();
             };
+        }
+        private void OpenPoreNetwork2DComparison(object sender, EventArgs e)
+        {
+            if (networkModel == null || networkModel.Pores.Count == 0)
+            {
+                MessageBox.Show("Please generate a pore network first", "No Network",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            try
+            {
+                using (var comparisonForm = new PoreNetwork2DComparisonForm(
+                    mainForm, networkModel, selectedMaterial, networkModel.PixelSize))
+                {
+                    comparisonForm.ShowDialog();
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error opening 2D comparison: {ex.Message}",
+                    "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Logger.Log($"[PoreNetworkModelingForm] Error opening 2D comparison: {ex.Message}\n{ex.StackTrace}");
+            }
         }
 
         /// <summary>
@@ -932,7 +976,7 @@ namespace CTS
             // Enable data-related controls
             exportButton.Enabled = true;
             saveButton.Enabled = true;
-
+            compareWith2DButton.Enabled = true;
             // Create a mock "Loaded Model" material for display purposes
             Material viewerMaterial = new Material("Loaded Model", Color.Gray, 0, 255, 1);
             materialComboBox.Items.Clear();
@@ -1140,7 +1184,7 @@ namespace CTS
                 exportButton.Enabled = true;
                 saveButton.Enabled = true;
                 simulateButton.Enabled = true;
-
+                compareWith2DButton.Enabled = true;
                 statusLabel.Text = $"Generated network with {networkModel.Pores.Count} pores and " +
                                   $"{networkModel.Throats.Count} throats. Porosity: {networkModel.Porosity:P2}";
             }

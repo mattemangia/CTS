@@ -242,6 +242,9 @@
     <Compile Include="Modules\NodeEditor\Nodes\SaveLabelsNode.cs" />
     <Compile Include="Modules\PNM\PermeabilitySImulationResults.cs" />
     <Compile Include="Modules\PNM\PoreNetworkButtonIcons.cs" />
+    <Compile Include="Modules\PNM\PoreNetwork2DComparisonForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Modules\StressAnalysis\AcousticVelocitySimulation.cs" />
     <Compile Include="Modules\StressAnalysis\DensityVisualizationForm.cs">
       <SubType>Form</SubType>

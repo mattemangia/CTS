@@ -20,9 +20,6 @@ namespace ParallelComputingEndpoint
             Console.WriteLine($"Processing {nodeType}...");
         }
     }
- 
-
-
         /// <summary>
         /// Interfaccia per handler di nodi che supportano il tracciamento del progresso
         /// </summary>
@@ -30,4 +27,4 @@ namespace ParallelComputingEndpoint
         {
             void SetProgressCallback(Action<int> progressCallback);
         }
-    }
+}

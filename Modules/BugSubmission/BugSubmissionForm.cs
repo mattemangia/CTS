@@ -21,7 +21,7 @@ namespace CTS.Modules.BugSubmission
     public class BugSubmissionForm : KryptonForm
     {
         
-        private const string BugReportEmail = "your-email@example.com";
+        private const string BugReportEmail = "matteo.mangiagalli@unifr.ch";
 
         // UI Controls
         private KryptonLabel lblTitle;
@@ -543,7 +543,7 @@ namespace CTS.Modules.BugSubmission
         {
             string repoOwner = "mattemangia";
             string repoName = "CTS";
-            string apiToken = "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";
+            string apiToken = "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";
 
             // Build issue data
             var issueData = new

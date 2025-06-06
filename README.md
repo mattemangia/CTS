@@ -37,7 +37,7 @@
    cd CTS
    ```
 3. **Open the solution**
-   Launch *CTS.sln* in Visual Studio.
+   Launch *CTSegmenter.sln* in Visual Studio.
 4. **Restore NuGet packages**
    VS will automatically restore on load, or run:
 

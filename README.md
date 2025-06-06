@@ -33,7 +33,7 @@
 2. **Clone the repository**
 
    ```bash
-   git clone https://github.com/your‑org/CTS.git
+   git clone https://github.com/mattemangia/CTS.git
    cd CTS
    ```
 3. **Open the solution**

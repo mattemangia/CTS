@@ -1,6 +1,6 @@
-# CTS (CT Simulation)
+# CTS (CT Simulation environment)
 
-**CTS (CT Simulation)** is an open‑source, modular environment for visualising, segmenting and simulating X‑ray computed‑tomography (CT) data. Built in C#/.NET, CTS targets researchers and students in materials science, geology and petrophysics who need a free alternative to commercial CT‑analysis suites.
+**CTS (CT Simulation environment)** is an open‑source, modular environment for visualising, segmenting and simulating X‑ray computed‑tomography (CT) data. Built in C#/.NET, CTS targets researchers and students in materials science, geology and petrophysics who need a free alternative to commercial CT‑analysis suites.
 
 > **Work‑in‑Progress Notice**
 > The **Node Editor** and **HPC server/endpoint** integration are not yet available and are marked as *work in progress*.

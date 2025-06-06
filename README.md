@@ -46,7 +46,9 @@
    ```
 5. **Build**
    Select **x64 | Release** (or Debug) and choose **Build > Build Solution**.
-6. **Run**
+   **Add ONNX models (Not Included in this repo)**
+   Copy the original ONNX model files for SAM2, μSAM, and Grounding DINO into the bin/ONNX/ directory (create the folder if it does not exist). CTS expects these models here at runtime in order to use AI segmentation.
+7. **Run**
    Press **F5** (Debug) or **Ctrl‑F5** (Run) from Visual Studio, or launch the executable in `bin/`.
 
 ---

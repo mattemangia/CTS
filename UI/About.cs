@@ -114,7 +114,7 @@ namespace CTS
             {
                 try
                 {
-                    System.Diagnostics.Process.Start("mailto:matteo.mangiagalli@unifr.ch");
+                    System.Diagnostics.Process.Start("mailto:mattemangia@icloud.com");
                 }
                 catch (Exception ex)
                 {
@@ -125,7 +125,7 @@ namespace CTS
 
             // License
             licenseLabel = new KryptonLabel();
-            licenseLabel.Text = "License: MIT, 2025";
+            licenseLabel.Text = "License: Apache 2.0, 2025";
             licenseLabel.StateCommon.ShortText.Font = new Font("Segoe UI", 10, FontStyle.Regular);
             licenseLabel.StateCommon.ShortText.TextH = Krypton.Toolkit.PaletteRelativeAlign.Center;
             licenseLabel.Location = new Point(0, emailLabel.Bottom + 20);

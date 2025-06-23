@@ -21,7 +21,7 @@ namespace CTS.Modules.BugSubmission
     public class BugSubmissionForm : KryptonForm
     {
         
-        private const string BugReportEmail = "matteo.mangiagalli@unifr.ch";
+        private const string BugReportEmail = "mattemangia@icloud.com";
 
         // UI Controls
         private KryptonLabel lblTitle;

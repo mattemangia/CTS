@@ -106,7 +106,7 @@ namespace CTS
 
             // Email link
             emailLinkLabel = new KryptonLinkLabel();
-            emailLinkLabel.Text = "matteo.mangiagalli@unifr.ch";
+            emailLinkLabel.Text = "mattemangia@icloud.com";
             emailLinkLabel.StateCommon.ShortText.Font = new Font("Segoe UI", 10, FontStyle.Regular);
             emailLinkLabel.Location = new Point(emailLabel.Right + 5, departmentLabel.Bottom + 15);
             emailLinkLabel.Size = new Size(200, 22);

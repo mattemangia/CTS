@@ -99,3 +99,5 @@ CTS is released under the **Apache License 2.0**. See the [LICENSE](LICENSE) f
 
 Maintained by **Matteo Mangiagalli** (University of Fribourg).
 Feedback, issues and pull requests are welcome. Please use the GitHub *Issues* page to get in touch or contribute.
+
+Software mechanics are explained in the CTS_User_Manual.pdf file.

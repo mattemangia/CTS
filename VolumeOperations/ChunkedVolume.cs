@@ -640,6 +640,50 @@ namespace CTS
         }
 
         /// <summary>
+        /// Fills the entire in-memory volume with a specified byte value.
+        /// </summary>
+        /// <param name="value">The byte value to fill the volume with.</param>
+        public void Fill(byte value)
+        {
+            if (Chunks == null)
+            {
+                Logger.Log("[ChunkedVolume.Fill] Cannot fill volume, Chunks array is null (likely memory-mapped). This method is for in-memory volumes.");
+                // For memory-mapped files, this operation would be very slow and is not implemented.
+                // The current use case is for a new, in-memory dummy volume, so this is safe.
+                return;
+            }
+
+            long chunkSize = (long)_chunkDim * _chunkDim * _chunkDim;
+
+            // Create a template chunk filled with the value
+            byte[] fillTemplate = new byte[chunkSize];
+
+            // A fast way to fill the array with a single value
+            // (new byte[] is already zeroed-out, so we only need to fill if value is non-zero)
+            if (value != 0)
+            {
+                for (int i = 0; i < chunkSize; i++)
+                {
+                    fillTemplate[i] = value;
+                }
+            }
+
+            // Use a parallel loop to copy the template to each chunk for efficiency
+            System.Threading.Tasks.Parallel.For(0, Chunks.Length, i =>
+            {
+                if (Chunks[i] == null)
+                {
+                    Chunks[i] = new byte[chunkSize];
+                }
+                // Copy the pre-filled template into the volume's chunk
+                Buffer.BlockCopy(fillTemplate, 0, Chunks[i], 0, (int)chunkSize);
+            });
+
+            Logger.Log($"[ChunkedVolume.Fill] Filled volume with value: {value}");
+        }
+
+
+        /// <summary>
         /// Create volume.chk file for backward compatibility
         /// </summary>
         private static void CreateVolumeChk(string folder, int width, int height, int depth, int chunkDim, double pixelSize)

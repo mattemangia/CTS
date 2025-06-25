@@ -309,6 +309,10 @@ namespace CTS
             importBinMenuItem = new ToolStripMenuItem("Import .bin");
             importBinMenuItem.Click += async (s, e) => await OnImportClicked();
 
+            // Load label stack
+            var loadLabelStackMenuItem = new ToolStripMenuItem("Load Label Stack...");
+            loadLabelStackMenuItem.Click += async (s, e) => await OnLoadLabelStackClicked();
+
             // Separator
             fileSep1 = new ToolStripSeparator();
 
@@ -407,7 +411,7 @@ namespace CTS
             // Add items to File menu
             fileMenu.DropDownItems.AddRange(new ToolStripItem[]
             {
-        loadFolderMenuItem, importBinMenuItem, fileSep1, saveBinMenuItem,
+        loadFolderMenuItem, importBinMenuItem, loadLabelStackMenuItem, fileSep1, saveBinMenuItem,
         exportImagesMenuItem,exportLabelImagesMenuItem, compressSeparator, compressVolumeMenuItem, compressSeparator, closeDatasetMenuItem, exitMenuItem
             });
         }
@@ -1582,7 +1586,30 @@ namespace CTS
             // Simply show the overlay – MainForm will handle its own timer.
             mainForm.ShowBrushOverlay(size);
         }
+        private async Task OnLoadLabelStackClicked()
+        {
+            using (var fbd = new FolderBrowserDialog())
+            {
+                fbd.Description = "Select the folder containing the label image stack.";
+                if (fbd.ShowDialog(this) == DialogResult.OK)
+                {
+                    // Ask the user for essential metadata
+                    double? userPixelSize = mainForm.AskUserPixelSize();
+                    if (!userPixelSize.HasValue || userPixelSize.Value <= 0)
+                    {
+                        Logger.Log("[OnLoadLabelStackClicked] User cancelled or provided invalid pixel size.");
+                        return;
+                    }
 
+                    // Call the new loading method on MainForm
+                    await mainForm.LoadLabelStackAsync(fbd.SelectedPath, userPixelSize.Value, mainForm.SelectedBinningFactor);
+
+                    // Refresh UI controls
+                    InitializeSliceControls();
+                    RefreshMaterialList();
+                }
+            }
+        }
         private void OnCloseDataset()
         {
             if (mainForm.volumeData != null)

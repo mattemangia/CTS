@@ -1120,7 +1120,7 @@ namespace CTS
                 }));
             }
         }
-        private double? AskUserPixelSize()
+        public double? AskUserPixelSize()
         {
             // Ensure we're on the UI thread
             if (this.InvokeRequired)
@@ -1280,7 +1280,97 @@ namespace CTS
                 }
             }
         }
+        public async Task LoadLabelStackAsync(string path, double pixelSize, int binningFactor)
+        {
+            Logger.Log($"[LoadLabelStackAsync] Loading label stack from path: {path}");
+            ProgressFormWithProgress progressForm = null;
 
+            try
+            {
+                await this.SafeInvokeAsync(() =>
+                {
+                    progressForm = new ProgressFormWithProgress("Loading Label Stack...");
+                    progressForm.Show();
+                });
+
+                CurrentPath = path;
+                renderCts.Cancel();
+                renderCts = new CancellationTokenSource();
+
+                // Dispose of any previously loaded data
+                lock (datasetLock)
+                {
+                    volumeData?.Dispose();
+                    volumeData = null;
+                    if (volumeLabels != null)
+                    {
+                        volumeLabels.ReleaseFileLock();
+                        volumeLabels.Dispose();
+                        volumeLabels = null;
+                    }
+                }
+
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+
+                // Call the new FileOperations method
+                var result = await FileOperations.LoadLabelStackAsync(path, pixelSize, binningFactor, progressForm);
+
+                // Update MainForm state with the result
+                lock (datasetLock)
+                {
+                    volumeData = result.volumeData;
+                    volumeLabels = result.volumeLabels;
+                    Materials = result.materials; // IMPORTANT: Update the materials list
+                    width = result.width;
+                    height = result.height;
+                    depth = result.depth;
+                    this.pixelSize = result.pixelSize;
+
+                    // Initialize selections
+                    currentSelection = new byte[width, height];
+                    currentSelectionXZ = new byte[width, depth];
+                    currentSelectionYZ = new byte[depth, height];
+                }
+
+                // Update UI and trigger initial render
+                if ((volumeData != null || volumeLabels != null) && !this.IsDisposed)
+                {
+                    await this.SafeInvokeAsync(() =>
+                    {
+                        CurrentSlice = depth / 2;
+                        XzSliceY = height / 2;
+                        YzSliceX = width / 2;
+
+                        UpdateViewLabels();
+                        orthogonalView.UpdateDimensions(width, height, depth);
+                        orthogonalView.UpdatePosition(YzSliceX, XzSliceY, CurrentSlice);
+
+                        RenderViews(ViewType.All);
+                    });
+                }
+
+                // Initialize MaterialOperations with the new materials
+                if (volumeLabels != null)
+                {
+                    Logger.Log($"[LoadLabelStackAsync] Initializing MaterialOperations with {Materials.Count} materials.");
+                    MaterialOps = new MaterialOperations(volumeLabels, Materials, width, height, depth);
+                }
+
+                // Center all views
+                ResetView();
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("[LoadLabelStackAsync] Exception: " + ex);
+                ShowError("Loading Label Stack Failed", ex.Message);
+            }
+            finally
+            {
+                await this.SafeInvokeAsync(() => progressForm?.Close());
+                controlForm.lblPixelSize.Text = $"Pixel Size: {this.pixelSize * 1e6:F2} µm";
+            }
+        }
         public void SaveLabelsChk()
         {
             string folder;

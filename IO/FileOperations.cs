@@ -1732,6 +1732,149 @@ public static IGrayscaleVolumeData LoadVolumeBinRaw(string path, bool useMM, int
 
             return bmp;
         }
+
+        /// <summary>
+        /// Loads a stack of label images, creates materials from unique colors, and generates the corresponding
+        /// volume.bin (dummy) and labels.bin files.
+        /// </summary>
+        /// <returns>A tuple containing the loaded data, including the newly generated material list.</returns>
+        public static async Task<(IGrayscaleVolumeData volumeData, ILabelVolumeData volumeLabels, List<Material> materials, int width, int height, int depth, double pixelSize)>
+            LoadLabelStackAsync(string path, double pixelSize, int binningFactor, IProgress<int> progress)
+        {
+            Logger.Log($"[FileOperations] Loading label stack from path: {path}");
+            var imageFiles = Directory.GetFiles(path)
+                .Where(f => IsImageFile(f))
+                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase) // Natural sort order
+                .ToList();
+
+            if (!imageFiles.Any())
+            {
+                throw new FileNotFoundException("No image files found in the specified folder.", path);
+            }
+
+            // --- Step 1: Scan for unique colors and get dimensions ---
+            progress?.Report(5);
+            Logger.Log("[FileOperations] Step 1: Scanning images for unique colors and dimensions.");
+
+            int width, height, depth;
+            var uniqueColors = new HashSet<Color>();
+
+            using (var firstImage = new Bitmap(imageFiles[0]))
+            {
+                width = firstImage.Width;
+                height = firstImage.Height;
+            }
+            depth = imageFiles.Count;
+
+            if (binningFactor > 1)
+            {
+                Logger.Log($"[FileOperations] Warning: Binning is not supported for label stack import. Loading at original resolution.");
+            }
+
+            for (int i = 0; i < imageFiles.Count; i++)
+            {
+                using (var bmp = new Bitmap(imageFiles[i]))
+                {
+                    if (bmp.Width != width || bmp.Height != height)
+                    {
+                        Logger.Log($"[FileOperations] Warning: Image {Path.GetFileName(imageFiles[i])} has different dimensions. Skipping.");
+                        continue;
+                    }
+
+                    for (int y = 0; y < bmp.Height; y++)
+                    {
+                        for (int x = 0; x < bmp.Width; x++)
+                        {
+                            uniqueColors.Add(bmp.GetPixel(x, y));
+                        }
+                    }
+                }
+                progress?.Report(5 + (i * 30) / imageFiles.Count);
+            }
+
+            // --- Step 2: Create materials from unique colors (CORRECTED LOGIC) ---
+            progress?.Report(35);
+            Logger.Log($"[FileOperations] Step 2: Creating materials from {uniqueColors.Count} unique colors.");
+            var materials = new List<Material>();
+            var colorToIdMap = new Dictionary<Color, byte>();
+            byte nextId = 1;
+
+            // First, add the Exterior material. This is the ONLY place ID 0 is assigned.
+            materials.Add(new Material("Exterior", Color.FromArgb(0, 0, 0), 0, 0, 0) { IsExterior = true });
+
+            // Now, process all unique colors found in the images.
+            foreach (var color in uniqueColors)
+            {
+                // Check if the color is black (ignoring alpha). This is our robust check.
+                if (color.R == 0 && color.G == 0 && color.B == 0)
+                {
+                    // This is our exterior color. Map it to the existing ID 0.
+                    colorToIdMap[color] = 0;
+                    // Do NOT create a new material for it. Continue to the next color.
+                    continue;
+                }
+
+                // If the color is NOT black, create a new material for it.
+                if (nextId == byte.MaxValue)
+                {
+                    Logger.Log("[FileOperations] Warning: Exceeded maximum number of materials (255).");
+                    break;
+                }
+                string matName = $"Material {nextId}";
+                materials.Add(new Material(matName, color, 0, 0, nextId));
+                colorToIdMap[color] = nextId;
+                nextId++;
+            }
+
+            // --- Step 3: Create and save labels.bin and a dummy volume.bin ---
+            Logger.Log("[FileOperations] Step 3: Generating binary files.");
+            string volumeBinPath = Path.Combine(path, "volume.bin");
+            string labelsBinPath = Path.Combine(path, "labels.bin");
+
+            // Create dummy grayscale volume (filled with 128)
+            var dummyVolume = new ChunkedVolume(width, height, depth, CHUNK_DIM);
+            dummyVolume.Fill(128);
+            dummyVolume.SaveAsBin(volumeBinPath);
+            dummyVolume.Dispose(); // Release memory
+            progress?.Report(50);
+
+            // Create label volume from images
+            var labelVolume = new ChunkedLabelVolume(width, height, depth, CHUNK_DIM, false, null);
+            for (int z = 0; z < depth; z++)
+            {
+                using (var bmp = new Bitmap(imageFiles[z]))
+                {
+                    for (int y = 0; y < height; y++)
+                    {
+                        for (int x = 0; x < width; x++)
+                        {
+                            var color = bmp.GetPixel(x, y);
+                            if (colorToIdMap.TryGetValue(color, out byte id))
+                            {
+                                labelVolume[x, y, z] = id;
+                            }
+                        }
+                    }
+                }
+                progress?.Report(50 + (z * 40) / depth);
+            }
+            labelVolume.SaveAsBin(labelsBinPath);
+            labelVolume.Dispose(); // Release memory
+            progress?.Report(95);
+
+            // --- Step 4: Create header files and load the generated binaries ---
+            Logger.Log("[FileOperations] Step 4: Creating header files and reloading data.");
+            CreateVolumeChk(path, width, height, depth, CHUNK_DIM, pixelSize);
+            CreateLabelsChk(path, materials);
+
+            // Now, load the files we just created to ensure consistency
+            var loadedVolume = LoadVolumeBin(volumeBinPath, true); // Use memory mapping for efficiency
+            var loadedLabels = LoadLabelsBin(labelsBinPath, true);
+            progress?.Report(100);
+
+            return (loadedVolume, loadedLabels, materials, width, height, depth, pixelSize);
+        }
+
         /// <summary>
         /// Creates a bitmap for a specific slice
         /// </summary>

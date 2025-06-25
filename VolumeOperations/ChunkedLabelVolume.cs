@@ -420,6 +420,56 @@ namespace CTS
 
         #region Private Methods
         /// <summary>
+        /// Saves the in-memory label volume to a binary file with the correct header.
+        /// </summary>
+        /// <param name="path">The full file path to save the labels.bin file.</param>
+        public void SaveAsBin(string path)
+        {
+            try
+            {
+                using (FileStream fs = new FileStream(path, FileMode.Create, FileAccess.Write))
+                using (BinaryWriter bw = new BinaryWriter(fs))
+                {
+                    // Write the header using public properties (this part is correct)
+                    bw.Write(this.ChunkDim);
+                    bw.Write(this.ChunkCountX);
+                    bw.Write(this.ChunkCountY);
+                    bw.Write(this.ChunkCountZ);
+
+                    // *** THE FIX: Access the private field `_chunks` directly. ***
+                    // The method is part of the class, so it has permission to do this.
+                    if (this._chunks == null)
+                    {
+                        Logger.Log("[ChunkedLabelVolume.SaveAsBin] Error: The internal _chunks array is null. Cannot save file.");
+                        throw new InvalidOperationException("Cannot save a label volume that has not been initialized in memory.");
+                    }
+
+                    // Write the raw chunk data from the private field
+                    for (int i = 0; i < this._chunks.Length; i++)
+                    {
+                        if (this._chunks[i] != null)
+                        {
+                            bw.Write(this._chunks[i]);
+                        }
+                        else
+                        {
+                            // This case is a safeguard. If a chunk is null, write an empty one.
+                            long chunkSize = (long)this.ChunkDim * this.ChunkDim * this.ChunkDim;
+                            bw.Write(new byte[chunkSize]);
+                        }
+                    }
+                }
+                // Use the private field for logging the length
+                Logger.Log($"[ChunkedLabelVolume] Saved label volume with {this._chunks.Length} chunks to {path}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ChunkedLabelVolume.SaveAsBin] Failed to save to {path}. Error: {ex.Message}");
+                throw;
+            }
+        }
+
+        /// <summary>
         /// Computes the chunk index and the voxel offset within that chunk.
         /// </summary>
         private (int chunkIndex, int offset) GetChunkIndexAndOffset(int x, int y, int z)

@@ -387,6 +387,10 @@ namespace CTS
             exportImagesMenuItem = new ToolStripMenuItem("Export Images");
             exportImagesMenuItem.Click += (s, e) => mainForm.ExportImages();
 
+            // Eport Label Images
+            var exportLabelImagesMenuItem = new ToolStripMenuItem("Export Label Images");
+            exportLabelImagesMenuItem.Click += (s, e) => OnExportLabelImages();
+
             // Close Dataset
             closeDatasetMenuItem = new ToolStripMenuItem("Close Greyscale Dataset");
             closeDatasetMenuItem.Click += (s, e) => OnCloseDataset();
@@ -404,7 +408,7 @@ namespace CTS
             fileMenu.DropDownItems.AddRange(new ToolStripItem[]
             {
         loadFolderMenuItem, importBinMenuItem, fileSep1, saveBinMenuItem,
-        exportImagesMenuItem, compressSeparator, compressVolumeMenuItem, compressSeparator, closeDatasetMenuItem, exitMenuItem
+        exportImagesMenuItem,exportLabelImagesMenuItem, compressSeparator, compressVolumeMenuItem, compressSeparator, closeDatasetMenuItem, exitMenuItem
             });
         }
 
@@ -1675,6 +1679,53 @@ namespace CTS
                 }
             }
         }
+
+        private async void OnExportLabelImages()
+        {
+            if (mainForm.volumeLabels == null)
+            {
+                MessageBox.Show("No label volume loaded.", "No Data", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            using (var dialog = new FolderBrowserDialog())
+            {
+                dialog.Description = "Select a folder to save the label image stack.";
+                if (dialog.ShowDialog(this) == DialogResult.OK)
+                {
+                    ProgressForm progressForm = new ProgressForm("Exporting Label Images...");
+                    try
+                    {
+                        progressForm.Show(this);
+                        this.Enabled = false;
+
+                        await Task.Run(() =>
+                        {
+                            FileOperations.ExportLabelImages(
+                                dialog.SelectedPath,
+                                mainForm.volumeLabels,
+                                mainForm.Materials,
+                                mainForm.GetWidth(),
+                                mainForm.GetHeight(),
+                                mainForm.GetDepth());
+                        });
+
+                        MessageBox.Show($"Label images successfully exported to:\n{dialog.SelectedPath}", "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log("[OnExportLabelImages] Error: " + ex);
+                        MessageBox.Show($"Export failed: {ex.Message}", "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                    finally
+                    {
+                        this.Enabled = true;
+                        progressForm.Close();
+                    }
+                }
+            }
+        }
+
         /// Handles the Extract from Material button click event
         /// </summary>
         private async Task OnExtractFromMaterialAsync()

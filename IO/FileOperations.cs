@@ -1651,7 +1651,87 @@ public static IGrayscaleVolumeData LoadVolumeBinRaw(string path, bool useMM, int
 
             Logger.Log("[FileOperations] Exported label images to " + outputPath);
         }
+        /// <summary>
+        /// Exports the label data as a stack of RGB image files, where each material has its assigned color
+        /// and the exterior is black.
+        /// </summary>
+        public static void ExportLabelImages(string outputPath, ILabelVolumeData volumeLabels,
+                                      List<Material> materials, int width, int height, int depth)
+        {
+            if (volumeLabels == null)
+            {
+                throw new ArgumentNullException(nameof(volumeLabels), "No label volume loaded.");
+            }
+            if (materials == null)
+            {
+                throw new ArgumentNullException(nameof(materials));
+            }
 
+            // Create a dictionary for fast color lookups inside the parallel loop.
+            var colorMap = materials.ToDictionary(m => m.ID, m => m.Color);
+
+            Parallel.For(0, depth, z =>
+            {
+                using (Bitmap bmp = CreateLabelBitmapForSlice(z, volumeLabels, colorMap, width, height))
+                {
+                    // The D5 format specifier ensures 5 digits with leading zeros (e.g., 00001, 00012, 00123)
+                    string filePath = Path.Combine(outputPath, $"label_{z:D5}.png");
+                    bmp.Save(filePath, ImageFormat.Png);
+                }
+            });
+
+            Logger.Log("[FileOperations] Exported label-only images to " + outputPath);
+        }
+
+        /// <summary>
+        /// Creates a bitmap for a specific slice using only label data.
+        /// </summary>
+        private static Bitmap CreateLabelBitmapForSlice(int sliceIndex, ILabelVolumeData volumeLabels,
+                                                        Dictionary<byte, Color> colorMap, int width, int height)
+        {
+            Bitmap bmp = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+            BitmapData bmpData = bmp.LockBits(
+                new Rectangle(0, 0, width, height),
+                ImageLockMode.WriteOnly,
+                PixelFormat.Format24bppRgb);
+
+            try
+            {
+                unsafe
+                {
+                    byte* ptr = (byte*)bmpData.Scan0.ToPointer();
+                    int stride = bmpData.Stride;
+
+                    for (int y = 0; y < height; y++)
+                    {
+                        byte* row = ptr + (y * stride);
+                        for (int x = 0; x < width; x++)
+                        {
+                            int offset = x * 3;
+                            byte label = volumeLabels[x, y, sliceIndex];
+
+                            Color pixelColor;
+                            // If label is 0 (exterior) or not found in map, use black.
+                            if (label == 0 || !colorMap.TryGetValue(label, out pixelColor))
+                            {
+                                pixelColor = Color.Black;
+                            }
+
+                            // Write RGB values (in BGR order for bitmap)
+                            row[offset] = pixelColor.B;
+                            row[offset + 1] = pixelColor.G;
+                            row[offset + 2] = pixelColor.R;
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                bmp.UnlockBits(bmpData);
+            }
+
+            return bmp;
+        }
         /// <summary>
         /// Creates a bitmap for a specific slice
         /// </summary>

@@ -2026,13 +2026,14 @@ namespace CTS
                                 if (segID != 0 && ShowMask)
                                 {
                                     Material mat = Materials.FirstOrDefault(m => m.ID == segID);
-                                    if (mat != null)
+                                    if (mat != null && mat.IsVisible) // Check visibility
                                     {
                                         if (RenderMaterials)
                                             pixelColor = mat.Color;
                                         else
                                             pixelColor = BlendColors(pixelColor, mat.Color, 0.5f);
                                     }
+                                    
                                 }
 
                                 // Process interpolated mask if available for XY view

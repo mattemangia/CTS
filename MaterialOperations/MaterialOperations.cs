@@ -417,46 +417,54 @@ namespace CTS
             return bothChunked || isVeryLarge;
         }
 
-        /// <summary>
-        /// Removes material from a specific slice.
-        /// </summary>
         private void RemoveMaterialFromSlice(byte materialID, int z)
         {
             // Fast inner loop for removing a material from a slice
             byte[] sliceBuffer = new byte[_width * _height];
+            bool modified = false;
 
-            try
+            // Check if the label volume is a type we can optimize.
+            if (_volumeLabels is ChunkedLabelVolume fastVolume)
             {
-                // Try to read the entire slice
-                _volumeLabels.ReadSliceZ(z, sliceBuffer);
-
-                // Process the entire slice buffer at once
-                bool modified = false;
-                for (int i = 0; i < sliceBuffer.Length; i++)
+                // --- OPTIMIZED PATH ---
+                try
                 {
-                    if (sliceBuffer[i] == materialID)
+                    fastVolume.ReadSliceZ(z, sliceBuffer);
+
+                    // Process the entire slice buffer at once
+                    for (int i = 0; i < sliceBuffer.Length; i++)
                     {
-                        sliceBuffer[i] = 0;
-                        modified = true;
+                        if (sliceBuffer[i] == materialID)
+                        {
+                            sliceBuffer[i] = 0; // Set to Exterior
+                            modified = true;
+                        }
+                    }
+
+                    // Write back only if modified using the new, fast method
+                    if (modified)
+                    {
+                        fastVolume.WriteSliceZ(z, sliceBuffer);
                     }
                 }
-
-                // Write back only if modified
-                if (modified)
+                catch (Exception ex)
                 {
-                    WriteSliceToVolume(_volumeLabels, z, sliceBuffer);
+                    Logger.Log($"[MaterialOperations] Optimized slice operation failed for slice {z}. Falling back. Error: {ex.Message}");
+                    modified = false; // Reset flag to trigger fallback
                 }
             }
-            catch (Exception)
+
+            // --- FALLBACK PATH ---
+            // Use this if the volume is not a 'ChunkedLabelVolume' or if the optimized path failed.
+            if (!(_volumeLabels is ChunkedLabelVolume) || modified == false)
             {
-                // Fallback to voxel-by-voxel processing if slice operation fails
                 for (int y = 0; y < _height; y++)
                 {
                     for (int x = 0; x < _width; x++)
                     {
                         if (_volumeLabels[x, y, z] == materialID)
                         {
-                            _volumeLabels[x, y, z] = 0;
+                            _volumeLabels[x, y, z] = 0; // Set to Exterior
                         }
                     }
                 }

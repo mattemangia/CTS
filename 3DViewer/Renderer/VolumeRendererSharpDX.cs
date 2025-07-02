@@ -242,6 +242,8 @@ namespace CTS
         private ShaderResourceView[] lodSRVs = new ShaderResourceView[5];
         private int currentStreamingLOD = 0;
         private bool isInitializingStreaming = false;
+        
+        public bool IsRefining { get; private set; } = false;
 
         public bool UseStreamingRenderer
         {
@@ -337,6 +339,7 @@ namespace CTS
             public Vector4 CutPlaneZ; // x=enabled, y=direction, z=position, w=unused                                    
             public Vector4 ClippingPlane1; // x=enabled, yzw=normal
             public Vector4 ClippingPlane2; // x=distance, y=mirror, z,w=unused
+            public Vector4 LightDirection; // Directional light for shading
         }
 
         #endregion Fields
@@ -917,456 +920,202 @@ namespace CTS
         private string LoadVolumeRenderingShader()
         {
             return @"
-// Volume rendering shader with clipping plane support
+// Volume rendering shader with dynamic lighting, clipping, and SURFACE BOUNDARY DETECTION
 cbuffer ConstantBuffer : register(b0)
 {
-    matrix worldViewProj;        // World-view-projection matrix
-    matrix invViewMatrix;        // Inverse view matrix for ray calculation
-    float4 thresholds;           // x=min, y=max, z=stepSize, w=showGrayscale
-    float4 dimensions;           // xyz=volume dimensions, w=unused
-    float4 sliceCoords;          // xyz=slice positions normalized (0-1), w=slice visibility flags
-    float4 cameraPosition;       // Camera position in world space
-    float4 colorMapIndex;        // x=colorMapIndex, y=slice border thickness, z,w=unused
-    float4 cutPlaneX;            // x=enabled, y=direction(1=forward,-1=backward), z=position, w=unused
-    float4 cutPlaneY;            // x=enabled, y=direction(1=forward,-1=backward), z=position, w=unused
-    float4 cutPlaneZ;            // x=enabled, y=direction(1=forward,-1=backward), z=position, w=unused
-    float4 clippingPlane1;       // x=enabled, yzw=normal
-    float4 clippingPlane2;       // x=distance, y=mirror, z,w=unused
+    matrix worldViewProj;
+    matrix invViewMatrix;
+    float4 thresholds;
+    float4 dimensions;
+    float4 sliceCoords;
+    float4 cameraPosition;
+    float4 colorMapIndex;
+    float4 cutPlaneX;
+    float4 cutPlaneY;
+    float4 cutPlaneZ;
+    float4 clippingPlane1;
+    float4 clippingPlane2;
+    float4 lightDirection;
 };
 
-// Material properties
-Texture1D<float> materialVisibility : register(t0);    // Whether material is visible (0=hidden, 1=visible)
-Texture1D<float> materialOpacity : register(t1);       // Material opacity (0-1)
-Texture3D<float> volumeTexture : register(t2);         // Grayscale volume data (0-1)
-Texture3D<float> labelTexture : register(t3);          // Label/material volume as float
-Texture1D<float4> materialColors : register(t4);       // Material color lookup texture
-Texture1D<float4> colorMaps : register(t5);            // Color maps for grayscale visualization
+// Textures
+Texture1D<float> materialVisibility : register(t0);
+Texture1D<float> materialOpacity : register(t1);
+Texture3D<float> volumeTexture : register(t2);
+Texture3D<float> labelTexture : register(t3);
+Texture1D<float4> materialColors : register(t4);
+Texture1D<float4> colorMaps : register(t5);
 
 // Samplers
 SamplerState linearSampler : register(s0);
 SamplerState pointSampler : register(s1);
 
 // Structures
-struct VS_INPUT
-{
-    float3 Position : POSITION;
-};
+struct VS_INPUT { float3 Position : POSITION; };
+struct VS_OUTPUT { float4 Position : SV_POSITION; float3 WorldPos : POSITION0; float3 TexCoord : TEXCOORD0; };
 
-struct VS_OUTPUT
-{
-    float4 Position : SV_POSITION;
-    float3 WorldPos : POSITION0;
-    float3 TexCoord : TEXCOORD0;
-};
-
-// Ray-box intersection function
-bool IntersectBox(float3 rayOrigin, float3 rayDir, float3 boxMin, float3 boxMax,
-                 out float tNear, out float tFar)
-{
-    // Compute intersection with all planes
-    float3 invRayDir = 1.0 / (rayDir + 0.0000001f); // Avoid division by zero
+// --- HELPER FUNCTIONS (UNCHANGED) ---
+bool IntersectBox(float3 rayOrigin, float3 rayDir, float3 boxMin, float3 boxMax, out float tNear, out float tFar) {
+    float3 invRayDir = 1.0 / (rayDir + 1e-7f);
     float3 t1 = (boxMin - rayOrigin) * invRayDir;
     float3 t2 = (boxMax - rayOrigin) * invRayDir;
-
-    // Sort t values
     float3 tMin = min(t1, t2);
     float3 tMax = max(t1, t2);
-
-    // Find the largest tMin and smallest tMax
     tNear = max(max(tMin.x, tMin.y), tMin.z);
     tFar = min(min(tMax.x, tMax.y), tMax.z);
-
     return tFar > tNear && tFar > 0.0;
 }
-
-// Vertex shader
-VS_OUTPUT VSMain(VS_INPUT input)
-{
+VS_OUTPUT VSMain(VS_INPUT input) {
     VS_OUTPUT output;
-
-    // Transform vertex to clip space
     output.Position = mul(float4(input.Position, 1.0), worldViewProj);
-
-    // Pass through world position
     output.WorldPos = input.Position;
-
-    // Normalize texture coordinates to [0,1]
     output.TexCoord = input.Position / dimensions.xyz;
-
     return output;
 }
-
-// Helper function for slice planes with individual slice visibility
-bool IsOnSlicePlane(float3 pos, float3 slicePos, float epsilon, out int sliceType)
-{
-    // sliceCoords.w now contains a bit field for slice visibility
-    // We need to convert to int for bitwise operations
-    int sliceFlags = (int)(sliceCoords.w + 0.5); // Round to nearest int
-
-    // Check which slices are enabled using integer bitwise operations
+bool IsOnSlicePlane(float3 pos, float3 slicePos, float epsilon, out int sliceType) {
+    int sliceFlags = (int)(sliceCoords.w + 0.5);
     bool xSliceEnabled = (sliceFlags & 1) != 0;
     bool ySliceEnabled = (sliceFlags & 2) != 0;
     bool zSliceEnabled = (sliceFlags & 4) != 0;
-
-    // Check if the position is on any of the three slice planes
     bool onXSlice = xSliceEnabled && abs(pos.x - slicePos.x * dimensions.x) < epsilon;
     bool onYSlice = ySliceEnabled && abs(pos.y - slicePos.y * dimensions.y) < epsilon;
     bool onZSlice = zSliceEnabled && abs(pos.z - slicePos.z * dimensions.z) < epsilon;
-
-    // Set slice type (1=X, 2=Y, 3=Z)
     sliceType = 0;
-    if (onXSlice) sliceType = 1;
-    else if (onYSlice) sliceType = 2;
-    else if (onZSlice) sliceType = 3;
-
+    if (onXSlice) sliceType = 1; else if (onYSlice) sliceType = 2; else if (onZSlice) sliceType = 3;
     return (sliceType > 0);
 }
-
-// Helper function to check if a point is within the slice border
-bool IsOnSliceBorder(float3 pos, float3 slicePos, float thickness, int sliceType)
-{
-    if (sliceType == 1) // X slice (YZ plane)
-    {
-        float y = pos.y / dimensions.y;
-        float z = pos.z / dimensions.z;
-        return (y < thickness || y > 1.0 - thickness || z < thickness || z > 1.0 - thickness);
-    }
-    else if (sliceType == 2) // Y slice (XZ plane)
-    {
-        float x = pos.x / dimensions.x;
-        float z = pos.z / dimensions.z;
-        return (x < thickness || x > 1.0 - thickness || z < thickness || z > 1.0 - thickness);
-    }
-    else if (sliceType == 3) // Z slice (XY plane)
-    {
-        float x = pos.x / dimensions.x;
-        float y = pos.y / dimensions.y;
-        return (x < thickness || x > 1.0 - thickness || y < thickness || y > 1.0 - thickness);
-    }
+bool IsOnSliceBorder(float3 pos, float3 slicePos, float thickness, int sliceType) {
+    if (sliceType == 1) { float y = pos.y / dimensions.y; float z = pos.z / dimensions.z; return (y < thickness || y > 1.0 - thickness || z < thickness || z > 1.0 - thickness); }
+    else if (sliceType == 2) { float x = pos.x / dimensions.x; float z = pos.z / dimensions.z; return (x < thickness || x > 1.0 - thickness || z < thickness || z > 1.0 - thickness); }
+    else if (sliceType == 3) { float x = pos.x / dimensions.x; float y = pos.y / dimensions.y; return (x < thickness || x > 1.0 - thickness || y < thickness || y > 1.0 - thickness); }
     return false;
 }
-
-// Check if a point is cut by any cutting plane
-bool IsCutByPlane(float3 pos)
-{
-    // Check X cutting plane
-    if (cutPlaneX.x > 0.5) { // If enabled
-        if (cutPlaneX.y > 0) { // Forward cut
-            if (pos.x > cutPlaneX.z * dimensions.x) return true;
-        } else { // Backward cut
-            if (pos.x < cutPlaneX.z * dimensions.x) return true;
-        }
-    }
-
-    // Check Y cutting plane
-    if (cutPlaneY.x > 0.5) { // If enabled
-        if (cutPlaneY.y > 0) { // Forward cut
-            if (pos.y > cutPlaneY.z * dimensions.y) return true;
-        } else { // Backward cut
-            if (pos.y < cutPlaneY.z * dimensions.y) return true;
-        }
-    }
-
-    // Check Z cutting plane
-    if (cutPlaneZ.x > 0.5) { // If enabled
-        if (cutPlaneZ.y > 0) { // Forward cut
-            if (pos.z > cutPlaneZ.z * dimensions.z) return true;
-        } else { // Backward cut
-            if (pos.z < cutPlaneZ.z * dimensions.z) return true;
-        }
-    }
-
+bool IsCutByPlane(float3 pos) {
+    if (cutPlaneX.x > 0.5 && ((cutPlaneX.y > 0 && pos.x > cutPlaneX.z * dimensions.x) || (cutPlaneX.y <= 0 && pos.x < cutPlaneX.z * dimensions.x))) return true;
+    if (cutPlaneY.x > 0.5 && ((cutPlaneY.y > 0 && pos.y > cutPlaneY.z * dimensions.y) || (cutPlaneY.y <= 0 && pos.y < cutPlaneY.z * dimensions.y))) return true;
+    if (cutPlaneZ.x > 0.5 && ((cutPlaneZ.y > 0 && pos.z > cutPlaneZ.z * dimensions.z) || (cutPlaneZ.y <= 0 && pos.z < cutPlaneZ.z * dimensions.z))) return true;
     return false;
 }
-
-// Check if a point is cut by the clipping plane
-bool IsCutByClippingPlane(float3 pos)
-{
-    // Check if clipping plane is enabled
+bool IsCutByClippingPlane(float3 pos) {
     if (clippingPlane1.x < 0.5) return false;
-
-    // Get plane normal and distance
     float3 normal = clippingPlane1.yzw;
     float distance = clippingPlane2.x;
     bool mirror = clippingPlane2.y > 0.5;
-
-    // Convert position to normalized coordinates [0,1]
     float3 normalizedPos = pos / dimensions.xyz;
-
-    // Calculate distance from point to plane
-    // Plane equation: n·(p - p0) = 0
-    // Where n is the normal, p is the point, p0 is a point on the plane
     float3 planePoint = normal * distance;
     float distanceToPlane = dot(normal, normalizedPos - planePoint);
-
-    // Check which side of the plane the point is on
-    if (mirror)
-    {
-        return distanceToPlane < 0; // Cut the negative side
-    }
-    else
-    {
-        return distanceToPlane > 0; // Cut the positive side
-    }
+    return mirror ? (distanceToPlane < 0) : (distanceToPlane > 0);
 }
-
-// Get color from the selected color map
-float4 ApplyColorMap(float intensity, float minThreshold, float maxThreshold, int mapIndex)
-{
-    // Normalize intensity to 0-1 range based on thresholds
-    float normalizedIntensity = (intensity - minThreshold) / (maxThreshold - minThreshold);
-    normalizedIntensity = saturate(normalizedIntensity); // Clamp to [0,1]
-
-    // Sample from the color map based on the intensity
-    // The colorMaps texture is a 1D texture with different color maps stacked
-    // Each map has 256 entries, so we offset by mapIndex * 256
+float4 ApplyColorMap(float intensity, float minThreshold, float maxThreshold, int mapIndex) {
+    float normalizedIntensity = saturate((intensity - minThreshold) / (maxThreshold - minThreshold));
     float mapOffset = mapIndex * 256;
-    float samplePos = (mapOffset + normalizedIntensity * 255) / 1024.0; // Assuming total size of 1024
+    float samplePos = (mapOffset + normalizedIntensity * 255) / 1024.0;
     float4 color = colorMaps.SampleLevel(linearSampler, samplePos, 0);
-
-    // Adjust alpha based on intensity
-    float alpha = normalizedIntensity * 0.5 + 0.2;
-    color.a = min(0.7, alpha);
-
+    color.a = min(0.7, normalizedIntensity * 0.5 + 0.2);
     return color;
 }
-
-// Improved edge detection for wireframe
-bool IsOnBoundingBoxEdge(float3 texCoord, float edgeThickness)
-{
-    // Check if we're near any of the 12 edges of the box
-    // This approach is more precise than the previous one
-
-    // We need at least two coordinates to be near the edge
-    int nearEdgeCount = 0;
-
-    // Check each dimension
-    for (int i = 0; i < 3; i++)
-    {
-        float coord = texCoord[i];
-        if (coord < edgeThickness || coord > (1.0 - edgeThickness))
-        {
-            nearEdgeCount++;
-        }
-    }
-
-    // We're on an edge if exactly two coordinates are at extremes
-    return nearEdgeCount >= 2;
+float rand(float3 seed) { return frac(sin(dot(seed, float3(12.9898, 78.233, 45.5432))) * 43758.5453); }
+float3 GetNormalFromLabel(float3 texCoord) {
+    float3 sampleOffset = 1.0 / dimensions.xyz;
+    float x1 = labelTexture.SampleLevel(pointSampler, texCoord - float3(sampleOffset.x, 0, 0), 0);
+    float x2 = labelTexture.SampleLevel(pointSampler, texCoord + float3(sampleOffset.x, 0, 0), 0);
+    float y1 = labelTexture.SampleLevel(pointSampler, texCoord - float3(0, sampleOffset.y, 0), 0);
+    float y2 = labelTexture.SampleLevel(pointSampler, texCoord + float3(0, sampleOffset.y, 0), 0);
+    float z1 = labelTexture.SampleLevel(pointSampler, texCoord - float3(0, 0, sampleOffset.z), 0);
+    float z2 = labelTexture.SampleLevel(pointSampler, texCoord + float3(0, 0, sampleOffset.z), 0);
+    return normalize(float3(x2 - x1, y2 - y1, z2 - z1));
 }
 
-// Pixel shader implementing ray marching through the volume
+
+// --- MAIN PIXEL SHADER WITH BOUNDARY DETECTION ---
 float4 PSMain(VS_OUTPUT input) : SV_TARGET
 {
-    // Get the ray origin and direction in world space
     float3 rayOrigin = cameraPosition.xyz;
     float3 rayDir = normalize(input.WorldPos - rayOrigin);
 
-    // Compute intersection with the volume bounding box
     float tNear, tFar;
-    float3 boxMin = float3(0, 0, 0);
-    float3 boxMax = dimensions.xyz;
-
-    // Check if ray actually hits the bounding box
-    if (!IntersectBox(rayOrigin, rayDir, boxMin, boxMax, tNear, tFar))
+    if (!IntersectBox(rayOrigin, rayDir, float3(0, 0, 0), dimensions.xyz, tNear, tFar))
     {
-        // Ray completely misses the volume - return fully transparent
         return float4(0, 0, 0, 0);
     }
 
-    // Ensure we start inside the volume
     tNear = max(tNear, 0.0);
+    float stepSize = max(0.25, thresholds.z);
+    int maxSteps = (int)((tFar - tNear) / stepSize);
+    if (maxSteps > 2000) maxSteps = 2000;
 
-    // Step size for ray marching - this must be small enough
-    float stepSize = max(0.5, thresholds.z);
-    int maxSteps = 2000; // Higher limit for quality
-
-    // Initialize accumulated color
     float4 accumulatedColor = float4(0, 0, 0, 0);
+    float t = tNear + rand(input.Position.xyz) * stepSize;
 
-    // Start ray marching from the near intersection point
-    float t = tNear;
+    uint prevMaterialId = 0;
 
-    // Thresholds
-    float minThreshold = thresholds.x;
-    float maxThreshold = thresholds.y;
-
-    // Whether to show grayscale
-    bool showGrayscale = thresholds.w > 0.5;
-
-    // Whether any slices are enabled (w component contains the bit flags)
-    bool anySlicesEnabled = sliceCoords.w > 0.0;
-
-    // Slice positions
-    float3 slicePos = sliceCoords.xyz;
-
-    // Color map index
-    int mapIndex = (int)(colorMapIndex.x + 0.5);
-
-    // Border thickness for slices
-    float borderThickness = colorMapIndex.y;
-
-    // Ray marching loop
-    for (int i = 0; i < maxSteps && t < tFar; i++)
+    for (int i = 0; i < maxSteps && t < tFar; i++, t += stepSize)
     {
-        // Calculate current position along the ray
         float3 pos = rayOrigin + t * rayDir;
-
-        // Convert to texture coordinates [0,1]
         float3 texCoord = pos / dimensions.xyz;
 
-        // Robust bounds check - add extra safety margin
-        if (any(texCoord < -0.001) || any(texCoord > 1.001))
+        if (any(texCoord < 0.0) || any(texCoord > 1.0) || IsCutByPlane(pos) || IsCutByClippingPlane(pos))
         {
-            break;
-        }
-
-        // Check if this point is cut by any cutting plane
-        if (IsCutByPlane(pos))
-        {
-            t += stepSize;
+            prevMaterialId = 0;
             continue;
         }
 
-        // Check if this point is cut by the clipping plane
-        if (IsCutByClippingPlane(pos))
-        {
-            t += stepSize;
-            continue;
-        }
-
-        // Handle slice planes with higher priority
         int sliceType = 0;
-        if (anySlicesEnabled && IsOnSlicePlane(pos, slicePos, stepSize * 1.5, sliceType))
+        if (sliceCoords.w > 0.0 && IsOnSlicePlane(pos, sliceCoords.xyz, stepSize * 1.5, sliceType))
         {
-            // We're on a slice plane - render it
-            // Clamp coordinates to valid range to avoid sampling artifacts
             float3 safeCoord = clamp(texCoord, 0.001, 0.999);
-
-            // Sample the volume with clamped coordinates
             float intensity = volumeTexture.SampleLevel(linearSampler, safeCoord, 0);
-            float labelValue = labelTexture.SampleLevel(pointSampler, safeCoord, 0);
-
-            // Convert label to material ID
-            uint materialId = (uint)(labelValue + 0.5);
-
-            // Check if we're on a slice border
-            bool onBorder = IsOnSliceBorder(pos, slicePos, borderThickness, sliceType);
-
-            // Create the slice color - either from material, grayscale, or border
+            uint materialId = (uint)(labelTexture.SampleLevel(pointSampler, safeCoord, 0) + 0.5);
             float4 sliceColor;
-
-            if (onBorder)
-            {
-                // Use different colors for borders based on slice type
-                if (sliceType == 1) // X slice (YZ plane) - Red
-                    sliceColor = float4(1.0, 0.0, 0.0, 0.9);
-                else if (sliceType == 2) // Y slice (XZ plane) - Green
-                    sliceColor = float4(0.0, 1.0, 0.0, 0.9);
-                else if (sliceType == 3) // Z slice (XY plane) - Blue
-                    sliceColor = float4(0.0, 0.0, 1.0, 0.9);
-            }
-            else if (materialId > 0 && materialVisibility[materialId] > 0.5)
-            {
-                // Use material color for the slice
-                sliceColor = materialColors[materialId];
-                sliceColor.a *= materialOpacity[materialId];
-                sliceColor.a = min(sliceColor.a, 0.9); // Cap opacity
-            }
-            else
-            {
-                // Use color map or grayscale for the slice with higher opacity for better visibility
-                if (mapIndex >= 0)
-                    sliceColor = ApplyColorMap(intensity, minThreshold, maxThreshold, mapIndex);
-                else
-                    sliceColor = float4(intensity, intensity, intensity, 0.7);
-
-                // Higher opacity for slices
-                sliceColor.a = 0.7;
-            }
-
-            // Accumulate the slice color
+            bool onBorder = IsOnSliceBorder(pos, sliceCoords.xyz, colorMapIndex.y, sliceType);
+            if (onBorder) { if (sliceType == 1) sliceColor = float4(1,0,0,0.9); else if (sliceType == 2) sliceColor = float4(0,1,0,0.9); else sliceColor = float4(0,0,1,0.9);
+            } else if (materialId > 0 && materialVisibility[materialId] > 0.5) { sliceColor = materialColors[materialId]; sliceColor.a *= materialOpacity[materialId]; sliceColor.a = min(sliceColor.a, 0.9);
+            } else { int mapIndex = (int)(colorMapIndex.x + 0.5); if (mapIndex >= 0) sliceColor = ApplyColorMap(intensity, thresholds.x, thresholds.y, mapIndex); else sliceColor = float4(intensity, intensity, intensity, 0.7); sliceColor.a = 0.7; }
             accumulatedColor = sliceColor;
-
-            // Early exit after hitting a slice
             break;
         }
-
-        // Safety check before sampling the volume
-        if (any(texCoord < 0.0) || any(texCoord > 1.0))
+        
+        uint currentMaterialId = (uint)(labelTexture.SampleLevel(pointSampler, texCoord, 0) + 0.5);
+        float4 sampleColor = float4(0,0,0,0);
+        
+        if (currentMaterialId != prevMaterialId && currentMaterialId > 0 && materialVisibility[currentMaterialId] > 0.5)
         {
-            t += stepSize;
-            continue;
+            float4 matColor = materialColors[currentMaterialId];
+            matColor.a *= materialOpacity[currentMaterialId];
+            
+            float3 normal = GetNormalFromLabel(texCoord);
+            
+            float3 lightDir = normalize(lightDirection.xyz);
+            float3 viewDir = normalize(cameraPosition.xyz - pos);
+            
+            // --- LIGHTING ADJUSTMENT TO MAKE THE SCENE BRIGHTER ---
+            float ambient = 0.45; // Increased from 0.25 to lift shadows and overall brightness.
+            float diffuse = saturate(dot(normal, lightDir));
+            
+            float3 halfwayDir = normalize(lightDir + viewDir);
+            float spec = pow(saturate(dot(normal, halfwayDir)), 32.0);
+            
+            // Increased diffuse contribution from 0.9 to 1.0 for brighter lit areas.
+            // Also increased specular highlight intensity.
+            float3 finalColor = matColor.rgb * (ambient + diffuse * 1.0) + float3(0.8,0.8,0.8) * spec * 0.6;
+            // --- END OF LIGHTING ADJUSTMENT ---
+            
+            sampleColor = float4(finalColor, 1.0); 
         }
-
-        // Sample volume data
-        float intensity = volumeTexture.SampleLevel(linearSampler, texCoord, 0);
-        float labelValue = labelTexture.SampleLevel(pointSampler, texCoord, 0);
-
-        // Convert label to material ID
-        uint materialId = (uint)(labelValue + 0.5);
-
-        // Initialize this sample's color to transparent
-        float4 sampleColor = float4(0, 0, 0, 0);
-
-        // Process the regular volume
-        if (showGrayscale && intensity >= minThreshold && intensity <= maxThreshold)
-        {
-            // Apply color map based on selected index
-            if (mapIndex >= 0)
-                sampleColor = ApplyColorMap(intensity, minThreshold, maxThreshold, mapIndex);
-            else
-                sampleColor = float4(intensity, intensity, intensity, intensity * 0.5 + 0.2);
-        }
-
-        // Overlay material color if applicable
-        if (materialId > 0 && materialVisibility[materialId] > 0.5)
-        {
-            // Use material color
-            float4 matColor = materialColors[materialId];
-            matColor.a *= materialOpacity[materialId];
-
-            // Replace grayscale with material color
-            sampleColor = matColor;
-        }
-
-        // Front-to-back compositing if the sample has color
+        
         if (sampleColor.a > 0.01)
         {
-            // Pre-multiply alpha
             sampleColor.rgb *= sampleColor.a;
-
-            // Accumulate color
             accumulatedColor += (1.0 - accumulatedColor.a) * sampleColor;
-
-            // Early ray termination for efficiency
-            if (accumulatedColor.a > 0.95)
+            if (accumulatedColor.a > 0.98)
             {
                 break;
             }
         }
-
-        // Move along ray
-        t += stepSize;
+        
+        prevMaterialId = currentMaterialId;
     }
 
-    // Draw wireframe if needed - only if we didn't hit anything solid
-    if (accumulatedColor.a < 0.01)
-    {
-        // Use a much thinner wireframe
-        float edgeThickness = 0.003;
-
-        // Check if we're on an edge of the bounding box
-        if (IsOnBoundingBoxEdge(input.TexCoord, edgeThickness))
-        {
-            // Draw wireframe in bright white with low opacity
-            return float4(1.0, 1.0, 1.0, 0.3);
-        }
-
-        // For non-edge pixels, return fully transparent color
-        return float4(0, 0, 0, 0);
-    }
-
-    // Return the final accumulated color
     return accumulatedColor;
 }";
         }
@@ -2491,42 +2240,39 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 // Set blend state for volume rendering
                 context.OutputMerger.SetBlendState(alphaBlendState);
 
-                // Handle LOD levels for movement
                 bool isMoving = isDragging || isPanning;
-                if (useLodSystem && isMoving && !useStreamingRenderer)
-                {
-                    // During movement, use a suitable LOD level that exists
-                    bool foundValidLod = false;
-                    for (int i = 1; i <= MAX_LOD_LEVELS; i++)
-                    {
-                        if (lodVolumeSRVs[i] != null)
-                        {
-                            currentLodLevel = i;
-                            foundValidLod = true;
-                            break;
-                        }
-                    }
 
-                    // If no LOD textures exist, fall back to the original
-                    if (!foundValidLod || lodVolumeSRVs[currentLodLevel] == null)
-                    {
-                        currentLodLevel = 0;
-                    }
-                }
-                else
-                {
-                    // When not moving, use highest quality
-                    currentLodLevel = 0;
-                }
-
-           
                 if (useStreamingRenderer)
                 {
-                    // Use the streaming renderer
+                    // Use the streaming renderer which handles its own refinement
                     RenderVolumeWithStreaming();
                 }
                 else
                 {
+                    // Handle LOD for non-streaming mode
+                    if (useLodSystem && isMoving)
+                    {
+                        // During movement, use a suitable LOD level that exists
+                        bool foundValidLod = false;
+                        for (int i = 1; i <= MAX_LOD_LEVELS; i++)
+                        {
+                            if (lodVolumeSRVs[i] != null)
+                            {
+                                currentLodLevel = i;
+                                foundValidLod = true;
+                                break;
+                            }
+                        }
+                        if (!foundValidLod) currentLodLevel = 0;
+                        // We are moving, so we will need to refine when we stop.
+                        IsRefining = true;
+                    }
+                    else
+                    {
+                        // When not moving, use highest quality and finish refining.
+                        currentLodLevel = 0;
+                        IsRefining = false;
+                    }
                     // Use the standard renderer
                     RenderVolume();
                 }
@@ -2559,9 +2305,8 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 }
 
                 // Reset the needs render flag for infrequent renders when nothing changes
-                if (!isMoving)
+                if (!isMoving && !IsRefining)
                 {
-                    
                     NeedsRender = false;
                 }
             }
@@ -2819,14 +2564,21 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 context.VertexShader.Set(volumeVertexShader);
                 context.PixelShader.Set(volumePixelShader);
 
-                // Update constant buffer for rendering
-                float currentStepSize = isMoving ? Math.Min(3.0f, stepSize * 2.0f) : stepSize;
-
-                // For LOD, adjust step size based on level
-                if (useLodSystem && currentLodLevel > 0 && isMoving)
+                // --- START OF FIX ---
+                // For the final, high-quality render (not moving), force a fine step size.
+                // This is critical for capturing fine details in the materials.
+                float currentStepSize;
+                if (!isMoving)
                 {
+                    // Force high quality for the static, refined render.
+                    currentStepSize = 0.5f;
+                }
+                else
+                {
+                    // During movement, use the UI-selected quality or LOD-specific step size.
                     currentStepSize = lodStepSizes[currentLodLevel];
                 }
+                // --- END OF FIX ---
 
                 UpdateConstantBuffer(currentStepSize);
                 context.VertexShader.SetConstantBuffer(0, constantBuffer);
@@ -3020,7 +2772,11 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     clippingPlaneDistance,               // distance
                     clippingPlaneMirror ? 1.0f : 0.0f,  // mirror
                     0.0f,                                // unused
-                    0.0f)                                // unused
+                    0.0f),                                // unused
+                    // --- START OF FIX ---
+                    // Define a fixed directional light coming from the top-right-front
+                    LightDirection = new Vector4(Vector3.Normalize(new Vector3(0.8f, 1.0f, -0.6f)), 0.0f)
+                    // --- END OF FIX ---
                 };
 
                 // Update the constant buffer
@@ -3495,6 +3251,11 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 // Set temporary lower quality during movement
                 stepSize = Math.Min(2.0f, stepSize * 2.0f);
 
+                if (useStreamingRenderer || useLodSystem)
+                {
+                    IsRefining = true;
+                }
+
                 // Mark that we need rendering
                 NeedsRender = true;
             }
@@ -3506,6 +3267,11 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
                 // Set temporary lower quality during movement
                 stepSize = Math.Min(2.0f, stepSize * 2.0f);
+
+                if (useStreamingRenderer || useLodSystem)
+                {
+                    IsRefining = true;
+                }
 
                 // Mark that we need rendering
                 NeedsRender = true;
@@ -4792,6 +4558,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 {
                     // Use a lower resolution during movement
                     currentStreamingLOD = Math.Min(2, lodTextures.Length - 1);
+                    IsRefining = true; // Set flag that we'll need to refine when movement stops
                 }
                 else
                 {
@@ -4799,8 +4566,14 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     if (currentStreamingLOD > 0)
                     {
                         currentStreamingLOD--;
+                        IsRefining = true; // Still refining
+                    }
+                    else
+                    {
+                        IsRefining = false; // Refinement finished
                     }
                 }
+
 
                 // Prepare resources array
                 ShaderResourceView[] resources = new ShaderResourceView[6];
@@ -4827,7 +4600,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 {
                     resources[2] = volumeSRV;
                     hasValidTexture = true;
-                    Logger.Log("[RenderVolumeWithStreaming] Using original volume texture as fallback");
+                    //Logger.Log("[RenderVolumeWithStreaming] Using original volume texture as fallback");
                 }
 
                 if (!hasValidTexture)

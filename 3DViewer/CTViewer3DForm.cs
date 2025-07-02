@@ -107,16 +107,16 @@ namespace CTS.SharpDXIntegration
                     try
                     {
                         isRendering = true;
-                        lastRenderTime = DateTime.Now;
 
-                        // Force render at least once per second even if nothing is changing
-                        // This ensures the volume stays visible
                         bool forceRender = (DateTime.Now - lastRenderTime).TotalSeconds > 1.0;
-                        bool needsRender = volumeRenderer.NeedsRender || forceRender;
+
+                        // Render if explicitly needed, if we are refining, or for keep-alive.
+                        bool needsRender = volumeRenderer.NeedsRender || volumeRenderer.IsRefining || forceRender;
 
                         if (needsRender)
                         {
                             volumeRenderer.Render();
+                            lastRenderTime = DateTime.Now; // Update time only on successful render call
                             renderFailCount = 0; // Reset failure counter on success
                         }
                     }
@@ -148,7 +148,6 @@ namespace CTS.SharpDXIntegration
                 }
             };
         }
-
         private void RecreateRenderer()
         {
             // Stop rendering during recreation

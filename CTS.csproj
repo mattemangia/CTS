@@ -139,6 +139,7 @@
     <Compile Include="Misc\OrthogonalViewPanel.cs">
       <SubType>Component</SubType>
     </Compile>
+    <Compile Include="Misc\ParticleAnalyzer.cs" />
     <Compile Include="Misc\ProgressFormWithProgress.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -294,6 +295,9 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="UI\DensitySettingsForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="UI\RemoveIslandsForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="UI\SplashScreen.cs">

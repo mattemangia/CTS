@@ -470,6 +470,98 @@ namespace CTS
         }
 
         /// <summary>
+        /// Reads an entire Z-slice into the provided buffer efficiently.
+        /// This method is public for performance-critical operations.
+        /// </summary>
+        public void ReadSliceZ(int z, byte[] buffer)
+        {
+            if (buffer == null || buffer.Length != Width * Height)
+                throw new ArgumentException("Buffer size must match slice dimensions (Width * Height).");
+
+            ValidateCoordinates(0, 0, z);
+
+            int cz = z / ChunkDim;
+            int lz = z % ChunkDim;
+
+            Parallel.For(0, ChunkCountY, cy =>
+            {
+                for (int cx = 0; cx < ChunkCountX; cx++)
+                {
+                    int chunkIndex = GetChunkIndex(cx, cy, cz);
+
+                    int xStart = cx * ChunkDim;
+                    int yStart = cy * ChunkDim;
+                    int xEnd = Math.Min(xStart + ChunkDim, Width);
+                    int yEnd = Math.Min(yStart + ChunkDim, Height);
+
+                    for (int y = yStart; y < yEnd; y++)
+                    {
+                        int ly = y % ChunkDim;
+                        int dstOffset = y * Width + xStart;
+                        int srcOffsetInChunk = (lz * ChunkDim * ChunkDim) + (ly * ChunkDim) + (xStart % ChunkDim);
+                        int length = xEnd - xStart;
+
+                        if (_useMemoryMapping)
+                        {
+                            long chunkStartInFile = CalculateGlobalOffset(chunkIndex, 0);
+                            _viewAccessor.ReadArray(chunkStartInFile + srcOffsetInChunk, buffer, dstOffset, length);
+                        }
+                        else
+                        {
+                            Array.Copy(_chunks[chunkIndex], srcOffsetInChunk, buffer, dstOffset, length);
+                        }
+                    }
+                }
+            });
+        }
+
+        /// <summary>
+        /// Writes an entire Z-slice from the provided buffer efficiently.
+        /// This method is public for performance-critical operations.
+        /// </summary>
+        public void WriteSliceZ(int z, byte[] buffer)
+        {
+            if (buffer == null || buffer.Length != Width * Height)
+                throw new ArgumentException("Buffer size must match slice dimensions (Width * Height).");
+
+            ValidateCoordinates(0, 0, z);
+
+            int cz = z / ChunkDim;
+            int lz = z % ChunkDim;
+
+            Parallel.For(0, ChunkCountY, cy =>
+            {
+                for (int cx = 0; cx < ChunkCountX; cx++)
+                {
+                    int chunkIndex = GetChunkIndex(cx, cy, cz);
+
+                    int xStart = cx * ChunkDim;
+                    int yStart = cy * ChunkDim;
+                    int xEnd = Math.Min(xStart + ChunkDim, Width);
+                    int yEnd = Math.Min(yStart + ChunkDim, Height);
+
+                    for (int y = yStart; y < yEnd; y++)
+                    {
+                        int ly = y % ChunkDim;
+                        int srcOffset = y * Width + xStart;
+                        int dstOffsetInChunk = (lz * ChunkDim * ChunkDim) + (ly * ChunkDim) + (xStart % ChunkDim);
+                        int length = xEnd - xStart;
+
+                        if (_useMemoryMapping)
+                        {
+                            long chunkStartInFile = CalculateGlobalOffset(chunkIndex, 0);
+                            _viewAccessor.WriteArray(chunkStartInFile + dstOffsetInChunk, buffer, srcOffset, length);
+                        }
+                        else
+                        {
+                            Array.Copy(buffer, srcOffset, _chunks[chunkIndex], dstOffsetInChunk, length);
+                        }
+                    }
+                }
+            });
+        }
+
+        /// <summary>
         /// Computes the chunk index and the voxel offset within that chunk.
         /// </summary>
         private (int chunkIndex, int offset) GetChunkIndexAndOffset(int x, int y, int z)

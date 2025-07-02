@@ -48,6 +48,7 @@ namespace CTS
         private Button btnAddMaterial;
         private Button btnRemoveMaterial;
         private Button btnRenameMaterial;
+
         private Label lblThreshold;
         private RangeSlider thresholdRangeSlider;
         private NumericUpDown numThresholdMin, numThresholdMax;
@@ -95,7 +96,7 @@ namespace CTS
         private ToolStripMenuItem showMaskMenuItem;
         private ToolStripMenuItem enableThresholdMaskMenuItem; // This now is "Render Materials"
         private ToolStripMenuItem showHistogramMenuItem;
-
+        // private Button btnToggleVisibility; // REMOVED
         //private ToolStripMenuItem showOrthoviewsMenuItem;
         private ToolStripMenuItem resetZoomMenuItem;
 
@@ -187,7 +188,7 @@ namespace CTS
         {
             // ==== Form Setup ====
             //this.FormBorderStyle = FormBorderStyle.None;
-          
+
             //this.CloseBox = false;
             //this.TopMost = false;
             this.Text = "Controls";
@@ -433,6 +434,9 @@ namespace CTS
             mergeMaterialMenuItem = new ToolStripMenuItem("Merge Material");
             mergeMaterialMenuItem.Click += (s, e) => OnMergeMaterial();
 
+            ToolStripMenuItem removeIslandsMenuItem = new ToolStripMenuItem("Remove Islands...");
+            removeIslandsMenuItem.Click += (s, e) => OnRemoveIslands();
+
             ToolStripMenuItem extractFromMaterialMenuItem = new ToolStripMenuItem("Extract from Material");
             extractFromMaterialMenuItem.Click += async (s, e) => await OnExtractFromMaterialAsync();
 
@@ -485,7 +489,7 @@ namespace CTS
             editMenu.DropDownItems.AddRange(new ToolStripItem[]
             {
                 addMaterialMenuItem, deleteMaterialMenuItem, renameMaterialMenuItem,
-                mergeMaterialMenuItem, extractFromMaterialMenuItem, editSep1,
+                mergeMaterialMenuItem, extractFromMaterialMenuItem,removeIslandsMenuItem, editSep1,
                 addThresholdedMenuItem, subtractThresholdedMenuItem, editSep2,
                 segmentAnythingMenuItem
             });
@@ -1238,7 +1242,7 @@ namespace CTS
 
             btnAddSelection = new Button { Text = "+", Width = 50, Height = 25 };
             btnSubSelection = new Button { Text = "-", Width = 50, Height = 25 };
-            
+
             btnAddSelection.Click += OnAddSelectionAsync;
             btnSubSelection.Click += OnSubSelectionAsync;
             Button btnClearSelection = new Button { Text = "Clear", Width = 50, Height = 25 };
@@ -1511,7 +1515,7 @@ namespace CTS
                 Text = "Change",
                 Width = 80,
                 Height = 25,
-                Enabled = true 
+                Enabled = true
             };
             btnChangePixelSize.Click += BtnChangePixelSize_Click;
             pixelSizePanel.Controls.Add(btnChangePixelSize);
@@ -1624,7 +1628,27 @@ namespace CTS
             else
                 MessageBox.Show("No dataset is currently loaded.", "Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
+        private void OnRemoveIslands()
+        {
+            if (mainForm.volumeLabels == null)
+            {
+                MessageBox.Show("A label volume must be loaded to use this feature.", "No Label Data", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
 
+            try
+            {
+                using (var form = new RemoveIslandsForm(mainForm))
+                {
+                    form.ShowDialog(this);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ControlForm] Error opening Remove Islands form: {ex.Message}");
+                MessageBox.Show($"Error opening form: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
         private async Task OnLoadFolderClicked()
         {
             using (FolderBrowserDialog fbd = new FolderBrowserDialog())
@@ -1666,28 +1690,115 @@ namespace CTS
         {
             if (e.Index < 0 || e.Index >= lstMaterials.Items.Count)
                 return;
+
+            // Draw the background of the item (handles selection color)
             e.DrawBackground();
+
             Material mat = mainForm.Materials[e.Index];
-            if ((e.State & DrawItemState.Selected) == DrawItemState.Selected)
-                e.Graphics.FillRectangle(Brushes.LightBlue, e.Bounds);
-            else
+
+            // If not selected, fill with the custom material color
+            if ((e.State & DrawItemState.Selected) == 0)
             {
                 using (SolidBrush b = new SolidBrush(mat.Color))
                     e.Graphics.FillRectangle(b, e.Bounds);
             }
-            Color textColor = mat.IsExterior ? Color.Red : (mat.Color.GetBrightness() < 0.4f ? Color.White : Color.Black);
-            using (SolidBrush textBrush = new SolidBrush(textColor))
-                e.Graphics.DrawString(mat.Name, e.Font, textBrush, e.Bounds);
+
+            // --- CheckBox Drawing ---
+            int checkBoxSize = 14;
+            int checkBoxMargin = 4;
+            Rectangle checkBoxRect = new Rectangle(
+                e.Bounds.X + checkBoxMargin,
+                e.Bounds.Y + (e.Bounds.Height - checkBoxSize) / 2,
+                checkBoxSize,
+                checkBoxSize);
+
+            ButtonState cbState = mat.IsVisible ? ButtonState.Checked : ButtonState.Normal;
+            // For high-contrast on selection, we can make it flat
+            if ((e.State & DrawItemState.Selected) != 0)
+            {
+                cbState |= ButtonState.Flat;
+            }
+            ControlPaint.DrawCheckBox(e.Graphics, checkBoxRect, cbState);
+
+            // --- Text Drawing ---
+            Rectangle textRect = new Rectangle(
+                checkBoxRect.Right + checkBoxMargin,
+                e.Bounds.Y,
+                e.Bounds.Width - (checkBoxRect.Right + checkBoxMargin),
+                e.Bounds.Height);
+
+            // Determine text color based on selection state and background color
+            Color textColor;
+            if ((e.State & DrawItemState.Selected) != 0)
+            {
+                textColor = e.ForeColor; // System color for selected text
+            }
+            else
+            {
+                textColor = mat.IsExterior ? Color.Red : (mat.Color.GetBrightness() < 0.4f ? Color.White : Color.Black);
+            }
+
+            string itemText = lstMaterials.Items[e.Index].ToString();
+
+            // Use a font with strikeout for non-visible materials
+            using (Font font = new Font(e.Font, mat.IsVisible ? FontStyle.Regular : FontStyle.Strikeout))
+            {
+                using (SolidBrush textBrush = new SolidBrush(textColor))
+                {
+                    // Center text vertically and prevent wrapping
+                    StringFormat sf = new StringFormat { LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter };
+                    e.Graphics.DrawString(itemText, font, textBrush, textRect, sf);
+                }
+            }
+
+            // Draw the focus rectangle if the item has focus
             e.DrawFocusRectangle();
         }
 
+
         private void LstMaterials_MouseDown(object sender, MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Right)
+            int index = lstMaterials.IndexFromPoint(e.Location);
+            if (index < 0 || index >= lstMaterials.Items.Count)
+                return;
+
+            // Handle left-click for toggling visibility via checkbox
+            if (e.Button == MouseButtons.Left)
             {
-                int index = lstMaterials.IndexFromPoint(e.Location);
-                if (index < 0 || index >= mainForm.Materials.Count)
-                    return;
+                // Define the checkbox rectangle exactly as in DrawItem to check for a click
+                int checkBoxSize = 14;
+                int checkBoxMargin = 4;
+                Rectangle itemBounds = lstMaterials.GetItemRectangle(index);
+                Rectangle checkBoxRect = new Rectangle(
+                    itemBounds.X + checkBoxMargin,
+                    itemBounds.Y + (itemBounds.Height - checkBoxSize) / 2,
+                    checkBoxSize,
+                    checkBoxSize);
+
+                // If the click was on the checkbox, toggle visibility
+                if (checkBoxRect.Contains(e.Location))
+                {
+                    Material mat = mainForm.Materials[index];
+                    mat.IsVisible = !mat.IsVisible; // Toggle visibility
+
+                    // Invalidate the item to force a redraw with the new state
+                    lstMaterials.Invalidate(itemBounds);
+
+                    // Update the 3D views to reflect the change
+                    mainForm.RenderViews();
+                    _ = mainForm.RenderOrthoViewsAsync();
+                }
+            }
+            // Handle right-click for changing material color
+            else if (e.Button == MouseButtons.Right)
+            {
+                // To avoid changing color when right-clicking the new checkbox, ensure the selection is updated first.
+                // This ensures the right-click menu for color applies to the item under the cursor.
+                if (lstMaterials.SelectedIndex != index)
+                {
+                    lstMaterials.SelectedIndex = index;
+                }
+
                 Material mat = mainForm.Materials[index];
                 if (mat.IsExterior)
                 {
@@ -1700,6 +1811,7 @@ namespace CTS
                     if (dlg.ShowDialog() == DialogResult.OK)
                     {
                         mat.Color = dlg.Color;
+                        // A full refresh is needed here to update the color swatch
                         RefreshMaterialList();
                         mainForm.RenderViews();
                     }

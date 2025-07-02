@@ -14,6 +14,7 @@ namespace CTS
         public byte Max { get; set; }
         public bool IsExterior { get; set; } = false;
         public double Density { get; set; } = 0.0;
+        public bool IsVisible { get; set; } = true;
 
         public Material(string name, Color color, byte min, byte max, byte id, double density = 0.0)
         {
@@ -23,6 +24,7 @@ namespace CTS
             Max = max;
             ID = id;
             Density = density;
+            this.IsVisible = true;
         }
 
         public override string ToString() => Name;

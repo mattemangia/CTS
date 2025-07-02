@@ -46,5 +46,6 @@ namespace CTS
         void ReadChunksHeaderAndData(BinaryReader br, MemoryMappedFile mmfIfAny = null, long offsetAfterHeader = 0);
 
         void ReleaseFileLock();
+
     }
 }

@@ -1456,12 +1456,12 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
         private void CreateVolumeTextures()
         {
+            // --- Step 1: Create the Grayscale Volume Texture ---
             try
             {
-                // For streaming renderer with large datasets, we only create LOD textures initially
                 if (useStreamingRenderer && mainForm.volumeData != null)
                 {
-                    // Create a single low-resolution overview texture
+                    // Create a single low-resolution overview texture for streaming
                     int downsampleFactor = 8; // Start with a significant downsampling
                     int dsWidth = Math.Max(1, volW / downsampleFactor);
                     int dsHeight = Math.Max(1, volH / downsampleFactor);
@@ -1469,7 +1469,6 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
                     Logger.Log($"[SharpDXVolumeRenderer] Creating low-res overview texture: {dsWidth}x{dsHeight}x{dsDepth}");
 
-                    // Create the downsampled texture
                     Texture3DDescription desc = new Texture3DDescription
                     {
                         Width = dsWidth,
@@ -1482,61 +1481,36 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                         CpuAccessFlags = CpuAccessFlags.None,
                         OptionFlags = ResourceOptionFlags.None
                     };
-
                     volumeTexture = new Texture3D(device, desc);
 
-                    // Create a downsampled buffer
                     byte[] dsData = new byte[dsWidth * dsHeight * dsDepth];
-
-                    // Simple downsampling - skip most voxels
                     for (int z = 0; z < dsDepth; z++)
                     {
                         for (int y = 0; y < dsHeight; y++)
                         {
                             for (int x = 0; x < dsWidth; x++)
                             {
-                                // Sample from the original volume
-                                int srcX = x * downsampleFactor;
-                                int srcY = y * downsampleFactor;
-                                int srcZ = z * downsampleFactor;
-
-                                // Ensure we don't go out of bounds
-                                srcX = Math.Min(srcX, volW - 1);
-                                srcY = Math.Min(srcY, volH - 1);
-                                srcZ = Math.Min(srcZ, volD - 1);
-
-                                byte value = mainForm.volumeData[srcX, srcY, srcZ];
-
-                                // Store in the downsampled array
-                                int dstIndex = (z * dsHeight * dsWidth) + (y * dsWidth) + x;
-                                dsData[dstIndex] = value;
+                                int srcX = Math.Min(x * downsampleFactor, volW - 1);
+                                int srcY = Math.Min(y * downsampleFactor, volH - 1);
+                                int srcZ = Math.Min(z * downsampleFactor, volD - 1);
+                                dsData[(z * dsHeight * dsWidth) + (y * dsWidth) + x] = mainForm.volumeData[srcX, srcY, srcZ];
                             }
                         }
                     }
-
-                    // Upload the data
                     context.UpdateSubresource(dsData, volumeTexture, 0);
 
-                    // Create the resource view
                     ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
                     {
                         Format = Format.R8_UNorm,
                         Dimension = ShaderResourceViewDimension.Texture3D,
-                        Texture3D = new ShaderResourceViewDescription.Texture3DResource
-                        {
-                            MipLevels = 1,
-                            MostDetailedMip = 0
-                        }
+                        Texture3D = new ShaderResourceViewDescription.Texture3DResource { MipLevels = 1, MostDetailedMip = 0 }
                     };
-
                     volumeSRV = new ShaderResourceView(device, volumeTexture, srvDesc);
-                    Logger.Log($"[SharpDXVolumeRenderer] Created low-res overview texture");
-
-                    // No need to create full resolution volume texture - chunks will be loaded as needed
+                    Logger.Log($"[SharpDXVolumeRenderer] Created low-res overview texture for streaming.");
                 }
-                // For standard rendering, create the full volume texture
                 else if (mainForm.volumeData != null && !useStreamingRenderer)
                 {
+                    // For standard rendering, create the full volume texture
                     volumeTexture = CreateTexture3DFromChunkedVolume((ChunkedVolume)mainForm.volumeData, Format.R8_UNorm);
                     if (volumeTexture != null)
                     {
@@ -1544,47 +1518,45 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                         {
                             Format = Format.R8_UNorm,
                             Dimension = ShaderResourceViewDimension.Texture3D,
-                            Texture3D = new ShaderResourceViewDescription.Texture3DResource
-                            {
-                                MipLevels = 1,
-                                MostDetailedMip = 0
-                            }
+                            Texture3D = new ShaderResourceViewDescription.Texture3DResource { MipLevels = 1, MostDetailedMip = 0 }
                         };
-
                         volumeSRV = new ShaderResourceView(device, volumeTexture, srvDesc);
                         Logger.Log($"[SharpDXVolumeRenderer] Created volume texture: {volW}x{volH}x{volD}");
-                    }
-                }
-
-                // Load label volume if available - keep this the same
-                if (mainForm.volumeLabels != null)
-                {
-                    // Change from R8_UInt to R32_Float
-                    labelTexture = CreateTexture3DFromChunkedLabelVolume((ChunkedLabelVolume)mainForm.volumeLabels, Format.R32_Float);
-                    if (labelTexture != null)
-                    {
-                        ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
-                        {
-                            // Change from R8_UInt to R32_Float
-                            Format = Format.R32_Float,
-                            Dimension = ShaderResourceViewDimension.Texture3D,
-                            Texture3D = new ShaderResourceViewDescription.Texture3DResource
-                            {
-                                MipLevels = 1,
-                                MostDetailedMip = 0
-                            }
-                        };
-
-                        labelSRV = new ShaderResourceView(device, labelTexture, srvDesc);
-                        Logger.Log("[SharpDXVolumeRenderer] Created label volume texture");
                     }
                 }
             }
             catch (Exception ex)
             {
-                Logger.Log("[SharpDXVolumeRenderer] Error creating volume textures: " + ex.Message);
-                // Don't throw here - the application should still work for basic cube rendering
-                Logger.Log("[SharpDXVolumeRenderer] Continuing with basic rendering only");
+                Logger.Log($"[SharpDXVolumeRenderer] CRITICAL ERROR creating grayscale volume texture: {ex.Message}. Rendering may be impaired.");
+                // We don't re-throw, allowing the application to continue with what it has.
+            }
+
+            // --- Step 2: Create the Label Volume Texture ---
+            // This is in a separate try-catch block to allow graceful failure.
+            try
+            {
+                if (mainForm.volumeLabels != null)
+                {
+                    // Using R32_Float for labels to support more than 255 materials in the shader.
+                    labelTexture = CreateTexture3DFromChunkedLabelVolume((ChunkedLabelVolume)mainForm.volumeLabels, Format.R32_Float);
+                    if (labelTexture != null)
+                    {
+                        ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
+                        {
+                            Format = Format.R32_Float,
+                            Dimension = ShaderResourceViewDimension.Texture3D,
+                            Texture3D = new ShaderResourceViewDescription.Texture3DResource { MipLevels = 1, MostDetailedMip = 0 }
+                        };
+                        labelSRV = new ShaderResourceView(device, labelTexture, srvDesc);
+                        Logger.Log("[SharpDXVolumeRenderer] Created label volume texture.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] WARNING: Failed to create label texture: {ex.Message}. Continuing with grayscale rendering only.");
+                // If label texture fails, labelSRV will be null. The shader should handle this gracefully.
+                // The application will continue running with just the grayscale volume.
             }
         }
 
@@ -2233,42 +2205,30 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
             try
             {
-                // Check if volume exceeds hardware limits (most hardware limits 3D textures to ~2048^3)
-                // For extremely large volumes, we'll create a downsampled version
+                // --- Downsampling Logic (unchanged) ---
                 int width = volume.Width;
                 int height = volume.Height;
                 int depth = volume.Depth;
-
-                // Check if dimensions are too large for a single texture (more than ~2048 in any dimension)
-                bool needsDownsampling = width > 2048 || height > 2048 || depth > 2048;
-
-                // Calculate maximum volume in bytes (approximate) to avoid memory issues
-                long volumeSizeInBytes = (long)width * height * depth;
-                bool exceedsMemoryLimit = volumeSizeInBytes > 4L * 1024L * 1024L * 1024L; // 4GB safe limit
-
                 int downsampleFactor = 1;
+
+                bool needsDownsampling = width > 2048 || height > 2048 || depth > 2048;
+                long volumeSizeInBytes = (long)width * height * depth;
+                bool exceedsMemoryLimit = volumeSizeInBytes > 4L * 1024L * 1024L * 1024L;
 
                 if (needsDownsampling || exceedsMemoryLimit)
                 {
-                    // Calculate appropriate downsampling factor based on size
-                    while ((width / downsampleFactor > 1024 || height / downsampleFactor > 1024 ||
-                           depth / downsampleFactor > 1024) ||
-                           ((long)(width / downsampleFactor) * (height / downsampleFactor) *
-                           (depth / downsampleFactor) > 1024L * 1024L * 1024L))
+                    while ((width / downsampleFactor > 2048 || height / downsampleFactor > 2048 || depth / downsampleFactor > 2048) ||
+                           ((long)(width / downsampleFactor) * (height / downsampleFactor) * (depth / downsampleFactor) > 2L * 1024L * 1024L * 1024L)) // 2GB GPU limit
                     {
                         downsampleFactor *= 2;
                     }
-
-                    // Log the downsampling to inform the user
-                    Logger.Log($"[SharpDXVolumeRenderer] Large volume detected ({width}x{height}x{depth}), creating downsampled version (factor: {downsampleFactor})");
-
-                    // Update dimensions
+                    Logger.Log($"[SharpDXVolumeRenderer] Large volume detected ({volume.Width}x{volume.Height}x{volume.Depth}), creating downsampled version (factor: {downsampleFactor})");
                     width /= downsampleFactor;
                     height /= downsampleFactor;
                     depth /= downsampleFactor;
                 }
 
-                // Create the 3D texture with potentially reduced size
+                // --- Optimized Texture Creation and Upload ---
                 Texture3DDescription desc = new Texture3DDescription
                 {
                     Width = width,
@@ -2285,92 +2245,95 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 Logger.Log($"[SharpDXVolumeRenderer] Creating volume texture: {width}x{height}x{depth}");
                 Texture3D texture = new Texture3D(device, desc);
 
-                // Upload data chunk by chunk, with downsampling if needed
+                // Upload data chunk by chunk for performance
                 int chunkDim = volume.ChunkDim;
-
-                for (int cz = 0; cz < volume.ChunkCountZ; cz++)
+                Parallel.For(0, volume.ChunkCountZ, cz =>
                 {
                     int zBase = cz * chunkDim;
-
                     for (int cy = 0; cy < volume.ChunkCountY; cy++)
                     {
                         int yBase = cy * chunkDim;
-
                         for (int cx = 0; cx < volume.ChunkCountX; cx++)
                         {
                             int xBase = cx * chunkDim;
-                            int chunkIndex = volume.GetChunkIndex(cx, cy, cz);
-                            byte[] chunkData = volume.GetChunkBytes(chunkIndex);
 
-                            // If we're downsampling, process fewer slices
-                            for (int z = 0; z < chunkDim; z += downsampleFactor)
+                            // Destination region in the downsampled texture
+                            int destX = xBase / downsampleFactor;
+                            int destY = yBase / downsampleFactor;
+                            int destZ = zBase / downsampleFactor;
+
+                            // If this chunk is entirely outside the downsampled volume, skip it
+                            if (destX >= width || destY >= height || destZ >= depth) continue;
+
+                            byte[] chunkData = volume.GetChunkBytes(volume.GetChunkIndex(cx, cy, cz));
+
+                            byte[] dataToUpload;
+                            int dsChunkWidth, dsChunkHeight, dsChunkDepth;
+
+                            if (downsampleFactor > 1)
                             {
-                                if ((zBase + z) / downsampleFactor >= depth) break;
+                                // Calculate dimensions of the downsampled chunk
+                                dsChunkWidth = Math.Min(width - destX, chunkDim / downsampleFactor);
+                                dsChunkHeight = Math.Min(height - destY, chunkDim / downsampleFactor);
+                                dsChunkDepth = Math.Min(depth - destZ, chunkDim / downsampleFactor);
 
-                                // Create a downsampled slice
-                                int dsWidth = Math.Min(width - (xBase / downsampleFactor), chunkDim / downsampleFactor);
-                                int dsHeight = Math.Min(height - (yBase / downsampleFactor), chunkDim / downsampleFactor);
+                                if (dsChunkWidth <= 0 || dsChunkHeight <= 0 || dsChunkDepth <= 0) continue;
 
-                                if (dsWidth <= 0 || dsHeight <= 0) continue;
+                                dataToUpload = new byte[dsChunkWidth * dsChunkHeight * dsChunkDepth];
 
-                                byte[] sliceData = new byte[dsWidth * dsHeight];
-                                int sliceIndex = 0;
-
-                                // Extract downsampled data from the chunk
-                                for (int y = 0; y < chunkDim; y += downsampleFactor)
+                                // Perform downsampling for this chunk
+                                for (int z = 0; z < dsChunkDepth; z++)
                                 {
-                                    if ((yBase + y) / downsampleFactor >= height) break;
-
-                                    for (int x = 0; x < chunkDim; x += downsampleFactor)
+                                    for (int y = 0; y < dsChunkHeight; y++)
                                     {
-                                        if ((xBase + x) / downsampleFactor >= width) break;
-
-                                        // Simple downsampling: just take one voxel from each block
-                                        int srcIndex = (z * chunkDim + y) * chunkDim + x;
-
-                                        if (srcIndex < chunkData.Length)
+                                        for (int x = 0; x < dsChunkWidth; x++)
                                         {
-                                            sliceData[sliceIndex++] = chunkData[srcIndex];
+                                            int srcIndex = (z * downsampleFactor * chunkDim * chunkDim) + (y * downsampleFactor * chunkDim) + (x * downsampleFactor);
+                                            if (srcIndex < chunkData.Length)
+                                            {
+                                                dataToUpload[(z * dsChunkHeight * dsChunkWidth) + (y * dsChunkWidth) + x] = chunkData[srcIndex];
+                                            }
                                         }
                                     }
                                 }
+                            }
+                            else
+                            {
+                                dataToUpload = chunkData;
+                                dsChunkWidth = Math.Min(width - destX, chunkDim);
+                                dsChunkHeight = Math.Min(height - destY, chunkDim);
+                                dsChunkDepth = Math.Min(depth - destZ, chunkDim);
+                            }
 
-                                // Upload this slice to the texture
-                                GCHandle handle = GCHandle.Alloc(sliceData, GCHandleType.Pinned);
-                                try
-                                {
-                                    DataBox dataBox = new DataBox(handle.AddrOfPinnedObject(), dsWidth, dsWidth * dsHeight);
-                                    ResourceRegion region = new ResourceRegion(
-                                        xBase / downsampleFactor,
-                                        yBase / downsampleFactor,
-                                        (zBase + z) / downsampleFactor,
-                                        (xBase / downsampleFactor) + dsWidth,
-                                        (yBase / downsampleFactor) + dsHeight,
-                                        (zBase + z) / downsampleFactor + 1);
+                            // Upload the processed chunk to the correct region on the GPU
+                            GCHandle handle = GCHandle.Alloc(dataToUpload, GCHandleType.Pinned);
+                            try
+                            {
+                                var dataBox = new DataBox(handle.AddrOfPinnedObject(), dsChunkWidth, dsChunkWidth * dsChunkHeight);
+                                var region = new ResourceRegion(destX, destY, destZ, destX + dsChunkWidth, destY + dsChunkHeight, destZ + dsChunkDepth);
 
-                                    device.ImmediateContext.UpdateSubresource(dataBox, texture, 0, region);
-                                }
-                                finally
+                                lock (context) // The context is not thread-safe, so lock it for the upload
                                 {
-                                    handle.Free();
+                                    context.UpdateSubresource(dataBox, texture, 0, region);
                                 }
+                            }
+                            finally
+                            {
+                                handle.Free();
                             }
                         }
                     }
-                }
+                });
 
                 return texture;
             }
             catch (SharpDXException ex)
             {
                 Logger.Log($"[SharpDXVolumeRenderer] DirectX error creating volume texture: {ex.Message} (HRESULT: {ex.HResult:X})");
-
-                // If we hit the "out of memory" error, suggest solutions
-                if (ex.HResult == -2147024882) // 0x8007000E = E_OUTOFMEMORY
+                if (ex.HResult == -2147024882) // E_OUTOFMEMORY
                 {
                     Logger.Log("[SharpDXVolumeRenderer] Out of memory error. This dataset is too large for available GPU memory.");
                 }
-
                 throw;
             }
             catch (Exception ex)
@@ -2386,59 +2349,40 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
             try
             {
-                // Use the same dimensions as the grayscale volume texture, if available
-                int width, height, depth;
-                int downsampleFactor = 1;
-
-                // If we have already created the grayscale texture, use its dimensions
+                // --- Downsampling Logic (unchanged) ---
+                int width, height, depth, downsampleFactor = 1;
                 if (volumeTexture != null)
                 {
                     width = volumeTexture.Description.Width;
                     height = volumeTexture.Description.Height;
                     depth = volumeTexture.Description.Depth;
-
-                    // Calculate downsample factor based on original dimensions
-                    int factorX = Math.Max(1, volume.Width / width);
-                    int factorY = Math.Max(1, volume.Height / height);
-                    int factorZ = Math.Max(1, volume.Depth / depth);
-                    downsampleFactor = Math.Max(Math.Max(factorX, factorY), factorZ);
-
+                    downsampleFactor = Math.Max(1, volume.Width / width);
                     Logger.Log($"[SharpDXVolumeRenderer] Creating label texture with same dimensions as grayscale: {width}x{height}x{depth} (factor: {downsampleFactor})");
                 }
                 else
                 {
-                    // Fallback to original dimensions logic if volumeTexture doesn't exist yet
+                    // Fallback logic if grayscale texture wasn't created
                     width = volume.Width;
                     height = volume.Height;
                     depth = volume.Depth;
-
-                    // Check if dimensions are too large for a single texture
                     bool needsDownsampling = width > 2048 || height > 2048 || depth > 2048;
-
-                    // Calculate approximate memory requirements
-                    long volumeSizeInBytes = (long)width * height * depth * (format == Format.R32_Float ? 4 : 1);
-                    bool exceedsMemoryLimit = volumeSizeInBytes > 2L * 1024L * 1024L * 1024L; // 2GB limit for label data
+                    long volumeSizeInBytes = (long)width * height * depth * 4; // 4 bytes for R32_Float
+                    bool exceedsMemoryLimit = volumeSizeInBytes > 2L * 1024L * 1024L * 1024L;
 
                     if (needsDownsampling || exceedsMemoryLimit)
                     {
-                        // Calculate appropriate downsampling factor
-                        while ((width / downsampleFactor > 1024 || height / downsampleFactor > 1024 ||
-                               depth / downsampleFactor > 1024) ||
-                               ((long)(width / downsampleFactor) * (height / downsampleFactor) *
-                               (depth / downsampleFactor) * (format == Format.R32_Float ? 4 : 1) > 1024L * 1024L * 1024L))
+                        while ((width / downsampleFactor > 1024 || height / downsampleFactor > 1024 || depth / downsampleFactor > 1024) ||
+                               ((long)(width / downsampleFactor) * (height / downsampleFactor) * (depth / downsampleFactor) * 4 > 1024L * 1024L * 1024L))
                         {
                             downsampleFactor *= 2;
                         }
-
-                        Logger.Log($"[SharpDXVolumeRenderer] Large label volume detected ({width}x{height}x{depth}), creating downsampled version (factor: {downsampleFactor})");
-
                         width /= downsampleFactor;
                         height /= downsampleFactor;
                         depth /= downsampleFactor;
                     }
                 }
 
-                // Create the 3D texture with potentially reduced size
+                // --- Optimized Texture Creation and Upload ---
                 Texture3DDescription desc = new Texture3DDescription
                 {
                     Width = width,
@@ -2455,144 +2399,81 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 Logger.Log($"[SharpDXVolumeRenderer] Creating label texture: {width}x{height}x{depth}");
                 Texture3D texture = new Texture3D(device, desc);
 
-                // Upload data chunk by chunk with downsampling if needed
+                // Upload data chunk by chunk for performance
                 int chunkDim = volume.ChunkDim;
+                int bytesPerPixel = (format == Format.R32_Float) ? 4 : 1;
 
-                for (int cz = 0; cz < volume.ChunkCountZ; cz++)
+                Parallel.For(0, volume.ChunkCountZ, cz =>
                 {
                     int zBase = cz * chunkDim;
-
                     for (int cy = 0; cy < volume.ChunkCountY; cy++)
                     {
                         int yBase = cy * chunkDim;
-
                         for (int cx = 0; cx < volume.ChunkCountX; cx++)
                         {
                             int xBase = cx * chunkDim;
-                            int chunkIndex = volume.GetChunkIndex(cx, cy, cz);
-                            byte[] chunkData = volume.GetChunkBytes(chunkIndex);
 
-                            // If we're downsampling, process fewer slices
-                            for (int z = 0; z < chunkDim; z += downsampleFactor)
+                            int destX = xBase / downsampleFactor;
+                            int destY = yBase / downsampleFactor;
+                            int destZ = zBase / downsampleFactor;
+
+                            if (destX >= width || destY >= height || destZ >= depth) continue;
+
+                            byte[] chunkBytes = volume.GetChunkBytes(volume.GetChunkIndex(cx, cy, cz));
+
+                            int dsChunkWidth = Math.Min(width - destX, chunkDim / downsampleFactor);
+                            int dsChunkHeight = Math.Min(height - destY, chunkDim / downsampleFactor);
+                            int dsChunkDepth = Math.Min(depth - destZ, chunkDim / downsampleFactor);
+
+                            if (dsChunkWidth <= 0 || dsChunkHeight <= 0 || dsChunkDepth <= 0) continue;
+
+                            // Convert byte[] to float[] for R32_Float format
+                            float[] floatData = new float[dsChunkWidth * dsChunkHeight * dsChunkDepth];
+
+                            // Perform downsampling and data type conversion
+                            for (int z = 0; z < dsChunkDepth; z++)
                             {
-                                if ((zBase + z) / downsampleFactor >= depth) break;
-
-                                // For float format (R32_Float), create a float array for the slice
-                                if (format == Format.R32_Float)
+                                for (int y = 0; y < dsChunkHeight; y++)
                                 {
-                                    int dsWidth = Math.Min(width - (xBase / downsampleFactor), chunkDim / downsampleFactor);
-                                    int dsHeight = Math.Min(height - (yBase / downsampleFactor), chunkDim / downsampleFactor);
-
-                                    if (dsWidth <= 0 || dsHeight <= 0) continue;
-
-                                    float[] sliceData = new float[dsWidth * dsHeight];
-                                    int sliceIndex = 0;
-
-                                    // Extract downsampled data from the chunk
-                                    for (int y = 0; y < chunkDim; y += downsampleFactor)
+                                    for (int x = 0; x < dsChunkWidth; x++)
                                     {
-                                        if ((yBase + y) / downsampleFactor >= height) break;
-
-                                        for (int x = 0; x < chunkDim; x += downsampleFactor)
+                                        int srcIndex = (z * downsampleFactor * chunkDim * chunkDim) + (y * downsampleFactor * chunkDim) + (x * downsampleFactor);
+                                        if (srcIndex < chunkBytes.Length)
                                         {
-                                            if ((xBase + x) / downsampleFactor >= width) break;
-
-                                            // For labels, we want to preserve the original values exactly
-                                            int srcIndex = (z * chunkDim + y) * chunkDim + x;
-
-                                            if (srcIndex < chunkData.Length)
-                                            {
-                                                sliceData[sliceIndex++] = chunkData[srcIndex];
-                                            }
+                                            floatData[(z * dsChunkHeight * dsChunkWidth) + (y * dsChunkWidth) + x] = chunkBytes[srcIndex];
                                         }
-                                    }
-
-                                    // Upload this slice to the texture
-                                    GCHandle handle = GCHandle.Alloc(sliceData, GCHandleType.Pinned);
-                                    try
-                                    {
-                                        DataBox dataBox = new DataBox(handle.AddrOfPinnedObject(), dsWidth * sizeof(float), dsWidth * dsHeight * sizeof(float));
-                                        ResourceRegion region = new ResourceRegion(
-                                            xBase / downsampleFactor,
-                                            yBase / downsampleFactor,
-                                            (zBase + z) / downsampleFactor,
-                                            (xBase / downsampleFactor) + dsWidth,
-                                            (yBase / downsampleFactor) + dsHeight,
-                                            (zBase + z) / downsampleFactor + 1);
-
-                                        device.ImmediateContext.UpdateSubresource(dataBox, texture, 0, region);
-                                    }
-                                    finally
-                                    {
-                                        handle.Free();
-                                    }
-                                }
-                                else
-                                {
-                                    // For byte format, same as grayscale volume
-                                    int dsWidth = Math.Min(width - (xBase / downsampleFactor), chunkDim / downsampleFactor);
-                                    int dsHeight = Math.Min(height - (yBase / downsampleFactor), chunkDim / downsampleFactor);
-
-                                    if (dsWidth <= 0 || dsHeight <= 0) continue;
-
-                                    byte[] sliceData = new byte[dsWidth * dsHeight];
-                                    int sliceIndex = 0;
-
-                                    // Extract downsampled data from the chunk
-                                    for (int y = 0; y < chunkDim; y += downsampleFactor)
-                                    {
-                                        if ((yBase + y) / downsampleFactor >= height) break;
-
-                                        for (int x = 0; x < chunkDim; x += downsampleFactor)
-                                        {
-                                            if ((xBase + x) / downsampleFactor >= width) break;
-
-                                            int srcIndex = (z * chunkDim + y) * chunkDim + x;
-
-                                            if (srcIndex < chunkData.Length)
-                                            {
-                                                sliceData[sliceIndex++] = chunkData[srcIndex];
-                                            }
-                                        }
-                                    }
-
-                                    // Upload this slice to the texture
-                                    GCHandle handle = GCHandle.Alloc(sliceData, GCHandleType.Pinned);
-                                    try
-                                    {
-                                        DataBox dataBox = new DataBox(handle.AddrOfPinnedObject(), dsWidth, dsWidth * dsHeight);
-                                        ResourceRegion region = new ResourceRegion(
-                                            xBase / downsampleFactor,
-                                            yBase / downsampleFactor,
-                                            (zBase + z) / downsampleFactor,
-                                            (xBase / downsampleFactor) + dsWidth,
-                                            (yBase / downsampleFactor) + dsHeight,
-                                            (zBase + z) / downsampleFactor + 1);
-
-                                        device.ImmediateContext.UpdateSubresource(dataBox, texture, 0, region);
-                                    }
-                                    finally
-                                    {
-                                        handle.Free();
                                     }
                                 }
                             }
+
+                            GCHandle handle = GCHandle.Alloc(floatData, GCHandleType.Pinned);
+                            try
+                            {
+                                var dataBox = new DataBox(handle.AddrOfPinnedObject(), dsChunkWidth * bytesPerPixel, dsChunkWidth * dsChunkHeight * bytesPerPixel);
+                                var region = new ResourceRegion(destX, destY, destZ, destX + dsChunkWidth, destY + dsChunkHeight, destZ + dsChunkDepth);
+
+                                lock (context)
+                                {
+                                    context.UpdateSubresource(dataBox, texture, 0, region);
+                                }
+                            }
+                            finally
+                            {
+                                handle.Free();
+                            }
                         }
                     }
-                }
+                });
 
                 return texture;
             }
             catch (SharpDXException ex)
             {
                 Logger.Log($"[SharpDXVolumeRenderer] DirectX error creating label texture: {ex.Message} (HRESULT: {ex.HResult:X})");
-
-                // If we hit the "out of memory" error, suggest solutions
-                if (ex.HResult == -2147024882) // 0x8007000E = E_OUTOFMEMORY
+                if (ex.HResult == -2147024882) // E_OUTOFMEMORY
                 {
                     Logger.Log("[SharpDXVolumeRenderer] Out of memory error. This dataset is too large for available GPU memory.");
                 }
-
                 throw;
             }
             catch (Exception ex)

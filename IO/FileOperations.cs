@@ -1653,7 +1653,7 @@ public static IGrayscaleVolumeData LoadVolumeBinRaw(string path, bool useMM, int
         }
         /// <summary>
         /// Exports the label data as a stack of RGB image files, where each material has its assigned color
-        /// and the exterior is black.
+        /// and the exterior is black. This version is optimized for high performance with large datasets.
         /// </summary>
         public static void ExportLabelImages(string outputPath, ILabelVolumeData volumeLabels,
                                       List<Material> materials, int width, int height, int depth)
@@ -1667,18 +1667,76 @@ public static IGrayscaleVolumeData LoadVolumeBinRaw(string path, bool useMM, int
                 throw new ArgumentNullException(nameof(materials));
             }
 
-            // Create a dictionary for fast color lookups inside the parallel loop.
+            // Create a dictionary for fast color lookups. This is much faster than `FirstOrDefault` inside a loop.
             var colorMap = materials.ToDictionary(m => m.ID, m => m.Color);
-
-            Parallel.For(0, depth, z =>
+            // Ensure black is available for the exterior (ID 0).
+            if (!colorMap.ContainsKey(0))
             {
-                using (Bitmap bmp = CreateLabelBitmapForSlice(z, volumeLabels, colorMap, width, height))
+                colorMap[0] = Color.Black;
+            }
+
+            // Use a ThreadLocal buffer for the label data of each slice.
+            // This avoids reallocating a large buffer for every slice in the parallel loop, reducing GC pressure.
+            using (var labelBufferCache = new System.Threading.ThreadLocal<byte[]>(() => new byte[width * height]))
+            {
+                Parallel.For(0, depth, z =>
                 {
-                    // The D5 format specifier ensures 5 digits with leading zeros (e.g., 00001, 00012, 00123)
-                    string filePath = Path.Combine(outputPath, $"label_{z:D5}.png");
-                    bmp.Save(filePath, ImageFormat.Png);
-                }
-            });
+                    // Get the thread-local buffer for this slice's label data.
+                    byte[] labelSliceData = labelBufferCache.Value;
+
+                    // Read the entire Z-slice into the buffer. This is a single, optimized I/O operation per slice.
+                    volumeLabels.ReadSliceZ(z, labelSliceData);
+
+                    // Create the bitmap for this slice.
+                    using (var bmp = new Bitmap(width, height, PixelFormat.Format24bppRgb))
+                    {
+                        BitmapData bmpData = bmp.LockBits(
+                            new Rectangle(0, 0, width, height),
+                            ImageLockMode.WriteOnly,
+                            PixelFormat.Format24bppRgb);
+
+                        try
+                        {
+                            unsafe
+                            {
+                                byte* ptr = (byte*)bmpData.Scan0;
+                                int stride = bmpData.Stride;
+                                int pixelIndex = 0; // Index for the flat labelSliceData array
+
+                                for (int y = 0; y < height; y++)
+                                {
+                                    byte* row = ptr + (y * stride);
+                                    for (int x = 0; x < width; x++)
+                                    {
+                                        int offset = x * 3;
+                                        byte label = labelSliceData[pixelIndex++];
+
+                                        // Look up the color for the label ID.
+                                        if (!colorMap.TryGetValue(label, out Color pixelColor))
+                                        {
+                                            // Fallback to black if a label ID has no corresponding material.
+                                            pixelColor = Color.Black;
+                                        }
+
+                                        // Write RGB values (in BGR order for bitmap).
+                                        row[offset] = pixelColor.B;
+                                        row[offset + 1] = pixelColor.G;
+                                        row[offset + 2] = pixelColor.R;
+                                    }
+                                }
+                            }
+                        }
+                        finally
+                        {
+                            bmp.UnlockBits(bmpData);
+                        }
+
+                        // The D5 format specifier ensures 5 digits with leading zeros (e.g., 00001, 00012, 00123).
+                        string filePath = Path.Combine(outputPath, $"label_{z:D5}.png");
+                        bmp.Save(filePath, ImageFormat.Png);
+                    }
+                });
+            }
 
             Logger.Log("[FileOperations] Exported label-only images to " + outputPath);
         }

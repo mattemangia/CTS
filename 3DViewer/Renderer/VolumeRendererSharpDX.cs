@@ -226,7 +226,7 @@ namespace CTS
         }
 
         //Streaming rendering
-        private bool useStreamingRenderer = false;
+        private bool useStreamingRenderer = true;
 
         private Dictionary<Vector3, Texture3D> loadedChunks = new Dictionary<Vector3, Texture3D>();
         private Dictionary<Vector3, ShaderResourceView> loadedChunkSRVs = new Dictionary<Vector3, ShaderResourceView>();
@@ -275,7 +275,6 @@ namespace CTS
                         if (mainForm.volumeData != null)
                         {
                             Logger.Log("[SharpDXVolumeRenderer] Recreating standard textures after disabling streaming");
-
                             try
                             {
                                 // Clean up existing textures first
@@ -291,13 +290,8 @@ namespace CTS
                                     {
                                         Format = Format.R8_UNorm,
                                         Dimension = ShaderResourceViewDimension.Texture3D,
-                                        Texture3D = new ShaderResourceViewDescription.Texture3DResource
-                                        {
-                                            MipLevels = 1,
-                                            MostDetailedMip = 0
-                                        }
+                                        Texture3D = new ShaderResourceViewDescription.Texture3DResource { MipLevels = 1, MostDetailedMip = 0 }
                                     };
-
                                     volumeSRV = new ShaderResourceView(device, volumeTexture, srvDesc);
                                     Logger.Log("[SharpDXVolumeRenderer] Standard volume texture recreated successfully");
                                 }
@@ -309,18 +303,8 @@ namespace CTS
                             catch (Exception ex)
                             {
                                 Logger.Log($"[SharpDXVolumeRenderer] Error recreating standard textures: {ex.Message}");
-                                // Even if recreation fails, continue with disabling streaming
                             }
                         }
-                    }
-
-                    // Store original volume texture before switching to streaming mode
-                    Texture3D originalVolumeTex = null;
-                    ShaderResourceView originalVolumeSRV = null;
-                    if (!useStreamingRenderer && value && volumeTexture != null)
-                    {
-                        originalVolumeTex = volumeTexture;
-                        originalVolumeSRV = volumeSRV;
                     }
 
                     // Update the flag immediately
@@ -5552,123 +5536,65 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             var token = initStreamingCts.Token;
 
             // Create a progress form to show the user something is happening
-            if (streamingProgressForm != null && !streamingProgressForm.IsDisposed)
-            {
-                streamingProgressForm.Close();
-            }
-
-            // Create and show the progress form on the UI thread
             mainForm.Invoke((Action)(() =>
             {
-                streamingProgressForm = new ProgressForm("Initializing Streaming Renderer...");
-                streamingProgressForm.FormClosed += (s, e) =>
+                if (streamingProgressForm != null && !streamingProgressForm.IsDisposed)
                 {
-                    // If the user closes the form, cancel the initialization
+                    streamingProgressForm.Close();
+                }
+                streamingProgressForm = new ProgressForm("Initializing Streaming Renderer...");
+                streamingProgressForm.FormClosed += (s, e) => {
                     if (!initStreamingCts.IsCancellationRequested)
                     {
                         initStreamingCts.Cancel();
-                        useStreamingRenderer = false;
-                        NeedsRender = true;
+                        UseStreamingRenderer = false; // Revert the state
                     }
                 };
                 streamingProgressForm.Show(mainForm);
                 streamingProgressForm.UpdateProgress(0, 100);
             }));
 
-            // Set a flag to indicate initialization is in progress
             isInitializingStreaming = true;
 
-            // Start the async task
             streamingInitTask = Task.Run(() =>
             {
                 try
                 {
                     Logger.Log("[InitializeStreamingRendererAsync] Starting initialization on background thread");
 
-                    // Set a timer to update the progress UI periodically
-                    int progressPercent = 0;
-                    var timer = new System.Threading.Timer(state =>
+                    // Create the LOD textures asynchronously
+                    CreateStreamingLODTexturesAsync(token, progressValue =>
                     {
                         if (streamingProgressForm != null && !streamingProgressForm.IsDisposed)
                         {
-                            progressPercent = (progressPercent + 3) % 100; // Simple progress simulation
-                            streamingProgressForm.SafeUpdateProgress(progressPercent, 100, "Creating LOD textures...");
+                            // Use Invoke to safely update the UI from the background thread
+                            mainForm.Invoke((Action)(() => streamingProgressForm.UpdateProgress(progressValue, 100)));
                         }
-                    }, null, 0, 300);
+                    });
 
-                    try
-                    {
-                        // Create a series of progressively lower-resolution versions of the volume
-                        // These will be used during camera movement and then progressively refined
-                        CreateStreamingLODTexturesAsync(token, progressValue =>
-                        {
-                            if (streamingProgressForm != null && !streamingProgressForm.IsDisposed)
-                            {
-                                streamingProgressForm.SafeUpdateProgress(progressValue, 100);
-                            }
-                        });
+                    token.ThrowIfCancellationRequested();
 
-                        token.ThrowIfCancellationRequested();
-
-                        // Important: Force render with new resources
-                        NeedsRender = true;
-                    }
-                    finally
-                    {
-                        // Clean up the timer
-                        timer.Dispose();
-                    }
-
-                    // Update progress to 100% when done
-                    if (streamingProgressForm != null && !streamingProgressForm.IsDisposed)
-                    {
-                        streamingProgressForm.SafeUpdateProgress(100, 100, "Initialization complete!");
-
-                        // Close the form after a short delay
-                        Task.Delay(1000).ContinueWith(_ =>
-                        {
-                            mainForm.Invoke((Action)(() =>
-                            {
-                                if (streamingProgressForm != null && !streamingProgressForm.IsDisposed)
-                                {
-                                    streamingProgressForm.Close();
-                                    streamingProgressForm = null;
-                                }
-                            }));
-                        });
-                    }
-
+                    NeedsRender = true; // Request a render with the new textures
                     Logger.Log("[InitializeStreamingRendererAsync] Streaming renderer initialized successfully");
                 }
                 catch (OperationCanceledException)
                 {
-                    Logger.Log("[InitializeStreamingRendererAsync] Initialization canceled");
-                    // If canceled, make sure streaming mode is disabled
-                    useStreamingRenderer = false;
-                    NeedsRender = true;
+                    Logger.Log("[InitializeStreamingRendererAsync] Initialization canceled by user.");
+                    UseStreamingRenderer = false; // Ensure state is reverted
                 }
                 catch (Exception ex)
                 {
                     Logger.Log($"[InitializeStreamingRendererAsync] Error initializing streaming renderer: {ex.Message}");
-
-                    // Show error message to user
-                    mainForm.Invoke((Action)(() =>
-                    {
+                    mainForm.Invoke((Action)(() => {
                         MessageBox.Show(mainForm,
                             $"Failed to initialize streaming renderer: {ex.Message}\n\nFalling back to standard renderer.",
-                            "Initialization Error",
-                            MessageBoxButtons.OK,
-                            MessageBoxIcon.Error);
+                            "Initialization Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }));
-
-                    // Disable streaming mode on error
-                    useStreamingRenderer = false;
-                    NeedsRender = true;
+                    UseStreamingRenderer = false; // Revert on error
                 }
                 finally
                 {
                     isInitializingStreaming = false;
-
                     // Close progress form if still open
                     mainForm.Invoke((Action)(() =>
                     {
@@ -5682,49 +5608,34 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             }, token);
         }
 
+
         private void CreateStreamingLODTexturesAsync(CancellationToken token, Action<int> progressCallback)
         {
-            // Clean up any existing textures first
-            for (int i = 0; i < lodTextures.Length; i++)
-            {
-                Utilities.Dispose(ref lodSRVs[i]);
-                Utilities.Dispose(ref lodTextures[i]);
-            }
+            DisposeStreamingResources(); // Clean up any existing textures first
 
             if (mainForm.volumeData == null)
             {
-                Logger.Log("[CreateStreamingLODTexturesAsync] No volume data available for streaming LODs");
                 throw new InvalidOperationException("No volume data available to create streaming LODs");
             }
 
             ChunkedVolume volume = (ChunkedVolume)mainForm.volumeData;
             bool anyLodCreated = false;
+            int totalLevels = lodTextures.Length;
 
-            // Report initial progress
-            progressCallback(5);
-
-            // Create a series of downsampled textures at different resolutions
-            for (int lodLevel = 0; lodLevel < lodTextures.Length; lodLevel++)
+            for (int lodLevel = 0; lodLevel < totalLevels; lodLevel++)
             {
-                // Check for cancellation
                 token.ThrowIfCancellationRequested();
-
-                // Update progress
-                progressCallback(5 + (lodLevel * 90 / lodTextures.Length));
+                progressCallback(5 + (lodLevel * 90 / totalLevels));
 
                 try
                 {
-                    // Level 0 is highest resolution, each level reduces by 2x
                     int downsampleFactor = (int)Math.Pow(2, lodLevel);
-
-                    // Calculate dimensions for this LOD level
                     int width = Math.Max(1, volW / downsampleFactor);
                     int height = Math.Max(1, volH / downsampleFactor);
                     int depth = Math.Max(1, volD / downsampleFactor);
 
                     Logger.Log($"[CreateStreamingLODTexturesAsync] Creating LOD level {lodLevel}: {width}x{height}x{depth}");
 
-                    // Create the texture
                     Texture3DDescription desc = new Texture3DDescription
                     {
                         Width = width,
@@ -5737,87 +5648,84 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                         CpuAccessFlags = CpuAccessFlags.None,
                         OptionFlags = ResourceOptionFlags.None
                     };
+                    var texture = new Texture3D(device, desc);
+                    lodTextures[lodLevel] = texture;
 
-                    lodTextures[lodLevel] = new Texture3D(device, desc);
+                    // Prepare data in parallel
+                    var preparedChunks = new ConcurrentBag<(ResourceRegion Region, byte[] Data, int RowPitch, int SlicePitch)>();
+                    int chunkDim = volume.ChunkDim;
 
-                    // Create the data array for this LOD level
-                    byte[] lodData = new byte[width * height * depth];
-
-                    // Use parallel processing for faster downsampling
-                    Parallel.For(0, depth, new ParallelOptions { CancellationToken = token, MaxDegreeOfParallelism = Environment.ProcessorCount }, z =>
+                    Parallel.For(0, volume.ChunkCountZ, new ParallelOptions { CancellationToken = token }, cz =>
                     {
-                        // Check cancellation occasionally but not on every iteration
-                        if (z % 10 == 0) token.ThrowIfCancellationRequested();
-
-                        for (int y = 0; y < height; y++)
+                        int zBase = cz * chunkDim;
+                        for (int cy = 0; cy < volume.ChunkCountY; cy++)
                         {
-                            for (int x = 0; x < width; x++)
+                            int yBase = cy * chunkDim; // <<< FIX WAS HERE
+                            for (int cx = 0; cx < volume.ChunkCountX; cx++)
                             {
-                                // Calculate source coordinates in the original volume
-                                int srcX = Math.Min(x * downsampleFactor, volW - 1);
-                                int srcY = Math.Min(y * downsampleFactor, volH - 1);
-                                int srcZ = Math.Min(z * downsampleFactor, volD - 1);
+                                int xBase = cx * chunkDim;
+                                int destX = xBase / downsampleFactor;
+                                int destY = yBase / downsampleFactor;
+                                int destZ = zBase / downsampleFactor;
 
-                                // Calculate linear index in the lodData array
-                                int idx = (z * width * height) + (y * width) + x;
+                                if (destX >= width || destY >= height || destZ >= depth) continue;
 
-                                // Sample from the original volume with bounds checking
-                                if (srcX < volW && srcY < volH && srcZ < volD)
-                                {
-                                    byte value = volume[srcX, srcY, srcZ];
-                                    lodData[idx] = value;
-                                }
+                                byte[] chunkBytes = volume.GetChunkBytes(volume.GetChunkIndex(cx, cy, cz));
+                                int dsChunkWidth = Math.Min(width - destX, chunkDim / downsampleFactor);
+                                int dsChunkHeight = Math.Min(height - destY, chunkDim / downsampleFactor);
+                                int dsChunkDepth = Math.Min(depth - destZ, chunkDim / downsampleFactor);
+
+                                if (dsChunkWidth <= 0 || dsChunkHeight <= 0 || dsChunkDepth <= 0) continue;
+
+                                byte[] dataToUpload = new byte[dsChunkWidth * dsChunkHeight * dsChunkDepth];
+                                for (int z = 0; z < dsChunkDepth; z++)
+                                    for (int y = 0; y < dsChunkHeight; y++)
+                                        for (int x = 0; x < dsChunkWidth; x++)
+                                        {
+                                            int srcIndex = (z * downsampleFactor * chunkDim * chunkDim) + (y * downsampleFactor * chunkDim) + (x * downsampleFactor);
+                                            if (srcIndex < chunkBytes.Length)
+                                                dataToUpload[(z * dsChunkHeight * dsChunkWidth) + (y * dsChunkWidth) + x] = chunkBytes[srcIndex];
+                                        }
+
+                                var region = new ResourceRegion(destX, destY, destZ, destX + dsChunkWidth, destY + dsChunkHeight, destZ + dsChunkDepth);
+                                preparedChunks.Add((region, dataToUpload, dsChunkWidth, dsChunkWidth * dsChunkHeight));
                             }
                         }
                     });
 
-                    // Check for cancellation again before resource-intensive GPU operations
                     token.ThrowIfCancellationRequested();
 
-                    // Upload the data to the texture
-                    context.UpdateSubresource(lodData, lodTextures[lodLevel], 0);
+                    // Upload sequentially
+                    foreach (var chunk in preparedChunks)
+                    {
+                        GCHandle handle = GCHandle.Alloc(chunk.Data, GCHandleType.Pinned);
+                        try
+                        {
+                            context.UpdateSubresource(new DataBox(handle.AddrOfPinnedObject(), chunk.RowPitch, chunk.SlicePitch), texture, 0, chunk.Region);
+                        }
+                        finally { handle.Free(); }
+                    }
 
-                    // Create a shader resource view
                     ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
                     {
                         Format = Format.R8_UNorm,
                         Dimension = ShaderResourceViewDimension.Texture3D,
-                        Texture3D = new ShaderResourceViewDescription.Texture3DResource
-                        {
-                            MipLevels = 1,
-                            MostDetailedMip = 0
-                        }
+                        Texture3D = new ShaderResourceViewDescription.Texture3DResource { MipLevels = 1, MostDetailedMip = 0 }
                     };
-
-                    lodSRVs[lodLevel] = new ShaderResourceView(device, lodTextures[lodLevel], srvDesc);
+                    lodSRVs[lodLevel] = new ShaderResourceView(device, texture, srvDesc);
                     anyLodCreated = true;
-
-                    // For LOD level 0 (highest resolution), also use as main texture for now
-                    if (lodLevel == 0)
-                    {
-                        currentStreamingLOD = 0;
-                        Logger.Log("[CreateStreamingLODTexturesAsync] Created highest-resolution LOD texture");
-                    }
                 }
-                catch (OperationCanceledException)
-                {
-                    // Rethrow cancellation exception to be handled by the caller
-                    throw;
-                }
+                catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
                     Logger.Log($"[CreateStreamingLODTexturesAsync] Error creating LOD level {lodLevel}: {ex.Message}");
-                    // Continue with next LOD level
                 }
             }
 
-            // Final progress update
             progressCallback(100);
 
             if (!anyLodCreated)
             {
-                // If we couldn't create any LOD textures, disable streaming mode
-                Logger.Log("[CreateStreamingLODTexturesAsync] Failed to create any LOD textures");
                 throw new InvalidOperationException("Failed to create any LOD textures for streaming");
             }
         }

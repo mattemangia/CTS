@@ -1,3 +1,4 @@
+//Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
 using Krypton.Toolkit;
 using System;
 using System.Collections.Generic;
@@ -129,7 +130,7 @@ namespace CTS.Modules.BugSubmission
             this.panelMain.Dock = System.Windows.Forms.DockStyle.Fill;
             this.panelMain.Location = new System.Drawing.Point(0, 0);
             this.panelMain.Name = "panelMain";
-            this.panelMain.Size = new System.Drawing.Size(586, 654);
+            this.panelMain.Size = new System.Drawing.Size(588, 647);
             this.panelMain.TabIndex = 0;
             // 
             // lblTitle
@@ -305,7 +306,7 @@ namespace CTS.Modules.BugSubmission
             // 
             // BugSubmissionForm
             // 
-            this.ClientSize = new System.Drawing.Size(586, 654);
+            this.ClientSize = new System.Drawing.Size(588, 647);
             this.Controls.Add(this.panelMain);
             this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;

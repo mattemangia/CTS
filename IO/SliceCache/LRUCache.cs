@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿//Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
+using System.Collections.Generic;
 
 namespace CTS
 {

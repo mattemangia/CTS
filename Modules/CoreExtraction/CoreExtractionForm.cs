@@ -1,4 +1,5 @@
-﻿using Krypton.Toolkit;
+﻿//Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
+using Krypton.Toolkit;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;

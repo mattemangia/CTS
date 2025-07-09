@@ -1,4 +1,5 @@
-﻿using System;
+﻿//Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
+using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;

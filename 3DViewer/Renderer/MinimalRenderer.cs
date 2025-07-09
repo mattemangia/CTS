@@ -1,4 +1,5 @@
-﻿using SharpDX;
+﻿//Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
+using SharpDX;
 using SharpDX.Direct3D;
 using SharpDX.Direct3D11;
 using SharpDX.DXGI;

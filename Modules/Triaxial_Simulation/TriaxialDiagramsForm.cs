@@ -1,4 +1,5 @@
-﻿// DiagramsForm.cs
+﻿//Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
+// DiagramsForm.cs
 using System;
 using System.Collections.Generic;
 using System.Drawing;

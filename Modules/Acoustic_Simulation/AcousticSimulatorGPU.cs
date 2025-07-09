@@ -1,4 +1,5 @@
-﻿using System;
+﻿//Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
+using System;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;

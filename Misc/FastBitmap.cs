@@ -1,4 +1,5 @@
-﻿using System.Drawing.Imaging;
+﻿//Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
+using System.Drawing.Imaging;
 using System.Drawing;
 
 using System;

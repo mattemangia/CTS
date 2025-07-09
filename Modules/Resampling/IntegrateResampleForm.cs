@@ -1,4 +1,5 @@
-﻿using ILGPU;
+﻿//Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
+using ILGPU;
 using ILGPU.Runtime;
 using System;
 using System.ComponentModel;

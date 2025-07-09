@@ -1,4 +1,5 @@
-﻿using CTS;
+﻿//Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
+using CTS;
 using System.Collections.Generic;
 
 public class PermeabilitySimulationResult

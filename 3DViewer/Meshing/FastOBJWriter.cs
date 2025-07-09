@@ -1,4 +1,5 @@
-﻿using SharpDX;
+﻿//Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
+using SharpDX;
 using System.Collections.Concurrent;
 using System;
 using System.Globalization;

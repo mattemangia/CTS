@@ -1,4 +1,5 @@
-﻿using System.Drawing;
+﻿//Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
+using System.Drawing;
 
 namespace CTS
 {

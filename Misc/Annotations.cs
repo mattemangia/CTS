@@ -1,4 +1,5 @@
-﻿// Annotations.cs
+﻿//Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
+// Annotations.cs
 using System.Collections.Generic;
 using System.Linq;
 

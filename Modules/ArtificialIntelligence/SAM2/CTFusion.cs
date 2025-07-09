@@ -1,4 +1,5 @@
-﻿// CTFusion.cs
+﻿//Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
+// CTFusion.cs
 using System;
 using System.Collections.Generic;
 using System.Drawing;

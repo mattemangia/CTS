@@ -1,4 +1,5 @@
-﻿using CTS.SharpDXIntegration;
+﻿//Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
+using CTS.SharpDXIntegration;
 using SharpDX;
 using SharpDX.Direct3D;
 using SharpDX.Direct3D11;

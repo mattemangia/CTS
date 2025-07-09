@@ -1,4 +1,5 @@
-﻿// Custom panel for 3D orthogonal view
+﻿//Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
+// Custom panel for 3D orthogonal view
 using CTS;
 using System;
 using System.Drawing;

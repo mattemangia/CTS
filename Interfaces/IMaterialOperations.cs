@@ -1,4 +1,5 @@
-﻿namespace CTS
+﻿//Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
+namespace CTS
 {
     /// <summary>
     /// Interface for material and voxel operations on volume data.

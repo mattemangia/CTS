@@ -203,6 +203,9 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Modules\MeasurementTool\MeasurementManager.cs" />
+    <Compile Include="Modules\NMRSimulation\NMRMaterialSelectorDialog.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Modules\NodeEditor\BaseNode.cs" />
     <Compile Include="Modules\NodeEditor\NodeEditorForm.cs" />
     <Compile Include="Modules\NMRSimulation\MaterialNMRPropertiesdialog.cs">

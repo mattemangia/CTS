@@ -105,6 +105,7 @@ namespace CTS.Modules.Simulation.NMR
 
         // Material properties
         private Dictionary<byte, MaterialNMRProperties> _materialProperties;
+        public List<byte> SelectedPoreMaterials { get; set; }
 
         // GPU compute instance
         private NMRGPUDirectCompute _gpuCompute;
@@ -115,6 +116,7 @@ namespace CTS.Modules.Simulation.NMR
             _pixelSize = mainForm.GetPixelSize();
 
             _materialProperties = new Dictionary<byte, MaterialNMRProperties>();
+            SelectedPoreMaterials = new List<byte>();
             InitializeDefaultMaterialProperties();
 
             // Initialize GPU compute if available
@@ -235,7 +237,10 @@ namespace CTS.Modules.Simulation.NMR
         public async Task<NMRSimulationResult> RunSimulationAsync(NMRCalibration calibration = null, CancellationToken cancellationToken = default)
         {
             var startTime = DateTime.Now;
-
+            if (SelectedPoreMaterials == null || SelectedPoreMaterials.Count == 0)
+            {
+                throw new InvalidOperationException("No pore materials selected for NMR simulation. Please select at least one pore/fluid material.");
+            }
             // Create result structure
             var result = new NMRSimulationResult
             {
@@ -325,8 +330,8 @@ namespace CTS.Modules.Simulation.NMR
 
                         byte label = _mainForm.volumeLabels[x, y, z];
 
-                        // Skip exterior material (ID 0)
-                        if (label == 0)
+                        // Skip exterior material (ID 0) and non-selected materials
+                        if (label == 0 || !SelectedPoreMaterials.Contains(label))
                             continue;
 
                         // Count voxels
@@ -370,7 +375,7 @@ namespace CTS.Modules.Simulation.NMR
             // Create structure info for each material (excluding exterior)
             foreach (var material in _mainForm.Materials)
             {
-                if (material.ID == 0 || !materialCounts.ContainsKey(material.ID))
+                if (material.ID == 0 || !SelectedPoreMaterials.Contains(material.ID) || !materialCounts.ContainsKey(material.ID))
                     continue;
 
                 structure[material.ID] = new PoreStructureInfo
@@ -464,7 +469,7 @@ namespace CTS.Modules.Simulation.NMR
             foreach (var material in _mainForm.Materials)
             {
                 // Skip exterior material (ID 0)
-                if (material.ID == 0)
+                if (!SelectedPoreMaterials.Contains(material.ID))
                     continue;
 
                 var properties = _materialProperties[material.ID];

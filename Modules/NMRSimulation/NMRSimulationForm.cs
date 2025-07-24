@@ -34,9 +34,10 @@ namespace CTS
         private KryptonButton btnSaveResults;
         private KryptonButton btnCalibration;
         private KryptonButton btnMaterialProperties;
-        private KryptonButton btnSaveSimulation;  // New button
-        private KryptonButton btnLoadSimulation;  // New button
-        private KryptonButton btnLoadPNM;         // New button
+        private KryptonButton btnSelectPoreMaterials;  // New button
+        private KryptonButton btnSaveSimulation;
+        private KryptonButton btnLoadSimulation;
+        private KryptonButton btnLoadPNM;
         private CheckBox chkUseGPU;
         private NumericUpDown numThreads;
         private NumericUpDown numMaxTime;
@@ -52,6 +53,7 @@ namespace CTS
         private PictureBox pbOverview;
         private CheckBox chkLogScale;
         private CheckBox chkShowComponents;
+        private Label lblSelectedMaterials;  // New label
 
         // Material properties controls
         private DataGridView dgvMaterials;
@@ -603,11 +605,33 @@ namespace CTS
             {
                 Dock = DockStyle.Top,  // Changed from Fill to Top
                 ColumnCount = 1,
-                RowCount = 8,
+                RowCount = 10,  // Increased to accommodate new controls
                 Padding = new Padding(10),
                 BackColor = Color.Black,
                 AutoSize = true  // Added to prevent expansion
             };
+
+            // Selected materials label
+            lblSelectedMaterials = new Label
+            {
+                Text = "No pore materials selected",
+                Dock = DockStyle.Fill,
+                ForeColor = Color.Yellow,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                TextAlign = ContentAlignment.MiddleCenter,
+                Height = 30
+            };
+            layout.Controls.Add(lblSelectedMaterials, 0, 0);
+
+            // Select pore materials button
+            btnSelectPoreMaterials = new KryptonButton
+            {
+                Text = "Select Pore Materials...",
+                Dock = DockStyle.Fill,
+                Values = { Image = CreateSelectIcon() }
+            };
+            btnSelectPoreMaterials.Click += SelectPoreMaterials;
+            layout.Controls.Add(btnSelectPoreMaterials, 0, 1);
 
             // Run button
             btnRun = new KryptonButton
@@ -617,7 +641,7 @@ namespace CTS
                 Values = { Image = CreatePlayIcon() }
             };
             btnRun.Click += async (s, e) => await RunSimulationAsync();
-            layout.Controls.Add(btnRun, 0, 0);
+            layout.Controls.Add(btnRun, 0, 2);
 
             // Stop button
             btnStop = new KryptonButton
@@ -628,7 +652,7 @@ namespace CTS
                 Values = { Image = CreateStopIcon() }
             };
             btnStop.Click += (s, e) => StopSimulation();
-            layout.Controls.Add(btnStop, 0, 1);
+            layout.Controls.Add(btnStop, 0, 3);
 
             // Save results button
             btnSaveResults = new KryptonButton
@@ -639,7 +663,7 @@ namespace CTS
                 Values = { Image = CreateSaveIcon() }
             };
             btnSaveResults.Click += SaveResults;
-            layout.Controls.Add(btnSaveResults, 0, 2);
+            layout.Controls.Add(btnSaveResults, 0, 4);
 
             // Calibration button
             btnCalibration = new KryptonButton
@@ -649,7 +673,7 @@ namespace CTS
                 Values = { Image = CreateCalibrationIcon() }
             };
             btnCalibration.Click += OpenCalibrationDialog;
-            layout.Controls.Add(btnCalibration, 0, 3);
+            layout.Controls.Add(btnCalibration, 0, 5);
 
             // Material properties button
             btnMaterialProperties = new KryptonButton
@@ -659,7 +683,7 @@ namespace CTS
                 Values = { Image = CreatePropertiesIcon() }
             };
             btnMaterialProperties.Click += OpenMaterialPropertiesDialog;
-            layout.Controls.Add(btnMaterialProperties, 0, 4);
+            layout.Controls.Add(btnMaterialProperties, 0, 6);
 
             // Save simulation settings button
             btnSaveSimulation = new KryptonButton
@@ -669,7 +693,7 @@ namespace CTS
                 Values = { Image = CreateSaveIcon() }
             };
             btnSaveSimulation.Click += SaveSimulationSettings;
-            layout.Controls.Add(btnSaveSimulation, 0, 5);
+            layout.Controls.Add(btnSaveSimulation, 0, 7);
 
             // Load simulation settings button
             btnLoadSimulation = new KryptonButton
@@ -679,7 +703,7 @@ namespace CTS
                 Values = { Image = CreateLoadIcon() }
             };
             btnLoadSimulation.Click += LoadSimulationSettings;
-            layout.Controls.Add(btnLoadSimulation, 0, 6);
+            layout.Controls.Add(btnLoadSimulation, 0, 8);
 
             // Load PNM button
             btnLoadPNM = new KryptonButton
@@ -689,14 +713,14 @@ namespace CTS
                 Values = { Image = CreatePNMIcon() }
             };
             btnLoadPNM.Click += LoadPNMData;
-            layout.Controls.Add(btnLoadPNM, 0, 7);
+            layout.Controls.Add(btnLoadPNM, 0, 9);
 
             // Set row styles for buttons - ALL with fixed height
-            for (int i = 0; i < 8; i++)
+            for (int i = 0; i < 10; i++)
             {
                 layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
             }
-            
+
             panel.Controls.Add(layout);
             return panel;
         }
@@ -866,6 +890,7 @@ namespace CTS
                                 UseGPU = _simulation.UseGPU,
                                 MaxThreads = _simulation.MaxThreads
                             },
+                            SelectedPoreMaterials = _simulation.SelectedPoreMaterials,
                             MaterialProperties = _mainForm.Materials
                                 .Where(m => m.ID != 0)  // Skip exterior material
                                 .ToDictionary(
@@ -950,6 +975,17 @@ namespace CTS
                                     _simulation.MaxThreads = maxThreads.GetInt32();
                                     numThreads.Value = _simulation.MaxThreads;
                                 }
+                            }
+
+                            // Load selected pore materials
+                            if (root.TryGetProperty("SelectedPoreMaterials", out var selectedMaterials))
+                            {
+                                _simulation.SelectedPoreMaterials.Clear();
+                                foreach (var element in selectedMaterials.EnumerateArray())
+                                {
+                                    _simulation.SelectedPoreMaterials.Add((byte)element.GetInt32());
+                                }
+                                UpdateSelectedMaterialsLabel();
                             }
 
                             // Load material properties
@@ -1112,6 +1148,25 @@ namespace CTS
         }
 
         // Create icon methods
+        private Image CreateSelectIcon()
+        {
+            var bitmap = new Bitmap(16, 16);
+            using (var g = Graphics.FromImage(bitmap))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.Clear(Color.Transparent);
+
+                using (var pen = new Pen(Color.Cyan, 2))
+                {
+                    // Draw a checklist icon
+                    g.DrawRectangle(pen, 2, 2, 12, 12);
+                    g.DrawLine(pen, 4, 7, 7, 10);
+                    g.DrawLine(pen, 7, 10, 12, 5);
+                }
+            }
+            return bitmap;
+        }
+
         private Image CreatePlayIcon()
         {
             var bitmap = new Bitmap(16, 16);
@@ -1299,6 +1354,14 @@ namespace CTS
             if (_isRunning)
                 return;
 
+            // Check if pore materials are selected
+            if (_simulation.SelectedPoreMaterials == null || _simulation.SelectedPoreMaterials.Count == 0)
+            {
+                MessageBox.Show("Please select at least one pore/fluid material before running the simulation.",
+                    "No Materials Selected", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
             _isRunning = true;
             btnRun.Enabled = false;
             btnStop.Enabled = true;
@@ -1317,6 +1380,7 @@ namespace CTS
                 txtResults.AppendText($"Pixel size: {_mainForm.GetPixelSize() * 1e6:F2} µm\n");
                 txtResults.AppendText($"GPU acceleration: {(chkUseGPU.Checked ? "Yes" : "No")}\n");
                 txtResults.AppendText($"CPU threads: {numThreads.Value}\n");
+                txtResults.AppendText($"Selected pore materials: {_simulation.SelectedPoreMaterials.Count}\n");
                 txtResults.AppendText("----------------------------------------\n");
 
                 // Run simulation with cancellation token
@@ -1377,6 +1441,14 @@ namespace CTS
             txtResults.AppendText($"Used {result.ThreadsUsed} threads\n");
             txtResults.AppendText($"GPU acceleration: {(result.UsedGPU ? "Yes" : "No")}\n");
             txtResults.AppendText("----------------------------------------\n");
+
+            // Show which materials were simulated
+            var simulatedMaterials = _mainForm.Materials
+                .Where(m => _simulation.SelectedPoreMaterials.Contains(m.ID))
+                .Select(m => m.Name)
+                .ToList();
+            txtResults.AppendText($"Simulated materials: {string.Join(", ", simulatedMaterials)}\n");
+
             txtResults.AppendText($"Total Porosity: {result.TotalPorosity:P2}\n");
             txtResults.AppendText($"Average T2: {result.AverageT2:F1} ms\n");
             txtResults.AppendText($"Average Tortuosity: {result.AverageTortuosity:F2}\n");
@@ -1607,6 +1679,41 @@ namespace CTS
             {
                 dialog.ShowDialog();
                 LoadMaterialProperties(); // Refresh the grid
+            }
+        }
+
+        private void SelectPoreMaterials(object sender, EventArgs e)
+        {
+            using (var dialog = new NMRMaterialSelectorDialog(_mainForm.Materials, _simulation.SelectedPoreMaterials))
+            {
+                if (dialog.ShowDialog() == DialogResult.OK)
+                {
+                    _simulation.SelectedPoreMaterials = dialog.SelectedMaterialIDs;
+                    UpdateSelectedMaterialsLabel();
+                }
+            }
+        }
+
+        private void UpdateSelectedMaterialsLabel()
+        {
+            if (_simulation.SelectedPoreMaterials == null || _simulation.SelectedPoreMaterials.Count == 0)
+            {
+                lblSelectedMaterials.Text = "No pore materials selected";
+                lblSelectedMaterials.ForeColor = Color.Yellow;
+            }
+            else
+            {
+                var selectedNames = _mainForm.Materials
+                    .Where(m => _simulation.SelectedPoreMaterials.Contains(m.ID))
+                    .Select(m => m.Name)
+                    .ToList();
+
+                string displayText = selectedNames.Count <= 3
+                    ? string.Join(", ", selectedNames)
+                    : $"{string.Join(", ", selectedNames.Take(2))} + {selectedNames.Count - 2} more";
+
+                lblSelectedMaterials.Text = $"Selected: {displayText}";
+                lblSelectedMaterials.ForeColor = Color.LightGreen;
             }
         }
 

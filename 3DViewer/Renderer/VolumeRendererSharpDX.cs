@@ -1016,6 +1016,16 @@ float4 ApplyColorMap(float intensity, float minThreshold, float maxThreshold, in
     return color;
 }
 float rand(float3 seed) { return frac(sin(dot(seed, float3(12.9898, 78.233, 45.5432))) * 43758.5453); }
+float3 GetNormalFromVolume(float3 texCoord) {
+    float3 sampleOffset = 1.0 / dimensions.xyz;
+    float x1 = volumeTexture.SampleLevel(linearSampler, texCoord - float3(sampleOffset.x, 0, 0), 0);
+    float x2 = volumeTexture.SampleLevel(linearSampler, texCoord + float3(sampleOffset.x, 0, 0), 0);
+    float y1 = volumeTexture.SampleLevel(linearSampler, texCoord - float3(0, sampleOffset.y, 0), 0);
+    float y2 = volumeTexture.SampleLevel(linearSampler, texCoord + float3(0, sampleOffset.y, 0), 0);
+    float z1 = volumeTexture.SampleLevel(linearSampler, texCoord - float3(0, 0, sampleOffset.z), 0);
+    float z2 = volumeTexture.SampleLevel(linearSampler, texCoord + float3(0, 0, sampleOffset.z), 0);
+    return normalize(float3(x2 - x1, y2 - y1, z2 - z1));
+}
 float3 GetNormalFromLabel(float3 texCoord) {
     float3 sampleOffset = 1.0 / dimensions.xyz;
     float x1 = labelTexture.SampleLevel(pointSampler, texCoord - float3(sampleOffset.x, 0, 0), 0);
@@ -1028,7 +1038,7 @@ float3 GetNormalFromLabel(float3 texCoord) {
 }
 
 
-// --- MAIN PIXEL SHADER WITH BOUNDARY DETECTION ---
+// --- MAIN PIXEL SHADER WITH GRAYSCALE VOLUME RENDERING ---
 float4 PSMain(VS_OUTPUT input) : SV_TARGET
 {
     float3 rayOrigin = cameraPosition.xyz;
@@ -1049,6 +1059,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
     float t = tNear + rand(input.Position.xyz) * stepSize;
 
     uint prevMaterialId = 0;
+    bool showGrayscale = thresholds.w > 0.5;
 
     for (int i = 0; i < maxSteps && t < tFar; i++, t += stepSize)
     {
@@ -1076,9 +1087,12 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             break;
         }
         
+        // Sample the volume data
+        float intensity = volumeTexture.SampleLevel(linearSampler, texCoord, 0);
         uint currentMaterialId = (uint)(labelTexture.SampleLevel(pointSampler, texCoord, 0) + 0.5);
         float4 sampleColor = float4(0,0,0,0);
         
+        // First check for material boundaries (labels)
         if (currentMaterialId != prevMaterialId && currentMaterialId > 0 && materialVisibility[currentMaterialId] > 0.5)
         {
             float4 matColor = materialColors[currentMaterialId];
@@ -1089,21 +1103,54 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             float3 lightDir = normalize(lightDirection.xyz);
             float3 viewDir = normalize(cameraPosition.xyz - pos);
             
-            // --- LIGHTING ADJUSTMENT TO MAKE THE SCENE BRIGHTER ---
-            float ambient = 0.45; // Increased from 0.25 to lift shadows and overall brightness.
+            float ambient = 0.45;
             float diffuse = saturate(dot(normal, lightDir));
             
             float3 halfwayDir = normalize(lightDir + viewDir);
             float spec = pow(saturate(dot(normal, halfwayDir)), 32.0);
             
-            // Increased diffuse contribution from 0.9 to 1.0 for brighter lit areas.
-            // Also increased specular highlight intensity.
             float3 finalColor = matColor.rgb * (ambient + diffuse * 1.0) + float3(0.8,0.8,0.8) * spec * 0.6;
-            // --- END OF LIGHTING ADJUSTMENT ---
             
             sampleColor = float4(finalColor, 1.0); 
         }
+        // Then check for grayscale volume rendering if enabled
+        else if (showGrayscale && intensity >= thresholds.x && intensity <= thresholds.y)
+        {
+            // Apply color map or use grayscale
+            int mapIndex = (int)(colorMapIndex.x + 0.5);
+            float4 volumeColor;
+            
+            if (mapIndex > 0) // 0 is grayscale, handled separately
+            {
+                volumeColor = ApplyColorMap(intensity, thresholds.x, thresholds.y, mapIndex);
+            }
+            else
+            {
+                // Grayscale rendering
+                volumeColor = float4(intensity, intensity, intensity, 1.0);
+            }
+            
+            // Calculate gradient-based shading for better depth perception
+            float3 normal = GetNormalFromVolume(texCoord);
+            float3 lightDir = normalize(lightDirection.xyz);
+            float3 viewDir = normalize(cameraPosition.xyz - pos);
+            
+            float ambient = 0.3;
+            float diffuse = saturate(dot(normal, lightDir));
+            
+            float3 halfwayDir = normalize(lightDir + viewDir);
+            float spec = pow(saturate(dot(normal, halfwayDir)), 16.0);
+            
+            float3 shadedColor = volumeColor.rgb * (ambient + diffuse * 0.7) + float3(0.5,0.5,0.5) * spec * 0.3;
+            
+            // Set opacity based on intensity
+            float normalizedIntensity = (intensity - thresholds.x) / (thresholds.y - thresholds.x);
+            float opacity = normalizedIntensity * 0.15; // Lower opacity for volume rendering
+            
+            sampleColor = float4(shadedColor, opacity);
+        }
         
+        // Accumulate color if we have a valid sample
         if (sampleColor.a > 0.01)
         {
             sampleColor.rgb *= sampleColor.a;

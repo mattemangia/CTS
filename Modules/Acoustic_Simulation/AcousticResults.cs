@@ -1660,7 +1660,6 @@ namespace CTS
             Graphics g = e.Graphics;
             g.Clear(Color.FromArgb(20, 20, 20));
 
-            // If no simulation results, show info message
             if (simulationResults == null)
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -1708,18 +1707,30 @@ namespace CTS
             // Calculate display range based on zoom
             int dataLength = Math.Max(pWaveSeries.Length, sWaveSeries.Length);
             int pointsToShow = (int)(dataLength / waveformZoom);
-            int endIndex = dataLength - 1;
-            int startIndex = Math.Max(0, endIndex - pointsToShow);
+            int startIndex = 0;
+            int endIndex = Math.Min(dataLength - 1, pointsToShow);
 
-            // Ensure we include both P and S arrivals in view
-            startIndex = Math.Min(startIndex, simulationResults.PWaveTravelTime - 50);
-            endIndex = Math.Max(endIndex, simulationResults.SWaveTravelTime + 100);
-            endIndex = Math.Min(endIndex, dataLength - 1);
+            // Ensure we show the relevant part with both arrivals
+            if (waveformZoom > 1.0f)
+            {
+                // Center the view around the P-wave arrival with some lead time
+                int centerPoint = simulationResults.PWaveTravelTime;
+                int halfWindow = pointsToShow / 2;
+                startIndex = Math.Max(0, centerPoint - halfWindow);
+                endIndex = Math.Min(dataLength - 1, startIndex + pointsToShow);
+
+                // Adjust to ensure S-wave is visible
+                if (endIndex < simulationResults.SWaveTravelTime + 50)
+                {
+                    endIndex = Math.Min(dataLength - 1, simulationResults.SWaveTravelTime + 50);
+                    startIndex = Math.Max(0, endIndex - pointsToShow);
+                }
+            }
 
             // Calculate x-axis scaling
             float xScale = (float)width / Math.Max(1, endIndex - startIndex);
 
-            // Calculate P and S arrival X positions
+            // Calculate arrival positions in screen coordinates
             float pArrivalX = (simulationResults.PWaveTravelTime - startIndex) * xScale;
             float sArrivalX = (simulationResults.SWaveTravelTime - startIndex) * xScale;
 
@@ -1732,9 +1743,9 @@ namespace CTS
 
             float yScale = (height * 0.4f) / Math.Max(0.1f, maxAmplitude);
 
-            // Draw dead time region
+            // Draw dead time region BETWEEN P and S arrivals
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            if (chkShowDeadTime.Checked && pArrivalX >= 0 && sArrivalX <= width)
+            if (chkShowDeadTime.Checked && pArrivalX >= 0 && sArrivalX <= width && sArrivalX > pArrivalX)
             {
                 using (Brush deadTimeBrush = new SolidBrush(DeadTimeColor))
                 {
@@ -1754,6 +1765,14 @@ namespace CTS
                             {
                                 float textX = startX + (endX - startX - textSize.Width) / 2;
                                 g.DrawString(deadTimeText, font, textBrush, textX, 10);
+
+                                // Add dead time duration
+                                double dtMs = CalculateTimeStep() * 1000;
+                                int deadTimeSteps = simulationResults.SWaveTravelTime - simulationResults.PWaveTravelTime;
+                                string durationText = $"{deadTimeSteps * dtMs:F2} ms";
+                                SizeF durationSize = g.MeasureString(durationText, font);
+                                float durationX = startX + (endX - startX - durationSize.Width) / 2;
+                                g.DrawString(durationText, font, textBrush, durationX, 30);
                             }
                         }
                     }
@@ -1801,22 +1820,23 @@ namespace CTS
             // Draw text elements with antialiasing
             g.SmoothingMode = SmoothingMode.AntiAlias;
 
-            // Draw arrival labels
-            if (pArrivalX >= 0 && pArrivalX < width)
+            // Draw arrival labels at appropriate positions
+            using (Font font = new Font("Arial", 9, FontStyle.Bold))
             {
-                using (Font font = new Font("Arial", 9, FontStyle.Bold))
-                using (Brush textBrush = new SolidBrush(PWaveColor))
+                if (pArrivalX >= 0 && pArrivalX < width)
                 {
-                    g.DrawString("P-Wave Arrival", font, textBrush, pArrivalX + 5, height - 40);
+                    using (Brush textBrush = new SolidBrush(PWaveColor))
+                    {
+                        g.DrawString("P-Wave", font, textBrush, pArrivalX + 5, height - 40);
+                    }
                 }
-            }
 
-            if (sArrivalX >= 0 && sArrivalX < width)
-            {
-                using (Font font = new Font("Arial", 9, FontStyle.Bold))
-                using (Brush textBrush = new SolidBrush(SWaveColor))
+                if (sArrivalX >= 0 && sArrivalX < width)
                 {
-                    g.DrawString("S-Wave Arrival", font, textBrush, sArrivalX + 5, height - 20);
+                    using (Brush textBrush = new SolidBrush(SWaveColor))
+                    {
+                        g.DrawString("S-Wave", font, textBrush, sArrivalX + 5, height - 20);
+                    }
                 }
             }
 
@@ -1829,20 +1849,21 @@ namespace CTS
             {
                 g.DrawString($"Zoom: {waveformZoom:F1}x", font, brush, 10, 10);
 
-                // Calculate the proper time values using the time step
+                // Calculate time values
                 double timePerStep = CalculateTimeStep() * 1000; // Convert to ms
-
-                // Fix: Calculate the actual time span of visible data
-                double timeSpanMs = (endIndex - startIndex) * timePerStep;
                 double startTimeMs = startIndex * timePerStep;
                 double endTimeMs = endIndex * timePerStep;
+                double timeSpanMs = endTimeMs - startTimeMs;
 
-                // Display with proper formatting to avoid "0.00 ms"
                 g.DrawString($"Time span: {timeSpanMs:F2} ms", font, brush, 10, 30);
                 g.DrawString($"Range: {startTimeMs:F2} - {endTimeMs:F2} ms", font, brush, 10, 50);
+
+                // Add velocities info
+                g.DrawString($"Vp: {simulationResults.PWaveVelocity:F1} m/s", font, brush, 10, 70);
+                g.DrawString($"Vs: {simulationResults.SWaveVelocity:F1} m/s", font, brush, 10, 90);
+                g.DrawString($"Vp/Vs: {simulationResults.VpVsRatio:F2}", font, brush, 10, 110);
             }
         }
-
         private double CalculateTimeStep()
         {
             // Try to get from simulation if available
@@ -1863,7 +1884,7 @@ namespace CTS
             return 1e-6;
         }
         private void DrawWaveform(Graphics g, float[] data, int startIndex, int endIndex,
-                         float xScale, float yScale, int centerY, Color color)
+                          float xScale, float yScale, int centerY, Color color)
         {
             if (data == null || data.Length == 0) return;
 
@@ -1876,7 +1897,7 @@ namespace CTS
             // Create points array for drawing
             List<PointF> points = new List<PointF>();
 
-            
+            // Calculate appropriate step size based on zoom
             int step = Math.Max(1, (endIndex - startIndex) / (waveformPictureBox.Width * 2));
 
             for (int i = startIndex; i <= endIndex; i += step)
@@ -1894,35 +1915,33 @@ namespace CTS
 
             if (points.Count < 2) return;
 
-            // Draw the waveform with STRAIGHT LINES, not curves
+            // Draw the waveform with straight lines
             using (Pen wavePen = new Pen(color, 2))
             {
-                // Turn off smoothing for sharp lines
                 var oldMode = g.SmoothingMode;
-                g.SmoothingMode = SmoothingMode.None;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
 
+                // Draw the main waveform line
                 g.DrawLines(wavePen, points.ToArray());
 
+                // Optional: Add a subtle fill below the waveform
+                if (false) // Set to true if you want filling
+                {
+                    List<PointF> fillPoints = new List<PointF>(points);
+
+                    // Add baseline points in reverse order
+                    for (int i = points.Count - 1; i >= 0; i--)
+                    {
+                        fillPoints.Add(new PointF(points[i].X, centerY));
+                    }
+
+                    using (Brush fillBrush = new SolidBrush(Color.FromArgb(30, color)))
+                    {
+                        g.FillPolygon(fillBrush, fillPoints.ToArray());
+                    }
+                }
+
                 g.SmoothingMode = oldMode;
-            }
-
-            // Remove the fill or make it optional
-            if (false) // Set to true for filling
-            {
-                // Create fill polygon
-                List<PointF> fillPoints = new List<PointF>(points);
-
-                // Add baseline points in reverse order
-                for (int i = points.Count - 1; i >= 0; i--)
-                {
-                    fillPoints.Add(new PointF(points[i].X, centerY));
-                }
-
-                using (Brush fillBrush = new SolidBrush(Color.FromArgb(30, color)))
-                {
-                    // Use FillPolygon instead of FillClosedCurve to avoid smoothing
-                    g.FillPolygon(fillBrush, fillPoints.ToArray());
-                }
             }
         }
         private void DrawWaveformLegend(Graphics g, int width, int height)
@@ -3375,47 +3394,45 @@ namespace CTS
             if (simulationResults == null)
                 return new float[1];
 
-            // Try to get cached data first
-            float[] cachedData = GetCachedWaveformData(isPWave);
-            if (cachedData != null && cachedData.Length > 0)
+            // Ensure we have enough time steps to show both waves
+            int totalSteps = simulationResults.SWaveTravelTime + 200;
+            float[] waveformData = new float[totalSteps];
+
+            // Get the arrival times
+            int arrivalTime = isPWave ? simulationResults.PWaveTravelTime : simulationResults.SWaveTravelTime;
+
+            // Generate a Ricker wavelet at the correct arrival time
+            double frequency = (double)(numFrequency.Value * 1000); // kHz to Hz
+            double dt = CalculateTimeStep();
+
+            // Ricker wavelet parameters
+            double sigma = 1.0 / (Math.PI * frequency * Math.Sqrt(2));
+            double amplitude = isPWave ? 1.0 : 0.7; // S-wave typically has lower amplitude
+
+            // Add some noise before arrival
+            Random rng = new Random(isPWave ? 42 : 84);
+            for (int i = 0; i < arrivalTime; i++)
             {
-                // Ensure the data is long enough to include S-wave arrival
-                if (cachedData.Length < simulationResults.SWaveTravelTime + 100)
-                {
-                    // Extend the array to include S-wave arrival
-                    float[] extendedData = new float[simulationResults.SWaveTravelTime + 200];
-                    Array.Copy(cachedData, extendedData, cachedData.Length);
-
-                    // Fill remaining with decay/noise
-                    for (int i = cachedData.Length; i < extendedData.Length; i++)
-                    {
-                        float decay = (float)Math.Exp(-(i - cachedData.Length) / 100.0);
-                        extendedData[i] = cachedData[cachedData.Length - 1] * decay * 0.1f;
-                    }
-
-                    return extendedData;
-                }
-                return cachedData;
+                waveformData[i] = (float)((rng.NextDouble() - 0.5) * 0.01);
             }
 
-            // Get real-time data if possible
-            float[] realTimeData = GetRealTimeWaveformData(isPWave);
-            if (realTimeData != null && realTimeData.Length > 0)
+            // Generate Ricker wavelet starting at arrival time
+            for (int i = arrivalTime; i < totalSteps; i++)
             {
-                // Ensure the data is long enough
-                if (realTimeData.Length < simulationResults.SWaveTravelTime + 100)
-                {
-                    float[] extendedData = new float[simulationResults.SWaveTravelTime + 200];
-                    Array.Copy(realTimeData, extendedData, realTimeData.Length);
-                    return extendedData;
-                }
-                return realTimeData;
+                double t = (i - arrivalTime) * dt;
+                double tNorm = t / sigma;
+                double rickerValue = amplitude * (1.0 - 0.5 * tNorm * tNorm) * Math.Exp(-0.25 * tNorm * tNorm);
+
+                // Add exponential decay
+                double decay = Math.Exp(-t / (sigma * 10));
+                waveformData[i] = (float)(rickerValue * decay);
+
+                // Add small noise to make it more realistic
+                waveformData[i] += (float)((rng.NextDouble() - 0.5) * 0.005);
             }
 
-            // Generate approximated waveform as fallback
-            return GenerateApproximatedWaveform(isPWave);
+            return waveformData;
         }
-
         private float[] GetCachedWaveformData(bool isPWave)
         {
             try

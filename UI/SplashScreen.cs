@@ -94,15 +94,12 @@ namespace CTS.UI
                 // Note: CTS.dll is excluded as CTS is the main executable
                 string[] requiredAssemblies = new string[]
                 {
-                    "clblast.dll",
+                    
                     "CpuMathNative.dll",
                     "Cyotek.Drawing.BitmapFont.dll",
                     "DirectML.Debug.dll",
                     "DirectML.dll",
-                    "ggml-base.dll",
-                    "ggml-cpu.dll",
-                    "ggml-vulkan.dll",
-                    "ggml.dll",
+                    
                     "Google.Protobuf.dll",
                     "ILGPU.Algorithms.dll",
                     "ILGPU.dll",
@@ -113,12 +110,11 @@ namespace CTS.UI
                     "Krypton.Toolkit.dll",
                     "Krypton.Workspace.dll",
                     "LdaNative.dll",
-                    "llama.dll",
-                    "llava_shared.dll",
+                    
                     "MediaFoundation.Net.dll",
                     "Microsoft.Bcl.AsyncInterfaces.dll",
                     "Microsoft.Bcl.Numerics.dll",
-                    "Microsoft.Extensions.AI.Abstractions.dll",
+                   
                     "Microsoft.Extensions.DependencyInjection.Abstractions.dll",
                     "Microsoft.Extensions.Logging.Abstractions.dll",
                     "Microsoft.ML.Core.dll",
@@ -133,12 +129,10 @@ namespace CTS.UI
                     "Microsoft.ML.StandardTrainers.dll",
                     "Microsoft.ML.Transforms.dll",
                     "Newtonsoft.Json.dll",
-                    "onnxruntime-genai-cuda.dll",
+                   
                     "onnxruntime-genai.dll",
                     "onnxruntime.dll",
-                    "onnxruntime_providers_cuda.dll",
-                    "onnxruntime_providers_shared.dll",
-                    "onnxruntime_providers_tensorrt.dll",
+                   
                     "OpenTK.dll",
                     "OpenTK.GLControl.dll",
                     "ortextensions.dll",

@@ -1,6 +1,7 @@
 ﻿//Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
 using System;
 using Vector4 = SharpDX.Vector4;
+using Vector3 = System.Numerics.Vector3;
 
 namespace CTS
 {
@@ -11,6 +12,19 @@ namespace CTS
         public float M21, M22, M23, M24;
         public float M31, M32, M33, M34;
         public float M41, M42, M43, M44;
+
+        // Constructor that takes 16 float values
+        public Matrix4x4(
+            float m11, float m12, float m13, float m14,
+            float m21, float m22, float m23, float m24,
+            float m31, float m32, float m33, float m34,
+            float m41, float m42, float m43, float m44)
+        {
+            M11 = m11; M12 = m12; M13 = m13; M14 = m14;
+            M21 = m21; M22 = m22; M23 = m23; M24 = m24;
+            M31 = m31; M32 = m32; M33 = m33; M34 = m34;
+            M41 = m41; M42 = m42; M43 = m43; M44 = m44;
+        }
 
         public static Matrix4x4 Identity => new Matrix4x4
         {
@@ -87,6 +101,80 @@ namespace CTS
             result.M21 = -sin;
             result.M22 = cos;
             return result;
+        }
+
+        public static Matrix4x4 CreateLookAt(Vector3 cameraPosition, Vector3 cameraTarget, Vector3 cameraUpVector)
+        {
+            var zaxis = Vector3.Normalize(cameraPosition - cameraTarget);
+            var xaxis = Vector3.Normalize(Vector3.Cross(cameraUpVector, zaxis));
+            var yaxis = Vector3.Cross(zaxis, xaxis);
+
+            return new Matrix4x4(
+                xaxis.X, yaxis.X, zaxis.X, 0,
+                xaxis.Y, yaxis.Y, zaxis.Y, 0,
+                xaxis.Z, yaxis.Z, zaxis.Z, 0,
+                -Vector3.Dot(xaxis, cameraPosition), -Vector3.Dot(yaxis, cameraPosition), -Vector3.Dot(zaxis, cameraPosition), 1
+            );
+        }
+
+        public static Matrix4x4 CreatePerspectiveFieldOfView(float fieldOfView, float aspectRatio, float nearPlaneDistance, float farPlaneDistance)
+        {
+            if (fieldOfView <= 0 || fieldOfView >= Math.PI)
+                throw new ArgumentOutOfRangeException(nameof(fieldOfView));
+
+            if (nearPlaneDistance <= 0)
+                throw new ArgumentOutOfRangeException(nameof(nearPlaneDistance));
+
+            if (farPlaneDistance <= 0)
+                throw new ArgumentOutOfRangeException(nameof(farPlaneDistance));
+
+            if (nearPlaneDistance >= farPlaneDistance)
+                throw new ArgumentOutOfRangeException(nameof(nearPlaneDistance));
+
+            float yScale = 1 / (float)Math.Tan(fieldOfView * 0.5f);
+            float xScale = yScale / aspectRatio;
+            float negFarRange = float.IsPositiveInfinity(farPlaneDistance) ? -1 : farPlaneDistance / (nearPlaneDistance - farPlaneDistance);
+
+            return new Matrix4x4(
+                xScale, 0, 0, 0,
+                0, yScale, 0, 0,
+                0, 0, negFarRange, -1,
+                0, 0, nearPlaneDistance * negFarRange, 0
+            );
+        }
+
+        public static Matrix4x4 CreateFromAxisAngle(Vector3 axis, float angle)
+        {
+            float x = axis.X, y = axis.Y, z = axis.Z;
+            float sa = (float)Math.Sin(angle), ca = (float)Math.Cos(angle);
+            float xx = x * x, yy = y * y, zz = z * z;
+            float xy = x * y, xz = x * z, yz = y * z;
+
+            return new Matrix4x4(
+                xx + ca * (1.0f - xx),
+                xy - ca * xy + sa * z,
+                xz - ca * xz - sa * y,
+                0,
+                xy - ca * xy - sa * z,
+                yy + ca * (1.0f - yy),
+                yz - ca * yz + sa * x,
+                0,
+                xz - ca * xz + sa * y,
+                yz - ca * yz - sa * x,
+                zz + ca * (1.0f - zz),
+                0,
+                0, 0, 0, 1
+            );
+        }
+
+        public static Matrix4x4 Transpose(Matrix4x4 matrix)
+        {
+            return new Matrix4x4(
+                matrix.M11, matrix.M21, matrix.M31, matrix.M41,
+                matrix.M12, matrix.M22, matrix.M32, matrix.M42,
+                matrix.M13, matrix.M23, matrix.M33, matrix.M43,
+                matrix.M14, matrix.M24, matrix.M34, matrix.M44
+            );
         }
 
         public static bool Invert(Matrix4x4 matrix, out Matrix4x4 result)
@@ -229,6 +317,18 @@ namespace CTS
             result.M44 = a.M41 * b.M14 + a.M42 * b.M24 + a.M43 * b.M34 + a.M44 * b.M44;
 
             return result;
+        }
+    }
+
+    public static class Vector3Extensions
+    {
+        public static Vector3 TransformNormal(Vector3 normal, Matrix4x4 matrix)
+        {
+            return new Vector3(
+                normal.X * matrix.M11 + normal.Y * matrix.M21 + normal.Z * matrix.M31,
+                normal.X * matrix.M12 + normal.Y * matrix.M22 + normal.Z * matrix.M32,
+                normal.X * matrix.M13 + normal.Y * matrix.M23 + normal.Z * matrix.M33
+            );
         }
     }
 

@@ -243,7 +243,7 @@ namespace CTS
         private ShaderResourceView[] lodSRVs = new ShaderResourceView[5];
         private int currentStreamingLOD = 0;
         private bool isInitializingStreaming = false;
-        
+
         public bool IsRefining { get; private set; } = false;
 
         public bool UseStreamingRenderer
@@ -255,67 +255,51 @@ namespace CTS
                 {
                     Logger.Log($"[SharpDXVolumeRenderer] Switching streaming renderer: {useStreamingRenderer} -> {value}");
 
-                    // If turning OFF streaming render, restore original state
                     if (useStreamingRenderer && !value)
                     {
-                        // Cancel any ongoing initialization task
+                        // --- Turning OFF streaming ---
                         if (initStreamingCts != null && !initStreamingCts.IsCancellationRequested)
                         {
                             initStreamingCts.Cancel();
                         }
 
-                        // Close progress form if open
                         if (streamingProgressForm != null && !streamingProgressForm.IsDisposed)
                         {
                             streamingProgressForm.Close();
                             streamingProgressForm = null;
                         }
 
-                        // Clean up streaming resources
                         DisposeStreamingResources();
+                        useStreamingRenderer = value;
 
-                        // Force recreation of the original textures
+                        // Recreate all standard textures for the non-streaming mode
                         if (mainForm.volumeData != null)
                         {
                             Logger.Log("[SharpDXVolumeRenderer] Recreating standard textures after disabling streaming");
-                            try
-                            {
-                                // Clean up existing textures first
-                                Utilities.Dispose(ref volumeSRV);
-                                Utilities.Dispose(ref volumeTexture);
 
-                                // Create new volume texture from the volume data
-                                volumeTexture = CreateTexture3DFromChunkedVolume((ChunkedVolume)mainForm.volumeData, Format.R8_UNorm);
+                            Utilities.Dispose(ref volumeSRV);
+                            Utilities.Dispose(ref volumeTexture);
 
-                                if (volumeTexture != null)
-                                {
-                                    ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
-                                    {
-                                        Format = Format.R8_UNorm,
-                                        Dimension = ShaderResourceViewDimension.Texture3D,
-                                        Texture3D = new ShaderResourceViewDescription.Texture3DResource { MipLevels = 1, MostDetailedMip = 0 }
-                                    };
-                                    volumeSRV = new ShaderResourceView(device, volumeTexture, srvDesc);
-                                    Logger.Log("[SharpDXVolumeRenderer] Standard volume texture recreated successfully");
-                                }
-                                else
-                                {
-                                    Logger.Log("[SharpDXVolumeRenderer] ERROR: Failed to recreate volume texture!");
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                Logger.Log($"[SharpDXVolumeRenderer] Error recreating standard textures: {ex.Message}");
-                            }
+                            CreateVolumeTextures(); // Creates base texture (LOD 0)
+                            CreateLodTextures();    // Creates LOD 1+ for standard renderer
                         }
                     }
-
-                    // Update the flag immediately
-                    useStreamingRenderer = value;
-
-                    if (useStreamingRenderer)
+                    else
                     {
-                        // Initialize streaming textures ASYNCHRONOUSLY
+                        // --- Turning ON streaming ---
+                        Logger.Log("[SharpDXVolumeRenderer] Disposing standard renderer resources.");
+                        Utilities.Dispose(ref volumeSRV);
+                        Utilities.Dispose(ref volumeTexture);
+                        for (int i = 1; i <= MAX_LOD_LEVELS; i++) // LOD 0 was volumeTexture
+                        {
+                            Utilities.Dispose(ref lodVolumeSRVs[i]);
+                            Utilities.Dispose(ref lodVolumeTextures[i]);
+                        }
+                        // Clear the reference to the disposed textures
+                        if (lodVolumeSRVs.Length > 0) lodVolumeSRVs[0] = null;
+                        if (lodVolumeTextures.Length > 0) lodVolumeTextures[0] = null;
+
+                        useStreamingRenderer = value;
                         InitializeStreamingRendererAsync();
                     }
 
@@ -582,35 +566,39 @@ namespace CTS
 
             try
             {
-                // Initialize DirectX
+                // Initialize DirectX components common to both renderers
                 CreateDeviceAndSwapChain();
                 CreateRenderTargets();
                 CreateRenderStates();
                 CreateShaders();
                 CreateCubeGeometry();
 
-                // Check the dataset size to determine rendering approach
+                // Check dataset size to determine default rendering mode
                 long volumeSizeBytes = (long)volW * volH * volD;
-                bool isLargeDataset = volumeSizeBytes > 8L * 1024L * 1024L * 1024L; // 8GB threshold
+                bool isLargeDataset = volumeSizeBytes > 2L * 1024L * 1024L * 1024L; // 2GB threshold
 
                 if (isLargeDataset)
                 {
-                    // For large datasets, enable streaming renderer by default
                     useStreamingRenderer = true;
-                    Logger.Log($"[SharpDXVolumeRenderer] Large dataset detected ({volumeSizeBytes / (1024 * 1024 * 1024)}GB), using streaming renderer");
+                    Logger.Log($"[SharpDXVolumeRenderer] Large dataset detected ({volumeSizeBytes / (1024 * 1024 * 1024)}GB), using streaming renderer by default.");
                 }
 
-                // Create textures - modified to handle streaming for large datasets
-                CreateVolumeTextures();
+                // These resources are needed for both modes (labels, colors, etc.)
                 CreateLabelTextures();
                 CreateMaterialColorTexture();
                 CreateColorMapTexture();
-                CreateLodTextures();
 
-                // Initialize streaming renderer if enabled
+                // --- RESTRUCTURED INITIALIZATION ---
+                // Initialize resources for the selected mode only
                 if (useStreamingRenderer)
                 {
                     InitializeStreamingRenderer();
+                }
+                else
+                {
+                    // Create resources for the standard (non-streaming) renderer
+                    CreateVolumeTextures();
+                    CreateLodTextures();
                 }
 
                 CreateMeasurementResources();
@@ -640,7 +628,87 @@ namespace CTS
                 MessageBox.Show("Failed to initialize volume renderer: " + ex.Message);
             }
         }
+        private Texture3D CreateTexture3DFromChunkedVolumeFixed(ChunkedVolume volume, Format format)
+        {
+            if (volume == null) return null;
 
+            try
+            {
+                int width = volume.Width;
+                int height = volume.Height;
+                int depth = volume.Depth;
+
+                // Check if downsampling is needed
+                int downsampleFactor = 1;
+                bool needsDownsampling = width > 2048 || height > 2048 || depth > 2048;
+                long volumeSizeInBytes = (long)width * height * depth;
+                bool exceedsMemoryLimit = volumeSizeInBytes > 2L * 1024L * 1024L * 1024L;
+
+                if (needsDownsampling || exceedsMemoryLimit)
+                {
+                    while ((width / downsampleFactor > 2048 || height / downsampleFactor > 2048 || depth / downsampleFactor > 2048) ||
+                           ((long)(width / downsampleFactor) * (height / downsampleFactor) * (depth / downsampleFactor) > 2L * 1024L * 1024L * 1024L))
+                    {
+                        downsampleFactor *= 2;
+                    }
+                    Logger.Log($"[SharpDXVolumeRenderer] Large volume detected, downsampling by factor: {downsampleFactor}");
+                    width /= downsampleFactor;
+                    height /= downsampleFactor;
+                    depth /= downsampleFactor;
+                }
+
+                // Create texture description
+                Texture3DDescription desc = new Texture3DDescription
+                {
+                    Width = width,
+                    Height = height,
+                    Depth = depth,
+                    MipLevels = 1,
+                    Format = format,
+                    Usage = ResourceUsage.Default,
+                    BindFlags = BindFlags.ShaderResource,
+                    CpuAccessFlags = CpuAccessFlags.None,
+                    OptionFlags = ResourceOptionFlags.None
+                };
+
+                Texture3D texture = new Texture3D(device, desc);
+
+                // Create a single buffer for the entire volume
+                byte[] volumeData = new byte[width * height * depth];
+
+                // Fill the buffer with correct data layout
+                Parallel.For(0, depth, z =>
+                {
+                    for (int y = 0; y < height; y++)
+                    {
+                        for (int x = 0; x < width; x++)
+                        {
+                            // Sample from the original volume
+                            int srcX = Math.Min(x * downsampleFactor, volume.Width - 1);
+                            int srcY = Math.Min(y * downsampleFactor, volume.Height - 1);
+                            int srcZ = Math.Min(z * downsampleFactor, volume.Depth - 1);
+
+                            // Calculate destination index in linear array
+                            // DirectX expects: index = z * (width * height) + y * width + x
+                            int destIndex = z * (width * height) + y * width + x;
+
+                            volumeData[destIndex] = volume[srcX, srcY, srcZ];
+                        }
+                    }
+                });
+
+                // Upload the entire volume at once
+                context.UpdateSubresource(volumeData, texture, 0);
+
+                Logger.Log($"[SharpDXVolumeRenderer] Created fixed volume texture: {width}x{height}x{depth}");
+                return texture;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] Error creating fixed volume texture: {ex.Message}");
+                throw;
+            }
+        }
         private void CreateDeviceAndSwapChain()
         {
             try
@@ -653,7 +721,7 @@ namespace CTS
                 SwapChainDescription swapChainDesc = new SwapChainDescription
                 {
                     BufferCount = 2, // Double buffering for better stability
-                    ModeDescription = new ModeDescription(width, height, new Rational(60, 1), Format.B8G8R8A8_UNorm), // BGRA format can be more efficient
+                    ModeDescription = new ModeDescription(width, height, new Rational(60, 1), Format.R8G8B8A8_UNorm), // More standard format
                     IsWindowed = true,
                     OutputHandle = renderPanel.Handle,
                     SampleDescription = new SampleDescription(1, 0), // No MSAA
@@ -663,7 +731,7 @@ namespace CTS
                 };
 
                 // Try different device options in case of failure
-                DeviceCreationFlags deviceFlags = DeviceCreationFlags.BgraSupport; // Add BGRA support
+                DeviceCreationFlags deviceFlags = DeviceCreationFlags.None;
 
                 try
                 {
@@ -755,7 +823,7 @@ namespace CTS
                     2, // Double buffering
                     width,
                     height,
-                    Format.B8G8R8A8_UNorm, // RGBA format for proper transparency
+                    Format.R8G8B8A8_UNorm, // RGBA format for proper transparency
                     SwapChainFlags.None);
 
                 // Create render target view from backbuffer
@@ -801,7 +869,7 @@ namespace CTS
                     CullMode = CullMode.Back,
                     FillMode = FillMode.Solid,
                     IsDepthClipEnabled = true,
-                    IsFrontCounterClockwise = false
+                    IsFrontCounterClockwise = true // FIX: Change this from false to true
                 };
                 solidRasterState = new RasterizerState(device, solidRsDesc);
 
@@ -1238,110 +1306,161 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
         private void CreateVolumeTextures()
         {
-            // --- Step 1: Create the Grayscale Volume Texture ---
             try
             {
-                if (useStreamingRenderer && mainForm.volumeData != null)
+                if (mainForm.volumeData == null)
                 {
-                    // Create a single low-resolution overview texture for streaming
-                    int downsampleFactor = 8; // Start with a significant downsampling
-                    int dsWidth = Math.Max(1, volW / downsampleFactor);
-                    int dsHeight = Math.Max(1, volH / downsampleFactor);
-                    int dsDepth = Math.Max(1, volD / downsampleFactor);
+                    Logger.Log("[SharpDXVolumeRenderer] No volume data available");
+                    return;
+                }
 
-                    Logger.Log($"[SharpDXVolumeRenderer] Creating low-res overview texture: {dsWidth}x{dsHeight}x{dsDepth}");
+                if (useStreamingRenderer)
+                {
+                    // Don't create standard texture in streaming mode
+                    Logger.Log("[SharpDXVolumeRenderer] Streaming renderer enabled, skipping standard texture creation");
+                    return;
+                }
 
-                    Texture3DDescription desc = new Texture3DDescription
-                    {
-                        Width = dsWidth,
-                        Height = dsHeight,
-                        Depth = dsDepth,
-                        MipLevels = 1,
-                        Format = Format.R8_UNorm,
-                        Usage = ResourceUsage.Default,
-                        BindFlags = BindFlags.ShaderResource,
-                        CpuAccessFlags = CpuAccessFlags.None,
-                        OptionFlags = ResourceOptionFlags.None
-                    };
-                    volumeTexture = new Texture3D(device, desc);
+                // Create the volume texture
+                volumeTexture = CreateTexture3DFromChunkedVolumeFixed((ChunkedVolume)mainForm.volumeData, Format.R8_UNorm);
 
-                    byte[] dsData = new byte[dsWidth * dsHeight * dsDepth];
-                    for (int z = 0; z < dsDepth; z++)
-                    {
-                        for (int y = 0; y < dsHeight; y++)
-                        {
-                            for (int x = 0; x < dsWidth; x++)
-                            {
-                                int srcX = Math.Min(x * downsampleFactor, volW - 1);
-                                int srcY = Math.Min(y * downsampleFactor, volH - 1);
-                                int srcZ = Math.Min(z * downsampleFactor, volD - 1);
-                                dsData[(z * dsHeight * dsWidth) + (y * dsWidth) + x] = mainForm.volumeData[srcX, srcY, srcZ];
-                            }
-                        }
-                    }
-                    context.UpdateSubresource(dsData, volumeTexture, 0);
-
+                if (volumeTexture != null)
+                {
                     ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
                     {
                         Format = Format.R8_UNorm,
                         Dimension = ShaderResourceViewDimension.Texture3D,
-                        Texture3D = new ShaderResourceViewDescription.Texture3DResource { MipLevels = 1, MostDetailedMip = 0 }
+                        Texture3D = new ShaderResourceViewDescription.Texture3DResource
+                        {
+                            MipLevels = 1,
+                            MostDetailedMip = 0
+                        }
                     };
                     volumeSRV = new ShaderResourceView(device, volumeTexture, srvDesc);
-                    Logger.Log($"[SharpDXVolumeRenderer] Created low-res overview texture for streaming.");
+                    Logger.Log($"[SharpDXVolumeRenderer] Created volume texture and SRV successfully");
                 }
-                else if (mainForm.volumeData != null && !useStreamingRenderer)
+                else
                 {
-                    // For standard rendering, create the full volume texture
-                    volumeTexture = CreateTexture3DFromChunkedVolume((ChunkedVolume)mainForm.volumeData, Format.R8_UNorm);
-                    if (volumeTexture != null)
-                    {
-                        ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
-                        {
-                            Format = Format.R8_UNorm,
-                            Dimension = ShaderResourceViewDimension.Texture3D,
-                            Texture3D = new ShaderResourceViewDescription.Texture3DResource { MipLevels = 1, MostDetailedMip = 0 }
-                        };
-                        volumeSRV = new ShaderResourceView(device, volumeTexture, srvDesc);
-                        Logger.Log($"[SharpDXVolumeRenderer] Created volume texture: {volW}x{volH}x{volD}");
-                    }
+                    Logger.Log("[SharpDXVolumeRenderer] Failed to create volume texture");
                 }
             }
             catch (Exception ex)
             {
-                Logger.Log($"[SharpDXVolumeRenderer] CRITICAL ERROR creating grayscale volume texture: {ex.Message}. Rendering may be impaired.");
-                // We don't re-throw, allowing the application to continue with what it has.
+                Logger.Log($"[SharpDXVolumeRenderer] Error creating volume textures: {ex.Message}");
             }
 
-            // --- Step 2: Create the Label Volume Texture ---
-            // This is in a separate try-catch block to allow graceful failure.
+            // Create label texture separately
             try
             {
                 if (mainForm.volumeLabels != null)
                 {
-                    // Using R32_Float for labels to support more than 255 materials in the shader.
-                    labelTexture = CreateTexture3DFromChunkedLabelVolume((ChunkedLabelVolume)mainForm.volumeLabels, Format.R32_Float);
+                    labelTexture = CreateTexture3DFromChunkedLabelVolumeFixed((ChunkedLabelVolume)mainForm.volumeLabels, Format.R32_Float);
                     if (labelTexture != null)
                     {
                         ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
                         {
                             Format = Format.R32_Float,
                             Dimension = ShaderResourceViewDimension.Texture3D,
-                            Texture3D = new ShaderResourceViewDescription.Texture3DResource { MipLevels = 1, MostDetailedMip = 0 }
+                            Texture3D = new ShaderResourceViewDescription.Texture3DResource
+                            {
+                                MipLevels = 1,
+                                MostDetailedMip = 0
+                            }
                         };
                         labelSRV = new ShaderResourceView(device, labelTexture, srvDesc);
-                        Logger.Log("[SharpDXVolumeRenderer] Created label volume texture.");
+                        Logger.Log("[SharpDXVolumeRenderer] Created label texture and SRV successfully");
                     }
                 }
             }
             catch (Exception ex)
             {
-                Logger.Log($"[SharpDXVolumeRenderer] WARNING: Failed to create label texture: {ex.Message}. Continuing with grayscale rendering only.");
-                // If label texture fails, labelSRV will be null. The shader should handle this gracefully.
-                // The application will continue running with just the grayscale volume.
+                Logger.Log($"[SharpDXVolumeRenderer] Error creating label texture: {ex.Message}");
             }
         }
+        private Texture3D CreateTexture3DFromChunkedLabelVolumeFixed(ChunkedLabelVolume volume, Format format)
+        {
+            if (volume == null) return null;
 
+            try
+            {
+                int width, height, depth, downsampleFactor = 1;
+
+                // Match dimensions with volume texture if it exists
+                if (volumeTexture != null)
+                {
+                    width = volumeTexture.Description.Width;
+                    height = volumeTexture.Description.Height;
+                    depth = volumeTexture.Description.Depth;
+                    downsampleFactor = Math.Max(1, volume.Width / width);
+                }
+                else
+                {
+                    width = volume.Width;
+                    height = volume.Height;
+                    depth = volume.Depth;
+
+                    // Apply same downsampling logic
+                    long volumeSizeInBytes = (long)width * height * depth * 4;
+                    if (width > 2048 || height > 2048 || depth > 2048 || volumeSizeInBytes > 2L * 1024L * 1024L * 1024L)
+                    {
+                        while ((width / downsampleFactor > 1024 || height / downsampleFactor > 1024 || depth / downsampleFactor > 1024) ||
+                               ((long)(width / downsampleFactor) * (height / downsampleFactor) * (depth / downsampleFactor) * 4 > 1024L * 1024L * 1024L))
+                        {
+                            downsampleFactor *= 2;
+                        }
+                    }
+                    width /= downsampleFactor;
+                    height /= downsampleFactor;
+                    depth /= downsampleFactor;
+                }
+
+                Logger.Log($"[SharpDXVolumeRenderer] Creating label texture: {width}x{height}x{depth}");
+
+                Texture3DDescription desc = new Texture3DDescription
+                {
+                    Width = width,
+                    Height = height,
+                    Depth = depth,
+                    MipLevels = 1,
+                    Format = format,
+                    Usage = ResourceUsage.Default,
+                    BindFlags = BindFlags.ShaderResource,
+                    CpuAccessFlags = CpuAccessFlags.None,
+                    OptionFlags = ResourceOptionFlags.None
+                };
+
+                Texture3D texture = new Texture3D(device, desc);
+
+                // Create float data for R32_Float format
+                float[] floatData = new float[width * height * depth];
+
+                Parallel.For(0, depth, z =>
+                {
+                    for (int y = 0; y < height; y++)
+                    {
+                        for (int x = 0; x < width; x++)
+                        {
+                            int srcX = Math.Min(x * downsampleFactor, volume.Width - 1);
+                            int srcY = Math.Min(y * downsampleFactor, volume.Height - 1);
+                            int srcZ = Math.Min(z * downsampleFactor, volume.Depth - 1);
+
+                            int idx = z * (width * height) + y * width + x;
+                            floatData[idx] = volume[srcX, srcY, srcZ];
+                        }
+                    }
+                });
+
+                // Upload float data
+                context.UpdateSubresource(floatData, texture, 0);
+
+                return texture;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[SharpDXVolumeRenderer] Error creating label texture: {ex.Message}");
+                throw;
+            }
+        }
         private void CreateLabelTextures()
         {
             try
@@ -1987,15 +2106,15 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
             try
             {
-                // --- Downsampling Logic (unchanged) ---
                 int width = volume.Width;
                 int height = volume.Height;
                 int depth = volume.Depth;
                 int downsampleFactor = 1;
 
+                // Check if we need to downsample
                 bool needsDownsampling = width > 2048 || height > 2048 || depth > 2048;
                 long volumeSizeInBytes = (long)width * height * depth;
-                bool exceedsMemoryLimit = volumeSizeInBytes > 4L * 1024L * 1024L * 1024L;
+                bool exceedsMemoryLimit = volumeSizeInBytes > 2L * 1024L * 1024L * 1024L;
 
                 if (needsDownsampling || exceedsMemoryLimit)
                 {
@@ -2004,13 +2123,15 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     {
                         downsampleFactor *= 2;
                     }
-                    Logger.Log($"[SharpDXVolumeRenderer] Large volume detected ({volume.Width}x{volume.Height}x{volume.Depth}), creating downsampled version (factor: {downsampleFactor})");
+                    Logger.Log($"[SharpDXVolumeRenderer] Large volume detected ({volume.Width}x{volume.Height}x{volume.Depth}), downsampling by factor: {downsampleFactor}");
                     width /= downsampleFactor;
                     height /= downsampleFactor;
                     depth /= downsampleFactor;
                 }
 
-                // --- Optimized Texture Creation ---
+                Logger.Log($"[SharpDXVolumeRenderer] Creating volume texture: {width}x{height}x{depth}");
+
+                // Create texture description
                 Texture3DDescription desc = new Texture3DDescription
                 {
                     Width = width,
@@ -2024,89 +2145,36 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     OptionFlags = ResourceOptionFlags.None
                 };
 
-                Logger.Log($"[SharpDXVolumeRenderer] Creating volume texture: {width}x{height}x{depth}");
                 Texture3D texture = new Texture3D(device, desc);
 
-                // --- Phase 1: Prepare all chunks in parallel and store them in memory ---
-                var preparedChunks = new ConcurrentBag<(ResourceRegion Region, byte[] Data, int RowPitch, int SlicePitch)>();
-                int chunkDim = volume.ChunkDim;
+                // Create data for the entire volume
+                int totalSize = width * height * depth;
+                byte[] volumeData = new byte[totalSize];
 
-                Parallel.For(0, volume.ChunkCountZ, cz =>
+                // Fill the volume data in the correct order
+                // Using Parallel.For for performance on large datasets
+                Parallel.For(0, depth, z =>
                 {
-                    int zBase = cz * chunkDim;
-                    for (int cy = 0; cy < volume.ChunkCountY; cy++)
+                    for (int y = 0; y < height; y++)
                     {
-                        int yBase = cy * chunkDim;
-                        for (int cx = 0; cx < volume.ChunkCountX; cx++)
+                        for (int x = 0; x < width; x++)
                         {
-                            int xBase = cx * chunkDim;
+                            int srcX = Math.Min(x * downsampleFactor, volume.Width - 1);
+                            int srcY = Math.Min(y * downsampleFactor, volume.Height - 1);
+                            int srcZ = Math.Min(z * downsampleFactor, volume.Depth - 1);
 
-                            int destX = xBase / downsampleFactor;
-                            int destY = yBase / downsampleFactor;
-                            int destZ = zBase / downsampleFactor;
-
-                            if (destX >= width || destY >= height || destZ >= depth) continue;
-
-                            byte[] chunkBytes = volume.GetChunkBytes(volume.GetChunkIndex(cx, cy, cz));
-
-                            int dsChunkWidth = Math.Min(width - destX, chunkDim / downsampleFactor);
-                            int dsChunkHeight = Math.Min(height - destY, chunkDim / downsampleFactor);
-                            int dsChunkDepth = Math.Min(depth - destZ, chunkDim / downsampleFactor);
-
-                            if (dsChunkWidth <= 0 || dsChunkHeight <= 0 || dsChunkDepth <= 0) continue;
-
-                            byte[] dataToUpload;
-
-                            if (downsampleFactor > 1)
-                            {
-                                dataToUpload = new byte[dsChunkWidth * dsChunkHeight * dsChunkDepth];
-                                for (int z = 0; z < dsChunkDepth; z++)
-                                    for (int y = 0; y < dsChunkHeight; y++)
-                                        for (int x = 0; x < dsChunkWidth; x++)
-                                        {
-                                            int srcIndex = (z * downsampleFactor * chunkDim * chunkDim) + (y * downsampleFactor * chunkDim) + (x * downsampleFactor);
-                                            if (srcIndex < chunkBytes.Length)
-                                            {
-                                                dataToUpload[(z * dsChunkHeight * dsChunkWidth) + (y * dsChunkWidth) + x] = chunkBytes[srcIndex];
-                                            }
-                                        }
-                            }
-                            else
-                            {
-                                dataToUpload = chunkBytes;
-                            }
-
-                            var region = new ResourceRegion(destX, destY, destZ, destX + dsChunkWidth, destY + dsChunkHeight, destZ + dsChunkDepth);
-                            preparedChunks.Add((region, dataToUpload, dsChunkWidth, dsChunkWidth * dsChunkHeight));
+                            // Correct linear index for DirectX texture layout
+                            int destIndex = z * (width * height) + y * width + x;
+                            volumeData[destIndex] = volume[srcX, srcY, srcZ];
                         }
                     }
                 });
 
-                // --- Phase 2: Upload all prepared chunks sequentially from a single thread ---
-                foreach (var chunk in preparedChunks)
-                {
-                    GCHandle handle = GCHandle.Alloc(chunk.Data, GCHandleType.Pinned);
-                    try
-                    {
-                        var dataBox = new DataBox(handle.AddrOfPinnedObject(), chunk.RowPitch, chunk.SlicePitch);
-                        context.UpdateSubresource(dataBox, texture, 0, chunk.Region);
-                    }
-                    finally
-                    {
-                        handle.Free();
-                    }
-                }
+                // Use UpdateSubresource which is the correct and simplest way to upload the data.
+                context.UpdateSubresource(volumeData, texture, 0);
 
+                Logger.Log($"[SharpDXVolumeRenderer] Volume texture created and filled successfully");
                 return texture;
-            }
-            catch (SharpDXException ex)
-            {
-                Logger.Log($"[SharpDXVolumeRenderer] DirectX error creating volume texture: {ex.Message} (HRESULT: {ex.HResult:X})");
-                if (ex.ResultCode.Code == SharpDX.DXGI.ResultCode.DeviceRemoved.Result.Code || ex.HResult == -2147024882)
-                {
-                    Logger.Log("[SharpDXVolumeRenderer] Out of memory or device hung. This dataset is likely too large for available GPU memory.");
-                }
-                throw;
             }
             catch (Exception ex)
             {
@@ -2120,8 +2188,9 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
             try
             {
-                // --- Downsampling Logic (unchanged) ---
                 int width, height, depth, downsampleFactor = 1;
+
+                // Match dimensions with volume texture if it exists
                 if (volumeTexture != null)
                 {
                     width = volumeTexture.Description.Width;
@@ -2131,7 +2200,10 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 }
                 else
                 {
-                    width = volume.Width; height = volume.Height; depth = volume.Depth;
+                    width = volume.Width;
+                    height = volume.Height;
+                    depth = volume.Depth;
+
                     long volumeSizeInBytes = (long)width * height * depth * 4;
                     if (width > 2048 || height > 2048 || depth > 2048 || volumeSizeInBytes > 2L * 1024L * 1024L * 1024L)
                     {
@@ -2141,11 +2213,13 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                             downsampleFactor *= 2;
                         }
                     }
-                    width /= downsampleFactor; height /= downsampleFactor; depth /= downsampleFactor;
+                    width /= downsampleFactor;
+                    height /= downsampleFactor;
+                    depth /= downsampleFactor;
                 }
+
                 Logger.Log($"[SharpDXVolumeRenderer] Creating label texture: {width}x{height}x{depth}");
 
-                // --- Optimized Texture Creation ---
                 Texture3DDescription desc = new Texture3DDescription
                 {
                     Width = width,
@@ -2158,81 +2232,35 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     CpuAccessFlags = CpuAccessFlags.None,
                     OptionFlags = ResourceOptionFlags.None
                 };
+
                 Texture3D texture = new Texture3D(device, desc);
 
-                // --- Phase 1: Prepare all chunks in parallel ---
-                var preparedChunks = new ConcurrentBag<(ResourceRegion Region, float[] Data, int RowPitch, int SlicePitch)>();
-                int chunkDim = volume.ChunkDim;
-                int bytesPerPixel = 4; // for R32_Float
+                // Create float array for the label data
+                int totalSize = width * height * depth;
+                float[] floatData = new float[totalSize];
 
-                Parallel.For(0, volume.ChunkCountZ, cz =>
+                // Fill the label data
+                Parallel.For(0, depth, z =>
                 {
-                    int zBase = cz * chunkDim;
-                    for (int cy = 0; cy < volume.ChunkCountY; cy++)
+                    for (int y = 0; y < height; y++)
                     {
-                        int yBase = cy * chunkDim;
-                        for (int cx = 0; cx < volume.ChunkCountX; cx++)
+                        for (int x = 0; x < width; x++)
                         {
-                            int xBase = cx * chunkDim;
+                            int srcX = Math.Min(x * downsampleFactor, volume.Width - 1);
+                            int srcY = Math.Min(y * downsampleFactor, volume.Height - 1);
+                            int srcZ = Math.Min(z * downsampleFactor, volume.Depth - 1);
 
-                            int destX = xBase / downsampleFactor;
-                            int destY = yBase / downsampleFactor;
-                            int destZ = zBase / downsampleFactor;
-
-                            if (destX >= width || destY >= height || destZ >= depth) continue;
-
-                            byte[] chunkBytes = volume.GetChunkBytes(volume.GetChunkIndex(cx, cy, cz));
-
-                            int dsChunkWidth = Math.Min(width - destX, chunkDim / downsampleFactor);
-                            int dsChunkHeight = Math.Min(height - destY, chunkDim / downsampleFactor);
-                            int dsChunkDepth = Math.Min(depth - destZ, chunkDim / downsampleFactor);
-
-                            if (dsChunkWidth <= 0 || dsChunkHeight <= 0 || dsChunkDepth <= 0) continue;
-
-                            float[] floatData = new float[dsChunkWidth * dsChunkHeight * dsChunkDepth];
-
-                            for (int z = 0; z < dsChunkDepth; z++)
-                                for (int y = 0; y < dsChunkHeight; y++)
-                                    for (int x = 0; x < dsChunkWidth; x++)
-                                    {
-                                        int srcIndex = (z * downsampleFactor * chunkDim * chunkDim) + (y * downsampleFactor * chunkDim) + (x * downsampleFactor);
-                                        if (srcIndex < chunkBytes.Length)
-                                        {
-                                            floatData[(z * dsChunkHeight * dsChunkWidth) + (y * dsChunkWidth) + x] = chunkBytes[srcIndex];
-                                        }
-                                    }
-
-                            var region = new ResourceRegion(destX, destY, destZ, destX + dsChunkWidth, destY + dsChunkHeight, destZ + dsChunkDepth);
-                            preparedChunks.Add((region, floatData, dsChunkWidth * bytesPerPixel, dsChunkWidth * dsChunkHeight * bytesPerPixel));
+                            int destIndex = z * (width * height) + y * width + x;
+                            floatData[destIndex] = volume[srcX, srcY, srcZ];
                         }
                     }
                 });
 
-                // --- Phase 2: Upload all prepared chunks sequentially ---
-                foreach (var chunk in preparedChunks)
-                {
-                    GCHandle handle = GCHandle.Alloc(chunk.Data, GCHandleType.Pinned);
-                    try
-                    {
-                        var dataBox = new DataBox(handle.AddrOfPinnedObject(), chunk.RowPitch, chunk.SlicePitch);
-                        context.UpdateSubresource(dataBox, texture, 0, chunk.Region);
-                    }
-                    finally
-                    {
-                        handle.Free();
-                    }
-                }
+                // Upload the data
+                context.UpdateSubresource(floatData, texture, 0);
 
+                Logger.Log($"[SharpDXVolumeRenderer] Label texture created and filled successfully");
                 return texture;
-            }
-            catch (SharpDXException ex)
-            {
-                Logger.Log($"[SharpDXVolumeRenderer] DirectX error creating label texture: {ex.Message} (HRESULT: {ex.HResult:X})");
-                if (ex.ResultCode.Code == SharpDX.DXGI.ResultCode.DeviceRemoved.Result.Code || ex.HResult == -2147024882)
-                {
-                    Logger.Log("[SharpDXVolumeRenderer] Out of memory or device hung. This dataset is likely too large for available GPU memory.");
-                }
-                throw;
             }
             catch (Exception ex)
             {
@@ -2240,9 +2268,6 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 throw;
             }
         }
-
-
-
         #endregion Initialization
 
         #region Rendering
@@ -2942,7 +2967,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 // Recreate from current data
                 if (mainForm.volumeLabels != null)
                 {
-                    labelTexture = CreateTexture3DFromChunkedLabelVolume((ChunkedLabelVolume)mainForm.volumeLabels, Format.R32_Float);
+                    labelTexture = CreateTexture3DFromChunkedLabelVolumeFixed((ChunkedLabelVolume)mainForm.volumeLabels, Format.R32_Float);
                     if (labelTexture != null)
                     {
                         ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
@@ -3609,7 +3634,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 {
                     try
                     {
-                      
+
                         if (renderPanel != null && renderPanel.Controls.Contains(measurementOverlay))
                         {
                             renderPanel.Controls.Remove(measurementOverlay);
@@ -3647,7 +3672,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 {
                     try
                     {
-                      
+
                         if (renderPanel != null && renderPanel.Controls.Contains(scaleBarPictureBox))
                         {
                             renderPanel.Controls.Remove(scaleBarPictureBox);
@@ -4095,7 +4120,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     context.Draw(vertexCount, 0);
                 }
 
-           
+
                 context.VertexShader.Set(volumeVertexShader);
                 context.PixelShader.Set(volumePixelShader);
 
@@ -4448,17 +4473,13 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
             {
                 try
                 {
-                    // Level 0 is highest resolution, each level reduces by 2x
                     int downsampleFactor = (int)Math.Pow(2, lodLevel);
-
-                    // Calculate dimensions for this LOD level
                     int width = Math.Max(1, volW / downsampleFactor);
                     int height = Math.Max(1, volH / downsampleFactor);
                     int depth = Math.Max(1, volD / downsampleFactor);
 
                     Logger.Log($"[SharpDXVolumeRenderer] Creating streaming LOD level {lodLevel}: {width}x{height}x{depth}");
 
-                    // Create the texture
                     Texture3DDescription desc = new Texture3DDescription
                     {
                         Width = width,
@@ -4475,29 +4496,22 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     lodTextures[lodLevel] = new Texture3D(device, desc);
 
                     // Create the data array for this LOD level
-                    byte[] lodData = new byte[width * height * depth];
+                    int totalSize = width * height * depth;
+                    byte[] lodData = new byte[totalSize];
 
-                    // Use a properly indexed approach to ensure correct memory layout
+                    // Fill the LOD data
+                    int index = 0;
                     for (int z = 0; z < depth; z++)
                     {
                         for (int y = 0; y < height; y++)
                         {
                             for (int x = 0; x < width; x++)
                             {
-                                // Calculate source coordinates in the original volume
                                 int srcX = Math.Min(x * downsampleFactor, volW - 1);
                                 int srcY = Math.Min(y * downsampleFactor, volH - 1);
                                 int srcZ = Math.Min(z * downsampleFactor, volD - 1);
 
-                                // Calculate linear index in the lodData array
-                                int idx = (z * width * height) + (y * width) + x;
-
-                                // Sample from the original volume with bounds checking
-                                if (srcX < volW && srcY < volH && srcZ < volD)
-                                {
-                                    byte value = volume[srcX, srcY, srcZ];
-                                    lodData[idx] = value;
-                                }
+                                lodData[index++] = volume[srcX, srcY, srcZ];
                             }
                         }
                     }
@@ -4520,11 +4534,8 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     lodSRVs[lodLevel] = new ShaderResourceView(device, lodTextures[lodLevel], srvDesc);
                     anyLodCreated = true;
 
-                    // IMPORTANT: For LOD level 0 (highest resolution), also temporarily use as main texture
-                    // Note: We'll keep the original volume texture reference for when streaming is disabled
                     if (lodLevel == 0)
                     {
-                        // Update the current rendering texture (we'll switch back later if needed)
                         currentStreamingLOD = 0;
                         Logger.Log("[SharpDXVolumeRenderer] Created highest-resolution LOD texture");
                     }
@@ -4537,12 +4548,10 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
             if (!anyLodCreated)
             {
-                // If we couldn't create any LOD textures, disable streaming mode
                 Logger.Log("[SharpDXVolumeRenderer] Failed to create any LOD textures, disabling streaming");
                 useStreamingRenderer = false;
             }
         }
-
         private void RenderVolumeWithStreaming()
         {
             if (isInitializingStreaming)
@@ -4630,7 +4639,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 if (labelVisibilitySRV != null) resources[0] = labelVisibilitySRV;
                 if (labelOpacitySRV != null) resources[1] = labelOpacitySRV;
 
-                
+
                 bool hasValidTexture = false;
 
                 // Try streaming LOD textures first, with bounds checking
@@ -4640,7 +4649,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     hasValidTexture = true;
                     if (frameCount % 60 == 0)  // Log less frequently to reduce spam
                     {
-                        Logger.Log($"[RenderVolumeWithStreaming] Using LOD level {currentStreamingLOD}");
+                        // Logger.Log($"[RenderVolumeWithStreaming] Using LOD level {currentStreamingLOD}");
                     }
                 }
                 // Fall back to the original volume texture if available
@@ -4655,7 +4664,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                 {
                     Logger.Log("[RenderVolumeWithStreaming] WARNING: No valid volume texture available!");
 
-                
+
                     if (resources[2] == null)
                     {
                         try
@@ -4934,7 +4943,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
         private bool IsChunkVisible(Vector3 minBounds, Vector3 maxBounds, ViewFrustum frustum)
         {
-            
+
 
             // Check if the volume center is roughly in the view direction
             Vector3 chunkCenter = (minBounds + maxBounds) * 0.5f;
@@ -5432,7 +5441,7 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
 
         private void CreateStreamingLODTexturesAsync(CancellationToken token, Action<int> progressCallback)
         {
-            DisposeStreamingResources(); // Clean up any existing textures first
+            DisposeStreamingResources();
 
             if (mainForm.volumeData == null)
             {
@@ -5469,63 +5478,37 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                         CpuAccessFlags = CpuAccessFlags.None,
                         OptionFlags = ResourceOptionFlags.None
                     };
+
                     var texture = new Texture3D(device, desc);
                     lodTextures[lodLevel] = texture;
 
-                    // Prepare data in parallel
-                    var preparedChunks = new ConcurrentBag<(ResourceRegion Region, byte[] Data, int RowPitch, int SlicePitch)>();
-                    int chunkDim = volume.ChunkDim;
+                    // Create the entire volume data at once
+                    byte[] lodData = new byte[width * height * depth];
 
-                    Parallel.For(0, volume.ChunkCountZ, new ParallelOptions { CancellationToken = token }, cz =>
+                    // Fill with correct data layout
+                    Parallel.For(0, depth, z =>
                     {
-                        int zBase = cz * chunkDim;
-                        for (int cy = 0; cy < volume.ChunkCountY; cy++)
+                        for (int y = 0; y < height; y++)
                         {
-                            int yBase = cy * chunkDim; // <<< FIX WAS HERE
-                            for (int cx = 0; cx < volume.ChunkCountX; cx++)
+                            for (int x = 0; x < width; x++)
                             {
-                                int xBase = cx * chunkDim;
-                                int destX = xBase / downsampleFactor;
-                                int destY = yBase / downsampleFactor;
-                                int destZ = zBase / downsampleFactor;
+                                // Calculate source coordinates
+                                int srcX = Math.Min(x * downsampleFactor, volume.Width - 1);
+                                int srcY = Math.Min(y * downsampleFactor, volume.Height - 1);
+                                int srcZ = Math.Min(z * downsampleFactor, volume.Depth - 1);
 
-                                if (destX >= width || destY >= height || destZ >= depth) continue;
+                                // Calculate linear index in the lodData array
+                                int idx = z * (width * height) + y * width + x;
 
-                                byte[] chunkBytes = volume.GetChunkBytes(volume.GetChunkIndex(cx, cy, cz));
-                                int dsChunkWidth = Math.Min(width - destX, chunkDim / downsampleFactor);
-                                int dsChunkHeight = Math.Min(height - destY, chunkDim / downsampleFactor);
-                                int dsChunkDepth = Math.Min(depth - destZ, chunkDim / downsampleFactor);
-
-                                if (dsChunkWidth <= 0 || dsChunkHeight <= 0 || dsChunkDepth <= 0) continue;
-
-                                byte[] dataToUpload = new byte[dsChunkWidth * dsChunkHeight * dsChunkDepth];
-                                for (int z = 0; z < dsChunkDepth; z++)
-                                    for (int y = 0; y < dsChunkHeight; y++)
-                                        for (int x = 0; x < dsChunkWidth; x++)
-                                        {
-                                            int srcIndex = (z * downsampleFactor * chunkDim * chunkDim) + (y * downsampleFactor * chunkDim) + (x * downsampleFactor);
-                                            if (srcIndex < chunkBytes.Length)
-                                                dataToUpload[(z * dsChunkHeight * dsChunkWidth) + (y * dsChunkWidth) + x] = chunkBytes[srcIndex];
-                                        }
-
-                                var region = new ResourceRegion(destX, destY, destZ, destX + dsChunkWidth, destY + dsChunkHeight, destZ + dsChunkDepth);
-                                preparedChunks.Add((region, dataToUpload, dsChunkWidth, dsChunkWidth * dsChunkHeight));
+                                lodData[idx] = volume[srcX, srcY, srcZ];
                             }
                         }
                     });
 
                     token.ThrowIfCancellationRequested();
 
-                    // Upload sequentially
-                    foreach (var chunk in preparedChunks)
-                    {
-                        GCHandle handle = GCHandle.Alloc(chunk.Data, GCHandleType.Pinned);
-                        try
-                        {
-                            context.UpdateSubresource(new DataBox(handle.AddrOfPinnedObject(), chunk.RowPitch, chunk.SlicePitch), texture, 0, chunk.Region);
-                        }
-                        finally { handle.Free(); }
-                    }
+                    // Upload the entire texture at once
+                    context.UpdateSubresource(lodData, texture, 0);
 
                     ShaderResourceViewDescription srvDesc = new ShaderResourceViewDescription
                     {
@@ -5535,8 +5518,17 @@ float4 PSMain(VS_OUTPUT input) : SV_TARGET
                     };
                     lodSRVs[lodLevel] = new ShaderResourceView(device, texture, srvDesc);
                     anyLodCreated = true;
+
+                    if (lodLevel == 0)
+                    {
+                        currentStreamingLOD = 0;
+                        Logger.Log("[CreateStreamingLODTexturesAsync] Created highest-resolution LOD texture");
+                    }
                 }
-                catch (OperationCanceledException) { throw; }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
                 catch (Exception ex)
                 {
                     Logger.Log($"[CreateStreamingLODTexturesAsync] Error creating LOD level {lodLevel}: {ex.Message}");

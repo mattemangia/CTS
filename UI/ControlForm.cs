@@ -551,10 +551,9 @@ namespace CTS
                     return;
                 }
 
-                // Create and show the 3D viewer form
-                SharpDXViewerForm viewer3DForm = new SharpDXViewerForm(mainForm);
-                viewer3DForm.InitializeEvents(mainForm);
-                viewer3DForm.Show();
+                // Create and show the NEW D3D11 viewer form
+                CTS.D3D11.D3D11ViewerForm viewer3DForm = new CTS.D3D11.D3D11ViewerForm(mainForm);
+                viewer3DForm.Show(); // Show non-modally
             };
 
             // Reset Zoom

@@ -121,6 +121,16 @@
     <Compile Include="3DViewer\Meshing\ProducerConsumerFileWriter.cs" />
     <Compile Include="3DViewer\Meshing\FastOBJWriter.cs" />
     <Compile Include="3DViewer\Meshing\FastSTLWriter.cs" />
+    <Compile Include="D3D11Viewer\Camera.cs" />
+    <Compile Include="D3D11Viewer\ChunkStreamingManager.cs" />
+    <Compile Include="D3D11Viewer\D3D11ControlPanel.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="D3D11Viewer\D3D11ViewerForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="D3D11Viewer\D3D11VolumeRenderer.cs" />
+    <Compile Include="D3D11Viewer\MaterialExtension.cs" />
     <Compile Include="Interfaces\IMaterialDensityProvider.cs" />
     <Compile Include="Interfaces\IMaterialOperations.cs" />
     <Compile Include="MaterialOperations\MaterialOperations.cs" />
@@ -540,6 +550,15 @@
     </PackageReference>
     <PackageReference Include="System.ValueTuple">
       <Version>4.6.1</Version>
+    </PackageReference>
+    <PackageReference Include="Vortice.D3DCompiler">
+      <Version>2.4.2</Version>
+    </PackageReference>
+    <PackageReference Include="Vortice.Direct3D11">
+      <Version>2.4.2</Version>
+    </PackageReference>
+    <PackageReference Include="Vortice.DXGI">
+      <Version>2.4.2</Version>
     </PackageReference>
   </ItemGroup>
   <ItemGroup>

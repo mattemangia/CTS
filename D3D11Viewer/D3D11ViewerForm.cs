@@ -183,7 +183,20 @@ namespace CTS.D3D11
             lodResetTimer.Stop();
             lodResetTimer.Start();
         }
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            // Add F12 as screenshot hotkey
+            if (keyData == Keys.F12)
+            {
+                if (controlPanel != null && !controlPanel.IsDisposed)
+                {
+                    controlPanel.TakeScreenshot();
+                }
+                return true;
+            }
 
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);

@@ -20,6 +20,7 @@ namespace CTS.D3D11
             public int ChunkIndex { get; set; } = -1;
             public long LastAccessTime { get; set; }
             public bool IsLoading { get; set; } = false;
+            public int LoadAttempts { get; set; } = 0;
         }
 
         private readonly ID3D11Device device;
@@ -51,6 +52,11 @@ namespace CTS.D3D11
         private readonly ManualResetEventSlim uploadSignal = new ManualResetEventSlim(false);
         private volatile bool isDisposed = false;
 
+        // Performance monitoring
+        private int successfulUploads = 0;
+        private int failedUploads = 0;
+        private DateTime lastStatsReport = DateTime.Now;
+
         public ChunkStreamingManager(ID3D11Device device, ID3D11DeviceContext context, IGrayscaleVolumeData volumeData, ILabelVolumeData labelData, ID3D11Texture2D grayscaleCache, ID3D11Texture2D labelCache)
         {
             this.device = device ?? throw new ArgumentNullException(nameof(device));
@@ -65,7 +71,7 @@ namespace CTS.D3D11
             // Calculate cache size from texture array size
             int arraySize = grayscaleCache.Description.ArraySize;
             int chunkDim = volumeData.ChunkDim;
-            int numCacheSlots = Math.Max(1, arraySize / chunkDim); // Ensure at least 1 slot
+            int numCacheSlots = Math.Max(1, arraySize / chunkDim);
 
             cacheSlots = new GpuCacheSlot[numCacheSlots];
             for (int i = 0; i < cacheSlots.Length; i++)
@@ -78,31 +84,40 @@ namespace CTS.D3D11
             for (int i = 0; i < chunkInfoGpuData.Length; i++)
                 chunkInfoGpuData[i].GpuSlotIndex = -1;
 
-            // Create staging textures for efficient GPU upload
-            var stagingDesc = new Texture2DDescription
+            try
             {
-                Width = volumeData.ChunkDim,
-                Height = volumeData.ChunkDim,
-                MipLevels = 1,
-                ArraySize = 1,
-                Format = Format.R8_UNorm,
-                SampleDescription = new SampleDescription(1, 0),
-                Usage = ResourceUsage.Staging,
-                BindFlags = BindFlags.None,
-                CPUAccessFlags = CpuAccessFlags.Write
-            };
-            stagingGrayscaleTexture = device.CreateTexture2D(stagingDesc);
+                // Create staging textures for efficient GPU upload
+                var stagingDesc = new Texture2DDescription
+                {
+                    Width = volumeData.ChunkDim,
+                    Height = volumeData.ChunkDim,
+                    MipLevels = 1,
+                    ArraySize = 1,
+                    Format = Format.R8_UNorm,
+                    SampleDescription = new SampleDescription(1, 0),
+                    Usage = ResourceUsage.Staging,
+                    BindFlags = BindFlags.None,
+                    CPUAccessFlags = CpuAccessFlags.Write
+                };
+                stagingGrayscaleTexture = device.CreateTexture2D(stagingDesc);
 
-            stagingDesc.Format = Format.R8_UInt;
-            stagingLabelTexture = device.CreateTexture2D(stagingDesc);
+                stagingDesc.Format = Format.R8_UInt;
+                stagingLabelTexture = device.CreateTexture2D(stagingDesc);
 
-            Logger.Log($"[ChunkStreamingManager] Initialized with {numCacheSlots} cache slots for {totalChunks} total chunks");
+                Logger.Log($"[ChunkStreamingManager] Initialized with {numCacheSlots} cache slots for {totalChunks} total chunks");
 
-            cancellationTokenSource = new CancellationTokenSource();
+                cancellationTokenSource = new CancellationTokenSource();
 
-            // Start background tasks
-            streamingTask = Task.Run(() => StreamingLoop(cancellationTokenSource.Token), cancellationTokenSource.Token);
-            uploadTask = Task.Run(() => ProcessUploadQueue(cancellationTokenSource.Token), cancellationTokenSource.Token);
+                // Start background tasks
+                streamingTask = Task.Run(() => StreamingLoop(cancellationTokenSource.Token), cancellationTokenSource.Token);
+                uploadTask = Task.Run(() => ProcessUploadQueue(cancellationTokenSource.Token), cancellationTokenSource.Token);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[ChunkStreamingManager] Initialization error: {ex.Message}");
+                Dispose();
+                throw;
+            }
         }
 
         public void Update(Camera camera)
@@ -111,7 +126,7 @@ namespace CTS.D3D11
 
             lock (_lock)
             {
-                lastCameraState = camera;
+                lastCameraState = new Camera(camera.Position, camera.Target, camera.Up, camera.AspectRatio);
                 isDirty = true;
             }
         }
@@ -141,6 +156,13 @@ namespace CTS.D3D11
                         ProcessRequiredChunks(requiredChunks);
                     }
 
+                    // Report statistics periodically
+                    if (DateTime.Now - lastStatsReport > TimeSpan.FromSeconds(10))
+                    {
+                        Logger.Log($"[ChunkStreamingManager] Stats - Successful: {successfulUploads}, Failed: {failedUploads}");
+                        lastStatsReport = DateTime.Now;
+                    }
+
                     await Task.Delay(50, cancellationToken);
                 }
                 catch (OperationCanceledException)
@@ -150,6 +172,7 @@ namespace CTS.D3D11
                 catch (Exception ex)
                 {
                     Logger.Log($"[ChunkStreamingManager] StreamingLoop error: {ex.Message}");
+                    await Task.Delay(100, cancellationToken); // Back off on error
                 }
             }
 
@@ -180,13 +203,43 @@ namespace CTS.D3D11
                     {
                         if (!isDisposed)
                         {
-                            UploadChunkToGpu(uploadItem.chunkIndex, uploadItem.slotIndex);
+                            bool success = UploadChunkToGpu(uploadItem.chunkIndex, uploadItem.slotIndex);
 
                             lock (_lock)
                             {
                                 if (!isDisposed && uploadItem.slotIndex < cacheSlots.Length)
                                 {
-                                    cacheSlots[uploadItem.slotIndex].IsLoading = false;
+                                    var slot = cacheSlots[uploadItem.slotIndex];
+                                    slot.IsLoading = false;
+
+                                    if (!success)
+                                    {
+                                        slot.LoadAttempts++;
+                                        if (slot.LoadAttempts < 3)
+                                        {
+                                            // Retry failed uploads
+                                            lock (uploadQueueLock)
+                                            {
+                                                uploadQueue.Enqueue((uploadItem.chunkIndex, uploadItem.slotIndex));
+                                                uploadSignal.Set();
+                                            }
+                                        }
+                                        else
+                                        {
+                                            // Give up after 3 attempts
+                                            Logger.Log($"[ChunkStreamingManager] Failed to load chunk {uploadItem.chunkIndex} after 3 attempts");
+                                            slot.ChunkIndex = -1;
+                                            chunkToGpuSlotMap.Remove(uploadItem.chunkIndex);
+                                            if (uploadItem.chunkIndex < chunkInfoGpuData.Length)
+                                            {
+                                                chunkInfoGpuData[uploadItem.chunkIndex].GpuSlotIndex = -1;
+                                            }
+                                        }
+                                    }
+                                    else
+                                    {
+                                        slot.LoadAttempts = 0;
+                                    }
                                 }
                             }
                         }
@@ -204,6 +257,7 @@ namespace CTS.D3D11
                 catch (Exception ex)
                 {
                     Logger.Log($"[ChunkStreamingManager] ProcessUploadQueue error: {ex.Message}");
+                    await Task.Delay(100, cancellationToken); // Back off on error
                 }
             }
 
@@ -235,14 +289,18 @@ namespace CTS.D3D11
 
                         float distance = Vector3.DistanceSquared(camPos, chunkCenter);
                         int chunkIndex = cz * (countX * countY) + cy * countX + cx;
-                        chunkDistances.Add((chunkIndex, distance));
+
+                        if (chunkIndex >= 0 && chunkIndex < totalChunks)
+                        {
+                            chunkDistances.Add((chunkIndex, distance));
+                        }
                     }
                 }
             }
 
             // Sort by distance and take the closest chunks that fit in cache
             var orderedChunks = chunkDistances.OrderBy(c => c.distance).ToList();
-            int maxChunks = cacheSlots.Length;
+            int maxChunks = Math.Min(cacheSlots.Length, orderedChunks.Count);
 
             foreach (var (chunkIndex, _) in orderedChunks.Take(maxChunks))
             {
@@ -256,31 +314,31 @@ namespace CTS.D3D11
         {
             if (isDisposed || requiredChunks == null) return;
 
-            // First pass: mark chunks that are already loaded
-            foreach (var chunkIndex in requiredChunks)
+            lock (_lock)
             {
-                if (chunkToGpuSlotMap.ContainsKey(chunkIndex))
+                if (isDisposed) return;
+
+                // First pass: mark chunks that are already loaded
+                foreach (var chunkIndex in requiredChunks)
                 {
-                    int slotIndex = chunkToGpuSlotMap[chunkIndex];
-                    if (slotIndex >= 0 && slotIndex < cacheSlots.Length)
+                    if (chunkToGpuSlotMap.ContainsKey(chunkIndex))
                     {
-                        cacheSlots[slotIndex].LastAccessTime = DateTime.Now.Ticks;
+                        int slotIndex = chunkToGpuSlotMap[chunkIndex];
+                        if (slotIndex >= 0 && slotIndex < cacheSlots.Length)
+                        {
+                            cacheSlots[slotIndex].LastAccessTime = DateTime.Now.Ticks;
+                        }
                     }
                 }
-            }
 
-            // Second pass: load missing chunks
-            foreach (var chunkIndex in requiredChunks)
-            {
-                if (!chunkToGpuSlotMap.ContainsKey(chunkIndex))
+                // Second pass: load missing chunks
+                foreach (var chunkIndex in requiredChunks)
                 {
-                    int slotIndex = FindGpuSlot(requiredChunks);
-                    if (slotIndex >= 0)
+                    if (!chunkToGpuSlotMap.ContainsKey(chunkIndex))
                     {
-                        lock (_lock)
+                        int slotIndex = FindGpuSlot(requiredChunks);
+                        if (slotIndex >= 0)
                         {
-                            if (isDisposed) return;
-
                             // Check if slot is already being loaded
                             if (cacheSlots[slotIndex].IsLoading)
                                 continue;
@@ -300,18 +358,20 @@ namespace CTS.D3D11
                             cacheSlots[slotIndex].IsLoading = true;
                             cacheSlots[slotIndex].ChunkIndex = chunkIndex;
                             cacheSlots[slotIndex].LastAccessTime = DateTime.Now.Ticks;
+                            cacheSlots[slotIndex].LoadAttempts = 0;
                             chunkToGpuSlotMap[chunkIndex] = slotIndex;
+
                             if (chunkIndex >= 0 && chunkIndex < chunkInfoGpuData.Length)
                             {
                                 chunkInfoGpuData[chunkIndex].GpuSlotIndex = slotIndex;
                             }
-                        }
 
-                        // Queue for async upload
-                        lock (uploadQueueLock)
-                        {
-                            uploadQueue.Enqueue((chunkIndex, slotIndex));
-                            uploadSignal.Set();
+                            // Queue for async upload
+                            lock (uploadQueueLock)
+                            {
+                                uploadQueue.Enqueue((chunkIndex, slotIndex));
+                                uploadSignal.Set();
+                            }
                         }
                     }
                 }
@@ -320,77 +380,120 @@ namespace CTS.D3D11
 
         private int FindGpuSlot(HashSet<int> requiredChunks)
         {
-            lock (_lock)
+            if (isDisposed) return -1;
+
+            // First, try to find an empty slot
+            for (int i = 0; i < cacheSlots.Length; i++)
             {
-                if (isDisposed) return -1;
-
-                // First, try to find an empty slot
-                for (int i = 0; i < cacheSlots.Length; i++)
-                {
-                    if (cacheSlots[i].ChunkIndex == -1 && !cacheSlots[i].IsLoading)
-                        return i;
-                }
-
-                // Find the least recently used slot that's not currently loading
-                // and not in the required set
-                long minTime = long.MaxValue;
-                int lruIndex = -1;
-
-                for (int i = 0; i < cacheSlots.Length; i++)
-                {
-                    if (!cacheSlots[i].IsLoading &&
-                        cacheSlots[i].ChunkIndex != -1 &&
-                        !requiredChunks.Contains(cacheSlots[i].ChunkIndex) &&
-                        cacheSlots[i].LastAccessTime < minTime)
-                    {
-                        minTime = cacheSlots[i].LastAccessTime;
-                        lruIndex = i;
-                    }
-                }
-
-                return lruIndex;
+                if (cacheSlots[i].ChunkIndex == -1 && !cacheSlots[i].IsLoading)
+                    return i;
             }
+
+            // Find the least recently used slot that's not currently loading
+            // and not in the required set
+            long minTime = long.MaxValue;
+            int lruIndex = -1;
+
+            for (int i = 0; i < cacheSlots.Length; i++)
+            {
+                if (!cacheSlots[i].IsLoading &&
+                    cacheSlots[i].ChunkIndex != -1 &&
+                    !requiredChunks.Contains(cacheSlots[i].ChunkIndex) &&
+                    cacheSlots[i].LastAccessTime < minTime)
+                {
+                    minTime = cacheSlots[i].LastAccessTime;
+                    lruIndex = i;
+                }
+            }
+
+            return lruIndex;
         }
 
-        private void UploadChunkToGpu(int chunkIndex, int slotIndex)
+        private bool UploadChunkToGpu(int chunkIndex, int slotIndex)
         {
-            if (isDisposed) return;
+            if (isDisposed) return false;
 
             try
             {
+                if (chunkIndex < 0 || chunkIndex >= totalChunks)
+                {
+                    Logger.Log($"[ChunkStreamingManager] Invalid chunk index: {chunkIndex}");
+                    return false;
+                }
+
+                if (slotIndex < 0 || slotIndex >= cacheSlots.Length)
+                {
+                    Logger.Log($"[ChunkStreamingManager] Invalid slot index: {slotIndex}");
+                    return false;
+                }
+
                 var grayData = volumeData.GetChunkBytes(chunkIndex);
                 var labelDataBytes = labelData.GetChunkBytes(chunkIndex);
 
                 if (grayData == null || labelDataBytes == null)
                 {
                     Logger.Log($"[ChunkStreamingManager] Null data for chunk {chunkIndex}");
-                    return;
+                    failedUploads++;
+                    return false;
                 }
 
                 int chunkDim = volumeData.ChunkDim;
                 int sliceByteSize = chunkDim * chunkDim;
                 int startSliceIndexInAtlas = slotIndex * chunkDim;
 
+                // Validate data sizes
+                if (grayData.Length < sliceByteSize * chunkDim)
+                {
+                    Logger.Log($"[ChunkStreamingManager] Grayscale data too small for chunk {chunkIndex}");
+                    failedUploads++;
+                    return false;
+                }
+
+                if (labelDataBytes.Length < sliceByteSize * chunkDim)
+                {
+                    Logger.Log($"[ChunkStreamingManager] Label data too small for chunk {chunkIndex}");
+                    failedUploads++;
+                    return false;
+                }
+
                 // Upload each slice
                 lock (context)
                 {
-                    if (isDisposed) return;
+                    if (isDisposed) return false;
 
                     for (int i = 0; i < chunkDim; i++)
                     {
                         if (isDisposed) break;
 
                         // Upload grayscale slice
-                        var mappedGray = context.Map(stagingGrayscaleTexture, 0, MapMode.Write, MapFlags.None);
+                        MappedSubresource mappedGray;
+                        try
+                        {
+                            mappedGray = context.Map(stagingGrayscaleTexture, 0, MapMode.Write, MapFlags.None);
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[ChunkStreamingManager] Failed to map grayscale staging texture: {ex.Message}");
+                            failedUploads++;
+                            return false;
+                        }
+
                         if (mappedGray.DataPointer != IntPtr.Zero)
                         {
                             try
                             {
-                                // Calculate proper stride and copy
                                 int srcOffset = i * sliceByteSize;
                                 if (srcOffset + sliceByteSize <= grayData.Length)
                                 {
-                                    Marshal.Copy(grayData, srcOffset, mappedGray.DataPointer, sliceByteSize);
+                                    unsafe
+                                    {
+                                        byte* dst = (byte*)mappedGray.DataPointer;
+                                        for (int row = 0; row < chunkDim; row++)
+                                        {
+                                            int rowOffset = srcOffset + row * chunkDim;
+                                            Marshal.Copy(grayData, rowOffset, new IntPtr(dst + row * mappedGray.RowPitch), chunkDim);
+                                        }
+                                    }
                                 }
                             }
                             finally
@@ -400,19 +503,33 @@ namespace CTS.D3D11
 
                             int destGraySliceSubresource = startSliceIndexInAtlas + i;
 
-                            // Use explicit source box
-                            var srcBox = new Box(0, 0, 0, chunkDim, chunkDim, 1);
-                            context.CopySubresourceRegion(
-                                grayscaleCache,
-                                destGraySliceSubresource,
-                                0, 0, 0,
-                                stagingGrayscaleTexture,
-                                0,
-                                srcBox);
+                            // Validate subresource index
+                            if (destGraySliceSubresource < grayscaleCache.Description.ArraySize)
+                            {
+                                var srcBox = new Box(0, 0, 0, chunkDim, chunkDim, 1);
+                                context.CopySubresourceRegion(
+                                    grayscaleCache,
+                                    destGraySliceSubresource,
+                                    0, 0, 0,
+                                    stagingGrayscaleTexture,
+                                    0,
+                                    srcBox);
+                            }
                         }
 
                         // Upload label slice
-                        var mappedLabel = context.Map(stagingLabelTexture, 0, MapMode.Write, MapFlags.None);
+                        MappedSubresource mappedLabel;
+                        try
+                        {
+                            mappedLabel = context.Map(stagingLabelTexture, 0, MapMode.Write, MapFlags.None);
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Log($"[ChunkStreamingManager] Failed to map label staging texture: {ex.Message}");
+                            failedUploads++;
+                            return false;
+                        }
+
                         if (mappedLabel.DataPointer != IntPtr.Zero)
                         {
                             try
@@ -420,7 +537,15 @@ namespace CTS.D3D11
                                 int srcOffset = i * sliceByteSize;
                                 if (srcOffset + sliceByteSize <= labelDataBytes.Length)
                                 {
-                                    Marshal.Copy(labelDataBytes, srcOffset, mappedLabel.DataPointer, sliceByteSize);
+                                    unsafe
+                                    {
+                                        byte* dst = (byte*)mappedLabel.DataPointer;
+                                        for (int row = 0; row < chunkDim; row++)
+                                        {
+                                            int rowOffset = srcOffset + row * chunkDim;
+                                            Marshal.Copy(labelDataBytes, rowOffset, new IntPtr(dst + row * mappedLabel.RowPitch), chunkDim);
+                                        }
+                                    }
                                 }
                             }
                             finally
@@ -430,22 +555,30 @@ namespace CTS.D3D11
 
                             int destLabelSliceSubresource = startSliceIndexInAtlas + i;
 
-                            // Use explicit source box
-                            var srcBox = new Box(0, 0, 0, chunkDim, chunkDim, 1);
-                            context.CopySubresourceRegion(
-                                labelCache,
-                                destLabelSliceSubresource,
-                                0, 0, 0,
-                                stagingLabelTexture,
-                                0,
-                                srcBox);
+                            // Validate subresource index
+                            if (destLabelSliceSubresource < labelCache.Description.ArraySize)
+                            {
+                                var srcBox = new Box(0, 0, 0, chunkDim, chunkDim, 1);
+                                context.CopySubresourceRegion(
+                                    labelCache,
+                                    destLabelSliceSubresource,
+                                    0, 0, 0,
+                                    stagingLabelTexture,
+                                    0,
+                                    srcBox);
+                            }
                         }
                     }
                 }
+
+                successfulUploads++;
+                return true;
             }
             catch (Exception ex)
             {
                 Logger.Log($"[ChunkStreamingManager] Error uploading chunk {chunkIndex}: {ex.Message}");
+                failedUploads++;
+                return false;
             }
         }
 
@@ -463,7 +596,7 @@ namespace CTS.D3D11
 
             try
             {
-                // Wait for tasks to complete
+                // Wait for tasks to complete with timeout
                 var tasks = new List<Task>();
                 if (streamingTask != null) tasks.Add(streamingTask);
                 if (uploadTask != null) tasks.Add(uploadTask);
@@ -481,11 +614,14 @@ namespace CTS.D3D11
                 Logger.Log($"[ChunkStreamingManager] Error waiting for tasks: {ex.Message}");
             }
 
+            // Report final statistics
+            Logger.Log($"[ChunkStreamingManager] Final stats - Successful uploads: {successfulUploads}, Failed: {failedUploads}");
+
             // Clean up resources
             cancellationTokenSource?.Dispose();
             uploadSignal?.Dispose();
 
-            // Clear staging textures - check if not null before disposing
+            // Clear staging textures
             try
             {
                 stagingGrayscaleTexture?.Dispose();

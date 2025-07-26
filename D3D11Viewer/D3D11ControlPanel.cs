@@ -3,6 +3,8 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
 using System.Linq;
 using System.Windows.Forms;
 using Vector2 = System.Numerics.Vector2;
@@ -105,7 +107,8 @@ namespace CTS.D3D11
             {
                 Dock = DockStyle.Fill,
                 Font = new Font("Segoe UI", 9.5F),
-                ItemSize = new Size(110, 32)
+                ItemSize = new Size(110, 32),
+                SizeMode = TabSizeMode.Fixed
             };
 
             // Create tabs
@@ -130,78 +133,72 @@ namespace CTS.D3D11
 
         private void SetupRenderingTab(TabPage page)
         {
-            var container = new TableLayoutPanel
+            var container = new Panel
             {
                 Dock = DockStyle.Fill,
-                ColumnCount = 1,
-                RowCount = 4,
                 Padding = new Padding(10),
                 AutoScroll = true
             };
-            container.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            container.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            container.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            container.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
 
             // Quality Section
             var qualityGroup = CreateStyledGroupBox("Rendering Quality");
-            var qualityPanel = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 2,
-                RowCount = 1,
-                Height = 40
-            };
-            qualityPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100F));
-            qualityPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            qualityGroup.Location = new Point(10, 10);
+            qualityGroup.Size = new Size(container.ClientSize.Width - 40, 80);
+            qualityGroup.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
-            qualityPanel.Controls.Add(new Label { Text = "Quality:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
+            var qualityLabel = new Label
+            {
+                Text = "Quality:",
+                Location = new Point(10, 30),
+                AutoSize = true
+            };
+
             cmbQuality = new ComboBox
             {
-                Dock = DockStyle.Fill,
+                Location = new Point(100, 27),
+                Size = new Size(200, 24),
                 DropDownStyle = ComboBoxStyle.DropDownList,
                 Font = new Font("Segoe UI", 9F)
             };
             cmbQuality.Items.AddRange(new[] { "Fast (Draft)", "Balanced", "High Quality" });
             cmbQuality.SelectedIndex = 1;
             cmbQuality.SelectedIndexChanged += (s, e) => UpdateRenderParams();
-            qualityPanel.Controls.Add(cmbQuality, 1, 0);
 
-            qualityGroup.Controls.Add(qualityPanel);
-            container.Controls.Add(qualityGroup, 0, 0);
+            qualityGroup.Controls.Add(qualityLabel);
+            qualityGroup.Controls.Add(cmbQuality);
+            container.Controls.Add(qualityGroup);
 
             // Grayscale Section
             var grayscaleGroup = CreateStyledGroupBox("Grayscale Volume");
-            var grayscalePanel = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 1,
-                RowCount = 3,
-                AutoSize = true
-            };
+            grayscaleGroup.Location = new Point(10, 100);
+            grayscaleGroup.Size = new Size(container.ClientSize.Width - 40, 220);
+            grayscaleGroup.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
             chkShowGrayscale = new CheckBox
             {
                 Text = "Show Grayscale Data",
+                Location = new Point(10, 30),
                 AutoSize = true,
                 Checked = true,
-                Font = new Font("Segoe UI", 9F),
-                Margin = new Padding(0, 0, 0, 10)
+                Font = new Font("Segoe UI", 9F)
             };
             chkShowGrayscale.CheckedChanged += (s, e) => UpdateRenderParams();
-            grayscalePanel.Controls.Add(chkShowGrayscale, 0, 0);
 
-            // Threshold controls with live update
-            var thresholdPanel = new Panel { Dock = DockStyle.Fill, Height = 120 };
+            lblMinThreshold = new Label
+            {
+                Text = "Min Threshold: 30",
+                Location = new Point(10, 65),
+                AutoSize = true
+            };
 
-            lblMinThreshold = new Label { Text = "Min Threshold: 30", Location = new Point(0, 5), AutoSize = true };
             trkMinThreshold = new TrackBar
             {
+                Location = new Point(10, 85),
+                Size = new Size(grayscaleGroup.ClientSize.Width - 30, 45),
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
                 Minimum = 0,
                 Maximum = 255,
                 Value = 30,
-                Width = 300,
-                Location = new Point(0, 25),
                 TickFrequency = 16,
                 TickStyle = TickStyle.BottomRight
             };
@@ -213,14 +210,21 @@ namespace CTS.D3D11
                 UpdateRenderParams();
             };
 
-            lblMaxThreshold = new Label { Text = "Max Threshold: 200", Location = new Point(0, 60), AutoSize = true };
+            lblMaxThreshold = new Label
+            {
+                Text = "Max Threshold: 200",
+                Location = new Point(10, 135),
+                AutoSize = true
+            };
+
             trkMaxThreshold = new TrackBar
             {
+                Location = new Point(10, 155),
+                Size = new Size(grayscaleGroup.ClientSize.Width - 30, 45),
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
                 Minimum = 0,
                 Maximum = 255,
                 Value = 200,
-                Width = 300,
-                Location = new Point(0, 80),
                 TickFrequency = 16,
                 TickStyle = TickStyle.BottomRight
             };
@@ -232,39 +236,35 @@ namespace CTS.D3D11
                 UpdateRenderParams();
             };
 
-            thresholdPanel.Controls.AddRange(new Control[] { lblMinThreshold, trkMinThreshold, lblMaxThreshold, trkMaxThreshold });
-            grayscalePanel.Controls.Add(thresholdPanel, 0, 1);
-
-            grayscaleGroup.Controls.Add(grayscalePanel);
-            container.Controls.Add(grayscaleGroup, 0, 1);
+            grayscaleGroup.Controls.Add(chkShowGrayscale);
+            grayscaleGroup.Controls.Add(lblMinThreshold);
+            grayscaleGroup.Controls.Add(trkMinThreshold);
+            grayscaleGroup.Controls.Add(lblMaxThreshold);
+            grayscaleGroup.Controls.Add(trkMaxThreshold);
+            container.Controls.Add(grayscaleGroup);
 
             page.Controls.Add(container);
         }
 
         private void SetupMaterialsTab(TabPage page)
         {
-            var splitContainer = new SplitContainer
+            var container = new Panel
             {
                 Dock = DockStyle.Fill,
-                Orientation = Orientation.Horizontal,
-                Panel1MinSize = 200,
-                Panel2MinSize = 150,
-                
+                Padding = new Padding(10)
             };
-            splitContainer.HandleCreated += (s, e) =>
-            {
-                int max = splitContainer.Height - splitContainer.Panel2MinSize;
-                int desired = (int)(splitContainer.Height * 0.6);
-                splitContainer.SplitterDistance = Math.Max(splitContainer.Panel1MinSize, Math.Min(desired, max));
-            };
-            // Top panel - Materials list
-            var topPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
+
+            // Materials list
             var materialsGroup = CreateStyledGroupBox("Material Visibility");
-            materialsGroup.Dock = DockStyle.Fill;
+            materialsGroup.Location = new Point(10, 10);
+            materialsGroup.Size = new Size(container.ClientSize.Width - 20, 300);
+            materialsGroup.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
             lstMaterials = new CheckedListBox
             {
-                Dock = DockStyle.Fill,
+                Location = new Point(10, 25),
+                Size = new Size(materialsGroup.ClientSize.Width - 20, 260),
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
                 CheckOnClick = true,
                 Font = new Font("Segoe UI", 9F),
                 BorderStyle = BorderStyle.FixedSingle
@@ -273,40 +273,32 @@ namespace CTS.D3D11
             lstMaterials.SelectedIndexChanged += LstMaterials_SelectedIndexChanged;
 
             materialsGroup.Controls.Add(lstMaterials);
-            topPanel.Controls.Add(materialsGroup);
+            container.Controls.Add(materialsGroup);
 
-            // Bottom panel - Material properties
-            var bottomPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
+            // Material properties
             var propertiesGroup = CreateStyledGroupBox("Material Properties");
-            propertiesGroup.Dock = DockStyle.Fill;
+            propertiesGroup.Location = new Point(10, 320);
+            propertiesGroup.Size = new Size(container.ClientSize.Width - 20, 200);
+            propertiesGroup.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
-            var propsPanel = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 2,
-                RowCount = 4,
-                RowStyles = {
-                    new RowStyle(SizeType.AutoSize),
-                    new RowStyle(SizeType.AutoSize),
-                    new RowStyle(SizeType.AutoSize),
-                    new RowStyle(SizeType.Percent, 100F)
-                }
-            };
-
-            // Material name
             lblMaterialName = new Label
             {
                 Text = "Select a material",
+                Location = new Point(10, 25),
                 Font = new Font("Segoe UI", 10F, FontStyle.Bold),
                 AutoSize = true
             };
-            propsPanel.Controls.Add(lblMaterialName, 0, 0);
-            propsPanel.SetColumnSpan(lblMaterialName, 2);
 
-            // Material color
-            propsPanel.Controls.Add(new Label { Text = "Color:", AutoSize = true }, 0, 1);
+            var lblColor = new Label
+            {
+                Text = "Color:",
+                Location = new Point(10, 55),
+                AutoSize = true
+            };
+
             materialColorPanel = new Panel
             {
+                Location = new Point(60, 53),
                 Size = new Size(60, 24),
                 BorderStyle = BorderStyle.FixedSingle,
                 BackColor = Color.White,
@@ -325,28 +317,32 @@ namespace CTS.D3D11
                     UpdateMaterialBuffer();
                 }
             };
-            propsPanel.Controls.Add(materialColorPanel, 1, 1);
 
-            // Opacity slider
-            propsPanel.Controls.Add(new Label { Text = "Opacity:", AutoSize = true }, 0, 2);
-            var opacityContainer = new Panel { Dock = DockStyle.Fill, Height = 50 };
+            var lblOpacityText = new Label
+            {
+                Text = "Opacity:",
+                Location = new Point(10, 95),
+                AutoSize = true
+            };
+
+            trkOpacity = new TrackBar
+            {
+                Location = new Point(10, 115),
+                Size = new Size(250, 45),
+                Minimum = 0,
+                Maximum = 100,
+                Value = 100,
+                TickFrequency = 10,
+                TickStyle = TickStyle.BottomRight
+            };
 
             lblOpacity = new Label
             {
                 Text = "100%",
-                Location = new Point(260, 5),
+                Location = new Point(270, 120),
                 AutoSize = true
             };
-            trkOpacity = new TrackBar
-            {
-                Minimum = 0,
-                Maximum = 100,
-                Value = 100,
-                Width = 250,
-                Location = new Point(0, 0),
-                TickFrequency = 10,
-                TickStyle = TickStyle.BottomRight
-            };
+
             trkOpacity.Scroll += (s, e) =>
             {
                 lblOpacity.Text = $"{trkOpacity.Value}%";
@@ -358,49 +354,41 @@ namespace CTS.D3D11
                 }
             };
 
-            opacityContainer.Controls.AddRange(new Control[] { trkOpacity, lblOpacity });
-            propsPanel.Controls.Add(opacityContainer, 1, 2);
+            propertiesGroup.Controls.Add(lblMaterialName);
+            propertiesGroup.Controls.Add(lblColor);
+            propertiesGroup.Controls.Add(materialColorPanel);
+            propertiesGroup.Controls.Add(lblOpacityText);
+            propertiesGroup.Controls.Add(trkOpacity);
+            propertiesGroup.Controls.Add(lblOpacity);
+            container.Controls.Add(propertiesGroup);
 
-            propertiesGroup.Controls.Add(propsPanel);
-            bottomPanel.Controls.Add(propertiesGroup);
-
-            splitContainer.Panel1.Controls.Add(topPanel);
-            splitContainer.Panel2.Controls.Add(bottomPanel);
-            page.Controls.Add(splitContainer);
+            page.Controls.Add(container);
         }
 
         private void SetupClippingTab(TabPage page)
         {
-            var mainPanel = new TableLayoutPanel
+            var container = new Panel
             {
                 Dock = DockStyle.Fill,
-                ColumnCount = 1,
-                RowCount = 3,
-                Padding = new Padding(10)
+                Padding = new Padding(10),
+                AutoScroll = true
             };
-            mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 180F));
-            mainPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-            mainPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 100F));
 
             // Clipping planes list
             var planesGroup = CreateStyledGroupBox("Clipping Planes");
-
-            var planesPanel = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 1,
-                RowCount = 2
-            };
-            planesPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-            planesPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 40F));
+            planesGroup.Location = new Point(10, 10);
+            planesGroup.Size = new Size(container.ClientSize.Width - 20, 180);
+            planesGroup.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
             lstClippingPlanes = new ListView
             {
+                Location = new Point(10, 25),
+                Size = new Size(planesGroup.ClientSize.Width - 20, 110),
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
                 View = View.Details,
                 FullRowSelect = true,
                 GridLines = true,
                 CheckBoxes = true,
-                Dock = DockStyle.Fill,
                 Font = new Font("Segoe UI", 9F)
             };
             lstClippingPlanes.Columns.Add("Name", 180);
@@ -423,200 +411,244 @@ namespace CTS.D3D11
             };
             lstClippingPlanes.SelectedIndexChanged += LstClippingPlanes_SelectedIndexChanged;
 
-            var buttonPanel = new FlowLayoutPanel
-            {
-                FlowDirection = FlowDirection.LeftToRight,
-                Dock = DockStyle.Fill,
-                Height = 35
-            };
-
             btnAddPlane = CreateStyledButton("Add", 70);
-            btnRemovePlane = CreateStyledButton("Remove", 70);
+            btnAddPlane.Location = new Point(10, 145);
             btnAddPlane.Click += BtnAddPlane_Click;
+
+            btnRemovePlane = CreateStyledButton("Remove", 70);
+            btnRemovePlane.Location = new Point(90, 145);
             btnRemovePlane.Click += BtnRemovePlane_Click;
 
-            buttonPanel.Controls.AddRange(new Control[] { btnAddPlane, btnRemovePlane });
-
-            planesPanel.Controls.Add(lstClippingPlanes, 0, 0);
-            planesPanel.Controls.Add(buttonPanel, 0, 1);
-            planesGroup.Controls.Add(planesPanel);
-            mainPanel.Controls.Add(planesGroup, 0, 0);
+            planesGroup.Controls.Add(lstClippingPlanes);
+            planesGroup.Controls.Add(btnAddPlane);
+            planesGroup.Controls.Add(btnRemovePlane);
+            container.Controls.Add(planesGroup);
 
             // Plane editor
             var editorGroup = CreateStyledGroupBox("Plane Properties");
-            var editorPanel = new TableLayoutPanel
+            editorGroup.Location = new Point(10, 200);
+            editorGroup.Size = new Size(container.ClientSize.Width - 20, 350);
+            editorGroup.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+
+            chkEnablePlane = new CheckBox
             {
-                Dock = DockStyle.Fill,
-                ColumnCount = 2,
-                RowCount = 9,
-                AutoScroll = true
+                Text = "Enable Plane",
+                Location = new Point(10, 25),
+                AutoSize = true
+            };
+            chkEnablePlane.CheckedChanged += (s, e) => UpdateSelectedPlane();
+
+            chkMirrorPlane = new CheckBox
+            {
+                Text = "Mirror Plane",
+                Location = new Point(150, 25),
+                AutoSize = true
+            };
+            chkMirrorPlane.CheckedChanged += (s, e) => UpdateSelectedPlane();
+
+            var lblPreset = new Label
+            {
+                Text = "Preset:",
+                Location = new Point(10, 55),
+                AutoSize = true
             };
 
-            // Enable and Mirror checkboxes
-            chkEnablePlane = new CheckBox { Text = "Enable Plane", AutoSize = true };
-            chkEnablePlane.CheckedChanged += (s, e) => UpdateSelectedPlane();
-            editorPanel.Controls.Add(chkEnablePlane, 0, 0);
-
-            chkMirrorPlane = new CheckBox { Text = "Mirror Plane", AutoSize = true };
-            chkMirrorPlane.CheckedChanged += (s, e) => UpdateSelectedPlane();
-            editorPanel.Controls.Add(chkMirrorPlane, 1, 0);
-
-            // Preset dropdown
-            editorPanel.Controls.Add(new Label { Text = "Preset:", AutoSize = true }, 0, 1);
             cmbPlanePresets = new ComboBox
             {
-                Dock = DockStyle.Fill,
+                Location = new Point(60, 52),
+                Size = new Size(150, 24),
                 DropDownStyle = ComboBoxStyle.DropDownList
             };
             cmbPlanePresets.Items.AddRange(new[] { "Custom", "X Axis", "Y Axis", "Z Axis", "XY Diagonal", "XZ Diagonal", "YZ Diagonal" });
             cmbPlanePresets.SelectedIndexChanged += CmbPresets_SelectedIndexChanged;
-            editorPanel.Controls.Add(cmbPlanePresets, 1, 1);
 
-            // Normal X
-            lblNormalX = new Label { Text = "Normal X: 0.00", AutoSize = true };
-            editorPanel.Controls.Add(lblNormalX, 0, 2);
-            trkPlaneNormalX = new TrackBar { Minimum = -100, Maximum = 100, Value = 0, Dock = DockStyle.Fill };
+            // Normal controls
+            lblNormalX = new Label { Text = "Normal X: 0.00", Location = new Point(10, 90), AutoSize = true };
+            trkPlaneNormalX = new TrackBar
+            {
+                Location = new Point(10, 110),
+                Size = new Size(300, 45),
+                Minimum = -100,
+                Maximum = 100,
+                Value = 0,
+                TickFrequency = 20
+            };
             trkPlaneNormalX.Scroll += (s, e) => { lblNormalX.Text = $"Normal X: {trkPlaneNormalX.Value / 100.0f:F2}"; UpdateSelectedPlane(); };
-            editorPanel.Controls.Add(trkPlaneNormalX, 1, 2);
 
-            // Normal Y
-            lblNormalY = new Label { Text = "Normal Y: 0.00", AutoSize = true };
-            editorPanel.Controls.Add(lblNormalY, 0, 3);
-            trkPlaneNormalY = new TrackBar { Minimum = -100, Maximum = 100, Value = 0, Dock = DockStyle.Fill };
+            lblNormalY = new Label { Text = "Normal Y: 0.00", Location = new Point(10, 155), AutoSize = true };
+            trkPlaneNormalY = new TrackBar
+            {
+                Location = new Point(10, 175),
+                Size = new Size(300, 45),
+                Minimum = -100,
+                Maximum = 100,
+                Value = 0,
+                TickFrequency = 20
+            };
             trkPlaneNormalY.Scroll += (s, e) => { lblNormalY.Text = $"Normal Y: {trkPlaneNormalY.Value / 100.0f:F2}"; UpdateSelectedPlane(); };
-            editorPanel.Controls.Add(trkPlaneNormalY, 1, 3);
 
-            // Normal Z
-            lblNormalZ = new Label { Text = "Normal Z: 1.00", AutoSize = true };
-            editorPanel.Controls.Add(lblNormalZ, 0, 4);
-            trkPlaneNormalZ = new TrackBar { Minimum = -100, Maximum = 100, Value = 100, Dock = DockStyle.Fill };
+            lblNormalZ = new Label { Text = "Normal Z: 1.00", Location = new Point(10, 220), AutoSize = true };
+            trkPlaneNormalZ = new TrackBar
+            {
+                Location = new Point(10, 240),
+                Size = new Size(300, 45),
+                Minimum = -100,
+                Maximum = 100,
+                Value = 100,
+                TickFrequency = 20
+            };
             trkPlaneNormalZ.Scroll += (s, e) => { lblNormalZ.Text = $"Normal Z: {trkPlaneNormalZ.Value / 100.0f:F2}"; UpdateSelectedPlane(); };
-            editorPanel.Controls.Add(trkPlaneNormalZ, 1, 4);
 
-            // Rotation
-            lblRotation = new Label { Text = "Rotation: 0°", AutoSize = true };
-            editorPanel.Controls.Add(lblRotation, 0, 5);
-            trkPlaneRotation = new TrackBar { Minimum = 0, Maximum = 360, Value = 0, Dock = DockStyle.Fill };
-            trkPlaneRotation.Scroll += (s, e) => { lblRotation.Text = $"Rotation: {trkPlaneRotation.Value}°"; UpdateSelectedPlane(); };
-            editorPanel.Controls.Add(trkPlaneRotation, 1, 5);
-
-            // Distance
-            lblDistance = new Label { Text = "Distance: 0.00", AutoSize = true };
-            editorPanel.Controls.Add(lblDistance, 0, 6);
-            trkPlaneDistance = new TrackBar { Minimum = -200, Maximum = 200, Value = 0, Dock = DockStyle.Fill };
+            lblDistance = new Label { Text = "Distance: 0.00", Location = new Point(10, 285), AutoSize = true };
+            trkPlaneDistance = new TrackBar
+            {
+                Location = new Point(10, 305),
+                Size = new Size(300, 45),
+                Minimum = -200,
+                Maximum = 200,
+                Value = 0,
+                TickFrequency = 20
+            };
             trkPlaneDistance.Scroll += (s, e) => { lblDistance.Text = $"Distance: {trkPlaneDistance.Value / 100.0f:F2}"; UpdateSelectedPlane(); };
-            editorPanel.Controls.Add(trkPlaneDistance, 1, 6);
 
-            editorGroup.Controls.Add(editorPanel);
-            mainPanel.Controls.Add(editorGroup, 0, 1);
+            editorGroup.Controls.Add(chkEnablePlane);
+            editorGroup.Controls.Add(chkMirrorPlane);
+            editorGroup.Controls.Add(lblPreset);
+            editorGroup.Controls.Add(cmbPlanePresets);
+            editorGroup.Controls.Add(lblNormalX);
+            editorGroup.Controls.Add(trkPlaneNormalX);
+            editorGroup.Controls.Add(lblNormalY);
+            editorGroup.Controls.Add(trkPlaneNormalY);
+            editorGroup.Controls.Add(lblNormalZ);
+            editorGroup.Controls.Add(trkPlaneNormalZ);
+            editorGroup.Controls.Add(lblDistance);
+            editorGroup.Controls.Add(trkPlaneDistance);
+            container.Controls.Add(editorGroup);
 
             // Plane preview
             var previewGroup = CreateStyledGroupBox("Preview");
+            previewGroup.Location = new Point(10, 560);
+            previewGroup.Size = new Size(container.ClientSize.Width - 20, 100);
+            previewGroup.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+
             planePreviewPanel = new Panel
             {
-                Dock = DockStyle.Fill,
+                Location = new Point(10, 25),
+                Size = new Size(previewGroup.ClientSize.Width - 20, 65),
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
                 BackColor = Color.FromArgb(30, 30, 30)
             };
             planePreviewPanel.Paint += PlanePreviewPanel_Paint;
-            previewGroup.Controls.Add(planePreviewPanel);
-            mainPanel.Controls.Add(previewGroup, 0, 2);
 
-            page.Controls.Add(mainPanel);
+            previewGroup.Controls.Add(planePreviewPanel);
+            container.Controls.Add(previewGroup);
+
+            page.Controls.Add(container);
         }
 
         private void SetupVisualizationTab(TabPage page)
         {
-            var container = new TableLayoutPanel
+            var container = new Panel
             {
                 Dock = DockStyle.Fill,
-                ColumnCount = 1,
-                RowCount = 3,
                 Padding = new Padding(10),
                 AutoScroll = true
             };
-            container.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            container.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            container.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
 
             // Scale Bar Section
             var scaleBarGroup = CreateStyledGroupBox("Scale Bar");
-            var scalePanel = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 2,
-                RowCount = 5,
-                AutoSize = true
-            };
-            scalePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150F));
-            scalePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            scaleBarGroup.Location = new Point(10, 10);
+            scaleBarGroup.Size = new Size(container.ClientSize.Width - 20, 200);
+            scaleBarGroup.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
             chkShowScaleBar = new CheckBox
             {
                 Text = "Show Scale Bar",
+                Location = new Point(10, 30),
                 AutoSize = true,
                 Checked = true
             };
             chkShowScaleBar.CheckedChanged += (s, e) => UpdateRenderParams();
-            scalePanel.Controls.Add(chkShowScaleBar, 0, 0);
-            scalePanel.SetColumnSpan(chkShowScaleBar, 2);
 
             chkShowScaleText = new CheckBox
             {
                 Text = "Show Scale Text",
+                Location = new Point(10, 55),
                 AutoSize = true,
                 Checked = true
             };
             chkShowScaleText.CheckedChanged += (s, e) => UpdateRenderParams();
-            scalePanel.Controls.Add(chkShowScaleText, 0, 1);
-            scalePanel.SetColumnSpan(chkShowScaleText, 2);
 
-            scalePanel.Controls.Add(new Label { Text = "Position:", AutoSize = true }, 0, 2);
+            var lblPosition = new Label
+            {
+                Text = "Position:",
+                Location = new Point(10, 85),
+                AutoSize = true
+            };
+
             cmbScaleBarPosition = new ComboBox
             {
-                Dock = DockStyle.Fill,
+                Location = new Point(80, 82),
+                Size = new Size(150, 24),
                 DropDownStyle = ComboBoxStyle.DropDownList
             };
-            // Fixed: Corrected the order to match shader expectations
             cmbScaleBarPosition.Items.AddRange(new[] { "Bottom Left", "Bottom Right", "Top Left", "Top Right" });
             cmbScaleBarPosition.SelectedIndex = 0;
             cmbScaleBarPosition.SelectedIndexChanged += (s, e) => UpdateRenderParams();
-            scalePanel.Controls.Add(cmbScaleBarPosition, 1, 2);
 
-            scalePanel.Controls.Add(new Label { Text = "Length (mm):", AutoSize = true }, 0, 3);
+            var lblLength = new Label
+            {
+                Text = "Length:",
+                Location = new Point(10, 115),
+                AutoSize = true
+            };
+
             numScaleBarLength = new NumericUpDown
             {
-                Dock = DockStyle.Fill,
-                Minimum = 10,
-                Maximum = 1000,
+                Location = new Point(100, 113),
+                Size = new Size(100, 24),
+                Minimum = 1,
+                Maximum = 10000,
                 Value = 100,
                 Increment = 10,
                 DecimalPlaces = 0
             };
             numScaleBarLength.ValueChanged += (s, e) => UpdateRenderParams();
-            scalePanel.Controls.Add(numScaleBarLength, 1, 3);
+
+            // Add a label to show the units
+            var lblUnits = new Label
+            {
+                Text = "Unit",
+                Location = new Point(205, 115),
+                AutoSize = true
+            };
 
             lblScaleBarUnits = new Label
             {
-                Text = $"Pixel Size: {mainForm.pixelSize:F3} mm",
+                Text = GetPixelSizeText(),
+                Location = new Point(10, 145),
                 AutoSize = true,
                 Font = new Font("Segoe UI", 8F, FontStyle.Italic)
             };
-            scalePanel.Controls.Add(lblScaleBarUnits, 0, 4);
-            scalePanel.SetColumnSpan(lblScaleBarUnits, 2);
 
-            scaleBarGroup.Controls.Add(scalePanel);
-            container.Controls.Add(scaleBarGroup, 0, 0);
+            scaleBarGroup.Controls.Add(chkShowScaleBar);
+            scaleBarGroup.Controls.Add(chkShowScaleText);
+            scaleBarGroup.Controls.Add(lblPosition);
+            scaleBarGroup.Controls.Add(cmbScaleBarPosition);
+            scaleBarGroup.Controls.Add(lblLength);
+            scaleBarGroup.Controls.Add(numScaleBarLength);
+            scaleBarGroup.Controls.Add(lblUnits);
+            scaleBarGroup.Controls.Add(lblScaleBarUnits);
+            container.Controls.Add(scaleBarGroup);
 
             // Background Section
             var bgGroup = CreateStyledGroupBox("Background");
-            var bgPanel = new FlowLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                FlowDirection = FlowDirection.LeftToRight,
-                Height = 40
-            };
+            bgGroup.Location = new Point(10, 220);
+            bgGroup.Size = new Size(container.ClientSize.Width - 20, 80);
+            bgGroup.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
             btnBackgroundColor = CreateStyledButton("Background Color...", 150);
+            btnBackgroundColor.Location = new Point(10, 30);
             btnBackgroundColor.Click += (s, e) =>
             {
                 if (colorDialog == null) colorDialog = new ColorDialog();
@@ -628,24 +660,148 @@ namespace CTS.D3D11
                     }
                 }
             };
-            bgPanel.Controls.Add(btnBackgroundColor);
 
-            bgGroup.Controls.Add(bgPanel);
-            container.Controls.Add(bgGroup, 0, 1);
+            bgGroup.Controls.Add(btnBackgroundColor);
+            container.Controls.Add(bgGroup);
+
+            // Screenshot Section
+            var screenshotGroup = CreateStyledGroupBox("Screenshot");
+            screenshotGroup.Location = new Point(10, 310);
+            screenshotGroup.Size = new Size(container.ClientSize.Width - 20, 80);
+            screenshotGroup.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+
+            Button btnScreenshot = CreateStyledButton("Take Screenshot", 150);
+            btnScreenshot.Location = new Point(10, 30);
+            btnScreenshot.Click += (s, e) => TakeScreenshot();
+
+            screenshotGroup.Controls.Add(btnScreenshot);
+            container.Controls.Add(screenshotGroup);
 
             page.Controls.Add(container);
-        }
 
+            // Set initial scale bar length based on pixel size
+            SetDefaultScaleBarLength();
+        }
+        private string GetPixelSizeText()
+        {
+            double pixelSizeMicrometers = mainForm.pixelSize * 1e6;
+            if (pixelSizeMicrometers < 1000)
+            {
+                return $"Pixel Size: {pixelSizeMicrometers:F1} µm";
+            }
+            else
+            {
+                double pixelSizeMillimeters = mainForm.pixelSize * 1e3;
+                return $"Pixel Size: {pixelSizeMillimeters:F3} mm";
+            }
+        }
+        private void SetDefaultScaleBarLength()
+        {
+            if (numScaleBarLength == null) return;
+
+            double pixelSizeMicrometers = mainForm.pixelSize * 1e6;
+
+            // Set scale bar length based on pixel size
+            if (pixelSizeMicrometers < 10) // Less than 10 micrometers
+            {
+                numScaleBarLength.Value = 10; // 10 mm = 10,000 micrometers
+            }
+            else if (pixelSizeMicrometers < 100) // 10-100 micrometers
+            {
+                numScaleBarLength.Value = 50; // 50 mm
+            }
+            else if (pixelSizeMicrometers < 1000) // 100-1000 micrometers
+            {
+                numScaleBarLength.Value = 100; // 100 mm
+            }
+            else // millimeter scale
+            {
+                numScaleBarLength.Value = 200; // 200 mm
+            }
+        }
+        public void TakeScreenshot()
+        {
+            if (viewerForm == null || viewerForm.IsDisposed || volumeRenderer == null || volumeRenderer.IsDisposed)
+            {
+                MessageBox.Show("No active 3D view to capture.", "Screenshot Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            try
+            {
+                // Create a bitmap of the viewer form's client area
+                Rectangle bounds = viewerForm.ClientRectangle;
+                if (bounds.Width <= 0 || bounds.Height <= 0)
+                {
+                    MessageBox.Show("Invalid window size for screenshot.", "Screenshot Error",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                using (Bitmap bitmap = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppArgb))
+                {
+                    // Capture the viewer form's content
+                    viewerForm.DrawToBitmap(bitmap, bounds);
+
+                    // Show save dialog
+                    using (SaveFileDialog sfd = new SaveFileDialog())
+                    {
+                        sfd.Filter = "PNG Image|*.png|JPEG Image|*.jpg|BMP Image|*.bmp|All Files|*.*";
+                        sfd.Title = "Save 3D View Screenshot";
+                        sfd.DefaultExt = "png";
+                        sfd.FileName = $"3DView_{DateTime.Now:yyyyMMdd_HHmmss}";
+
+                        if (sfd.ShowDialog() == DialogResult.OK)
+                        {
+                            // Determine the image format based on extension
+                            ImageFormat format = ImageFormat.Png;
+                            string ext = Path.GetExtension(sfd.FileName).ToLower();
+
+                            switch (ext)
+                            {
+                                case ".jpg":
+                                case ".jpeg":
+                                    format = ImageFormat.Jpeg;
+                                    break;
+                                case ".bmp":
+                                    format = ImageFormat.Bmp;
+                                    break;
+                                case ".gif":
+                                    format = ImageFormat.Gif;
+                                    break;
+                                case ".tiff":
+                                case ".tif":
+                                    format = ImageFormat.Tiff;
+                                    break;
+                            }
+
+                            // Save the image
+                            bitmap.Save(sfd.FileName, format);
+
+                            Logger.Log($"[D3D11ControlPanel] Screenshot saved to: {sfd.FileName}");
+
+                            // Show confirmation
+                            MessageBox.Show($"Screenshot saved successfully to:\n{sfd.FileName}",
+                                "Screenshot Saved", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[D3D11ControlPanel] Screenshot error: {ex.Message}");
+                MessageBox.Show($"Error taking screenshot: {ex.Message}", "Screenshot Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
         private GroupBox CreateStyledGroupBox(string title)
         {
             var groupBox = new GroupBox
             {
                 Text = title,
                 Font = new Font("Segoe UI", 9.5F, FontStyle.Bold),
-                Padding = new Padding(8, 12, 8, 8),
-                Margin = new Padding(0, 0, 0, 12),
-                AutoSize = true,
-                AutoSizeMode = AutoSizeMode.GrowAndShrink
+                Padding = new Padding(8, 12, 8, 8)
             };
             return groupBox;
         }
@@ -909,14 +1065,6 @@ namespace CTS.D3D11
                 normal = new Vector3(0, 0, 1);
             }
 
-            // Apply rotation if needed
-            if (trkPlaneRotation.Value > 0)
-            {
-                float angle = trkPlaneRotation.Value * (float)Math.PI / 180f;
-                // Rotate around the axis perpendicular to the normal
-                // This is a simplified rotation - you may want to implement more sophisticated rotation
-            }
-
             clippingPlanes[selectedPlaneIndex] = new ClippingPlane
             {
                 Name = clippingPlanes[selectedPlaneIndex].Name,
@@ -1021,8 +1169,6 @@ namespace CTS.D3D11
             p.ShowScaleBar = (chkShowScaleBar?.Checked ?? true) ? 1.0f : 0.0f;
 
             // Fixed: Map combo box index to correct shader positions
-            // Combo: 0=BottomLeft, 1=BottomRight, 2=TopLeft, 3=TopRight
-            // Shader expects: 0=BottomLeft, 1=BottomRight, 2=TopLeft, 3=TopRight
             p.ScaleBarPosition = cmbScaleBarPosition?.SelectedIndex ?? 0;
 
             // Pass scale bar settings
@@ -1056,8 +1202,26 @@ namespace CTS.D3D11
             // Update scale bar units label
             if (lblScaleBarUnits != null)
             {
-                lblScaleBarUnits.Text = $"Pixel Size: {mainForm.pixelSize:F3} mm";
+                lblScaleBarUnits.Text = GetPixelSizeText();
             }
+
+            // Set appropriate default scale bar length
+            SetDefaultScaleBarLength();
+
+            // Force initial render parameters update
+            UpdateRenderParams();
+
+            // Force layout update
+            PerformLayout();
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+
+            // Force relayout of all controls
+            PerformLayout();
+            Invalidate(true);
         }
 
         protected override void Dispose(bool disposing)

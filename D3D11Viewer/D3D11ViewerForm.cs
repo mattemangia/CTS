@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Windows.Forms;
 using System.Numerics;
 using System.Diagnostics;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace CTS.D3D11
@@ -16,8 +17,12 @@ namespace CTS.D3D11
         private MainForm mainForm;
 
         private Point lastMousePos;
-        private bool isRenderLoopRunning = false;
+        private volatile bool isRenderLoopRunning = false;
         private readonly System.Windows.Forms.Timer lodResetTimer;
+        private CancellationTokenSource renderCancellation;
+        private Task renderTask;
+        private readonly object disposeLock = new object();
+        private bool isDisposing = false;
 
         public D3D11ViewerForm(MainForm mainForm)
         {
@@ -39,18 +44,16 @@ namespace CTS.D3D11
 
                 // Create control panel after renderer is initialized
                 controlPanel = new D3D11ControlPanel(this, mainForm, renderer);
-                controlPanel.Show(this);
+                controlPanel.Owner = this; // Set owner to ensure proper disposal order
+                controlPanel.Show();
 
-                // Start render loop only after everything is initialized
-                isRenderLoopRunning = true;
-                this.FormClosing += (s, e) => isRenderLoopRunning = false;
-
-                // Start render loop with a small delay to ensure everything is ready
-                Task.Delay(100).ContinueWith(_ => Task.Run(RenderLoop));
+                // Start render loop
+                StartRenderLoop();
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Failed to initialize D3D11 Renderer: {ex.Message}\n\nThis might be due to missing DirectX components or an unsupported GPU.", "Renderer Initialization Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show($"Failed to initialize D3D11 Renderer: {ex.Message}\n\nThis might be due to missing DirectX components or an unsupported GPU.",
+                    "Renderer Initialization Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 Logger.Log($"[D3D11] Renderer Initialization Failed: {ex}");
                 this.Close();
                 return;
@@ -62,6 +65,9 @@ namespace CTS.D3D11
             this.Text = "CTS 3D Viewer (Direct3D 11)";
             this.Size = new Size(1024, 768);
             this.BackColor = Color.Black;
+            this.FormBorderStyle = FormBorderStyle.Sizable;
+            this.StartPosition = FormStartPosition.CenterScreen;
+
             try
             {
                 this.Icon = Properties.Resources.favicon;
@@ -72,27 +78,55 @@ namespace CTS.D3D11
         private void InitializeCamera()
         {
             float volumeSize = Math.Max(mainForm.GetWidth(), Math.Max(mainForm.GetHeight(), mainForm.GetDepth()));
-            camera = new Camera(new Vector3(volumeSize * 1.5f), Vector3.Zero, Vector3.UnitY,
+            camera = new Camera(
+                new Vector3(volumeSize * 1.5f, volumeSize * 0.5f, volumeSize * 1.5f),
+                new Vector3(volumeSize * 0.5f, volumeSize * 0.5f, volumeSize * 0.5f),
+                Vector3.UnitY,
                 (float)ClientSize.Width / ClientSize.Height);
         }
 
-        private async Task RenderLoop()
+        private void StartRenderLoop()
         {
-            // Wait a bit more to ensure everything is initialized
-            await Task.Delay(100);
+            lock (disposeLock)
+            {
+                if (isDisposing) return;
 
-            while (isRenderLoopRunning && !IsDisposed)
+                renderCancellation = new CancellationTokenSource();
+                isRenderLoopRunning = true;
+
+                renderTask = Task.Run(async () => await RenderLoop(renderCancellation.Token), renderCancellation.Token);
+            }
+        }
+
+        private async Task RenderLoop(CancellationToken cancellationToken)
+        {
+            // Wait a bit to ensure everything is initialized
+            await Task.Delay(100, cancellationToken);
+
+            while (!cancellationToken.IsCancellationRequested && isRenderLoopRunning)
             {
                 try
                 {
-                    if (renderer != null && !IsDisposed)
+                    if (renderer != null && !IsDisposed && IsHandleCreated)
                     {
-                        // Use BeginInvoke to ensure we're on the UI thread for rendering
-                        if (InvokeRequired)
+                        // Invoke on UI thread
+                        if (InvokeRequired && !IsDisposed)
                         {
-                            BeginInvoke(new Action(() => renderer.Render(camera)));
+                            try
+                            {
+                                BeginInvoke(new Action(() =>
+                                {
+                                    if (!isDisposing && renderer != null)
+                                        renderer.Render(camera);
+                                }));
+                            }
+                            catch (ObjectDisposedException)
+                            {
+                                // Form was disposed while we were trying to invoke
+                                break;
+                            }
                         }
-                        else
+                        else if (!isDisposing && renderer != null)
                         {
                             renderer.Render(camera);
                         }
@@ -101,11 +135,19 @@ namespace CTS.D3D11
                 catch (Exception ex)
                 {
                     Logger.Log($"[RenderLoop] Error: {ex.Message}");
-                    // Don't crash the loop on render errors
                 }
 
-                await Task.Delay(16); // ~60 FPS
+                try
+                {
+                    await Task.Delay(16, cancellationToken); // ~60 FPS
+                }
+                catch (TaskCanceledException)
+                {
+                    break;
+                }
             }
+
+            Logger.Log("[RenderLoop] Exited cleanly");
         }
 
         public void UpdateRenderParameters(RenderParameters parameters)
@@ -121,7 +163,7 @@ namespace CTS.D3D11
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            if (renderer != null && ClientSize.Width > 0 && ClientSize.Height > 0)
+            if (renderer != null && ClientSize.Width > 0 && ClientSize.Height > 0 && !isDisposing)
             {
                 renderer.Resize(ClientSize.Width, ClientSize.Height);
                 if (camera != null)
@@ -133,10 +175,10 @@ namespace CTS.D3D11
 
         private void NotifyCameraMoving()
         {
-            if (renderer != null)
+            if (renderer != null && !isDisposing)
             {
                 renderer.SetIsCameraMoving(true);
-                renderer.NeedsRender = true; // Force immediate render
+                renderer.NeedsRender = true;
             }
             lodResetTimer.Stop();
             lodResetTimer.Start();
@@ -166,6 +208,12 @@ namespace CTS.D3D11
                 camera.Pan(dx, dy);
                 NotifyCameraMoving();
             }
+            else if (e.Button == MouseButtons.Middle) // Alternative zoom
+            {
+                float dy = (e.Y - lastMousePos.Y) * 0.01f;
+                camera.Zoom(dy);
+                NotifyCameraMoving();
+            }
             lastMousePos = e.Location;
         }
 
@@ -176,13 +224,89 @@ namespace CTS.D3D11
             NotifyCameraMoving();
         }
 
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            Logger.Log("[D3D11ViewerForm] Form closing started");
+
+            lock (disposeLock)
+            {
+                isDisposing = true;
+                isRenderLoopRunning = false;
+            }
+
+            // Stop the render loop first
+            if (renderCancellation != null)
+            {
+                renderCancellation.Cancel();
+                try
+                {
+                    // Wait for render loop to finish, but not indefinitely
+                    if (renderTask != null && !renderTask.Wait(1000))
+                    {
+                        Logger.Log("[D3D11ViewerForm] Render task did not complete in time");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[D3D11ViewerForm] Exception waiting for render task: {ex.Message}");
+                }
+                renderCancellation.Dispose();
+            }
+
+            // Stop timers
+            lodResetTimer?.Stop();
+            lodResetTimer?.Dispose();
+
+            // Close control panel first (it references the renderer)
+            if (controlPanel != null && !controlPanel.IsDisposed)
+            {
+                controlPanel.Close();
+                controlPanel = null;
+            }
+
+            base.OnFormClosing(e);
+        }
+
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
-            isRenderLoopRunning = false;
-            lodResetTimer?.Dispose();
-            controlPanel?.Close();
-            renderer?.Dispose();
+            Logger.Log("[D3D11ViewerForm] Form closed, disposing renderer");
+
+            // Dispose renderer last
+            if (renderer != null)
+            {
+                try
+                {
+                    renderer.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[D3D11ViewerForm] Error disposing renderer: {ex.Message}");
+                }
+                renderer = null;
+            }
+
             base.OnFormClosed(e);
+
+            Logger.Log("[D3D11ViewerForm] Form closed completely");
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                lock (disposeLock)
+                {
+                    isDisposing = true;
+                }
+
+                lodResetTimer?.Dispose();
+                renderCancellation?.Dispose();
+
+                // The renderer should already be disposed in OnFormClosed
+                renderer?.Dispose();
+            }
+
+            base.Dispose(disposing);
         }
     }
 }

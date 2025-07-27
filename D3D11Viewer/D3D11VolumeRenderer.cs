@@ -10,6 +10,7 @@ using SharpGen.Runtime;
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Vortice.D3DCompiler;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
@@ -24,7 +25,6 @@ using DeviceCreationFlags = Vortice.Direct3D11.DeviceCreationFlags;
 using Filter = Vortice.Direct3D11.Filter;
 using Format = Vortice.DXGI.Format;
 using MapMode = Vortice.Direct3D11.MapMode;
-using ModeDescription = Vortice.DXGI.ModeDescription;
 using PresentFlags = Vortice.DXGI.PresentFlags;
 using ResourceOptionFlags = Vortice.Direct3D11.ResourceOptionFlags;
 using ResourceUsage = Vortice.Direct3D11.ResourceUsage;
@@ -39,6 +39,14 @@ using Vector2 = System.Numerics.Vector2;
 using Vector3 = System.Numerics.Vector3;
 using Vector4 = System.Numerics.Vector4;
 using Viewport = Vortice.Mathematics.Viewport;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Drawing.Text;
+using FeatureLevel = Vortice.Direct3D.FeatureLevel;
+using ModeDescription = Vortice.DXGI.ModeDescription;
+using Color = System.Drawing.Color;
+using Rectangle = System.Drawing.Rectangle;
+using Buffer = System.Buffer;
 
 namespace CTS.D3D11
 {
@@ -57,7 +65,6 @@ namespace CTS.D3D11
         public float ScaleBarLength; // in mm
         public float PixelSize;      // meters per pixel
     }
-
 
     [StructLayout(LayoutKind.Sequential)]
     public struct SceneConstants
@@ -90,9 +97,9 @@ namespace CTS.D3D11
         public float ShowScaleText;
         public float ScaleBarLength;    // in mm
         public float PixelSize;         // meters per pixel
-        public Vector2 _padding;
+        public float CameraDistance;    // For dynamic scale bar
+        public float _padding;
     }
-
 
     [StructLayout(LayoutKind.Sequential)]
     public struct MaterialGPU
@@ -148,11 +155,12 @@ namespace CTS.D3D11
                 float showScaleBar;
                 float scaleBarPosition;
                 float numClippingPlanes;
-                float maxTextureSlices; // ADDED: Maximum texture array slices
+                float maxTextureSlices;
                 float showScaleText;
                 float scaleBarLength;    // in mm
                 float pixelSize;         // meters per pixel
-                float2 padding;
+                float cameraDistance;    // For dynamic scale bar
+                float padding;
             };
 
             struct Material
@@ -171,10 +179,27 @@ namespace CTS.D3D11
 
             Texture2DArray<float> grayscaleAtlas : register(t2);
             Texture2DArray<uint>  labelAtlas     : register(t3);
+            Texture2D<float4>     scaleBarTexture : register(t4);
             SamplerState linearSampler : register(s0);
 
-            // Sample volume at a specific position
-            float4 sampleVolume(float3 worldPos)
+            // Applies a 1D Transfer Function to map intensity to color and opacity.
+            float4 applyTransferFunction(float intensity)
+            {
+                float grayInt = intensity * 255.0f;
+
+                if (grayInt < threshold.x)
+                    return float4(0, 0, 0, 0);
+
+                float t = saturate((grayInt - threshold.x) / (threshold.y - threshold.x));
+
+                float3 color = float3(t, t, t);
+                float opacity = pow(t, 2.0f);
+
+                return float4(color, opacity);
+            }
+
+            // Samples the volume and determines the color/opacity at a point.
+            float4 sampleAndClassifyVolume(float3 worldPos)
             {
                 float3 uvw = worldPos / volumeDimensions.xyz;
                 if (any(uvw < 0.0) || any(uvw > 1.0)) 
@@ -183,7 +208,6 @@ namespace CTS.D3D11
                 float3 voxelCoord = uvw * volumeDimensions.xyz;
                 int3 chunkCoord = int3(voxelCoord / chunkDimensions.x);
                 
-                // FIXED: Ensure chunk coordinates are within bounds
                 if (any(chunkCoord < 0) || chunkCoord.x >= (int)chunkDimensions.y || 
                     chunkCoord.y >= (int)chunkDimensions.z || chunkCoord.z >= (int)chunkDimensions.w)
                     return float4(0, 0, 0, 0);
@@ -200,45 +224,95 @@ namespace CTS.D3D11
                     return float4(0, 0, 0, 0);
                 
                 float3 localCoord = frac(voxelCoord / chunkDimensions.x);
-                
-                // FIXED: Calculate slice index more carefully to avoid overflow
                 float sliceZ = localCoord.z * (chunkDimensions.x - 1);
                 float sliceIndex = gpuSlot * chunkDimensions.x + sliceZ;
                 
-                // FIXED: Ensure we don't exceed texture array bounds
                 if (sliceIndex >= maxTextureSlices)
                     return float4(0, 0, 0, 0);
                 
                 float grayValue = grayscaleAtlas.SampleLevel(linearSampler, float3(localCoord.xy, sliceIndex), 0);
-                
-                // FIXED: Use Load with bounds checking
-                int3 loadCoords = int3(localCoord.xy * chunkDimensions.x, sliceIndex);
-                if (loadCoords.z >= maxTextureSlices)
-                    return float4(0, 0, 0, 0);
-                    
-                uint labelValue = labelAtlas.Load(int4(loadCoords, 0)).r;
+                uint labelValue = labelAtlas.Load(int4(int3(localCoord.xy * chunkDimensions.x, sliceIndex), 0)).r;
                 
                 float4 sampleColor = float4(0, 0, 0, 0);
-                
+
+                if (showGrayscale > 0.5)
+                {
+                    sampleColor = applyTransferFunction(grayValue);
+                }
+
                 if (labelValue > 0 && labelValue < 256)
                 {
                     Material mat = materials[labelValue];
                     if (mat.settings.y > 0.5)
                     {
-                        sampleColor = mat.color;
-                        sampleColor.a = mat.settings.x;
-                    }
-                }
-                else if (labelValue == 0 && showGrayscale > 0.5)
-                {
-                    float grayInt = grayValue * 255.0;
-                    if (grayInt > threshold.x && grayInt < threshold.y)
-                    {
-                        sampleColor = float4(grayValue, grayValue, grayValue, 1.0);
+                        sampleColor = float4(mat.color.rgb, mat.settings.x);
                     }
                 }
                 
                 return sampleColor;
+            }
+
+            // Draws the 2D scale bar overlay.
+            float4 drawScaleBar(float2 uv)
+            {
+                if (showScaleBar < 0.5) return float4(0, 0, 0, 0);
+                float worldSizePerPixel = cameraDistance * pixelSize / 500.0;
+                float targetPixels = 150.0;
+                float worldSize = targetPixels * worldSizePerPixel;
+                float scale = pow(10, floor(log10(worldSize)));
+                float normalizedSize = worldSize / scale;
+                float actualSize;
+                if (normalizedSize < 1.5) actualSize = scale;
+                else if (normalizedSize < 3.5) actualSize = 2 * scale;
+                else if (normalizedSize < 7.5) actualSize = 5 * scale;
+                else actualSize = 10 * scale;
+                float barLengthPixels = actualSize / worldSizePerPixel;
+                float barLengthNorm = barLengthPixels / screenDimensions.x;
+                float barHeight = 0.008;
+                barLengthNorm = min(barLengthNorm, 0.3);
+                float2 barPos;
+                if (scaleBarPosition < 0.5) barPos = float2(0.05, 0.94);
+                else if (scaleBarPosition < 1.5) barPos = float2(0.95 - barLengthNorm, 0.94);
+                else if (scaleBarPosition < 2.5) barPos = float2(0.05, 0.06);
+                else barPos = float2(0.95 - barLengthNorm, 0.06);
+                if (uv.x >= barPos.x && uv.x <= barPos.x + barLengthNorm && uv.y >= barPos.y && uv.y <= barPos.y + barHeight)
+                {
+                    float segmentSize = barLengthNorm / 5.0;
+                    int segment = (int)((uv.x - barPos.x) / segmentSize);
+                    float3 color = (segment % 2 == 0) ? float3(1, 1, 1) : float3(0, 0, 0);
+                    float borderDist = min(min(uv.x - barPos.x, barPos.x + barLengthNorm - uv.x), min(uv.y - barPos.y, barPos.y + barHeight - uv.y));
+                    if (borderDist < 0.0015) color = float3(0.5, 0.5, 0.5);
+                    return float4(color, 1.0);
+                }
+                if (showScaleText > 0.5)
+                {
+                    float textY, textHeight = 0.05;
+                    if (scaleBarPosition < 2.0) textY = barPos.y - textHeight - 0.01; else textY = barPos.y + barHeight + 0.01;
+                    if (uv.x >= barPos.x && uv.x <= barPos.x + barLengthNorm && uv.y >= textY && uv.y <= textY + textHeight)
+                    {
+                        float2 textUV = float2((uv.x - barPos.x) / barLengthNorm, (uv.y - textY) / textHeight);
+                        if (all(textUV >= 0.0) && all(textUV <= 1.0))
+                        {
+                            float4 textColor = scaleBarTexture.Sample(linearSampler, textUV);
+                            if (textColor.a > 0.5) return float4(textColor.rgb, 1.0);
+                        }
+                    }
+                }
+                return float4(0, 0, 0, 0);
+            }
+
+            // Renders the 2D slice planes.
+            float4 checkSlice(float3 worldPos)
+            {
+                float3 uvw = worldPos / volumeDimensions.xyz;
+                float sliceThickness = 0.5 / min(volumeDimensions.x, min(volumeDimensions.y, volumeDimensions.z));
+                if (sliceInfo.x >= 0 && abs(uvw.x - sliceInfo.x) < sliceThickness)
+                    return sampleAndClassifyVolume(float3(sliceInfo.x * volumeDimensions.x, worldPos.y, worldPos.z));
+                if (sliceInfo.y >= 0 && abs(uvw.y - sliceInfo.y) < sliceThickness)
+                     return sampleAndClassifyVolume(float3(worldPos.x, sliceInfo.y * volumeDimensions.y, worldPos.z));
+                if (sliceInfo.z >= 0 && abs(uvw.z - sliceInfo.z) < sliceThickness)
+                    return sampleAndClassifyVolume(float3(worldPos.x, worldPos.y, sliceInfo.z * volumeDimensions.z));
+                return float4(0, 0, 0, 0);
             }
 
             // Check if point is clipped
@@ -253,344 +327,18 @@ namespace CTS.D3D11
                 return false;
             }
 
-            // Improved digit rendering with cleaner patterns
-            float drawDigit(float2 uv, int digit)
-            {
-                // 5x7 bitmap font for digits 0-9
-                // Each row is 5 bits, stored in a compact format
-                uint patterns[70] = {
-                    // 0
-                    0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E,
-                    // 1
-                    0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E,
-                    // 2
-                    0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F,
-                    // 3
-                    0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E,
-                    // 4
-                    0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02,
-                    // 5
-                    0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E,
-                    // 6
-                    0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E,
-                    // 7
-                    0x1F, 0x11, 0x01, 0x02, 0x04, 0x04, 0x04,
-                    // 8
-                    0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E,
-                    // 9
-                    0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C
-                };
-                
-                // Convert UV to grid position
-                int2 cell = int2(uv * float2(5, 7));
-                
-                // Bounds check
-                if (any(cell < 0) || cell.x >= 5 || cell.y >= 7) 
-                    return 0.0;
-                
-                // Get the pattern for this digit and row
-                uint pattern = patterns[digit * 7 + cell.y];
-                
-                // Check if the bit is set for this column (flip x for correct orientation)
-                return ((pattern >> (4 - cell.x)) & 1) ? 1.0 : 0.0;
-            }
-
-            // Draw scale bar text with proper units
-            float drawScaleText(float2 uv, float scaleValue)
-            {
-                // Determine units and convert value
-                float displayValue = scaleValue;
-                int unitType = 0; // 0=µm, 1=mm, 2=cm
-                
-                // Convert based on pixel size
-                float pixelSizeMicrometers = pixelSize * 1e6;
-                
-                if (pixelSizeMicrometers < 100) // Small pixels - use µm
-                {
-                    displayValue = scaleValue * 1000; // mm to µm
-                    unitType = 0;
-                }
-                else if (scaleValue >= 10) // Large scale - use cm
-                {
-                    displayValue = scaleValue / 10; // mm to cm
-                    unitType = 2;
-                }
-                else // Default - use mm
-                {
-                    unitType = 1;
-                }
-                
-                // Round to appropriate precision
-                int intValue = (int)(displayValue + 0.5);
-                
-                // Extract digits
-                int digits[5];
-                int numDigits = 0;
-                
-                if (intValue == 0)
-                {
-                    digits[0] = 0;
-                    numDigits = 1;
-                }
-                else
-                {
-                    int temp = intValue;
-                    while (temp > 0 && numDigits < 5)
-                    {
-                        digits[numDigits] = temp % 10;
-                        temp /= 10;
-                        numDigits++;
-                    }
-                }
-                
-                // Calculate text dimensions
-                float charWidth = 0.015;
-                float charHeight = 0.018;
-                float spacing = 0.003;
-                
-                // Total width calculation
-                float totalWidth = numDigits * charWidth + (numDigits - 1) * spacing + spacing * 2 + charWidth * 2;
-                
-                // Center the text
-                float startX = 0.5 - totalWidth * 0.5;
-                
-                // Normalize UV within text area
-                float2 textUV = uv;
-                textUV.y = textUV.y / charHeight;
-                
-                if (textUV.y < 0 || textUV.y > 1) return 0;
-                
-                float currentX = startX;
-                
-                // Draw digits in correct order
-                for (int i = numDigits - 1; i >= 0; i--)
-                {
-                    if (textUV.x >= currentX && textUV.x < currentX + charWidth)
-                    {
-                        float2 digitUV = float2((textUV.x - currentX) / charWidth, textUV.y);
-                        if (all(digitUV >= 0 && digitUV <= 1))
-                        {
-                            float digitValue = drawDigit(digitUV, digits[i]);
-                            if (digitValue > 0) return 1.0;
-                        }
-                    }
-                    currentX += charWidth + spacing;
-                }
-                
-                // Add space before unit
-                currentX += spacing * 2;
-                
-                // Draw unit symbols
-                if (unitType == 0) // µm
-                {
-                    // Draw 'µ' as a simplified u with descender
-                    if (textUV.x >= currentX && textUV.x < currentX + charWidth)
-                    {
-                        float2 charUV = float2((textUV.x - currentX) / charWidth, textUV.y);
-                        // Simple µ pattern
-                        if ((charUV.x < 0.2 && charUV.y > 0.3 && charUV.y < 0.8) ||
-                            (charUV.x > 0.8 && charUV.y > 0.3) ||
-                            (charUV.y > 0.7 && charUV.y < 0.8 && charUV.x > 0.2 && charUV.x < 0.8))
-                            return 1.0;
-                    }
-                    currentX += charWidth;
-                    
-                    // Draw 'm'
-                    if (textUV.x >= currentX && textUV.x < currentX + charWidth)
-                    {
-                        float2 charUV = float2((textUV.x - currentX) / charWidth, textUV.y);
-                        if (charUV.y > 0.3 && charUV.y < 0.8)
-                        {
-                            if (charUV.x < 0.2 || (charUV.x > 0.4 && charUV.x < 0.6) || charUV.x > 0.8)
-                                return 1.0;
-                        }
-                    }
-                }
-                else if (unitType == 1) // mm
-                {
-                    // First 'm'
-                    if (textUV.x >= currentX && textUV.x < currentX + charWidth)
-                    {
-                        float2 charUV = float2((textUV.x - currentX) / charWidth, textUV.y);
-                        if (charUV.y > 0.3 && charUV.y < 0.8)
-                        {
-                            if (charUV.x < 0.2 || (charUV.x > 0.4 && charUV.x < 0.6) || charUV.x > 0.8)
-                                return 1.0;
-                        }
-                    }
-                    currentX += charWidth;
-                    
-                    // Second 'm'
-                    if (textUV.x >= currentX && textUV.x < currentX + charWidth)
-                    {
-                        float2 charUV = float2((textUV.x - currentX) / charWidth, textUV.y);
-                        if (charUV.y > 0.3 && charUV.y < 0.8)
-                        {
-                            if (charUV.x < 0.2 || (charUV.x > 0.4 && charUV.x < 0.6) || charUV.x > 0.8)
-                                return 1.0;
-                        }
-                    }
-                }
-                else // cm
-                {
-                    // Draw 'c'
-                    if (textUV.x >= currentX && textUV.x < currentX + charWidth)
-                    {
-                        float2 charUV = float2((textUV.x - currentX) / charWidth, textUV.y);
-                        if ((charUV.x < 0.3 && charUV.y > 0.3 && charUV.y < 0.7) ||
-                            (charUV.y > 0.2 && charUV.y < 0.3 && charUV.x < 0.8) ||
-                            (charUV.y > 0.7 && charUV.y < 0.8 && charUV.x < 0.8))
-                            return 1.0;
-                    }
-                    currentX += charWidth;
-                    
-                    // Draw 'm'
-                    if (textUV.x >= currentX && textUV.x < currentX + charWidth)
-                    {
-                        float2 charUV = float2((textUV.x - currentX) / charWidth, textUV.y);
-                        if (charUV.y > 0.3 && charUV.y < 0.8)
-                        {
-                            if (charUV.x < 0.2 || (charUV.x > 0.4 && charUV.x < 0.6) || charUV.x > 0.8)
-                                return 1.0;
-                        }
-                    }
-                }
-                
-                return 0;
-            }
-
-            float4 drawScaleBar(float2 uv)
-            {
-                if (showScaleBar < 0.5) return float4(0, 0, 0, 0);
-
-                // pixelSize is in meters, scaleBarLength is in millimeters
-                // Convert scale bar length from mm to meters
-                float scaleBarLengthMeters = scaleBarLength * 0.001;
-                
-                // Calculate bar length in pixels
-                float barLengthPixels = scaleBarLengthMeters / pixelSize;
-                
-                // Convert to normalized screen coordinates
-                float barLengthNorm = barLengthPixels / screenDimensions.x;
-                float barHeight = 0.008;
-
-                // Clamp bar length to reasonable screen size
-                barLengthNorm = min(barLengthNorm, 0.3); // Max 30% of screen width
-
-                float2 barPos;
-
-                // Fixed positioning - corrected mapping
-                if (scaleBarPosition < 0.5)
-                    barPos = float2(0.05, 0.94); // Bottom Left
-                else if (scaleBarPosition < 1.5)
-                    barPos = float2(0.95 - barLengthNorm, 0.94); // Bottom Right  
-                else if (scaleBarPosition < 2.5)
-                    barPos = float2(0.05, 0.06); // Top Left
-                else
-                    barPos = float2(0.95 - barLengthNorm, 0.06); // Top Right
-
-                // Draw the scale bar
-                if (uv.x >= barPos.x && uv.x <= barPos.x + barLengthNorm &&
-                    uv.y >= barPos.y && uv.y <= barPos.y + barHeight)
-                {
-                    // Create alternating segments (5 segments)
-                    float segmentSize = barLengthNorm / 5.0;
-                    int segment = (int)((uv.x - barPos.x) / segmentSize);
-                    float3 color = (segment % 2 == 0) ? float3(1, 1, 1) : float3(0, 0, 0);
-
-                    // Add border
-                    float borderDist = min(
-                        min(uv.x - barPos.x, barPos.x + barLengthNorm - uv.x),
-                        min(uv.y - barPos.y, barPos.y + barHeight - uv.y)
-                    );
-                    if (borderDist < 0.0015) color = float3(0.5, 0.5, 0.5);
-
-                    return float4(color, 1.0);
-                }
-
-                // Draw text if enabled
-                if (showScaleText > 0.5)
-                {
-                    // Position text based on scale bar position
-                    float textY;
-                    if (scaleBarPosition < 2.0) // Bottom positions
-                        textY = barPos.y - 0.025; // Text above bar for bottom positions
-                    else // Top positions
-                        textY = barPos.y + barHeight + 0.005; // Text below bar for top positions
-                    
-                    // Center text horizontally with the bar
-                    float textHeight = 0.018;
-                    
-                    if (uv.x >= barPos.x && uv.x <= barPos.x + barLengthNorm &&
-                        uv.y >= textY && uv.y <= textY + textHeight)
-                    {
-                        float2 textUV = float2((uv.x - barPos.x) / barLengthNorm, uv.y - textY);
-                        float textValue = drawScaleText(textUV, scaleBarLength);
-                        if (textValue > 0.5)
-                            return float4(1, 1, 1, 1);
-                    }
-                }
-
-                return float4(0, 0, 0, 0);
-            }
-
-            // Check if we're on a slice plane
-            float4 checkSlice(float3 worldPos)
-            {
-                float3 uvw = worldPos / volumeDimensions.xyz;
-                float sliceThickness = 0.5 / min(volumeDimensions.x, min(volumeDimensions.y, volumeDimensions.z));
-
-                // X slice
-                if (sliceInfo.x >= 0)
-                {
-                    if (abs(uvw.x - sliceInfo.x) < sliceThickness)
-                    {
-                        float3 slicePos = float3(sliceInfo.x * volumeDimensions.x, worldPos.y, worldPos.z);
-                        float4 color = sampleVolume(slicePos);
-                        if (color.a > 0) return color;
-                    }
-                }
-
-                // Y slice
-                if (sliceInfo.y >= 0)
-                {
-                    if (abs(uvw.y - sliceInfo.y) < sliceThickness)
-                    {
-                        float3 slicePos = float3(worldPos.x, sliceInfo.y * volumeDimensions.y, worldPos.z);
-                        float4 color = sampleVolume(slicePos);
-                        if (color.a > 0) return color;
-                    }
-                }
-
-                // Z slice
-                if (sliceInfo.z >= 0)
-                {
-                    if (abs(uvw.z - sliceInfo.z) < sliceThickness)
-                    {
-                        float3 slicePos = float3(worldPos.x, worldPos.y, sliceInfo.z * volumeDimensions.z);
-                        float4 color = sampleVolume(slicePos);
-                        if (color.a > 0) return color;
-                    }
-                }
-
-                return float4(0, 0, 0, 0);
-            }
-
             float4 main(float4 pos : SV_POSITION, float3 screenPos : TEXCOORD0) : SV_TARGET
             {
                 float2 uv = pos.xy / screenDimensions;
                 float4 scaleBarColor = drawScaleBar(uv);
-                if (scaleBarColor.a > 0) return scaleBarColor;
+                if (scaleBarColor.a > 0.5) { return scaleBarColor; }
 
                 float3 boxMin = float3(0, 0, 0);
                 float3 boxMax = volumeDimensions.xyz;
-
-                float4 clip = float4(pos.xy / screenDimensions * 2.0 - 1.0, 0.0, 1.0);
+                float4 clip = float4(uv * 2.0 - 1.0, 0.0, 1.0);
                 clip.y = -clip.y;
-
                 float4 world = mul(clip, inverseViewProjection);
                 world /= world.w;
-
                 float3 rayDir = normalize(world.xyz - cameraPosition.xyz);
                 float3 rayOrigin = cameraPosition.xyz;
 
@@ -607,26 +355,28 @@ namespace CTS.D3D11
 
                 float4 finalColor = float4(0, 0, 0, 0);
                 float t = tmin;
-
-                int maxSteps = quality == 0 ? 100 : (quality == 1 ? 200 : 400);
+                
+                int maxSteps = quality == 0 ? 256 : (quality == 1 ? 512 : 768);
                 float baseStepSize = max(stepSize, (tmax - tmin) / (float)maxSteps);
 
                 int emptySteps = 0;
+                float3 accumulatedColor = float3(0, 0, 0);
+                float accumulatedAlpha = 0.0;
 
                 [loop]
                 for (int i = 0; i < maxSteps; i++)
                 {
-                    if (finalColor.a > 0.98) break;
+                    if (accumulatedAlpha > 0.98f) break;
                     if (t > tmax) break;
 
                     float3 worldPos = rayOrigin + rayDir * t;
 
-                    // Check slices first
                     float4 sliceColor = checkSlice(worldPos);
-                    if (sliceColor.a > 0)
+                    if (sliceColor.a > 0.01f)
                     {
-                        finalColor = sliceColor;
-                        break; // Slices are opaque
+                        finalColor = float4(sliceColor.rgb * sliceColor.a + accumulatedColor * (1.0f - sliceColor.a),
+                                            sliceColor.a + accumulatedAlpha * (1.0f - sliceColor.a));
+                        return finalColor;
                     }
 
                     if (isClipped(worldPos))
@@ -634,20 +384,23 @@ namespace CTS.D3D11
                         t += baseStepSize;
                         continue;
                     }
+                    
+                    float4 sampleColor = sampleAndClassifyVolume(worldPos);
 
-                    float4 sampleColor = sampleVolume(worldPos);
-
-                    if (sampleColor.a > 0.001)
+                    if (sampleColor.a > 0.001f)
                     {
-                        // Reduce opacity for grayscale volume rendering
-                        if (sampleColor.r == sampleColor.g && sampleColor.r == sampleColor.b)
-                        {
-                            sampleColor.a *= 0.05;
-                        }
+                        // A slightly lower density allows more light from the volume interior,
+                        // contributing to a brighter, more voluminous look.
+                        float density_multiplier = 12.0f; 
+                        float sampleAlpha = 1.0f - exp(-sampleColor.a * baseStepSize * density_multiplier);
 
-                        float correctedAlpha = 1.0 - pow(1.0 - sampleColor.a, baseStepSize * 50.0);
-                        finalColor.rgb += sampleColor.rgb * correctedAlpha * (1.0 - finalColor.a);
-                        finalColor.a += correctedAlpha * (1.0 - finalColor.a);
+                        // A less aggressive lighting model that preserves more brightness.
+                        float light = 0.8f + 0.2f * dot(normalize(worldPos - cameraPosition.xyz), -rayDir);
+                        sampleColor.rgb *= light;
+
+                        accumulatedColor += sampleColor.rgb * sampleAlpha * (1.0f - accumulatedAlpha);
+                        accumulatedAlpha += sampleAlpha * (1.0f - accumulatedAlpha);
+                        
                         emptySteps = 0;
                     }
                     else
@@ -655,12 +408,26 @@ namespace CTS.D3D11
                         emptySteps++;
                     }
 
-                    float currentStepSize = (emptySteps > 2) ? baseStepSize * 4.0 : baseStepSize;
-                    t += currentStepSize;
+                    t += (emptySteps > 4) ? baseStepSize * 2.0f : baseStepSize;
                 }
+                
+                // --- GLOBAL BRIGHTNESS AND CONTRAST FIX ---
+                // We apply two effects to the final accumulated color to make it pop.
+                
+                // 1. Brightness: A multiplier to make the entire image brighter.
+                float brightness = 1.8f;
+                accumulatedColor *= brightness;
 
+                // 2. Gamma Correction: Adjusts the mid-tones to add contrast and richness.
+                // A value of ~0.75 is a good starting point.
+                float gamma = 0.75f;
+                accumulatedColor = pow(accumulatedColor, gamma);
+
+                finalColor = float4(accumulatedColor, accumulatedAlpha);
+                
                 return finalColor;
-            }";
+            }
+        ";
         #endregion
 
         private ID3D11Device device;
@@ -676,8 +443,13 @@ namespace CTS.D3D11
         private ID3D11Buffer materialBuffer;
         private ID3D11Buffer chunkInfoBuffer;
 
+        // Scale bar text texture
+        private ID3D11Texture2D scaleBarTexture;
+        private ID3D11ShaderResourceView scaleBarTextureSrv;
+        private float lastScaleBarValue = -1;
+
         private int GpuCacheSize = 32;
-        private int totalTextureSlices = 0;  // ADDED: Track total texture slices
+        private int totalTextureSlices = 0;
 
         private ID3D11Texture2D grayscaleTextureCache;
         private ID3D11ShaderResourceView grayscaleTextureSrv;
@@ -698,11 +470,22 @@ namespace CTS.D3D11
         private bool deviceLost = false;
         private int deviceLostRetryCount = 0;
         private DateTime lastDeviceLostTime = DateTime.MinValue;
+        private bool useWarpAdapter = false; // Fallback to software rendering
 
+        // Thread safety
         private volatile bool _isDisposed = false;
+        private volatile bool _isRendering = false;
+        private readonly object disposeLock = new object();
+        private readonly object renderLock = new object();
+        private readonly ManualResetEventSlim renderComplete = new ManualResetEventSlim(true);
+
         public bool IsDisposed => _isDisposed;
         private Color4 backgroundColor = new Color4(0.1f, 0.1f, 0.1f, 1.0f);
-        private readonly object renderLock = new object();
+
+        // GPU info
+        private string gpuDescription = "Unknown";
+        private bool isIntelGpu = false;
+        private bool isIntegratedGpu = false;
 
         public D3D11VolumeRenderer(IntPtr hwnd, int width, int height, MainForm mainForm)
         {
@@ -713,6 +496,7 @@ namespace CTS.D3D11
             try
             {
                 InitializeD3D11(hwnd, width, height);
+                DetectGPUCapabilities();
 
                 if (volumeData != null && labelData != null)
                 {
@@ -722,16 +506,29 @@ namespace CTS.D3D11
                     int chunkDim = volumeData.ChunkDim;
                     int maxCacheSize = maxArraySize / chunkDim;
 
-                    // FIXED: Ensure GPU cache size doesn't exceed texture limits
-                    if (chunkDim >= 256)
-                        GpuCacheSize = Math.Min(8, Math.Min(maxCacheSize, totalChunks));
-                    else if (chunkDim >= 128)
-                        GpuCacheSize = Math.Min(16, Math.Min(maxCacheSize, totalChunks));
+                    // Reduce cache size for Intel GPUs
+                    if (isIntelGpu)
+                    {
+                        if (chunkDim >= 256)
+                            GpuCacheSize = Math.Min(4, Math.Min(maxCacheSize, totalChunks));
+                        else if (chunkDim >= 128)
+                            GpuCacheSize = Math.Min(8, Math.Min(maxCacheSize, totalChunks));
+                        else
+                            GpuCacheSize = Math.Min(16, Math.Min(maxCacheSize, totalChunks));
+                    }
                     else
-                        GpuCacheSize = Math.Min(32, Math.Min(maxCacheSize, totalChunks));
+                    {
+                        if (chunkDim >= 256)
+                            GpuCacheSize = Math.Min(8, Math.Min(maxCacheSize, totalChunks));
+                        else if (chunkDim >= 128)
+                            GpuCacheSize = Math.Min(16, Math.Min(maxCacheSize, totalChunks));
+                        else
+                            GpuCacheSize = Math.Min(32, Math.Min(maxCacheSize, totalChunks));
+                    }
 
-                    totalTextureSlices = GpuCacheSize * chunkDim;  // ADDED: Calculate total slices
+                    totalTextureSlices = GpuCacheSize * chunkDim;
 
+                    Logger.Log($"[D3D11VolumeRenderer] GPU: {gpuDescription}");
                     Logger.Log($"[D3D11VolumeRenderer] Volume info: {volumeData.Width}x{volumeData.Height}x{volumeData.Depth}");
                     Logger.Log($"[D3D11VolumeRenderer] Chunk info: dim={chunkDim}, count={volumeData.ChunkCountX}x{volumeData.ChunkCountY}x{volumeData.ChunkCountZ}");
                     Logger.Log($"[D3D11VolumeRenderer] Using GPU cache size: {GpuCacheSize} chunks, {totalTextureSlices} total texture slices");
@@ -740,6 +537,7 @@ namespace CTS.D3D11
                     CreateShaders();
                     CreateConstantBuffers();
                     CreateSamplerState();
+                    CreateScaleBarTexture();
 
                     streamingManager = new ChunkStreamingManager(device, context, volumeData, labelData, grayscaleTextureCache, labelTextureCache);
                 }
@@ -750,14 +548,15 @@ namespace CTS.D3D11
                     CreateShaders();
                     CreateConstantBuffers();
                     CreateSamplerState();
+                    CreateScaleBarTexture();
                 }
 
                 UpdateMaterialsBuffer();
 
-                // Initialize scene constants
+                // Initialize scene constants with reduced quality for Intel GPUs
                 sceneConstants.ScreenDimensions = new Vector2(width, height);
-                sceneConstants.StepSize = 2.0f;
-                sceneConstants.Quality = 0.0f;
+                sceneConstants.StepSize = isIntelGpu ? 4.0f : 2.0f;
+                sceneConstants.Quality = 0.0f; // Start with lowest quality
                 sceneConstants.Threshold = new Vector2(30, 200);
                 sceneConstants.ShowGrayscale = 1.0f;
                 sceneConstants.ShowScaleBar = 1.0f;
@@ -765,9 +564,10 @@ namespace CTS.D3D11
                 sceneConstants.NumClippingPlanes = 0.0f;
                 sceneConstants.MaxTextureSlices = totalTextureSlices;
                 sceneConstants.SliceInfo = new Vector4(-1, -1, -1, 0);
-                sceneConstants.ShowScaleText = 1.0f;  // Add this
-                sceneConstants.ScaleBarLength = 100.0f;  // Add this - default 100mm
-                sceneConstants.PixelSize = (float)mainForm.pixelSize;  // Add this - ensure it's set
+                sceneConstants.ShowScaleText = 1.0f;
+                sceneConstants.ScaleBarLength = 100.0f;
+                sceneConstants.PixelSize = (float)mainForm.pixelSize;
+                sceneConstants.CameraDistance = 1000.0f;
                 sceneConstants.VolumeDimensions = new Vector4(
                     volumeData?.Width ?? 1,
                     volumeData?.Height ?? 1,
@@ -790,6 +590,43 @@ namespace CTS.D3D11
             }
         }
 
+        private void DetectGPUCapabilities()
+        {
+            try
+            {
+                using (var factory = device.QueryInterface<IDXGIDevice>()?.GetAdapter()?.GetParent<IDXGIFactory>())
+                {
+                    if (factory != null)
+                    {
+                        using (var adapter = device.QueryInterface<IDXGIDevice>()?.GetAdapter())
+                        {
+                            if (adapter != null)
+                            {
+                                var desc = adapter.Description;
+                                gpuDescription = desc.Description;
+
+                                // Detect Intel GPU
+                                isIntelGpu = gpuDescription.ToLower().Contains("intel");
+
+                                // Detect integrated GPU
+                                isIntegratedGpu = isIntelGpu ||
+                                                 gpuDescription.ToLower().Contains("integrated") ||
+                                                 desc.DedicatedVideoMemory < 1024 * 1024 * 1024; // Less than 1GB VRAM
+
+                                Logger.Log($"[DetectGPUCapabilities] GPU: {gpuDescription}");
+                                Logger.Log($"[DetectGPUCapabilities] Intel GPU: {isIntelGpu}, Integrated: {isIntegratedGpu}");
+                                Logger.Log($"[DetectGPUCapabilities] VRAM: {desc.DedicatedVideoMemory / 1024 / 1024} MB");
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[DetectGPUCapabilities] Error: {ex.Message}");
+            }
+        }
+
         private void InitializeD3D11(IntPtr hwnd, int width, int height)
         {
             var swapChainDesc = new Vortice.DXGI.SwapChainDescription
@@ -806,29 +643,84 @@ namespace CTS.D3D11
 
             var flags = DeviceCreationFlags.None;
 #if DEBUG
-            flags |= DeviceCreationFlags.Debug;
+    flags |= DeviceCreationFlags.Debug;
 #endif
 
-            Vortice.Direct3D11.D3D11.D3D11CreateDeviceAndSwapChain(
-                null,
-                DriverType.Hardware,
-                flags,
-                null,
-                swapChainDesc,
-                out swapChain,
-                out device,
-                out _,
-                out context);
+            // Supported feature levels (highest first)
+            var featureLevels = new[]
+            {
+        FeatureLevel.Level_11_0,
+        FeatureLevel.Level_10_1,
+        FeatureLevel.Level_10_0
+    };
+
+            try
+            {
+                // Try a hardware device first
+                Vortice.Direct3D11.D3D11.D3D11CreateDeviceAndSwapChain(
+                    null,
+                    DriverType.Hardware,
+                    flags,
+                    featureLevels,
+                    swapChainDesc,
+                    out swapChain,
+                    out device,
+                    out _,
+                    out context);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[InitializeD3D11] Hardware device creation failed: {ex.Message}, falling back to WARP");
+
+                // Fall back to software (WARP) device
+                useWarpAdapter = true;
+                Vortice.Direct3D11.D3D11.D3D11CreateDeviceAndSwapChain(
+                    null,
+                    DriverType.Warp,
+                    flags,
+                    featureLevels,
+                    swapChainDesc,
+                    out swapChain,
+                    out device,
+                    out _,
+                    out context);
+
+                Logger.Log("[InitializeD3D11] Using WARP software renderer");
+            }
+
+            // ------------------------------------------------------------------
+            // Make the immediate context thread-safe for the streaming thread
+            using (var mt = context.QueryInterface<ID3D11Multithread>())
+            {
+                mt.SetMultithreadProtected(true);
+            }
+            // ------------------------------------------------------------------
 
             CreateRenderTargetView();
         }
 
+
         private void CreateRenderTargetView()
         {
-            renderTargetView?.Dispose();
-            using (var backBuffer = swapChain.GetBuffer<ID3D11Texture2D>(0))
+            lock (disposeLock)
             {
-                renderTargetView = device.CreateRenderTargetView(backBuffer);
+                if (_isDisposed || swapChain == null || device == null) return;
+
+                renderTargetView?.Dispose();
+                renderTargetView = null;
+
+                try
+                {
+                    using (var backBuffer = swapChain.GetBuffer<ID3D11Texture2D>(0))
+                    {
+                        renderTargetView = device.CreateRenderTargetView(backBuffer);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"[CreateRenderTargetView] Error: {ex.Message}");
+                    throw;
+                }
             }
         }
 
@@ -859,7 +751,7 @@ namespace CTS.D3D11
                 ResourceOptionFlags.BufferStructured,
                 Marshal.SizeOf<MaterialGPU>()));
 
-            int chunkBufferSize = Math.Max(1, totalChunks) * Marshal.SizeOf<ChunkInfoGPU>();  // FIXED: Ensure at least 1
+            int chunkBufferSize = Math.Max(1, totalChunks) * Marshal.SizeOf<ChunkInfoGPU>();
             chunkInfoBuffer = device.CreateBuffer(new BufferDescription(
                 chunkBufferSize,
                 BindFlags.ShaderResource,
@@ -913,13 +805,147 @@ namespace CTS.D3D11
             Logger.Log($"[CreateGpuCache] Successfully created GPU cache textures");
         }
 
+        private void CreateScaleBarTexture()
+        {
+            try
+            {
+                // Create a blank texture for scale bar text
+                var desc = new Texture2DDescription
+                {
+                    Width = 256,
+                    Height = 64,
+                    MipLevels = 1,
+                    ArraySize = 1,
+                    Format = Format.R8G8B8A8_UNorm,
+                    SampleDescription = new SampleDescription(1, 0),
+                    Usage = ResourceUsage.Dynamic,
+                    BindFlags = BindFlags.ShaderResource,
+                    CPUAccessFlags = CpuAccessFlags.Write
+                };
+
+                scaleBarTexture = device.CreateTexture2D(desc);
+                scaleBarTextureSrv = device.CreateShaderResourceView(scaleBarTexture);
+
+                // Initialize with transparent texture
+                var mapped = context.Map(scaleBarTexture, 0, MapMode.WriteDiscard);
+                unsafe
+                {
+                    uint* dst = (uint*)mapped.DataPointer;
+                    int pixelCount = 256 * 64;
+                    for (int i = 0; i < pixelCount; i++)
+                    {
+                        dst[i] = 0; // Transparent black
+                    }
+                }
+                context.Unmap(scaleBarTexture, 0);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[CreateScaleBarTexture] Warning: Failed to create scale bar texture: {ex.Message}");
+                // Continue without scale bar text - the shader will handle the null case
+            }
+        }
+
+        private void UpdateScaleBarTexture(float scaleValue)
+        {
+            if (_isDisposed || scaleBarTexture == null || context == null) return;
+
+            // Only update if value changed significantly
+            if (Math.Abs(scaleValue - lastScaleBarValue) < 0.01f) return;
+            lastScaleBarValue = scaleValue;
+
+            try
+            {
+                // Create bitmap for text rendering
+                using (var bitmap = new Bitmap(256, 64, PixelFormat.Format32bppArgb))
+                using (var g = Graphics.FromImage(bitmap))
+                {
+                    g.Clear(Color.Transparent);
+                    g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+
+                    // Determine units and format text
+                    string text;
+                    float pixelSizeMicrometers = sceneConstants.PixelSize * 1e6f;
+
+                    if (pixelSizeMicrometers < 100) // Small pixels - use µm
+                    {
+                        float displayValue = scaleValue * 1000; // mm to µm
+                        text = $"{displayValue:F0} µm";
+                    }
+                    else if (scaleValue >= 10) // Large scale - use cm
+                    {
+                        float displayValue = scaleValue / 10; // mm to cm
+                        text = $"{displayValue:F1} cm";
+                    }
+                    else // Default - use mm
+                    {
+                        text = $"{scaleValue:F1} mm";
+                    }
+
+                    // Draw text centered
+                    using (var font = new Font("Arial", 24, FontStyle.Bold))
+                    using (var brush = new SolidBrush(Color.White))
+                    {
+                        var textSize = g.MeasureString(text, font);
+                        float x = (256 - textSize.Width) / 2;
+                        float y = (64 - textSize.Height) / 2;
+
+                        // Draw text with black outline for better visibility
+                        using (var outlineBrush = new SolidBrush(Color.Black))
+                        {
+                            for (int dx = -2; dx <= 2; dx++)
+                            {
+                                for (int dy = -2; dy <= 2; dy++)
+                                {
+                                    if (dx != 0 || dy != 0)
+                                        g.DrawString(text, font, outlineBrush, x + dx, y + dy);
+                                }
+                            }
+                        }
+
+                        g.DrawString(text, font, brush, x, y);
+                    }
+
+                    // Upload to GPU
+                    var rect = new Rectangle(0, 0, 256, 64);
+                    var bitmapData = bitmap.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+
+                    try
+                    {
+                        var mapped = context.Map(scaleBarTexture, 0, MapMode.WriteDiscard);
+                        unsafe
+                        {
+                            byte* src = (byte*)bitmapData.Scan0;
+                            byte* dst = (byte*)mapped.DataPointer;
+
+                            for (int row = 0; row < 64; row++)
+                            {
+                                Buffer.MemoryCopy(src + row * bitmapData.Stride,
+                                                  dst + row * mapped.RowPitch,
+                                                  256 * 4, 256 * 4);
+                            }
+                        }
+                        context.Unmap(scaleBarTexture, 0);
+                    }
+                    finally
+                    {
+                        bitmap.UnlockBits(bitmapData);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[UpdateScaleBarTexture] Warning: Failed to update scale bar texture: {ex.Message}");
+            }
+        }
+
         public void UpdateMaterialsBuffer()
         {
             if (materialBuffer == null || _isDisposed) return;
 
             lock (renderLock)
             {
-                if (_isDisposed) return;
+                if (_isDisposed || materialBuffer == null) return;
 
                 int materialCount = Math.Max(256, mainForm.Materials.Count);
                 var materialData = new MaterialGPU[materialCount];
@@ -978,12 +1004,17 @@ namespace CTS.D3D11
         {
             if (!deviceLost) return true;
 
+            lock (disposeLock)
+            {
+                if (_isDisposed || device == null || swapChain == null) return false;
+            }
+
             // Check if we should attempt recovery
             var timeSinceLastLost = DateTime.Now - lastDeviceLostTime;
-            if (timeSinceLastLost < TimeSpan.FromSeconds(2))
+            if (timeSinceLastLost < TimeSpan.FromSeconds(5))
             {
                 deviceLostRetryCount++;
-                if (deviceLostRetryCount > 5)
+                if (deviceLostRetryCount > 3)
                 {
                     Logger.Log("[HandleDeviceLost] Too many device lost errors, giving up");
                     return false;
@@ -1000,16 +1031,45 @@ namespace CTS.D3D11
 
             try
             {
+                // Log device removed reason
+                if (device != null)
+                {
+                    try
+                    {
+                        var reason = device.DeviceRemovedReason;
+                        Logger.Log($"[HandleDeviceLost] Device removed reason: {reason.Code.ToString("X")}");
+                    }
+                    catch { }
+                }
+
+                // Wait for any ongoing render to complete
+                renderComplete.Wait(1000);
+
+                // For Intel GPUs, reduce quality further
+                if (isIntelGpu)
+                {
+                    sceneConstants.Quality = 0;
+                    sceneConstants.StepSize = 8.0f;
+
+                    // Reduce cache size
+                    if (GpuCacheSize > 4)
+                    {
+                        GpuCacheSize = 4;
+                        Logger.Log("[HandleDeviceLost] Reduced GPU cache size to 4 for Intel GPU recovery");
+                    }
+                }
+
                 // Clean up resources
-                renderTargetView?.Dispose();
-                renderTargetView = null;
+                lock (disposeLock)
+                {
+                    if (_isDisposed) return false;
+
+                    renderTargetView?.Dispose();
+                    renderTargetView = null;
+                }
 
                 // Try to recreate render target
                 CreateRenderTargetView();
-
-                // Reset quality to lowest for stability
-                sceneConstants.Quality = 0;
-                sceneConstants.StepSize = 8.0f;
 
                 deviceLost = false;
                 Logger.Log("[HandleDeviceLost] Device recovery successful");
@@ -1018,6 +1078,13 @@ namespace CTS.D3D11
             catch (Exception ex)
             {
                 Logger.Log($"[HandleDeviceLost] Device recovery failed: {ex.Message}");
+
+                // If recovery fails on Intel GPU, consider using WARP
+                if (isIntelGpu && !useWarpAdapter)
+                {
+                    Logger.Log("[HandleDeviceLost] Intel GPU recovery failed, restart with WARP may be needed");
+                }
+
                 return false;
             }
         }
@@ -1025,114 +1092,211 @@ namespace CTS.D3D11
         public void Render(Camera camera)
         {
             if (!isInitialized || _isDisposed) return;
-            if (streamingManager == null || device == null || context == null) return;
-            if (renderTargetView == null || swapChain == null) return;
 
-            lock (renderLock)
+            // Check if we're already rendering
+            if (_isRendering) return;
+
+            try
             {
-                if (_isDisposed) return;
+                _isRendering = true;
+                renderComplete.Reset();
 
-                try
+                // Validate all resources under lock
+                bool canRender = false;
+                lock (disposeLock)
                 {
-                    // Handle device lost state
-                    if (deviceLost && !HandleDeviceLost())
+                    canRender = !_isDisposed &&
+                               device != null &&
+                               context != null &&
+                               swapChain != null &&
+                               renderTargetView != null &&
+                               streamingManager != null;
+                }
+
+                if (!canRender) return;
+
+                lock (renderLock)
+                {
+                    // Double-check after acquiring render lock
+                    lock (disposeLock)
                     {
-                        return;
+                        if (_isDisposed || renderTargetView == null) return;
                     }
-
-                    streamingManager.Update(camera);
-                    if (!NeedsRender && !streamingManager.IsDirty()) return;
-
-                    context.OMSetRenderTargets(renderTargetView);
-                    context.ClearRenderTargetView(renderTargetView, backgroundColor);
-                    context.RSSetViewports(new[] { new Viewport(0, 0, sceneConstants.ScreenDimensions.X, sceneConstants.ScreenDimensions.Y) });
-
-                    Matrix4x4 viewProjMatrix = camera.ViewMatrix * camera.ProjectionMatrix;
-                    if (!Matrix4x4.Invert(viewProjMatrix, out sceneConstants.InverseViewProjection))
-                    {
-                        Logger.Log("[Render] Failed to invert view projection matrix");
-                        return;
-                    }
-                    sceneConstants.InverseViewProjection = Matrix4x4.Transpose(sceneConstants.InverseViewProjection);
-                    sceneConstants.CameraPosition = new Vector4(camera.Position, 1);
-
-                    var mapped = context.Map(sceneConstantBuffer, 0, MapMode.WriteDiscard);
-                    unsafe { *(SceneConstants*)mapped.DataPointer.ToPointer() = sceneConstants; }
-                    context.Unmap(sceneConstantBuffer, 0);
-
-                    var chunkData = streamingManager.GetGpuChunkInfo();
-                    mapped = context.Map(chunkInfoBuffer, 0, MapMode.WriteDiscard);
-                    unsafe
-                    {
-                        var ptr = (ChunkInfoGPU*)mapped.DataPointer.ToPointer();
-                        for (int i = 0; i < chunkData.Length; i++)
-                        {
-                            ptr[i] = chunkData[i];
-                        }
-                    }
-                    context.Unmap(chunkInfoBuffer, 0);
-
-                    ID3D11ShaderResourceView chunkInfoSrv = null;
-                    ID3D11ShaderResourceView materialSrv = null;
 
                     try
                     {
-                        chunkInfoSrv = device.CreateShaderResourceView(chunkInfoBuffer);
-                        materialSrv = device.CreateShaderResourceView(materialBuffer);
+                        // Handle device lost state
+                        if (deviceLost && !HandleDeviceLost())
+                        {
+                            return;
+                        }
 
-                        context.VSSetShader(vertexShader);
-                        context.PSSetShader(pixelShader);
-                        context.PSSetConstantBuffers(0, new[] { sceneConstantBuffer });
-                        context.PSSetSamplers(0, new[] { samplerState });
+                        streamingManager.Update(camera);
+                        if (!NeedsRender && !streamingManager.IsDirty()) return;
 
-                        var srvs = new[] { materialSrv, chunkInfoSrv, grayscaleTextureSrv, labelTextureSrv };
-                        context.PSSetShaderResources(0, srvs);
+                        // Update camera distance for dynamic scale bar
+                        var volumeCenter = new Vector3(
+                            sceneConstants.VolumeDimensions.X * 0.5f,
+                            sceneConstants.VolumeDimensions.Y * 0.5f,
+                            sceneConstants.VolumeDimensions.Z * 0.5f);
+                        sceneConstants.CameraDistance = Vector3.Distance(camera.Position, volumeCenter);
 
-                        context.IASetInputLayout(null);
-                        context.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
-                        context.Draw(3, 0);
+                        // Update scale bar texture if needed
+                        if (sceneConstants.ShowScaleText > 0.5f)
+                        {
+                            float worldSizePerPixel = sceneConstants.CameraDistance * sceneConstants.PixelSize / 500.0f;
+                            float targetPixels = 150.0f;
+                            float worldSize = targetPixels * worldSizePerPixel;
+
+                            float scale = (float)Math.Pow(10, Math.Floor(Math.Log10(worldSize)));
+                            float normalizedSize = worldSize / scale;
+                            float actualSize;
+
+                            if (normalizedSize < 1.5f)
+                                actualSize = scale;
+                            else if (normalizedSize < 3.5f)
+                                actualSize = 2 * scale;
+                            else if (normalizedSize < 7.5f)
+                                actualSize = 5 * scale;
+                            else
+                                actualSize = 10 * scale;
+
+                            UpdateScaleBarTexture(actualSize * 1000.0f); // Convert to mm
+                        }
+
+                        // Set render target
+                        lock (disposeLock)
+                        {
+                            if (_isDisposed || renderTargetView == null) return;
+                            context.OMSetRenderTargets(renderTargetView);
+                        }
+
+                        context.ClearRenderTargetView(renderTargetView, backgroundColor);
+                        context.RSSetViewports(new[] { new Viewport(0, 0, sceneConstants.ScreenDimensions.X, sceneConstants.ScreenDimensions.Y) });
+
+                        Matrix4x4 viewProjMatrix = camera.ViewMatrix * camera.ProjectionMatrix;
+                        if (!Matrix4x4.Invert(viewProjMatrix, out sceneConstants.InverseViewProjection))
+                        {
+                            Logger.Log("[Render] Failed to invert view projection matrix");
+                            return;
+                        }
+                        sceneConstants.InverseViewProjection = Matrix4x4.Transpose(sceneConstants.InverseViewProjection);
+                        sceneConstants.CameraPosition = new Vector4(camera.Position, 1);
+
+                        var mapped = context.Map(sceneConstantBuffer, 0, MapMode.WriteDiscard);
+                        unsafe { *(SceneConstants*)mapped.DataPointer.ToPointer() = sceneConstants; }
+                        context.Unmap(sceneConstantBuffer, 0);
+
+                        var chunkData = streamingManager.GetGpuChunkInfo();
+                        mapped = context.Map(chunkInfoBuffer, 0, MapMode.WriteDiscard);
+                        unsafe
+                        {
+                            var ptr = (ChunkInfoGPU*)mapped.DataPointer.ToPointer();
+                            for (int i = 0; i < chunkData.Length; i++)
+                            {
+                                ptr[i] = chunkData[i];
+                            }
+                        }
+                        context.Unmap(chunkInfoBuffer, 0);
+
+                        ID3D11ShaderResourceView chunkInfoSrv = null;
+                        ID3D11ShaderResourceView materialSrv = null;
+
+                        try
+                        {
+                            chunkInfoSrv = device.CreateShaderResourceView(chunkInfoBuffer);
+                            materialSrv = device.CreateShaderResourceView(materialBuffer);
+
+                            context.VSSetShader(vertexShader);
+                            context.PSSetShader(pixelShader);
+                            context.PSSetConstantBuffers(0, new[] { sceneConstantBuffer });
+                            context.PSSetSamplers(0, new[] { samplerState });
+
+                            // Ensure scale bar texture SRV is available
+                            var srvs = new ID3D11ShaderResourceView[5];
+                            srvs[0] = materialSrv;
+                            srvs[1] = chunkInfoSrv;
+                            srvs[2] = grayscaleTextureSrv;
+                            srvs[3] = labelTextureSrv;
+                            srvs[4] = scaleBarTextureSrv; // Can be null, shader will handle it
+
+                            context.PSSetShaderResources(0, srvs);
+
+                            context.IASetInputLayout(null);
+                            context.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+                            context.Draw(3, 0);
+                        }
+                        finally
+                        {
+                            // Clear shader resources to prevent resource conflicts
+                            context.PSSetShaderResources(0, new ID3D11ShaderResourceView[] { null, null, null, null, null });
+                            context.PSSetShader(null);
+                            context.VSSetShader(null);
+                            context.PSSetConstantBuffers(0, new ID3D11Buffer[] { null });
+                            context.PSSetSamplers(0, new ID3D11SamplerState[] { null });
+                            context.OMSetRenderTargets(Array.Empty<ID3D11RenderTargetView>(), null);
+
+                            chunkInfoSrv?.Dispose();
+                            materialSrv?.Dispose();
+                        }
+
+                        // Present with validation
+                        lock (disposeLock)
+                        {
+                            if (!_isDisposed && swapChain != null)
+                            {
+                                try
+                                {
+                                    // For Intel GPUs, use more conservative present parameters
+                                    if (isIntelGpu)
+                                    {
+                                        swapChain.Present(0, PresentFlags.None); // No VSync for Intel
+                                    }
+                                    else
+                                    {
+                                        swapChain.Present(1, PresentFlags.None); // VSync for others
+                                    }
+                                    NeedsRender = false;
+                                }
+                                catch (SharpGenException sgex) when ((uint)sgex.HResult == 0x887A0005 ||
+                                                                      (uint)sgex.HResult == 0x887A0007 ||
+                                                                      (uint)sgex.HResult == 0x887A0001)
+                                {
+                                    Logger.Log($"[Render] Present failed with DXGI error: 0x{sgex.HResult:X}");
+                                    deviceLost = true;
+                                }
+                            }
+                        }
                     }
-                    finally
-                    {
-                        context.PSSetShaderResources(0, new ID3D11ShaderResourceView[] { null, null, null, null });
-                        context.PSSetShader(null);
-                        context.VSSetShader(null);
-                        context.PSSetConstantBuffers(0, new ID3D11Buffer[] { null });
-                        context.PSSetSamplers(0, new ID3D11SamplerState[] { null });
-                        context.OMSetRenderTargets(Array.Empty<ID3D11RenderTargetView>(), null);
-
-                        chunkInfoSrv?.Dispose();
-                        materialSrv?.Dispose();
-                    }
-
-                    swapChain.Present(1, PresentFlags.None);
-                    NeedsRender = false;
-                }
-                catch (SharpGenException sgex) when ((uint)sgex.HResult == 0x887A0005) // DXGI_ERROR_DEVICE_REMOVED
-                {
-                    deviceLost = true;
-                    var reason = device.DeviceRemovedReason;
-                    Logger.Log($"[Render] Device removed detected. Reason: {reason.Code.ToString("X")}");
-
-                    // Set lowest quality for recovery
-                    sceneConstants.Quality = 0;
-                    sceneConstants.StepSize = 8.0f;
-                }
-                catch (SharpGenException sgex) when ((uint)sgex.HResult == 0x887A0007) // DXGI_ERROR_DEVICE_RESET
-                {
-                    deviceLost = true;
-                    Logger.Log("[Render] Device reset detected");
-                }
-                catch (Exception ex)
-                {
-                    Logger.Log($"[Render] Error during rendering: {ex.Message}");
-
-                    // Check if it's a device-related error
-                    if (ex.Message.Contains("device") || ex.Message.Contains("Device"))
+                    catch (SharpGenException sgex) when ((uint)sgex.HResult == 0x887A0005) // DXGI_ERROR_DEVICE_REMOVED
                     {
                         deviceLost = true;
+                        var reason = device.DeviceRemovedReason;
+                        Logger.Log($"[Render] Device removed detected. Reason: {reason.Code.ToString("X")}");
+
+                        // Reduce quality for recovery
+                        sceneConstants.Quality = 0;
+                        sceneConstants.StepSize = isIntelGpu ? 8.0f : 4.0f;
+                    }
+                    catch (SharpGenException sgex) when ((uint)sgex.HResult == 0x887A0007) // DXGI_ERROR_DEVICE_RESET
+                    {
+                        deviceLost = true;
+                        Logger.Log("[Render] Device reset detected");
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[Render] Error during rendering: {ex.Message}");
+                        if (ex.Message.Contains("device") || ex.Message.Contains("Device"))
+                        {
+                            deviceLost = true;
+                        }
                     }
                 }
+            }
+            finally
+            {
+                _isRendering = false;
+                renderComplete.Set();
             }
         }
 
@@ -1140,24 +1304,32 @@ namespace CTS.D3D11
         {
             if (_isDisposed || device == null || width <= 0 || height <= 0) return;
 
+            // Wait for any ongoing render to complete
+            renderComplete.Wait(1000);
+
             lock (renderLock)
             {
-                if (_isDisposed) return;
-
-                try
+                lock (disposeLock)
                 {
-                    renderTargetView?.Dispose();
-                    renderTargetView = null;
+                    if (_isDisposed || swapChain == null) return;
 
-                    swapChain.ResizeBuffers(2, width, height, Format.R8G8B8A8_UNorm, SwapChainFlags.None);
-                    CreateRenderTargetView();
-                    sceneConstants.ScreenDimensions = new Vector2(width, height);
-                    NeedsRender = true;
-                }
-                catch (Exception ex)
-                {
-                    Logger.Log($"[Resize] Error: {ex.Message}");
-                    deviceLost = true;
+                    try
+                    {
+                        renderTargetView?.Dispose();
+                        renderTargetView = null;
+
+                        context.Flush();
+                        swapChain.ResizeBuffers(2, width, height, Format.R8G8B8A8_UNorm, SwapChainFlags.None);
+
+                        CreateRenderTargetView();
+                        sceneConstants.ScreenDimensions = new Vector2(width, height);
+                        NeedsRender = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[Resize] Error: {ex.Message}");
+                        deviceLost = true;
+                    }
                 }
             }
         }
@@ -1169,7 +1341,17 @@ namespace CTS.D3D11
             if (isCameraMoving != moving)
             {
                 isCameraMoving = moving;
-                sceneConstants.StepSize = moving ? 4.0f : 2.0f;
+
+                // Adjust step size based on GPU and movement
+                if (isIntelGpu)
+                {
+                    sceneConstants.StepSize = moving ? 8.0f : 4.0f;
+                }
+                else
+                {
+                    sceneConstants.StepSize = moving ? 4.0f : 2.0f;
+                }
+
                 NeedsRender = true;
             }
         }
@@ -1179,7 +1361,18 @@ namespace CTS.D3D11
             if (_isDisposed) return;
 
             sceneConstants.Threshold = p.Threshold;
-            sceneConstants.Quality = p.Quality;
+
+            // Limit quality for Intel GPUs
+            if (isIntelGpu && p.Quality > 0)
+            {
+                sceneConstants.Quality = 0; // Force lowest quality for Intel
+                Logger.Log("[SetRenderParams] Limiting quality to lowest for Intel GPU");
+            }
+            else
+            {
+                sceneConstants.Quality = p.Quality;
+            }
+
             sceneConstants.ShowGrayscale = p.ShowGrayscale;
             sceneConstants.ShowScaleBar = p.ShowScaleBar;
             sceneConstants.ScaleBarPosition = p.ScaleBarPosition;
@@ -1228,8 +1421,9 @@ namespace CTS.D3D11
                 }
             }
 
+            // Ensure minimum step size
             if (sceneConstants.StepSize < 1.0f)
-                sceneConstants.StepSize = 2.0f;
+                sceneConstants.StepSize = isIntelGpu ? 4.0f : 2.0f;
 
             NeedsRender = true;
         }
@@ -1238,12 +1432,21 @@ namespace CTS.D3D11
         {
             Logger.Log("[D3D11VolumeRenderer] Dispose called");
 
-            lock (renderLock)
+            lock (disposeLock)
             {
                 if (_isDisposed) return;
                 _isDisposed = true;
                 isInitialized = false;
+            }
 
+            // Wait for any ongoing render to complete (with timeout)
+            if (!renderComplete.Wait(5000))
+            {
+                Logger.Log("[D3D11VolumeRenderer] Warning: Render did not complete in time");
+            }
+
+            lock (renderLock)
+            {
                 // Clear any bound resources first
                 if (context != null)
                 {
@@ -1267,6 +1470,8 @@ namespace CTS.D3D11
             }
 
             // Dispose resources in reverse order of creation
+            scaleBarTextureSrv?.Dispose();
+            scaleBarTexture?.Dispose();
             grayscaleTextureSrv?.Dispose();
             labelTextureSrv?.Dispose();
             grayscaleTextureCache?.Dispose();
@@ -1280,21 +1485,28 @@ namespace CTS.D3D11
             pixelShader?.Dispose();
             vertexShader?.Dispose();
 
-            renderTargetView?.Dispose();
-
-            // Dispose swap chain and device last
-            if (swapChain != null)
+            lock (disposeLock)
             {
-                try
+                renderTargetView?.Dispose();
+                renderTargetView = null;
+
+                // Dispose swap chain and device last
+                if (swapChain != null)
                 {
-                    swapChain.SetFullscreenState(false, null);
-                    swapChain.Dispose();
+                    try
+                    {
+                        swapChain.SetFullscreenState(false, null);
+                        swapChain.Dispose();
+                        swapChain = null;
+                    }
+                    catch { }
                 }
-                catch { }
             }
 
             context?.Dispose();
             device?.Dispose();
+
+            renderComplete?.Dispose();
 
             Logger.Log("[D3D11VolumeRenderer] Disposed");
         }

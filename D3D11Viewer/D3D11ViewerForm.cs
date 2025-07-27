@@ -22,7 +22,8 @@ namespace CTS.D3D11
         private CancellationTokenSource renderCancellation;
         private Task renderTask;
         private readonly object disposeLock = new object();
-        private bool isDisposing = false;
+        private volatile bool isDisposing = false;
+        private volatile bool formClosed = false;
 
         public D3D11ViewerForm(MainForm mainForm)
         {
@@ -34,7 +35,10 @@ namespace CTS.D3D11
             lodResetTimer = new System.Windows.Forms.Timer { Interval = 250 };
             lodResetTimer.Tick += (s, e) =>
             {
-                renderer?.SetIsCameraMoving(false);
+                if (!isDisposing && renderer != null)
+                {
+                    renderer.SetIsCameraMoving(false);
+                }
                 lodResetTimer.Stop();
             };
 
@@ -55,6 +59,7 @@ namespace CTS.D3D11
                 MessageBox.Show($"Failed to initialize D3D11 Renderer: {ex.Message}\n\nThis might be due to missing DirectX components or an unsupported GPU.",
                     "Renderer Initialization Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 Logger.Log($"[D3D11] Renderer Initialization Failed: {ex}");
+                formClosed = true;
                 this.Close();
                 return;
             }
@@ -89,7 +94,7 @@ namespace CTS.D3D11
         {
             lock (disposeLock)
             {
-                if (isDisposing) return;
+                if (isDisposing || formClosed) return;
 
                 renderCancellation = new CancellationTokenSource();
                 isRenderLoopRunning = true;
@@ -103,32 +108,64 @@ namespace CTS.D3D11
             // Wait a bit to ensure everything is initialized
             await Task.Delay(100, cancellationToken);
 
-            while (!cancellationToken.IsCancellationRequested && isRenderLoopRunning)
+            while (!cancellationToken.IsCancellationRequested && isRenderLoopRunning && !formClosed)
             {
                 try
                 {
-                    if (renderer != null && !IsDisposed && IsHandleCreated)
+                    // Check if we can render
+                    bool canRender = false;
+                    lock (disposeLock)
                     {
-                        // Invoke on UI thread
-                        if (InvokeRequired && !IsDisposed)
+                        canRender = !isDisposing && !formClosed && renderer != null && !renderer.IsDisposed;
+                    }
+
+                    if (!canRender)
+                    {
+                        break;
+                    }
+
+                    // Check if form is still valid
+                    if (IsDisposed || !IsHandleCreated)
+                    {
+                        break;
+                    }
+
+                    // Render on UI thread for safety
+                    if (InvokeRequired)
+                    {
+                        try
                         {
-                            try
+                            // Use BeginInvoke to avoid blocking
+                            BeginInvoke(new Action(() =>
                             {
-                                BeginInvoke(new Action(() =>
+                                lock (disposeLock)
                                 {
-                                    if (!isDisposing && renderer != null)
+                                    if (!isDisposing && !formClosed && renderer != null && !renderer.IsDisposed)
+                                    {
                                         renderer.Render(camera);
-                                }));
-                            }
-                            catch (ObjectDisposedException)
-                            {
-                                // Form was disposed while we were trying to invoke
-                                break;
-                            }
+                                    }
+                                }
+                            }));
                         }
-                        else if (!isDisposing && renderer != null)
+                        catch (ObjectDisposedException)
                         {
-                            renderer.Render(camera);
+                            // Form was disposed while we were trying to invoke
+                            break;
+                        }
+                        catch (InvalidOperationException)
+                        {
+                            // Handle cannot be created
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        lock (disposeLock)
+                        {
+                            if (!isDisposing && !formClosed && renderer != null && !renderer.IsDisposed)
+                            {
+                                renderer.Render(camera);
+                            }
                         }
                     }
                 }
@@ -152,37 +189,59 @@ namespace CTS.D3D11
 
         public void UpdateRenderParameters(RenderParameters parameters)
         {
-            renderer?.SetRenderParams(parameters);
+            lock (disposeLock)
+            {
+                if (!isDisposing && renderer != null && !renderer.IsDisposed)
+                {
+                    renderer.SetRenderParams(parameters);
+                }
+            }
         }
 
         public void UpdateMaterialBuffer()
         {
-            renderer?.UpdateMaterialsBuffer();
+            lock (disposeLock)
+            {
+                if (!isDisposing && renderer != null && !renderer.IsDisposed)
+                {
+                    renderer.UpdateMaterialsBuffer();
+                }
+            }
         }
 
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            if (renderer != null && ClientSize.Width > 0 && ClientSize.Height > 0 && !isDisposing)
+
+            lock (disposeLock)
             {
-                renderer.Resize(ClientSize.Width, ClientSize.Height);
-                if (camera != null)
+                if (!isDisposing && renderer != null && !renderer.IsDisposed &&
+                    ClientSize.Width > 0 && ClientSize.Height > 0)
                 {
-                    camera.AspectRatio = (float)ClientSize.Width / ClientSize.Height;
+                    renderer.Resize(ClientSize.Width, ClientSize.Height);
+                    if (camera != null)
+                    {
+                        camera.AspectRatio = (float)ClientSize.Width / ClientSize.Height;
+                    }
                 }
             }
         }
 
         private void NotifyCameraMoving()
         {
-            if (renderer != null && !isDisposing)
+            lock (disposeLock)
             {
-                renderer.SetIsCameraMoving(true);
-                renderer.NeedsRender = true;
+                if (!isDisposing && renderer != null && !renderer.IsDisposed)
+                {
+                    renderer.SetIsCameraMoving(true);
+                    renderer.NeedsRender = true;
+                }
             }
+
             lodResetTimer.Stop();
             lodResetTimer.Start();
         }
+
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
             // Add F12 as screenshot hotkey
@@ -197,6 +256,7 @@ namespace CTS.D3D11
 
             return base.ProcessCmdKey(ref msg, keyData);
         }
+
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
@@ -243,7 +303,9 @@ namespace CTS.D3D11
 
             lock (disposeLock)
             {
+                if (isDisposing) return; // Already disposing
                 isDisposing = true;
+                formClosed = true;
                 isRenderLoopRunning = false;
             }
 
@@ -254,7 +316,7 @@ namespace CTS.D3D11
                 try
                 {
                     // Wait for render loop to finish, but not indefinitely
-                    if (renderTask != null && !renderTask.Wait(1000))
+                    if (renderTask != null && !renderTask.Wait(2000))
                     {
                         Logger.Log("[D3D11ViewerForm] Render task did not complete in time");
                     }
@@ -263,7 +325,9 @@ namespace CTS.D3D11
                 {
                     Logger.Log($"[D3D11ViewerForm] Exception waiting for render task: {ex.Message}");
                 }
+
                 renderCancellation.Dispose();
+                renderCancellation = null;
             }
 
             // Stop timers
@@ -273,7 +337,11 @@ namespace CTS.D3D11
             // Close control panel first (it references the renderer)
             if (controlPanel != null && !controlPanel.IsDisposed)
             {
-                controlPanel.Close();
+                try
+                {
+                    controlPanel.Close();
+                }
+                catch { }
                 controlPanel = null;
             }
 
@@ -285,17 +353,20 @@ namespace CTS.D3D11
             Logger.Log("[D3D11ViewerForm] Form closed, disposing renderer");
 
             // Dispose renderer last
-            if (renderer != null)
+            lock (disposeLock)
             {
-                try
+                if (renderer != null)
                 {
-                    renderer.Dispose();
+                    try
+                    {
+                        renderer.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"[D3D11ViewerForm] Error disposing renderer: {ex.Message}");
+                    }
+                    renderer = null;
                 }
-                catch (Exception ex)
-                {
-                    Logger.Log($"[D3D11ViewerForm] Error disposing renderer: {ex.Message}");
-                }
-                renderer = null;
             }
 
             base.OnFormClosed(e);
@@ -310,13 +381,27 @@ namespace CTS.D3D11
                 lock (disposeLock)
                 {
                     isDisposing = true;
+                    formClosed = true;
                 }
 
+                // Ensure everything is cleaned up
                 lodResetTimer?.Dispose();
                 renderCancellation?.Dispose();
 
                 // The renderer should already be disposed in OnFormClosed
-                renderer?.Dispose();
+                if (renderer != null)
+                {
+                    try
+                    {
+                        renderer.Dispose();
+                    }
+                    catch { }
+                    renderer = null;
+                }
+
+                // Clear references
+                camera = null;
+                mainForm = null;
             }
 
             base.Dispose(disposing);

@@ -18,7 +18,8 @@ namespace CTS.D3D11
         public Vector3 Normal;
         public float Distance;
         public bool Enabled;
-        public bool Mirrored;
+        public bool SlabMode; // Renamed from Mirrored
+        public float SlabTranslation; // New field for translation
         public string Name;
     }
 
@@ -47,13 +48,15 @@ namespace CTS.D3D11
         // Clipping tab
         private ListView lstClippingPlanes;
         private Button btnAddPlane, btnRemovePlane;
-        private CheckBox chkEnablePlane, chkMirrorPlane;
+        private CheckBox chkEnablePlane, chkSlabMode, chkDrawPlanes;
         private TrackBar trkPlaneNormalX, trkPlaneNormalY, trkPlaneNormalZ;
-        private TrackBar trkPlaneRotation, trkPlaneDistance;
+        private TrackBar trkPlaneDistance, trkSlabTranslation;
         private Label lblNormalX, lblNormalY, lblNormalZ;
-        private Label lblRotation, lblDistance;
+        private Label lblDistance, lblSlabTranslation;
+        private Label lblDistanceLabel; // To change text between Distance/Thickness
         private ComboBox cmbPlanePresets;
         private Panel planePreviewPanel;
+
 
         // Visualization tab
         private CheckBox chkShowScaleBar;
@@ -345,11 +348,13 @@ namespace CTS.D3D11
 
             trkOpacity.Scroll += (s, e) =>
             {
-                lblOpacity.Text = $"{trkOpacity.Value}%";
                 if (lstMaterials.SelectedIndex >= 0)
                 {
                     var material = mainForm.Materials[lstMaterials.SelectedIndex];
-                    material.SetOpacity(trkOpacity.Value / 100.0f);
+                    // Use linear mapping instead of quadratic
+                    float opacity = trkOpacity.Value / 100.0f;
+                    material.SetOpacity(opacity);
+                    lblOpacity.Text = $"{trkOpacity.Value}%";
                     UpdateMaterialBuffer();
                 }
             };
@@ -393,19 +398,14 @@ namespace CTS.D3D11
             };
             lstClippingPlanes.Columns.Add("Name", 180);
             lstClippingPlanes.Columns.Add("Type", 80);
-            lstClippingPlanes.Columns.Add("Mirror", 60);
+            lstClippingPlanes.Columns.Add("Slab", 60);
             lstClippingPlanes.ItemChecked += (s, e) =>
             {
-                if (!updatingUI)
+                if (!updatingUI && e.Item.Index < clippingPlanes.Count)
                 {
-                    clippingPlanes[e.Item.Index] = new ClippingPlane
-                    {
-                        Name = clippingPlanes[e.Item.Index].Name,
-                        Normal = clippingPlanes[e.Item.Index].Normal,
-                        Distance = clippingPlanes[e.Item.Index].Distance,
-                        Enabled = e.Item.Checked,
-                        Mirrored = clippingPlanes[e.Item.Index].Mirrored
-                    };
+                    var plane = clippingPlanes[e.Item.Index];
+                    plane.Enabled = e.Item.Checked;
+                    clippingPlanes[e.Item.Index] = plane;
                     UpdateClippingPlanes();
                 }
             };
@@ -427,7 +427,7 @@ namespace CTS.D3D11
             // Plane editor
             var editorGroup = CreateStyledGroupBox("Plane Properties");
             editorGroup.Location = new Point(10, 200);
-            editorGroup.Size = new Size(container.ClientSize.Width - 20, 350);
+            editorGroup.Size = new Size(container.ClientSize.Width - 20, 420); // Increased height
             editorGroup.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
             chkEnablePlane = new CheckBox
@@ -436,15 +436,24 @@ namespace CTS.D3D11
                 Location = new Point(10, 25),
                 AutoSize = true
             };
-            chkEnablePlane.CheckedChanged += (s, e) => UpdateSelectedPlane();
+            chkEnablePlane.CheckedChanged += ChkEnablePlane_CheckedChanged;
 
-            chkMirrorPlane = new CheckBox
+            chkSlabMode = new CheckBox
             {
-                Text = "Mirror Plane",
-                Location = new Point(150, 25),
+                Text = "Slab Mode", // Renamed
+                Location = new Point(120, 25),
                 AutoSize = true
             };
-            chkMirrorPlane.CheckedChanged += (s, e) => UpdateSelectedPlane();
+            chkSlabMode.CheckedChanged += ChkSlabMode_CheckedChanged;
+
+            chkDrawPlanes = new CheckBox
+            {
+                Text = "Show Visual Aid",
+                Location = new Point(230, 25),
+                AutoSize = true,
+                Checked = true
+            };
+            chkDrawPlanes.CheckedChanged += (s, e) => UpdateRenderParams();
 
             var lblPreset = new Label
             {
@@ -473,7 +482,12 @@ namespace CTS.D3D11
                 Value = 0,
                 TickFrequency = 20
             };
-            trkPlaneNormalX.Scroll += (s, e) => { lblNormalX.Text = $"Normal X: {trkPlaneNormalX.Value / 100.0f:F2}"; UpdateSelectedPlane(); };
+            trkPlaneNormalX.Scroll += (s, e) => {
+                if (updatingUI) return;
+                lblNormalX.Text = $"Normal X: {trkPlaneNormalX.Value / 100.0f:F2}";
+                UpdateSelectedPlaneFromAllControls();
+                planePreviewPanel?.Invalidate();
+            };
 
             lblNormalY = new Label { Text = "Normal Y: 0.00", Location = new Point(10, 155), AutoSize = true };
             trkPlaneNormalY = new TrackBar
@@ -485,7 +499,12 @@ namespace CTS.D3D11
                 Value = 0,
                 TickFrequency = 20
             };
-            trkPlaneNormalY.Scroll += (s, e) => { lblNormalY.Text = $"Normal Y: {trkPlaneNormalY.Value / 100.0f:F2}"; UpdateSelectedPlane(); };
+            trkPlaneNormalY.Scroll += (s, e) => {
+                if (updatingUI) return;
+                lblNormalY.Text = $"Normal Y: {trkPlaneNormalY.Value / 100.0f:F2}";
+                UpdateSelectedPlaneFromAllControls();
+                planePreviewPanel?.Invalidate();
+            };
 
             lblNormalZ = new Label { Text = "Normal Z: 1.00", Location = new Point(10, 220), AutoSize = true };
             trkPlaneNormalZ = new TrackBar
@@ -497,9 +516,16 @@ namespace CTS.D3D11
                 Value = 100,
                 TickFrequency = 20
             };
-            trkPlaneNormalZ.Scroll += (s, e) => { lblNormalZ.Text = $"Normal Z: {trkPlaneNormalZ.Value / 100.0f:F2}"; UpdateSelectedPlane(); };
+            trkPlaneNormalZ.Scroll += (s, e) => {
+                if (updatingUI) return;
+                lblNormalZ.Text = $"Normal Z: {trkPlaneNormalZ.Value / 100.0f:F2}";
+                UpdateSelectedPlaneFromAllControls();
+                planePreviewPanel?.Invalidate();
+            };
 
-            lblDistance = new Label { Text = "Distance: 0.00", Location = new Point(10, 285), AutoSize = true };
+            // Distance / Thickness controls
+            lblDistanceLabel = new Label { Text = "Distance:", Location = new Point(10, 285), AutoSize = true };
+            lblDistance = new Label { Text = "0.00", Location = new Point(120, 285), AutoSize = true };
             trkPlaneDistance = new TrackBar
             {
                 Location = new Point(10, 305),
@@ -509,10 +535,35 @@ namespace CTS.D3D11
                 Value = 0,
                 TickFrequency = 20
             };
-            trkPlaneDistance.Scroll += (s, e) => { lblDistance.Text = $"Distance: {trkPlaneDistance.Value / 100.0f:F2}"; UpdateSelectedPlane(); };
+            trkPlaneDistance.Scroll += (s, e) => {
+                if (updatingUI) return;
+                lblDistance.Text = $"{trkPlaneDistance.Value / 100.0f:F2}";
+                UpdateSelectedPlaneFromAllControls();
+                planePreviewPanel?.Invalidate();
+            };
+
+            // New Slab Translation controls
+            lblSlabTranslation = new Label { Text = "Slab Position: 0.00", Location = new Point(10, 350), AutoSize = true, Visible = false };
+            trkSlabTranslation = new TrackBar
+            {
+                Location = new Point(10, 370),
+                Size = new Size(300, 45),
+                Minimum = -200,
+                Maximum = 200,
+                Value = 0,
+                TickFrequency = 20,
+                Visible = false
+            };
+            trkSlabTranslation.Scroll += (s, e) => {
+                if (updatingUI) return;
+                lblSlabTranslation.Text = $"Slab Position: {trkSlabTranslation.Value / 100.0f:F2}";
+                UpdateSelectedPlaneFromAllControls();
+            };
+
 
             editorGroup.Controls.Add(chkEnablePlane);
-            editorGroup.Controls.Add(chkMirrorPlane);
+            editorGroup.Controls.Add(chkSlabMode);
+            editorGroup.Controls.Add(chkDrawPlanes);
             editorGroup.Controls.Add(lblPreset);
             editorGroup.Controls.Add(cmbPlanePresets);
             editorGroup.Controls.Add(lblNormalX);
@@ -521,13 +572,17 @@ namespace CTS.D3D11
             editorGroup.Controls.Add(trkPlaneNormalY);
             editorGroup.Controls.Add(lblNormalZ);
             editorGroup.Controls.Add(trkPlaneNormalZ);
+            editorGroup.Controls.Add(lblDistanceLabel);
             editorGroup.Controls.Add(lblDistance);
             editorGroup.Controls.Add(trkPlaneDistance);
+            editorGroup.Controls.Add(lblSlabTranslation);
+            editorGroup.Controls.Add(trkSlabTranslation);
             container.Controls.Add(editorGroup);
+
 
             // Plane preview
             var previewGroup = CreateStyledGroupBox("Preview");
-            previewGroup.Location = new Point(10, 560);
+            previewGroup.Location = new Point(10, 630); // Moved down
             previewGroup.Size = new Size(container.ClientSize.Width - 20, 100);
             previewGroup.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
@@ -536,7 +591,8 @@ namespace CTS.D3D11
                 Location = new Point(10, 25),
                 Size = new Size(previewGroup.ClientSize.Width - 20, 65),
                 Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
-                BackColor = Color.FromArgb(30, 30, 30)
+                BackColor = Color.FromArgb(30, 30, 30),
+                BorderStyle = BorderStyle.FixedSingle
             };
             planePreviewPanel.Paint += PlanePreviewPanel_Paint;
 
@@ -893,9 +949,9 @@ namespace CTS.D3D11
         private void InitializeClippingPlanes()
         {
             // Add default clipping planes (disabled)
-            clippingPlanes.Add(new ClippingPlane { Name = "X-Axis Plane", Normal = new Vector3(1, 0, 0), Distance = 0, Enabled = false, Mirrored = false });
-            clippingPlanes.Add(new ClippingPlane { Name = "Y-Axis Plane", Normal = new Vector3(0, 1, 0), Distance = 0, Enabled = false, Mirrored = false });
-            clippingPlanes.Add(new ClippingPlane { Name = "Z-Axis Plane", Normal = new Vector3(0, 0, 1), Distance = 0, Enabled = false, Mirrored = false });
+            clippingPlanes.Add(new ClippingPlane { Name = "X-Axis Plane", Normal = new Vector3(1, 0, 0), Distance = 0, Enabled = false, SlabMode = false });
+            clippingPlanes.Add(new ClippingPlane { Name = "Y-Axis Plane", Normal = new Vector3(0, 1, 0), Distance = 0, Enabled = false, SlabMode = false });
+            clippingPlanes.Add(new ClippingPlane { Name = "Z-Axis Plane", Normal = new Vector3(0, 0, 1), Distance = 0, Enabled = false, SlabMode = false });
 
             RefreshClippingPlanesList();
         }
@@ -904,18 +960,35 @@ namespace CTS.D3D11
         {
             if (lstClippingPlanes == null) return;
 
+            // --- START FIX: Preserve selection ---
+            int previouslySelectedIndex = -1;
+            if (lstClippingPlanes.SelectedIndices.Count > 0)
+            {
+                previouslySelectedIndex = lstClippingPlanes.SelectedIndices[0];
+            }
+            // --- END FIX ---
+
             updatingUI = true;
             lstClippingPlanes.Items.Clear();
             foreach (var plane in clippingPlanes)
             {
                 var item = new ListViewItem(plane.Name);
                 item.SubItems.Add(GetPlaneType(plane.Normal));
-                item.SubItems.Add(plane.Mirrored ? "Yes" : "No");
+                item.SubItems.Add(plane.SlabMode ? "Yes" : "No");
                 item.Checked = plane.Enabled;
                 lstClippingPlanes.Items.Add(item);
             }
             updatingUI = false;
+
+            // --- START FIX: Restore selection ---
+            if (previouslySelectedIndex != -1 && previouslySelectedIndex < lstClippingPlanes.Items.Count)
+            {
+                lstClippingPlanes.Items[previouslySelectedIndex].Selected = true;
+                lstClippingPlanes.Focus();
+            }
+            // --- END FIX ---
         }
+
 
         private string GetPlaneType(Vector3 normal)
         {
@@ -932,38 +1005,43 @@ namespace CTS.D3D11
 
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.Clear(Color.FromArgb(30, 30, 30));
+
             var bounds = planePreviewPanel.ClientRectangle;
-
-            // Draw axes
             var center = new PointF(bounds.Width / 2f, bounds.Height / 2f);
-            var scale = Math.Min(bounds.Width, bounds.Height) * 0.4f;
+            var scale = Math.Min(bounds.Width, bounds.Height) * 0.3f;
 
-            using (var axisPen = new Pen(Color.Gray, 1))
+            // Draw coordinate axes
+            using (var xPen = new Pen(Color.Red, 2))
+            using (var yPen = new Pen(Color.Green, 2))
+            using (var zPen = new Pen(Color.Blue, 2))
+            using (var font = new Font("Arial", 10, FontStyle.Bold))
             {
-                // X axis (red)
-                g.DrawLine(new Pen(Color.Red, 2), center, new PointF(center.X + scale * 0.8f, center.Y));
-                g.DrawString("X", Font, Brushes.Red, center.X + scale * 0.8f + 5, center.Y - 8);
+                // X axis
+                g.DrawLine(xPen, center, new PointF(center.X + scale, center.Y));
+                g.DrawString("X", font, Brushes.Red, center.X + scale + 5, center.Y - 10);
 
-                // Y axis (green) - inverted for screen coordinates
-                g.DrawLine(new Pen(Color.Green, 2), center, new PointF(center.X, center.Y - scale * 0.8f));
-                g.DrawString("Y", Font, Brushes.Green, center.X - 8, center.Y - scale * 0.8f - 15);
+                // Y axis (inverted for screen coordinates)
+                g.DrawLine(yPen, center, new PointF(center.X, center.Y - scale));
+                g.DrawString("Y", font, Brushes.Green, center.X - 10, center.Y - scale - 15);
 
-                // Z axis (blue) - projected
-                var zProj = new PointF(center.X - scale * 0.4f, center.Y + scale * 0.4f);
-                g.DrawLine(new Pen(Color.Blue, 2), center, zProj);
-                g.DrawString("Z", Font, Brushes.Blue, zProj.X - 15, zProj.Y);
+                // Z axis (projected at 45 degrees)
+                float zProjX = scale * 0.7f;
+                float zProjY = scale * 0.7f;
+                g.DrawLine(zPen, center, new PointF(center.X - zProjX, center.Y + zProjY));
+                g.DrawString("Z", font, Brushes.Blue, center.X - zProjX - 15, center.Y + zProjY);
             }
 
-            // Draw plane
+            // Draw the clipping plane
             var plane = clippingPlanes[selectedPlaneIndex];
-            var normal = Vector3.Normalize(plane.Normal);
+            var normal = plane.Normal.LengthSquared() > 0.01f ? Vector3.Normalize(plane.Normal) : new Vector3(0, 0, 1);
 
-            // Project normal to 2D
-            var projX = normal.X - normal.Z * 0.5f;
-            var projY = -normal.Y + normal.Z * 0.5f;
+            // Draw normal vector
+            float projX = normal.X - normal.Z * 0.5f;
+            float projY = -normal.Y + normal.Z * 0.5f;
             var normalEnd = new PointF(
-                center.X + projX * scale * 0.6f,
-                center.Y + projY * scale * 0.6f
+                center.X + projX * scale * 0.8f,
+                center.Y + projY * scale * 0.8f
             );
 
             using (var normalPen = new Pen(Color.Yellow, 3))
@@ -972,12 +1050,40 @@ namespace CTS.D3D11
                 g.DrawLine(normalPen, center, normalEnd);
             }
 
-            // Draw plane representation
-            using (var planeBrush = new SolidBrush(Color.FromArgb(64, 100, 100, 255)))
+            // Draw plane representation as a semi-transparent rectangle
+            using (var planeBrush = new SolidBrush(Color.FromArgb(80, 100, 150, 255)))
+            using (var planePen = new Pen(Color.FromArgb(200, 100, 150, 255), 2))
             {
-                // Simple rectangle representing the plane
-                var planeSize = scale * 0.5f;
-                g.FillRectangle(planeBrush, center.X - planeSize / 2, center.Y - planeSize / 2, planeSize, planeSize);
+                // Calculate plane orientation
+                float angle = (float)Math.Atan2(projY, projX);
+
+                g.TranslateTransform(center.X, center.Y);
+                g.RotateTransform(angle * 180f / (float)Math.PI);
+
+                float planeSize = scale * 0.6f;
+                var planeRect = new RectangleF(-planeSize / 2, -planeSize / 4, planeSize, planeSize / 2);
+
+                g.FillRectangle(planeBrush, planeRect);
+                g.DrawRectangle(planePen, planeRect.X, planeRect.Y, planeRect.Width, planeRect.Height);
+
+                g.ResetTransform();
+            }
+
+            // Draw distance indicator if non-zero
+            if (Math.Abs(plane.Distance) > 0.01f)
+            {
+                using (var distPen = new Pen(Color.Orange, 2) { DashStyle = DashStyle.Dash })
+                using (var font = new Font("Arial", 8))
+                {
+                    float distOffset = plane.Distance * scale / (float)Math.Max(mainForm.GetWidth(), 1);
+                    var offsetPoint = new PointF(
+                        center.X + projX * distOffset,
+                        center.Y + projY * distOffset
+                    );
+
+                    g.DrawLine(distPen, center, offsetPoint);
+                    g.DrawString($"d={plane.Distance:F1}", font, Brushes.Orange, offsetPoint.X + 5, offsetPoint.Y);
+                }
             }
         }
 
@@ -989,7 +1095,8 @@ namespace CTS.D3D11
                 Normal = new Vector3(0, 0, 1),
                 Distance = 0,
                 Enabled = true,
-                Mirrored = false
+                SlabMode = false,
+                SlabTranslation = 0
             };
             clippingPlanes.Add(plane);
             RefreshClippingPlanesList();
@@ -1027,26 +1134,60 @@ namespace CTS.D3D11
             {
                 updatingUI = true;
                 var plane = clippingPlanes[selectedPlaneIndex];
-                var n = Vector3.Normalize(plane.Normal);
+                var n = plane.Normal.LengthSquared() > 0.01f ? Vector3.Normalize(plane.Normal) : new Vector3(0, 0, 1);
 
                 chkEnablePlane.Checked = plane.Enabled;
-                chkMirrorPlane.Checked = plane.Mirrored;
+                chkSlabMode.Checked = plane.SlabMode;
 
                 trkPlaneNormalX.Value = (int)(n.X * 100);
                 trkPlaneNormalY.Value = (int)(n.Y * 100);
                 trkPlaneNormalZ.Value = (int)(n.Z * 100);
-                trkPlaneDistance.Value = (int)(plane.Distance * 100 / Math.Max(1, mainForm.GetWidth()));
+
+                float maxDim = Math.Max(1f, mainForm.GetWidth());
+                trkPlaneDistance.Value = (int)(plane.Distance * 200 / maxDim);
+                trkSlabTranslation.Value = (int)(plane.SlabTranslation * 200 / maxDim);
+
 
                 lblNormalX.Text = $"Normal X: {n.X:F2}";
                 lblNormalY.Text = $"Normal Y: {n.Y:F2}";
                 lblNormalZ.Text = $"Normal Z: {n.Z:F2}";
-                lblDistance.Text = $"Distance: {trkPlaneDistance.Value / 100.0f:F2}";
+                lblDistance.Text = $"{plane.Distance:F2}";
+                lblSlabTranslation.Text = $"Slab Position: {plane.SlabTranslation:F2}";
 
+                UpdateSlabControlsVisibility();
                 updatingUI = false;
             }
         }
 
-        private void UpdateSelectedPlane()
+        // --- START FIX: More robust event handlers for checkboxes ---
+        private void ChkEnablePlane_CheckedChanged(object sender, EventArgs e)
+        {
+            if (updatingUI || selectedPlaneIndex < 0 || selectedPlaneIndex >= clippingPlanes.Count) return;
+
+            var plane = clippingPlanes[selectedPlaneIndex];
+            plane.Enabled = chkEnablePlane.Checked;
+            clippingPlanes[selectedPlaneIndex] = plane;
+
+            RefreshClippingPlanesList();
+            UpdateClippingPlanes();
+        }
+
+        private void ChkSlabMode_CheckedChanged(object sender, EventArgs e)
+        {
+            if (updatingUI || selectedPlaneIndex < 0 || selectedPlaneIndex >= clippingPlanes.Count) return;
+
+            var plane = clippingPlanes[selectedPlaneIndex];
+            plane.SlabMode = chkSlabMode.Checked;
+            clippingPlanes[selectedPlaneIndex] = plane;
+
+            UpdateSlabControlsVisibility();
+            RefreshClippingPlanesList();
+            UpdateClippingPlanes();
+        }
+        // --- END FIX ---
+
+
+        private void UpdateSelectedPlaneFromAllControls()
         {
             if (updatingUI || selectedPlaneIndex < 0 || selectedPlaneIndex >= clippingPlanes.Count) return;
 
@@ -1065,18 +1206,38 @@ namespace CTS.D3D11
                 normal = new Vector3(0, 0, 1);
             }
 
-            clippingPlanes[selectedPlaneIndex] = new ClippingPlane
-            {
-                Name = clippingPlanes[selectedPlaneIndex].Name,
-                Normal = normal,
-                Distance = trkPlaneDistance.Value / 100.0f * Math.Max(1, mainForm.GetWidth()),
-                Enabled = chkEnablePlane.Checked,
-                Mirrored = chkMirrorPlane.Checked
-            };
+            var plane = clippingPlanes[selectedPlaneIndex];
+            plane.Normal = normal;
+
+            float maxDim = Math.Max(1f, mainForm.GetWidth());
+            plane.Distance = trkPlaneDistance.Value * maxDim / 200.0f;
+            plane.SlabTranslation = trkSlabTranslation.Value * maxDim / 200.0f;
+
+            plane.Enabled = chkEnablePlane.Checked;
+            plane.SlabMode = chkSlabMode.Checked;
+            clippingPlanes[selectedPlaneIndex] = plane;
 
             RefreshClippingPlanesList();
             UpdateClippingPlanes();
-            planePreviewPanel?.Invalidate();
+            UpdatePlaneEditor(); // Refresh labels
+        }
+
+        private void UpdateSlabControlsVisibility()
+        {
+            bool isSlab = chkSlabMode.Checked;
+            lblSlabTranslation.Visible = isSlab;
+            trkSlabTranslation.Visible = isSlab;
+
+            if (isSlab)
+            {
+                lblDistanceLabel.Text = "Slab Thickness:";
+                trkPlaneDistance.Minimum = 0; // Thickness cannot be negative
+            }
+            else
+            {
+                lblDistanceLabel.Text = "Distance:";
+                trkPlaneDistance.Minimum = -200;
+            }
         }
 
         private void CmbPresets_SelectedIndexChanged(object sender, EventArgs e)
@@ -1097,7 +1258,7 @@ namespace CTS.D3D11
             trkPlaneNormalX.Value = (int)(normal.X * 100);
             trkPlaneNormalY.Value = (int)(normal.Y * 100);
             trkPlaneNormalZ.Value = (int)(normal.Z * 100);
-            UpdateSelectedPlane();
+            UpdateSelectedPlaneFromAllControls();
         }
 
         private void UpdateClippingPlanes()
@@ -1134,8 +1295,10 @@ namespace CTS.D3D11
             var material = mainForm.Materials[lstMaterials.SelectedIndex];
             lblMaterialName.Text = material.Name;
             materialColorPanel.BackColor = material.Color;
-            trkOpacity.Value = (int)(material.GetOpacity() * 100);
-            lblOpacity.Text = $"{trkOpacity.Value}%";
+
+            float opacity = material.GetOpacity();
+            trkOpacity.Value = (int)(opacity * 100.0);
+            lblOpacity.Text = $"{(int)(opacity * 100)}%";
         }
 
         private void UpdateMaterialBuffer()
@@ -1183,14 +1346,34 @@ namespace CTS.D3D11
             p.ClippingPlanes = new List<Vector4>();
             foreach (var plane in clippingPlanes.Where(planeItem => planeItem.Enabled))
             {
-                p.ClippingPlanes.Add(new Vector4(plane.Normal, plane.Distance));
-
-                // If mirrored, add the opposite plane
-                if (plane.Mirrored)
+                if (plane.SlabMode)
                 {
-                    p.ClippingPlanes.Add(new Vector4(-plane.Normal, -plane.Distance));
+                    // It's a slab. Create two independent planes that are handled by the standard clipping logic.
+                    // The slab exists between a "lower" and "upper" bound along the plane's normal.
+                    float thickness = plane.Distance; // Distance slider now controls thickness
+                    float position = plane.SlabTranslation; // New slider controls position of the slab's center
+
+                    float lowerBound = position - thickness / 2.0f;
+                    float upperBound = position + thickness / 2.0f;
+
+                    // Add a plane to clip everything beyond the upper bound.
+                    // Equation: dot(P-C, N) - upperBound > 0 is clipped.
+                    p.ClippingPlanes.Add(new Vector4(plane.Normal, upperBound));
+
+                    // Add a plane to clip everything before the lower bound.
+                    // Equation: dot(P-C, N) < lowerBound is clipped.
+                    // This is equivalent to: dot(P-C, -N) > -lowerBound.
+                    p.ClippingPlanes.Add(new Vector4(-plane.Normal, -lowerBound));
+                }
+                else
+                {
+                    // It's a single, standard clipping plane.
+                    p.ClippingPlanes.Add(new Vector4(plane.Normal, plane.Distance));
                 }
             }
+
+
+            p.DrawClippingPlanes = (chkDrawPlanes?.Checked ?? true) ? 1.0f : 0.0f;
 
             volumeRenderer.SetRenderParams(p);
         }

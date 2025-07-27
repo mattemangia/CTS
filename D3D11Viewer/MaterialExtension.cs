@@ -1,4 +1,5 @@
-﻿namespace CTS.D3D11
+﻿// Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
+namespace CTS.D3D11
 {
     public static class MaterialExtensions
     {
@@ -23,6 +24,11 @@
         // Convert material for GPU usage
         public static MaterialGPU ToGPU(this Material material)
         {
+            float opacity = material.GetOpacity();
+
+            // Use linear opacity mapping for predictable behavior
+            // The shader will handle the actual blending
+
             return new MaterialGPU
             {
                 Color = new System.Numerics.Vector4(
@@ -32,7 +38,7 @@
                     1.0f
                 ),
                 Settings = new System.Numerics.Vector4(
-                    material.GetOpacity(),
+                    opacity,
                     material.IsVisible ? 1.0f : 0.0f,
                     material.Min,
                     material.Max

@@ -182,110 +182,50 @@ namespace CTS
             // Calculate the determinant
             float det = matrix.GetDeterminant();
 
-            if (Math.Abs(det) < float.Epsilon)
+            if (Math.Abs(det) < 1e-6f) // Use a small epsilon
             {
                 result = Identity;
                 return false;
             }
 
             float invDet = 1.0f / det;
+            float m11 = matrix.M11, m12 = matrix.M12, m13 = matrix.M13, m14 = matrix.M14;
+            float m21 = matrix.M21, m22 = matrix.M22, m23 = matrix.M23, m24 = matrix.M24;
+            float m31 = matrix.M31, m32 = matrix.M32, m33 = matrix.M33, m34 = matrix.M34;
+            float m41 = matrix.M41, m42 = matrix.M42, m43 = matrix.M43, m44 = matrix.M44;
 
-            // Calculate the adjoint matrix
-            result = new Matrix4x4();
-
-            // First row
-            result.M11 = invDet * (matrix.M22 * (matrix.M33 * matrix.M44 - matrix.M34 * matrix.M43) -
-                                  matrix.M23 * (matrix.M32 * matrix.M44 - matrix.M34 * matrix.M42) +
-                                  matrix.M24 * (matrix.M32 * matrix.M43 - matrix.M33 * matrix.M42));
-
-            result.M12 = -invDet * (matrix.M12 * (matrix.M33 * matrix.M44 - matrix.M34 * matrix.M43) -
-                                   matrix.M13 * (matrix.M32 * matrix.M44 - matrix.M34 * matrix.M42) +
-                                   matrix.M14 * (matrix.M32 * matrix.M43 - matrix.M33 * matrix.M42));
-
-            result.M13 = invDet * (matrix.M12 * (matrix.M23 * matrix.M44 - matrix.M24 * matrix.M43) -
-                                  matrix.M13 * (matrix.M22 * matrix.M44 - matrix.M24 * matrix.M42) +
-                                  matrix.M14 * (matrix.M22 * matrix.M43 - matrix.M23 * matrix.M42));
-
-            result.M14 = -invDet * (matrix.M12 * (matrix.M23 * matrix.M34 - matrix.M24 * matrix.M33) -
-                                   matrix.M13 * (matrix.M22 * matrix.M34 - matrix.M24 * matrix.M32) +
-                                   matrix.M14 * (matrix.M22 * matrix.M33 - matrix.M23 * matrix.M32));
-
-            // Second row
-            result.M21 = -invDet * (matrix.M21 * (matrix.M33 * matrix.M44 - matrix.M34 * matrix.M43) -
-                                   matrix.M23 * (matrix.M31 * matrix.M44 - matrix.M34 * matrix.M41) +
-                                   matrix.M24 * (matrix.M31 * matrix.M43 - matrix.M33 * matrix.M41));
-
-            result.M22 = invDet * (matrix.M11 * (matrix.M33 * matrix.M44 - matrix.M34 * matrix.M43) -
-                                  matrix.M13 * (matrix.M31 * matrix.M44 - matrix.M34 * matrix.M41) +
-                                  matrix.M14 * (matrix.M31 * matrix.M43 - matrix.M33 * matrix.M41));
-
-            result.M23 = -invDet * (matrix.M11 * (matrix.M23 * matrix.M44 - matrix.M24 * matrix.M43) -
-                                   matrix.M13 * (matrix.M21 * matrix.M44 - matrix.M24 * matrix.M41) +
-                                   matrix.M14 * (matrix.M21 * matrix.M43 - matrix.M23 * matrix.M41));
-
-            result.M24 = invDet * (matrix.M11 * (matrix.M23 * matrix.M34 - matrix.M24 * matrix.M33) -
-                                  matrix.M13 * (matrix.M21 * matrix.M34 - matrix.M24 * matrix.M31) +
-                                  matrix.M14 * (matrix.M21 * matrix.M33 - matrix.M23 * matrix.M31));
-
-            // Third row
-            result.M31 = invDet * (matrix.M21 * (matrix.M32 * matrix.M44 - matrix.M34 * matrix.M42) -
-                                  matrix.M22 * (matrix.M31 * matrix.M44 - matrix.M34 * matrix.M41) +
-                                  matrix.M24 * (matrix.M31 * matrix.M42 - matrix.M32 * matrix.M41));
-
-            result.M32 = -invDet * (matrix.M11 * (matrix.M32 * matrix.M44 - matrix.M34 * matrix.M42) -
-                                   matrix.M12 * (matrix.M31 * matrix.M44 - matrix.M34 * matrix.M41) +
-                                   matrix.M14 * (matrix.M31 * matrix.M42 - matrix.M32 * matrix.M41));
-
-            result.M33 = invDet * (matrix.M11 * (matrix.M22 * matrix.M44 - matrix.M24 * matrix.M42) -
-                                  matrix.M12 * (matrix.M21 * matrix.M44 - matrix.M24 * matrix.M41) +
-                                  matrix.M14 * (matrix.M21 * matrix.M42 - matrix.M22 * matrix.M41));
-
-            result.M34 = -invDet * (matrix.M11 * (matrix.M22 * matrix.M34 - matrix.M24 * matrix.M32) -
-                                   matrix.M12 * (matrix.M21 * matrix.M34 - matrix.M24 * matrix.M31) +
-                                   matrix.M14 * (matrix.M21 * matrix.M32 - matrix.M22 * matrix.M31));
-
-            // Fourth row
-            result.M41 = -invDet * (matrix.M21 * (matrix.M32 * matrix.M43 - matrix.M33 * matrix.M42) -
-                                   matrix.M22 * (matrix.M31 * matrix.M43 - matrix.M33 * matrix.M41) +
-                                   matrix.M23 * (matrix.M31 * matrix.M42 - matrix.M32 * matrix.M41));
-
-            result.M42 = invDet * (matrix.M11 * (matrix.M32 * matrix.M43 - matrix.M33 * matrix.M42) -
-                                  matrix.M12 * (matrix.M31 * matrix.M43 - matrix.M33 * matrix.M41) +
-                                  matrix.M13 * (matrix.M31 * matrix.M42 - matrix.M32 * matrix.M41));
-
-            result.M43 = -invDet * (matrix.M11 * (matrix.M22 * matrix.M43 - matrix.M23 * matrix.M42) -
-                                   matrix.M12 * (matrix.M21 * matrix.M43 - matrix.M23 * matrix.M41) +
-                                   matrix.M13 * (matrix.M21 * matrix.M42 - matrix.M22 * matrix.M41));
-
-            result.M44 = invDet * (matrix.M11 * (matrix.M22 * matrix.M33 - matrix.M23 * matrix.M32) -
-                                  matrix.M12 * (matrix.M21 * matrix.M33 - matrix.M23 * matrix.M31) +
-                                  matrix.M13 * (matrix.M21 * matrix.M32 - matrix.M22 * matrix.M31));
+            result.M11 = (m22 * (m33 * m44 - m43 * m34) - m23 * (m32 * m44 - m42 * m34) + m24 * (m32 * m43 - m42 * m33)) * invDet;
+            result.M12 = -(m12 * (m33 * m44 - m43 * m34) - m13 * (m32 * m44 - m42 * m34) + m14 * (m32 * m43 - m42 * m33)) * invDet;
+            result.M13 = (m12 * (m23 * m44 - m43 * m24) - m13 * (m22 * m44 - m42 * m24) + m14 * (m22 * m43 - m42 * m23)) * invDet;
+            result.M14 = -(m12 * (m23 * m34 - m33 * m24) - m13 * (m22 * m34 - m32 * m24) + m14 * (m22 * m33 - m32 * m23)) * invDet;
+            result.M21 = -(m21 * (m33 * m44 - m43 * m34) - m23 * (m31 * m44 - m41 * m34) + m24 * (m31 * m43 - m41 * m33)) * invDet;
+            result.M22 = (m11 * (m33 * m44 - m43 * m34) - m13 * (m31 * m44 - m41 * m34) + m14 * (m31 * m43 - m41 * m33)) * invDet;
+            result.M23 = -(m11 * (m23 * m44 - m43 * m24) - m13 * (m21 * m44 - m41 * m24) + m14 * (m21 * m43 - m41 * m23)) * invDet;
+            result.M24 = (m11 * (m23 * m34 - m33 * m24) - m13 * (m21 * m34 - m31 * m24) + m14 * (m21 * m33 - m31 * m23)) * invDet;
+            result.M31 = (m21 * (m32 * m44 - m42 * m34) - m22 * (m31 * m44 - m41 * m34) + m24 * (m31 * m42 - m41 * m32)) * invDet;
+            result.M32 = -(m11 * (m32 * m44 - m42 * m34) - m12 * (m31 * m44 - m41 * m34) + m14 * (m31 * m42 - m41 * m32)) * invDet;
+            result.M33 = (m11 * (m22 * m44 - m42 * m24) - m12 * (m21 * m44 - m41 * m24) + m14 * (m21 * m42 - m41 * m22)) * invDet;
+            result.M34 = -(m11 * (m22 * m34 - m32 * m24) - m12 * (m21 * m34 - m31 * m24) + m14 * (m21 * m32 - m31 * m22)) * invDet;
+            result.M41 = -(m21 * (m32 * m43 - m42 * m33) - m22 * (m31 * m43 - m41 * m33) + m23 * (m31 * m42 - m41 * m32)) * invDet;
+            result.M42 = (m11 * (m32 * m43 - m42 * m33) - m12 * (m31 * m43 - m41 * m33) + m13 * (m31 * m42 - m41 * m32)) * invDet;
+            result.M43 = -(m11 * (m22 * m43 - m42 * m23) - m12 * (m21 * m43 - m41 * m23) + m13 * (m21 * m42 - m41 * m22)) * invDet;
+            result.M44 = (m11 * (m22 * m33 - m32 * m23) - m12 * (m21 * m33 - m31 * m23) + m13 * (m21 * m32 - m31 * m22)) * invDet;
 
             return true;
         }
 
         private float GetDeterminant()
         {
-            // Calculate determinant of 4x4 matrix
             float m11 = M11, m12 = M12, m13 = M13, m14 = M14;
             float m21 = M21, m22 = M22, m23 = M23, m24 = M24;
             float m31 = M31, m32 = M32, m33 = M33, m34 = M34;
             float m41 = M41, m42 = M42, m43 = M43, m44 = M44;
 
-            float det1 = m11 * m22 - m12 * m21;
-            float det2 = m11 * m23 - m13 * m21;
-            float det3 = m11 * m24 - m14 * m21;
-            float det4 = m12 * m23 - m13 * m22;
-            float det5 = m12 * m24 - m14 * m22;
-            float det6 = m13 * m24 - m14 * m23;
-            float det7 = m31 * m42 - m32 * m41;
-            float det8 = m31 * m43 - m33 * m41;
-            float det9 = m31 * m44 - m34 * m41;
-            float det10 = m32 * m43 - m33 * m42;
-            float det11 = m32 * m44 - m34 * m42;
-            float det12 = m33 * m44 - m34 * m43;
-
-            return (det1 * det12 - det2 * det11 + det3 * det10 + det4 * det9 - det5 * det8 + det6 * det7);
+            return
+                m11 * (m22 * (m33 * m44 - m43 * m34) - m23 * (m32 * m44 - m42 * m34) + m24 * (m32 * m43 - m42 * m33)) -
+                m12 * (m21 * (m33 * m44 - m43 * m34) - m23 * (m31 * m44 - m41 * m34) + m24 * (m31 * m43 - m41 * m33)) +
+                m13 * (m21 * (m32 * m44 - m42 * m34) - m22 * (m31 * m44 - m41 * m34) + m24 * (m31 * m42 - m41 * m32)) -
+                m14 * (m21 * (m32 * m43 - m42 * m33) - m22 * (m31 * m43 - m41 * m33) + m23 * (m31 * m42 - m41 * m32));
         }
 
         public static Matrix4x4 operator *(Matrix4x4 a, Matrix4x4 b)
@@ -351,6 +291,17 @@ namespace CTS
         public static SharpDX.Matrix ToSharpDXMatrix(this Matrix4x4 matrix)
         {
             return new SharpDX.Matrix(
+                matrix.M11, matrix.M12, matrix.M13, matrix.M14,
+                matrix.M21, matrix.M22, matrix.M23, matrix.M24,
+                matrix.M31, matrix.M32, matrix.M33, matrix.M34,
+                matrix.M41, matrix.M42, matrix.M43, matrix.M44
+            );
+        }
+
+        // --- FIX: Added conversion to System.Numerics.Matrix4x4 ---
+        public static System.Numerics.Matrix4x4 ToSystemNumerics(this Matrix4x4 matrix)
+        {
+            return new System.Numerics.Matrix4x4(
                 matrix.M11, matrix.M12, matrix.M13, matrix.M14,
                 matrix.M21, matrix.M22, matrix.M23, matrix.M24,
                 matrix.M31, matrix.M32, matrix.M33, matrix.M34,

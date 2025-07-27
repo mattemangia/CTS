@@ -23,6 +23,34 @@ namespace CTS.D3D11
         public string Name;
     }
 
+    public abstract class MeasurementObject
+    {
+        private static int counter = 0;
+        public string Name { get; set; }
+        protected MeasurementObject() { Name = $"Item {++counter}"; }
+        public abstract string GetDetails(float pixelSize);
+    }
+
+    public class MeasurementPoint : MeasurementObject
+    {
+        public Vector3 Position;
+        public override string GetDetails(float pixelSize) => $"Point at ({Position.X:F1}, {Position.Y:F1}, {Position.Z:F1})";
+    }
+
+    public class MeasurementLine : MeasurementObject
+    {
+        public Vector3 Start;
+        public Vector3 End;
+        public override string GetDetails(float pixelSize)
+        {
+            float lengthMeters = Vector3.Distance(Start, End) * pixelSize;
+            string unit = "m";
+            if (lengthMeters < 1) { lengthMeters *= 1000; unit = "mm"; }
+            if (lengthMeters < 1 && unit == "mm") { lengthMeters *= 1000; unit = "µm"; }
+            return $"Line, Length: {lengthMeters:F2} {unit}";
+        }
+    }
+
     public partial class D3D11ControlPanel : Form
     {
         private D3D11ViewerForm viewerForm;
@@ -57,6 +85,12 @@ namespace CTS.D3D11
         private ComboBox cmbPlanePresets;
         private Panel planePreviewPanel;
 
+        // Measurement Tab
+        private ListView lstMeasurements;
+        private Button btnPlacePoint, btnDrawLine, btnRemoveMeasurement, btnClearMeasurements;
+        private List<MeasurementObject> measurements = new List<MeasurementObject>();
+        private Vector3? lineStartPoint = null;
+
 
         // Visualization tab
         private CheckBox chkShowScaleBar;
@@ -76,11 +110,13 @@ namespace CTS.D3D11
             viewerForm = viewer;
             mainForm = main;
             volumeRenderer = renderer;
+            viewerForm.PointPicked += ViewerForm_PointPicked;
 
             InitializeComponent();
             PopulateMaterials();
             InitializeClippingPlanes();
             ApplyDarkTheme();
+            PopulateInfoTab(); // Populate the new tab
         }
 
         private void InitializeComponent()
@@ -118,14 +154,18 @@ namespace CTS.D3D11
             var tabRendering = new TabPage("Rendering");
             var tabMaterials = new TabPage("Materials");
             var tabClipping = new TabPage("Clipping");
+            var tabMeasurement = new TabPage("Measurement");
             var tabVisualization = new TabPage("Display");
+            var tabInfo = new TabPage("Info"); // New Info tab
 
             SetupRenderingTab(tabRendering);
             SetupMaterialsTab(tabMaterials);
             SetupClippingTab(tabClipping);
+            SetupMeasurementTab(tabMeasurement);
             SetupVisualizationTab(tabVisualization);
+            SetupInfoTab(tabInfo); // Setup the new tab
 
-            mainTabControl.TabPages.AddRange(new[] { tabRendering, tabMaterials, tabClipping, tabVisualization });
+            mainTabControl.TabPages.AddRange(new TabPage[] { tabRendering, tabMaterials, tabClipping, tabMeasurement, tabVisualization, tabInfo });
             mainPanel.Controls.Add(mainTabControl);
             this.Controls.Add(mainPanel);
 
@@ -602,6 +642,140 @@ namespace CTS.D3D11
             page.Controls.Add(container);
         }
 
+        private void SetupMeasurementTab(TabPage page)
+        {
+            var container = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(10),
+                AutoScroll = true
+            };
+
+            // Tools group
+            var toolsGroup = CreateStyledGroupBox("Tools");
+            toolsGroup.Location = new Point(10, 10);
+            toolsGroup.Size = new Size(container.ClientSize.Width - 20, 80);
+            toolsGroup.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+
+            btnPlacePoint = CreateStyledButton("Place Point", 100);
+            btnPlacePoint.Location = new Point(10, 30);
+            btnPlacePoint.Click += (s, e) => viewerForm.CurrentMeasurementMode = MeasurementMode.PlacePoint;
+
+            btnDrawLine = CreateStyledButton("Draw Line", 100);
+            btnDrawLine.Location = new Point(120, 30);
+            btnDrawLine.Click += (s, e) => viewerForm.CurrentMeasurementMode = MeasurementMode.DrawLineStart;
+
+            toolsGroup.Controls.Add(btnPlacePoint);
+            toolsGroup.Controls.Add(btnDrawLine);
+            container.Controls.Add(toolsGroup);
+
+            // Measurements list
+            var listGroup = CreateStyledGroupBox("Measurements");
+            listGroup.Location = new Point(10, 100);
+            listGroup.Size = new Size(container.ClientSize.Width - 20, 300);
+            listGroup.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+
+            lstMeasurements = new ListView
+            {
+                Location = new Point(10, 25),
+                Size = new Size(listGroup.ClientSize.Width - 20, 220),
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+                View = View.Details,
+                FullRowSelect = true,
+                GridLines = true,
+                Font = new Font("Segoe UI", 9F)
+            };
+            lstMeasurements.Columns.Add("Name", 120);
+            lstMeasurements.Columns.Add("Details", 200);
+
+            btnRemoveMeasurement = CreateStyledButton("Remove", 80);
+            btnRemoveMeasurement.Location = new Point(10, 255);
+            btnRemoveMeasurement.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
+            btnRemoveMeasurement.Click += BtnRemoveMeasurement_Click;
+
+            btnClearMeasurements = CreateStyledButton("Clear All", 80);
+            btnClearMeasurements.Location = new Point(100, 255);
+            btnClearMeasurements.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
+            btnClearMeasurements.Click += BtnClearMeasurements_Click;
+
+            listGroup.Controls.Add(lstMeasurements);
+            listGroup.Controls.Add(btnRemoveMeasurement);
+            listGroup.Controls.Add(btnClearMeasurements);
+            container.Controls.Add(listGroup);
+
+            page.Controls.Add(container);
+        }
+
+        // --- NEW METHOD: Setup for the Info tab ---
+        private void SetupInfoTab(TabPage page)
+        {
+            var container = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(10),
+                AutoScroll = true
+            };
+
+            // System Info
+            var systemGroup = CreateStyledGroupBox("System Information");
+            systemGroup.Location = new Point(10, 10);
+            systemGroup.Size = new Size(container.ClientSize.Width - 20, 80);
+            systemGroup.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+
+            var lblGpu = new Label { Text = "GPU:", Location = new Point(10, 30), AutoSize = true };
+            var lblGpuNameValue = new Label { Name = "lblGpuNameValue", Location = new Point(120, 30), Size = new Size(280, 40) };
+            systemGroup.Controls.Add(lblGpu);
+            systemGroup.Controls.Add(lblGpuNameValue);
+            container.Controls.Add(systemGroup);
+
+            // Volume Info
+            var volumeGroup = CreateStyledGroupBox("Volume Information");
+            volumeGroup.Location = new Point(10, 100);
+            volumeGroup.Size = new Size(container.ClientSize.Width - 20, 120);
+            volumeGroup.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+
+            var lblDims = new Label { Text = "Dimensions:", Location = new Point(10, 30), AutoSize = true };
+            var lblVolumeDimsValue = new Label { Name = "lblVolumeDimsValue", Location = new Point(120, 30), AutoSize = true };
+            var lblChunk = new Label { Text = "Chunking:", Location = new Point(10, 55), AutoSize = true };
+            var lblChunkInfoValue = new Label { Name = "lblChunkInfoValue", Location = new Point(120, 55), AutoSize = true };
+            var lblCache = new Label { Text = "GPU Cache:", Location = new Point(10, 80), AutoSize = true };
+            var lblCacheSizeValue = new Label { Name = "lblCacheSizeValue", Location = new Point(120, 80), AutoSize = true };
+
+            volumeGroup.Controls.Add(lblDims);
+            volumeGroup.Controls.Add(lblVolumeDimsValue);
+            volumeGroup.Controls.Add(lblChunk);
+            volumeGroup.Controls.Add(lblChunkInfoValue);
+            volumeGroup.Controls.Add(lblCache);
+            volumeGroup.Controls.Add(lblCacheSizeValue);
+            container.Controls.Add(volumeGroup);
+
+            // Material Info
+            var materialGroup = CreateStyledGroupBox("Material List");
+            materialGroup.Location = new Point(10, 230);
+            materialGroup.Size = new Size(container.ClientSize.Width - 20, 400);
+            materialGroup.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+
+            var lstMaterialInfo = new ListView
+            {
+                Name = "lstMaterialInfo",
+                Location = new Point(10, 25),
+                Size = new Size(materialGroup.ClientSize.Width - 20, materialGroup.ClientSize.Height - 40),
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+                View = View.Details,
+                FullRowSelect = true,
+                GridLines = true,
+                Font = new Font("Segoe UI", 9F)
+            };
+            lstMaterialInfo.Columns.Add("Color", 40);
+            lstMaterialInfo.Columns.Add("ID", 40);
+            lstMaterialInfo.Columns.Add("Name", 180);
+
+            materialGroup.Controls.Add(lstMaterialInfo);
+            container.Controls.Add(materialGroup);
+
+            page.Controls.Add(container);
+        }
+
         private void SetupVisualizationTab(TabPage page)
         {
             var container = new Panel
@@ -738,6 +912,57 @@ namespace CTS.D3D11
             // Set initial scale bar length based on pixel size
             SetDefaultScaleBarLength();
         }
+
+        // --- NEW METHOD: Populates the Info tab with data ---
+        private void PopulateInfoTab()
+        {
+            if (volumeRenderer == null || mainForm == null) return;
+
+            var infoTab = mainTabControl.TabPages
+                             .Cast<TabPage>()
+                             .FirstOrDefault(tp => tp.Text == "Info");
+            if (infoTab == null) return;
+
+            // System Info
+            infoTab.Controls.Find("lblGpuNameValue", true).FirstOrDefault().Text = volumeRenderer.GpuDescription;
+
+            // Volume Info
+            infoTab.Controls.Find("lblVolumeDimsValue", true).FirstOrDefault().Text =
+                $"{mainForm.GetWidth()} x {mainForm.GetHeight()} x {mainForm.GetDepth()} voxels";
+
+            if (mainForm.volumeData != null)
+            {
+                infoTab.Controls.Find("lblChunkInfoValue", true).FirstOrDefault().Text =
+                    $"{mainForm.volumeData.ChunkDim}^3 voxels ({mainForm.volumeData.ChunkCountX}x{mainForm.volumeData.ChunkCountY}x{mainForm.volumeData.ChunkCountZ} chunks)";
+            }
+            infoTab.Controls.Find("lblCacheSizeValue", true).FirstOrDefault().Text =
+                $"{volumeRenderer.GpuCacheSizeInChunks} chunks";
+
+            // Material Info
+            var lstMaterialInfo = infoTab.Controls.Find("lstMaterialInfo", true).FirstOrDefault() as ListView;
+            if (lstMaterialInfo == null) return;
+
+            var colorImageList = new ImageList { ColorDepth = ColorDepth.Depth32Bit, ImageSize = new Size(16, 16) };
+            lstMaterialInfo.SmallImageList = colorImageList;
+            lstMaterialInfo.Items.Clear();
+
+            for (int i = 0; i < mainForm.Materials.Count; i++)
+            {
+                var material = mainForm.Materials[i];
+                var bmp = new Bitmap(16, 16);
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    g.Clear(material.Color);
+                }
+                colorImageList.Images.Add(bmp);
+
+                var item = new ListViewItem("", i);
+                item.SubItems.Add(i.ToString());
+                item.SubItems.Add(material.Name);
+                lstMaterialInfo.Items.Add(item);
+            }
+        }
+
         private string GetPixelSizeText()
         {
             double pixelSizeMicrometers = mainForm.pixelSize * 1e6;
@@ -960,13 +1185,11 @@ namespace CTS.D3D11
         {
             if (lstClippingPlanes == null) return;
 
-            // --- START FIX: Preserve selection ---
             int previouslySelectedIndex = -1;
             if (lstClippingPlanes.SelectedIndices.Count > 0)
             {
                 previouslySelectedIndex = lstClippingPlanes.SelectedIndices[0];
             }
-            // --- END FIX ---
 
             updatingUI = true;
             lstClippingPlanes.Items.Clear();
@@ -980,13 +1203,11 @@ namespace CTS.D3D11
             }
             updatingUI = false;
 
-            // --- START FIX: Restore selection ---
             if (previouslySelectedIndex != -1 && previouslySelectedIndex < lstClippingPlanes.Items.Count)
             {
                 lstClippingPlanes.Items[previouslySelectedIndex].Selected = true;
                 lstClippingPlanes.Focus();
             }
-            // --- END FIX ---
         }
 
 
@@ -1114,6 +1335,65 @@ namespace CTS.D3D11
             }
         }
 
+        private void ViewerForm_PointPicked(object sender, Vector3 pickedPosition)
+        {
+            if (viewerForm.CurrentMeasurementMode == MeasurementMode.PlacePoint)
+            {
+                var newPoint = new MeasurementPoint { Position = pickedPosition };
+                measurements.Add(newPoint);
+                viewerForm.CurrentMeasurementMode = MeasurementMode.None; // Reset mode
+            }
+            else if (viewerForm.CurrentMeasurementMode == MeasurementMode.DrawLineStart)
+            {
+                if (!lineStartPoint.HasValue)
+                {
+                    lineStartPoint = pickedPosition;
+                }
+                else
+                {
+                    var newLine = new MeasurementLine { Start = lineStartPoint.Value, End = pickedPosition };
+                    measurements.Add(newLine);
+                    lineStartPoint = null;
+                    viewerForm.CurrentMeasurementMode = MeasurementMode.None; // Reset mode
+                }
+            }
+            RefreshMeasurementsList();
+            viewerForm.UpdateMeasurementData(measurements);
+        }
+
+        private void RefreshMeasurementsList()
+        {
+            lstMeasurements.Items.Clear();
+            foreach (var m in measurements)
+            {
+                var item = new ListViewItem(m.Name);
+                item.SubItems.Add(m.GetDetails((float)mainForm.pixelSize));
+                item.Tag = m;
+                lstMeasurements.Items.Add(item);
+            }
+        }
+
+        private void BtnRemoveMeasurement_Click(object sender, EventArgs e)
+        {
+            if (lstMeasurements.SelectedItems.Count > 0)
+            {
+                var selectedObject = (MeasurementObject)lstMeasurements.SelectedItems[0].Tag;
+                measurements.Remove(selectedObject);
+                RefreshMeasurementsList();
+                viewerForm.UpdateMeasurementData(measurements);
+            }
+        }
+
+        private void BtnClearMeasurements_Click(object sender, EventArgs e)
+        {
+            measurements.Clear();
+            lineStartPoint = null;
+            viewerForm.CurrentMeasurementMode = MeasurementMode.None;
+            RefreshMeasurementsList();
+            viewerForm.UpdateMeasurementData(measurements);
+        }
+
+
         private void LstClippingPlanes_SelectedIndexChanged(object sender, EventArgs e)
         {
             if (lstClippingPlanes.SelectedIndices.Count > 0)
@@ -1159,7 +1439,6 @@ namespace CTS.D3D11
             }
         }
 
-        // --- START FIX: More robust event handlers for checkboxes ---
         private void ChkEnablePlane_CheckedChanged(object sender, EventArgs e)
         {
             if (updatingUI || selectedPlaneIndex < 0 || selectedPlaneIndex >= clippingPlanes.Count) return;
@@ -1184,7 +1463,6 @@ namespace CTS.D3D11
             RefreshClippingPlanesList();
             UpdateClippingPlanes();
         }
-        // --- END FIX ---
 
 
         private void UpdateSelectedPlaneFromAllControls()
@@ -1348,26 +1626,17 @@ namespace CTS.D3D11
             {
                 if (plane.SlabMode)
                 {
-                    // It's a slab. Create two independent planes that are handled by the standard clipping logic.
-                    // The slab exists between a "lower" and "upper" bound along the plane's normal.
-                    float thickness = plane.Distance; // Distance slider now controls thickness
-                    float position = plane.SlabTranslation; // New slider controls position of the slab's center
+                    float thickness = plane.Distance;
+                    float position = plane.SlabTranslation;
 
                     float lowerBound = position - thickness / 2.0f;
                     float upperBound = position + thickness / 2.0f;
 
-                    // Add a plane to clip everything beyond the upper bound.
-                    // Equation: dot(P-C, N) - upperBound > 0 is clipped.
                     p.ClippingPlanes.Add(new Vector4(plane.Normal, upperBound));
-
-                    // Add a plane to clip everything before the lower bound.
-                    // Equation: dot(P-C, N) < lowerBound is clipped.
-                    // This is equivalent to: dot(P-C, -N) > -lowerBound.
                     p.ClippingPlanes.Add(new Vector4(-plane.Normal, -lowerBound));
                 }
                 else
                 {
-                    // It's a single, standard clipping plane.
                     p.ClippingPlanes.Add(new Vector4(plane.Normal, plane.Distance));
                 }
             }
@@ -1382,27 +1651,19 @@ namespace CTS.D3D11
         {
             base.OnLoad(e);
 
-            // Update scale bar units label
             if (lblScaleBarUnits != null)
             {
                 lblScaleBarUnits.Text = GetPixelSizeText();
             }
 
-            // Set appropriate default scale bar length
             SetDefaultScaleBarLength();
-
-            // Force initial render parameters update
             UpdateRenderParams();
-
-            // Force layout update
             PerformLayout();
         }
 
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-
-            // Force relayout of all controls
             PerformLayout();
             Invalidate(true);
         }
@@ -1411,9 +1672,11 @@ namespace CTS.D3D11
         {
             if (disposing)
             {
+                if (viewerForm != null)
+                {
+                    viewerForm.PointPicked -= ViewerForm_PointPicked;
+                }
                 colorDialog?.Dispose();
-
-                // Clear references
                 volumeRenderer = null;
                 viewerForm = null;
                 mainForm = null;

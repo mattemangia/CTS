@@ -1,6 +1,7 @@
 ﻿// Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
 using System;
 using System.Numerics;
+using CTS; // --- FIX: Using your custom Matrix4x4 ---
 
 namespace CTS.D3D11
 {
@@ -91,23 +92,27 @@ namespace CTS.D3D11
             }
         }
 
+        // --- FIX: Changed return type to CTS.Matrix4x4 ---
         public Matrix4x4 ViewMatrix
         {
             get
             {
                 lock (this)
                 {
+                    // --- FIX: Use CTS.Matrix4x4 method ---
                     return Matrix4x4.CreateLookAt(position, target, up);
                 }
             }
         }
 
+        // --- FIX: Changed return type to CTS.Matrix4x4 ---
         public Matrix4x4 ProjectionMatrix
         {
             get
             {
                 lock (this)
                 {
+                    // --- FIX: Use CTS.Matrix4x4 method ---
                     return Matrix4x4.CreatePerspectiveFieldOfView(fov, aspectRatio, nearPlane, farPlane);
                 }
             }

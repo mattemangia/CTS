@@ -1,5 +1,6 @@
 ﻿// Copyright 2025 Matteo Mangiagalli - matteo.mangiagalli@unifr.ch
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Windows.Forms;
 using System.Numerics;
@@ -9,6 +10,14 @@ using System.Threading.Tasks;
 
 namespace CTS.D3D11
 {
+    // --- FIX: Moved enum here from Control Panel ---
+    public enum MeasurementMode
+    {
+        None,
+        PlacePoint,
+        DrawLineStart
+    }
+
     public partial class D3D11ViewerForm : Form
     {
         private D3D11ControlPanel controlPanel;
@@ -24,6 +33,9 @@ namespace CTS.D3D11
         private readonly object disposeLock = new object();
         private volatile bool isDisposing = false;
         private volatile bool formClosed = false;
+
+        public MeasurementMode CurrentMeasurementMode { get; set; } = MeasurementMode.None;
+        public event EventHandler<Vector3> PointPicked;
 
         public D3D11ViewerForm(MainForm mainForm)
         {
@@ -209,6 +221,18 @@ namespace CTS.D3D11
             }
         }
 
+        public void UpdateMeasurementData(List<MeasurementObject> measurements)
+        {
+            lock (disposeLock)
+            {
+                if (!isDisposing && renderer != null && !renderer.IsDisposed)
+                {
+                    // --- FIX: Corrected type casting error ---
+                    renderer.UpdateMeasurementData(measurements);
+                }
+            }
+        }
+
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
@@ -260,32 +284,55 @@ namespace CTS.D3D11
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
-            lastMousePos = e.Location;
-            NotifyCameraMoving();
+            if (CurrentMeasurementMode != MeasurementMode.None && e.Button == MouseButtons.Left)
+            {
+                lock (disposeLock)
+                {
+                    if (isDisposing || renderer == null || renderer.IsDisposed) return;
+                    var pickedPosition = renderer.Pick(e.Location, camera);
+                    if (pickedPosition != Vector3.Zero)
+                    {
+                        PointPicked?.Invoke(this, pickedPosition);
+                    }
+                }
+            }
+            else
+            {
+                lastMousePos = e.Location;
+                NotifyCameraMoving();
+            }
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
-            if (e.Button == MouseButtons.Left) // Rotate
+            if (CurrentMeasurementMode != MeasurementMode.None)
             {
-                float dx = (e.X - lastMousePos.X) * 0.008f;
-                float dy = (e.Y - lastMousePos.Y) * 0.008f;
-                camera.Orbit(dx, dy);
-                NotifyCameraMoving();
+                Cursor = Cursors.Cross;
             }
-            else if (e.Button == MouseButtons.Right) // Pan
+            else
             {
-                float dx = (e.X - lastMousePos.X) * 0.5f;
-                float dy = (e.Y - lastMousePos.Y) * 0.5f;
-                camera.Pan(dx, dy);
-                NotifyCameraMoving();
-            }
-            else if (e.Button == MouseButtons.Middle) // Alternative zoom
-            {
-                float dy = (e.Y - lastMousePos.Y) * 0.01f;
-                camera.Zoom(dy);
-                NotifyCameraMoving();
+                Cursor = Cursors.Default;
+                if (e.Button == MouseButtons.Left) // Rotate
+                {
+                    float dx = (e.X - lastMousePos.X) * 0.008f;
+                    float dy = (e.Y - lastMousePos.Y) * 0.008f;
+                    camera.Orbit(dx, dy);
+                    NotifyCameraMoving();
+                }
+                else if (e.Button == MouseButtons.Right) // Pan
+                {
+                    float dx = (e.X - lastMousePos.X) * 0.5f;
+                    float dy = (e.Y - lastMousePos.Y) * 0.5f;
+                    camera.Pan(dx, dy);
+                    NotifyCameraMoving();
+                }
+                else if (e.Button == MouseButtons.Middle) // Alternative zoom
+                {
+                    float dy = (e.Y - lastMousePos.Y) * 0.01f;
+                    camera.Zoom(dy);
+                    NotifyCameraMoving();
+                }
             }
             lastMousePos = e.Location;
         }

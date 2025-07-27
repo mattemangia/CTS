@@ -123,9 +123,7 @@
     <Compile Include="3DViewer\Meshing\FastSTLWriter.cs" />
     <Compile Include="D3D11Viewer\Camera.cs" />
     <Compile Include="D3D11Viewer\ChunkStreamingManager.cs" />
-    <Compile Include="D3D11Viewer\D3D11ControlPanel.cs">
-      <SubType>Form</SubType>
-    </Compile>
+    <Compile Include="D3D11Viewer\D3D11ControlPanel.cs" />
     <Compile Include="D3D11Viewer\D3D11ViewerForm.cs">
       <SubType>Form</SubType>
     </Compile>

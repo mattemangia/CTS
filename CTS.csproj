@@ -129,6 +129,7 @@
     </Compile>
     <Compile Include="D3D11Viewer\D3D11VolumeRenderer.cs" />
     <Compile Include="D3D11Viewer\MaterialExtension.cs" />
+    <Compile Include="D3D11Viewer\VolumeExporter.cs" />
     <Compile Include="Interfaces\IMaterialDensityProvider.cs" />
     <Compile Include="Interfaces\IMaterialOperations.cs" />
     <Compile Include="MaterialOperations\MaterialOperations.cs" />

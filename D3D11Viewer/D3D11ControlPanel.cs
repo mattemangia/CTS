@@ -6,6 +6,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using Vector2 = System.Numerics.Vector2;
 using Vector3 = System.Numerics.Vector3;
@@ -65,6 +66,8 @@ namespace CTS.D3D11
         private Label lblMinThreshold, lblMaxThreshold;
         private CheckBox chkShowGrayscale;
         private ComboBox cmbQuality;
+        private ComboBox cmbExportQuality;
+
 
         // Materials tab
         private CheckedListBox lstMaterials;
@@ -286,8 +289,132 @@ namespace CTS.D3D11
             grayscaleGroup.Controls.Add(trkMaxThreshold);
             container.Controls.Add(grayscaleGroup);
 
+            // Export Section
+            var exportGroup = CreateStyledGroupBox("Export");
+            exportGroup.Location = new Point(10, grayscaleGroup.Bottom + 10);
+            exportGroup.Size = new Size(container.ClientSize.Width - 40, 120);
+            exportGroup.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+
+            var exportQualityLabel = new Label
+            {
+                Text = "Export Quality:",
+                Location = new Point(10, 30),
+                AutoSize = true
+            };
+
+            cmbExportQuality = new ComboBox
+            {
+                Location = new Point(120, 27),
+                Size = new Size(150, 24),
+                DropDownStyle = ComboBoxStyle.DropDownList
+            };
+            cmbExportQuality.Items.AddRange(new[] { "Low (1/4 Res)", "Medium (1/2 Res)", "High (Full Res)" });
+            cmbExportQuality.SelectedIndex = 1; // Default to Medium
+
+            var btnExport = CreateStyledButton("Export as STL...", 150);
+            btnExport.Location = new Point(10, 65);
+            btnExport.Click += BtnExport_Click;
+
+            exportGroup.Controls.Add(exportQualityLabel);
+            exportGroup.Controls.Add(cmbExportQuality);
+            exportGroup.Controls.Add(btnExport);
+            container.Controls.Add(exportGroup);
+
             page.Controls.Add(container);
         }
+
+        private async void BtnExport_Click(object sender, EventArgs e)
+        {
+            if (volumeRenderer == null || mainForm.volumeData == null || mainForm.volumeLabels == null)
+            {
+                MessageBox.Show("Renderer or volume data not available for export.", "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            using (var sfd = new SaveFileDialog())
+            {
+                sfd.Filter = "STL Binary File|*.stl";
+                sfd.Title = "Export Visible Materials";
+                sfd.FileName = $"CTS_Export_{DateTime.Now:yyyyMMdd_HHmmss}.stl";
+
+                if (sfd.ShowDialog(this) == DialogResult.OK)
+                {
+                    var quality = (VolumeExporter.ExportQuality)cmbExportQuality.SelectedIndex;
+                    var parameters = GetCurrentRenderParameters();
+
+                    var progressForm = new Form
+                    {
+                        Text = "Exporting...",
+                        Size = new Size(300, 100),
+                        StartPosition = FormStartPosition.CenterParent,
+                        FormBorderStyle = FormBorderStyle.FixedDialog,
+                        ControlBox = false
+                    };
+                    var progressLabel = new Label
+                    {
+                        Text = "Generating mesh, please wait...\nThis may take several minutes.",
+                        Dock = DockStyle.Fill,
+                        TextAlign = ContentAlignment.MiddleCenter
+                    };
+                    progressForm.Controls.Add(progressLabel);
+
+                    try
+                    {
+                        this.Enabled = false;
+                        viewerForm.Enabled = false;
+                        progressForm.Show(this);
+                        Application.DoEvents(); // Ensure the progress form is displayed
+
+                        var exporter = new VolumeExporter(mainForm.volumeData, mainForm.volumeLabels, mainForm.Materials, parameters);
+                        await exporter.ExportToStlAsync(sfd.FileName, quality);
+
+                        progressForm.Close();
+                        MessageBox.Show($"Successfully exported to:\n{sfd.FileName}", "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        progressForm.Close();
+                        Logger.Log($"[STL Export] Error: {ex}");
+                        MessageBox.Show($"An error occurred during export:\n{ex.Message}", "Export Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                    finally
+                    {
+                        this.Enabled = true;
+                        viewerForm.Enabled = true;
+                    }
+                }
+            }
+        }
+
+        private RenderParameters GetCurrentRenderParameters()
+        {
+            var p = new RenderParameters();
+
+            p.Threshold = new Vector2(
+                trkMinThreshold?.Value ?? 30,
+                trkMaxThreshold?.Value ?? 200
+            );
+            p.ShowGrayscale = (chkShowGrayscale?.Checked ?? true) ? 1.0f : 0.0f;
+            p.ClippingPlanes = new List<Vector4>();
+            foreach (var plane in clippingPlanes.Where(planeItem => planeItem.Enabled))
+            {
+                if (plane.SlabMode)
+                {
+                    float thickness = plane.Distance;
+                    float position = plane.SlabTranslation;
+                    float lowerBound = position - thickness / 2.0f;
+                    float upperBound = position + thickness / 2.0f;
+                    p.ClippingPlanes.Add(new Vector4(plane.Normal, upperBound));
+                    p.ClippingPlanes.Add(new Vector4(-plane.Normal, -lowerBound));
+                }
+                else
+                {
+                    p.ClippingPlanes.Add(new Vector4(plane.Normal, plane.Distance));
+                }
+            }
+            return p;
+        }
+
 
         private void SetupMaterialsTab(TabPage page)
         {

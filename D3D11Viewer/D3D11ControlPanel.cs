@@ -1795,6 +1795,27 @@ namespace CTS.D3D11
             Invalidate(true);
         }
 
+        // --- ADDED: Override OnFormClosing to link to the main viewer window ---
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            // If the user is closing this panel directly (not because the owner form is closing)
+            if (e.CloseReason == CloseReason.UserClosing)
+            {
+                // ...and the main viewer form still exists...
+                if (viewerForm != null && !viewerForm.IsDisposed)
+                {
+                    // ...then we redirect the close action to the main viewer form.
+                    // We cancel our own close event because the viewer's closing
+                    // sequence will handle closing us properly and gracefully.
+                    e.Cancel = true;
+                    viewerForm.Close();
+                }
+            }
+
+            // For all other cases (e.g., the owner is closing), let the default behavior proceed.
+            base.OnFormClosing(e);
+        }
+
         protected override void Dispose(bool disposing)
         {
             if (disposing)
